@@ -204,7 +204,7 @@ const failureReasons = (verdict: Verdict) => [
 
 export type JudgeRecord = { commit: string; model: string; verdict: Verdict; passed: boolean; escalation?: string; judgedAt: string };
 export type JudgeDeps = { ask: (request: ModelRequest) => Promise<ModelAnswer>; model: string; arbiter: Arbiter; directory: string; commit: string; now: Date; failLimit: number; serialize: <T>(step: () => Promise<T>) => Promise<T> };
-export type JudgeOutcome = { state: "pass" | "fail" | "unavailable"; lines: string[]; model: string; broken: string[]; unchecked?: string[] };
+export type JudgeOutcome = { state: "pass" | "fail" | "unavailable"; lines: string[]; model: string; broken: string[]; held?: true; unchecked?: string[] };
 
 const freeJudgeFails = 2;
 const judgeBudgetSpent = (failed: number, unchecked: string[]) => `judge: budget spent: the judge failed ${failed} times on this PR, as often as pull-requests.reviewCeiling allows, so hedge runs it no more.${unchecked.length ? "" : " End it with a judge gap on HEAD: record hedge proof gap --kind judge --reason <why HEAD holds now>, and have a decision accept it as the judge gap line says"}`;
@@ -214,7 +214,7 @@ Answer ESCALATE only when the same failure comes back after the author answered 
 
 Your first line must be exactly CONTINUE, or ESCALATE: followed by one sentence that names the failure. Write nothing else.`;
 
-type Asked = JudgeRecord | { cause: string } | { spent: number };
+type Asked = JudgeRecord | { cause: string; held?: true } | { spent: number };
 const readRecord = (path: string) => readFile(path, "utf8").then((text) => JSON.parse(text) as JudgeRecord, () => undefined);
 
 async function inputKey(model: string, prompt: string, images: string[]) {
@@ -239,7 +239,7 @@ export async function judge(input: JudgeInput, deps: JudgeDeps): Promise<JudgeOu
     const unchecked = [...new Set((input.conditions ?? []).map(({ id }) => id))];
     return { state: "fail", lines: [judgeBudgetSpent(record.spent, unchecked)], model: deps.model, broken: [], unchecked };
   }
-  if ("cause" in record) return { state: "unavailable", lines: [`judge: unavailable (${record.cause})`], model: deps.model, broken: [] };
+  if ("cause" in record) return { state: "unavailable", lines: [`judge: unavailable (${record.cause})`], model: deps.model, broken: [], ...record.held ? { held: true } : {} };
   const escalation = record.escalation ? [`judge: escalate to the user: ${record.escalation}. First record hedge proof gap --kind judge --reason <why>, then ask them the question it prints with the question tool. When they accept, record their answer with hedge decision record --mark 👤 --class proof-gap --kind judge --pr <owner/repo#n>`] : [];
   return { state: record.passed ? "pass" : "fail", lines: [...verdictLines(record.verdict), ...escalation], model: record.model, broken: brokenConditions(record.verdict, input.conditions) };
 }
@@ -250,9 +250,9 @@ function brokenConditions(verdict: Verdict, conditions: JudgeInput["conditions"]
   return [...new Set(conditions.map(({ id }) => id))].filter(named);
 }
 
-async function askJudge(prompt: string, images: string[], readable: string[], cwd: string, asked: QuestionName[], deps: JudgeDeps): Promise<JudgeRecord | { cause: string }> {
+async function askJudge(prompt: string, images: string[], readable: string[], cwd: string, asked: QuestionName[], deps: JudgeDeps): Promise<JudgeRecord | { cause: string; held?: true }> {
   const answer = await deps.ask({ prompt, cwd, images, readable, schema: verdictSchema(asked) });
-  if (!answer.ok) return { cause: answer.cause };
+  if (!answer.ok) return { cause: answer.cause, ...answer.held ? { held: true } : {} };
   const verdict = parseVerdict(answer.text, asked);
   if (!verdict) return { cause: `unparseable answer: ${answer.text.split("\n")[0]!.slice(0, 200)}` };
   const record: JudgeRecord = { commit: deps.commit, model: answer.model, verdict, passed: passes(verdict), judgedAt: deps.now.toISOString() };

@@ -156,14 +156,20 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
   if (riskRubric === undefined) outcome.lines.push("judge risk: not asked; ~/.agents/skills/merge-risk/SKILL.md is not installed");
   const reason = outcome.lines.find((line) => /^judge [a-z]+: fail\b/.test(line)) ?? outcome.lines[0];
   if (outcome.state === "pass") return { code: 0, lines: outcome.lines, covered: `pass by ${outcome.model}`, judge: verdict(outcome.lines) };
-  const unchecked = outcome.unchecked ?? [];
-  if (unchecked.length) {
-    const line = `judge gap: the judge budget is spent, so no judge checks the condition of ${unchecked.map(conditionName).join(" or ")}, and no judge gap passes the gate while it rests on one. ${endUnchecked(unchecked)}`;
+  const spentUnchecked = outcome.unchecked ?? [];
+  if (spentUnchecked.length) {
+    const line = `judge gap: the judge budget is spent, so no judge checks the condition of ${spentUnchecked.map(conditionName).join(" or ")}, and no judge gap passes the gate while it rests on one. ${endSpent(spentUnchecked)}`;
     const lines = [...outcome.lines, line];
-    const open = weighedGap && { ...weighedGap, acceptance: undefined, line: `not accepted (the judge budget is spent, so no judge checks the condition of ${unchecked.map(conditionName).join(" or ")})` };
+    const open = weighedGap && { ...weighedGap, acceptance: undefined, line: `not accepted (the judge budget is spent, so no judge checks the condition of ${spentUnchecked.map(conditionName).join(" or ")})` };
     return { code: open ? 3 : 1, lines, covered: "", judge: verdict(lines, open && judgeGapProof(head.commit, open)), reason: line };
   }
   const gap = weighedGap && withBrokenConditions(weighedGap, outcome.broken);
+  const unchecked = outcome.held ? [...new Set(known.conditions.map(({ id }) => id))] : [];
+  if (gap?.acceptance && unchecked.length) {
+    const line = `not accepted (the secret guard held the judge prompt, so no judge checked the condition of ${unchecked.map(conditionName).join(" and ")})`;
+    const lines = [...outcome.lines, `judge gap: ${line}: ${gap.reason}. ${endUnchecked(unchecked)}`];
+    return { code: 3, lines, covered: "", judge: verdict(lines, judgeGapProof(head.commit, { ...gap, acceptance: undefined, line })), reason: `judge gap: ${line}` };
+  }
   if (gap?.acceptance) {
     const lines = [...outcome.lines, `judge gap: ${gap.acceptance.line}: ${gap.reason}`];
     return { code: 0, lines, covered: `${outcome.state} accepted by ${gap.acceptance.by}`, judge: verdict(lines, judgeGapProof(head.commit, gap)) };
@@ -190,13 +196,19 @@ async function judgeDiff(head: ProofIdentity, known: Omit<JudgeInput, "cwd" | "f
   });
 }
 
-function endUnchecked(ids: string[]) {
+function endSpent(ids: string[]) {
   const decisions = ids.filter((id) => !isStandingCondition(id));
   const rules = ids.filter(isStandingCondition);
   return [
     ...decisions.length ? [`End ${decisions.map(conditionName).join(" and ")} with hedge decision void <id> --reason <why>, then decide it again without a condition`] : [],
     ...rules.length ? [`Only the user can raise pull-requests.reviewCeiling, so the judge runs again and checks ${rules.join(" and ")}`] : [],
   ].join(". ");
+}
+
+function endUnchecked(ids: string[]) {
+  const rules = ids.filter(isStandingCondition);
+  const decisions = endBroken(ids.filter((id) => !isStandingCondition(id)));
+  return [...decisions ? [decisions] : [], ...rules.length ? [`Remove the value the secret guard matches so the judge can check ${rules.join(" and ")}, then run hedge proof gate again`] : []].join(". ");
 }
 
 function endBroken(ids: string[]) {
