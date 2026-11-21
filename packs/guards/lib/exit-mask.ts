@@ -189,7 +189,7 @@ function reachOf(program: Program, start: number): Reach {
 }
 
 const named = (command: Command, names: Set<string>) => [command.name, ...command.prefix].some((word) => names.has(word));
-const setsIfs = (command: Command) => command.env.has("IFS") || command.rawArgs.some((raw) => raw.includes("IFS"));
+const setsIfs = (command: Command) => command.env.has("IFS") || [...command.rawArgs, ...command.args].some((word) => word.includes("IFS"));
 const readsUnquoted = (command: Command) => command.rawArgs.some((raw) => new RegExp(statusRead).test(raw.replace(/'[^']*'|"[^"]*"/g, "")));
 const inThisShell = (commands: Command[]) => commands.filter((command) => parens(command.scope) === 0);
 

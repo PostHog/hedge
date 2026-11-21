@@ -180,6 +180,8 @@ describe("the exit-status mask guard", () => {
     "loose() { set +e; }; set -e; loose; git push > /dev/null 2>&1; true",
     "read -r IFS <<< 013; git push > /dev/null 2>&1; echo $?",
     "printf -v IFS 0123; git push > /dev/null 2>&1; echo $?",
+    "read -r I''FS <<< 0123456789; git push > /dev/null 2>&1; echo $?",
+    'printf -v "I""FS" 0123; git push > /dev/null 2>&1; echo $?',
     "trap 'exit 0' EXIT; git push > /dev/null 2>&1",
     "function quiet { set +o pipefail; }; set -o pipefail; quiet; git push > /dev/null 2>&1 | cat",
     "trap 'rm -f push.log; exit $?' EXIT; git push > push.log 2>&1; exit \"$?\"",
