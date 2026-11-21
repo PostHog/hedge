@@ -1,6 +1,6 @@
 import {
-  listLinkedThreads, readLinkedThread, readLinkedThreadWords, readSnapshots, readThread, readThreadWords, sendLinkedMessage, sendMessage, T3ToolError, withT3Session,
-  type ShellThread, type T3HttpClient, type T3SessionOptions,
+  listLinkedThreads, readLinkedThread, readLinkedThreadWords, readSnapshots, readThread, readThreadWords, sendLinkedMessage, sendMessage, sendModes, T3ToolError, withT3Session,
+  type SendMode, type ShellThread, type T3HttpClient, type T3SessionOptions,
 } from "../../base/lib/t3/index.ts";
 import { runActivity } from "./activity.ts";
 import { pickMachine, readEachMachine, readMachines } from "./machines.ts";
@@ -12,18 +12,20 @@ type Place = { local: ShellThread } | { environmentId: string; threadId: string 
 const usage = `Usage: hedge thread list [host] [--limit count] [--json]
        hedge thread find <id>
        hedge thread read [--host host] <id> [--words]
-       hedge thread send [--host host] <id> [message]
+       hedge thread send [--host host] [--mode auto|queue|steer|restart] <id> [message]
 Without --host, Hedge finds the machine that has the thread. find names that machine and reads nothing of the thread.
+--mode defaults to auto, which starts an idle thread or steers a running turn when it can (queuing behind a pending question or approval).
 --words prints only the messages a person typed; on a linked machine it leaves out answers to question tools.
 The message comes from stdin when you leave it out.`;
 const threadIdPattern = /^[a-zA-Z0-9][a-zA-Z0-9:._%-]{0,511}$/;
 const sendScopes = ["orchestration:read", "orchestration:operate", "access:read"];
+const isSendMode = (value: string): value is SendMode => (sendModes as readonly string[]).includes(value);
 
 export async function runThread(args: string[], io: ThreadIo): Promise<number> {
   const [action, ...rest] = args;
   if (action === "list") return runActivity(rest, io);
   if (action !== "find" && action !== "read" && action !== "send") throw new Error(usage);
-  const { host, threadId, words, typed } = parseTarget(rest, action);
+  const { host, mode, threadId, words, typed } = parseTarget(rest, action);
   const text = action === "send" ? await readMessage(words, io) : "";
   const result = await withT3Session(async (client) => {
     const { machine, place } = await placeThread(client, io.host, threadId, host, action);
@@ -34,7 +36,7 @@ export async function runThread(args: string[], io: ThreadIo): Promise<number> {
     if (action === "read") {
       return { host: machine, thread: "local" in place ? await readThread(client, place.local.id) : await readLinkedThread(client, place.environmentId, { threadId: place.threadId }) };
     }
-    return { host: machine, ...("local" in place ? await sendMessage(client, place.local, text) : await sendLinkedMessage(client, place.environmentId, place.threadId, text)) };
+    return { host: machine, ...("local" in place ? await sendMessage(client, place.local, text, mode) : await sendLinkedMessage(client, place.environmentId, place.threadId, text, mode)) };
   }, { home: io.home, ...io.session, ...(action === "send" ? { scopes: sendScopes } : {}) });
   io.print(JSON.stringify(result, null, 2));
   return 0;
@@ -42,17 +44,21 @@ export async function runThread(args: string[], io: ThreadIo): Promise<number> {
 
 function parseTarget(args: string[], action: "find" | "read" | "send") {
   let host: string | undefined;
+  let mode: SendMode = "auto";
   const rest = [...args];
-  while (rest[0] === "--host" && action !== "find") {
-    rest.shift();
-    host = rest.shift();
-    if (!host) throw new Error(usage);
+  while (action !== "find" && (rest[0] === "--host" || (action === "send" && rest[0] === "--mode"))) {
+    const flag = rest.shift();
+    const value = rest.shift();
+    if (!value) throw new Error(usage);
+    if (flag === "--host") host = value;
+    else if (isSendMode(value)) mode = value;
+    else throw new Error(`Unknown --mode ${value}. Use one of: ${sendModes.join(", ")}.`);
   }
   const [threadId, ...words] = rest;
   const typed = action === "read" && words.length === 1 && words[0] === "--words";
   if (!threadId || threadId.startsWith("-") || (action !== "send" && words.length && !typed)) throw new Error(usage);
   if (!threadIdPattern.test(threadId)) throw new Error("Invalid thread id.");
-  return { host, threadId, words, typed };
+  return { host, mode, threadId, words, typed };
 }
 
 async function readMessage(words: string[], io: ThreadIo): Promise<string> {

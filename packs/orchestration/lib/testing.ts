@@ -44,8 +44,13 @@ export function linkedTools(threads: LinkedThreadFixture[]): ToolHandler {
       const thread = threads.find((candidate) => candidate.threadId === args.threadId);
       if (!thread) throw new ToolRefusal("thread_not_found", "The thread was not found.");
       if (thread.runtimeMode === "full-access") throw new ToolRefusal("runtime_mode_escalation_denied", `Thread ${thread.threadId} runs in full-access mode, above this caller's.`);
-      const delivery = thread.status === "running" ? "queued" : "started";
-      return { threadId: thread.threadId, messageId: `message:${args.clientRequestId}`, runId: "run:linked", status: delivery === "queued" ? "queued" : "starting", delivery };
+      if (thread.status !== "running" && (args.mode === "steer" || args.mode === "restart")) {
+        throw new ToolRefusal("no_steerable_run", `Thread ${thread.threadId} has no running turn to ${args.mode}.`);
+      }
+      const delivery = thread.status === "running"
+        ? (args.mode === "queue" ? "queued" : args.mode === "restart" ? "restarted" : "steered")
+        : "started";
+      return { threadId: thread.threadId, messageId: `message:${args.clientRequestId}`, runId: "run:linked", status: delivery === "queued" ? "queued" : "running", delivery };
     }
     if (name === "t3_thread_read") {
       const thread = threads.find((candidate) => candidate.threadId === args.threadId);
