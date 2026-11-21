@@ -1,27 +1,23 @@
-import { type ChildProcess, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { type Hook, printing, runHook } from "../../base/lib/hook.ts";
-import { matchThread, questionCard, type ShellThread, t3CliRunner, t3UserData, type T3HttpClient, withT3Session } from "../../base/lib/t3/index.ts";
+import { matchThread, questionCard, type ShellThread, t3CliRunner, t3UserData, withT3Session } from "../../base/lib/t3/index.ts";
 import { backgroundReason, unwaitedBackgroundTasks } from "../lib/background-stop.ts";
-import { parkStop, type ParkT3, realSettleClock, settleWhenRunEnds, stillParks } from "../lib/closing-line.ts";
-import { asksInProse, closesOn, closingSettings, killSwitch, proseTitles } from "../lib/closing-marks.ts";
-import { checksRun, claudeTaskRuns, proofStop, realProcesses, waits, type ProofStopEvent, type ProofStopOptions } from "../lib/proof-stop.ts";
-import { asksForDecision, personName } from "../lib/prose-question.ts";
+import { checksRun, claudeTaskRuns, proofStop, waits, type ProofStopEvent, type ProofStopOptions } from "../lib/proof-stop.ts";
+import { asksForDecision, asksInProse, personName, proseTitles } from "../lib/prose-question.ts";
 
 export type StopEvent = { transcript_path?: string; stop_hook_active?: boolean; last_assistant_message?: string };
 export type StopBlock = { decision: "block"; reason: string };
-export type IsHidden = (threadId: string | undefined, home: string, event: ProofStopEvent, message: string) => Promise<boolean>;
+export type IsHidden = (threadId: string | undefined, home: string, event: ProofStopEvent) => Promise<boolean>;
 
 type Line = { type?: string; isMeta?: boolean; message?: { role?: string; content?: unknown }; payload?: { type?: string; role?: string; name?: string; content?: unknown } };
 type Block = { type?: string; text?: string; name?: string };
 type Step = { text: string } | { asked: true };
 
 export const questionToolReason = (person: string) => `Hedge blocked this stop: your last message asks ${person} a decision in prose, `
-  + "and this thread stays out of their inbox after the turn: it is snoozed, waits on a task, Monitor or thread wait, watches PR checks, or closes on a line that parks it. "
+  + "and this thread stays out of their inbox after the turn: it is snoozed, waits on a task, Monitor or thread wait, or watches PR checks. "
   + "Ask it now with the question tool (AskUserQuestion in Claude, request_user_input in Codex): restate the decision in full, with options. "
   + `A pending question brings the thread back to ${person}. `
   + `If you cannot ask on a card, because a skill asks in prose or ${person} turned down the card, end the turn with your complete reply again, word for word: `
@@ -82,15 +78,13 @@ export function currentTurn(transcript: string): string[] {
 const awaitsChecks = ({ snapshot, watch }: NonNullable<ShellThread["pullRequests"]>[number]) =>
   Boolean(watch) && !["merged", "closed"].includes(snapshot?.state?.toLowerCase() ?? "open") && (checksRun(watch!) || Boolean(watch!.awaitingApproval?.length));
 
-const closesOnPark = (message: string, home: string) => closesOn(message, closingSettings(home).marks, ["wait", "snooze", "check"]);
-
-export const hiddenIn = (shell: ReadShell, now = Date.now): IsHidden => async (threadId, home, event, message) => {
+export const hiddenIn = (shell: ReadShell, now = Date.now): IsHidden => async (threadId, home, event) => {
   if (!threadId) return false;
   try {
     const { threads } = await shell();
     const thread = matchThread(threads, threadId, (item) => item.id);
     if (!thread || thread.lineage?.parentThreadId || asksInProse(thread.title, proseTitles(home))) return false;
-    return (Boolean(thread.snoozedUntil) && Date.parse(thread.snoozedUntil!) > now()) || closesOnPark(message, home) || claudeTaskRuns(event)
+    return (Boolean(thread.snoozedUntil) && Date.parse(thread.snoozedUntil!) > now()) || claudeTaskRuns(event)
       || waits(threads, thread) || (thread.pullRequests ?? []).some(awaitsChecks);
   } catch {
     return false;
@@ -107,7 +101,7 @@ export async function guardStop(event: StopEvent & ProofStopEvent, home: string,
   }
   const { last, asked } = askedAfterLastMessage(turn, event.last_assistant_message);
   if (asked || !last || !asksForDecision(last)) return undefined;
-  if (!(await hidden(threadId, home, event, last))) return undefined;
+  if (!(await hidden(threadId, home, event))) return undefined;
   return { decision: "block", reason: questionToolReason(personName(home)) };
 }
 
@@ -121,7 +115,7 @@ export const pendingCardReason = (threadId: string, person: string) => `Hedge bl
   + `Send again with mode: "queue": the lane reads your message once ${person} answers. `
   + "Only when your message changes what the card asks, send the same message to the same thread once more to replace the card. A different message is denied again.";
 
-export { killSwitch };
+export const killSwitch = ".config/hedge/ask-guard.off";
 
 const isThreadSend = (name = "") => /^mcp__t3[-_]code__t3_thread_send$/.test(name);
 
@@ -193,75 +187,37 @@ export async function guardCard(event: SendEvent, options: SendGuardOptions, thr
 }
 
 const t3CallMs = 3_000;
-const parkStartsWithinMs = 6_000;
-const t3Scopes = ["orchestration:read", "orchestration:operate", "access:read"];
 
-const liveShell = (home: string): ReadShell => () =>
-  withT3Session((client) => client.getShell<{ threads: ShellThread[] }>(), { home, ttl: "1m", timeoutMs: t3CallMs, runCli: t3CliRunner({ timeoutMs: t3CallMs }) });
-
-export type HookT3 = ParkT3 & { freshShell: ReadShell; close: () => Promise<void> };
-
-export function hookT3(home: string, ttl = "1m"): HookT3 {
-  let opened: Promise<T3HttpClient> | undefined;
-  let release = () => {};
-  let closed: Promise<unknown> = Promise.resolve();
-  let shell: Promise<{ threads: ShellThread[] }> | undefined;
-  const client = () => (opened ??= new Promise<T3HttpClient>((resolve, reject) => {
-    const released = new Promise<void>((done) => { release = done; });
-    closed = withT3Session(async (session) => { resolve(session); await released; },
-      { home, ttl, scopes: t3Scopes, timeoutMs: t3CallMs, runCli: t3CliRunner({ timeoutMs: t3CallMs }) }).catch(reject);
-  }));
-  const freshShell = () => client().then((session) => session.getShell<{ threads: ShellThread[] }>());
-  return {
-    freshShell,
-    shell: () => (shell ??= freshShell()),
-    dispatch: async (command) => (await client()).call("orchestration.dispatchCommand", command, t3CallMs),
-    close: async () => { release(); await closed.catch(() => undefined); },
-  };
-}
-
-export function spawnSettle(threadId: string, runId: string, since: Date): ChildProcess {
-  const child = spawn(process.execPath, [import.meta.path, "settle-after", threadId, runId, since.toISOString()], { detached: true, stdio: "ignore" });
-  child.unref();
-  return child;
-}
-
-export async function settleAfter(home: string, threadId: string, runId: string, since: Date): Promise<boolean> {
-  const t3 = hookT3(home, "15m");
+async function readShell(home: string): Promise<{ threads: ShellThread[] }> {
+  let result: { threads: ShellThread[] } | undefined;
   try {
-    return await settleWhenRunEnds({ shell: t3.freshShell, dispatch: t3.dispatch }, { threadId, runId, since, stillParks: stillParks(home) }, realSettleClock).catch(() => false);
-  } finally {
-    await t3.close();
+    return await withT3Session(async (client) => (result = await client.getShell<{ threads: ShellThread[] }>()), { home, ttl: "1m", timeoutMs: t3CallMs, runCli: t3CliRunner({ timeoutMs: t3CallMs }) });
+  } catch (error) {
+    if (result) return result;
+    throw error;
   }
 }
 
-export type StopDeps = Partial<Pick<ProofStopOptions, "threadId" | "git" | "processes" | "deadline">> & {
-  hidden?: IsHidden; park?: ParkT3; settleAfterRun?: (threadId: string, runId: string, since: Date) => void; now?: () => Date; elapsed?: () => number;
+const liveShell = (home: string): ReadShell => {
+  let snapshot: Promise<{ threads: ShellThread[] }> | undefined;
+  return () => (snapshot ??= readShell(home));
 };
+
+export type StopDeps = Partial<Pick<ProofStopOptions, "threadId" | "git" | "processes" | "deadline">> & { hidden?: IsHidden };
 
 export async function guardBackground(event: StopEvent & ProofStopEvent, home: string, threadId: string | undefined): Promise<StopBlock | undefined> {
   if (event.stop_hook_active || !threadId || !event.transcript_path || !event.background_tasks?.length) return undefined;
-  const { marks } = closingSettings(home);
-  if (closesOn((await finalMessage(event)) ?? "", marks, ["wait"])) return undefined;
   const ids = unwaitedBackgroundTasks(currentTurn(await readFile(event.transcript_path, "utf8")), event.background_tasks);
-  return ids.length ? { decision: "block", reason: backgroundReason(ids, personName(home), marks.wait) } : undefined;
+  return ids.length ? { decision: "block", reason: backgroundReason(ids, personName(home)) } : undefined;
 }
 
 async function guardStopAndProof(event: StopEvent & ProofStopEvent, home: string, shell: ReadShell, deps: StopDeps) {
-  const stoppedAt = deps.now?.() ?? new Date();
-  const elapsed = deps.elapsed ?? ((started) => () => Date.now() - started)(Date.now());
   const threadId = "threadId" in deps ? deps.threadId : process.env.T3CODE_THREAD_ID;
   const prose = await guardStop(event, home, threadId, deps.hidden ?? hiddenIn(shell)).catch(() => undefined);
   if (prose || existsSync(join(home, killSwitch))) return prose;
   const background = await guardBackground(event, home, threadId).catch(() => undefined);
   if (background) return background;
-  const last = { ...event, last_assistant_message: await finalMessage(event) };
-  const proof = await proofStop(last, { home, shell, ...deps, threadId });
-  if (proof || !deps.park || elapsed() >= parkStartsWithinMs) return proof;
-  return parkStop(last, {
-    home, threadId, t3: deps.park, processes: deps.processes ?? realProcesses,
-    settleAfterRun: deps.settleAfterRun ?? spawnSettle, now: deps.now, stoppedAt,
-  });
+  return proofStop({ ...event, last_assistant_message: await finalMessage(event) }, { home, shell, ...deps, threadId });
 }
 
 export const hookWith = (shell: (home: string) => ReadShell, stop: StopDeps = {}): Hook => async (_provider, readInput, home) => {
@@ -277,17 +233,6 @@ export const hookWith = (shell: (home: string) => ReadShell, stop: StopDeps = {}
   }
 };
 
-export const hook: Hook = async (provider, readInput, home) => {
-  const t3 = hookT3(home);
-  try {
-    return await hookWith(() => t3.shell, { park: { shell: t3.freshShell, dispatch: t3.dispatch } })(provider, readInput, home);
-  } finally {
-    await t3.close();
-  }
-};
+export const hook = hookWith(liveShell);
 
-if (import.meta.main) {
-  const [mode, threadId, runId, since] = process.argv.slice(2);
-  if (mode === "settle-after" && threadId && runId && since && !Number.isNaN(Date.parse(since))) await settleAfter(process.env.HOME ?? homedir(), threadId, runId, new Date(since));
-  else await runHook(hook, { exitOnAnswer: true });
-}
+if (import.meta.main) await runHook(hook, { exitOnAnswer: true });

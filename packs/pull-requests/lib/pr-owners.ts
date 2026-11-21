@@ -118,7 +118,7 @@ export async function settleRefusal(id: string, deps: OwnerDeps, person: string)
   }
   if (!open.length) return undefined;
   return `Hedge blocked this settle: the thread owns open PR(s) ${open.join(", ")}, and no other open thread links them. `
-    + `If ${person} parked them, snooze the thread until the park date instead. If they wait on someone else, snooze it until they move. `
+    + `If ${person} parked them, snooze the thread until the park date instead. `
     + handOverFirst;
 }
 
@@ -133,10 +133,7 @@ export const isOrganize = (name = "") => /^mcp__t3[-_]code__t3_thread_organize$/
 
 export const guardedActions = ["settle", "snooze", "archive"];
 
-export const pinnedReason = (person: string, snoozeMark?: string) => `Hedge blocked this call: ${person} pinned this thread to keep it in view, so leave it open. `
-  + (snoozeMark
-    ? `Only a snooze ${person} asks for in the thread applies: end the turn on a line that starts with ${snoozeMark} and names the wake time.`
-    : `Only ${person} snoozes it, in T3.`);
+export const pinnedReason = (person: string) => `Hedge blocked this call: ${person} pinned this thread to keep it in view, so leave it open. Only ${person} snoozes it, in T3.`;
 
 export function settleTarget(input: Record<string, unknown>, self: string | undefined): string | undefined {
   if (!guardedActions.includes(String(input.action))) return undefined;

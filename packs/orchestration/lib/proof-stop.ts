@@ -2,7 +2,6 @@ import { realpath } from "node:fs/promises";
 import { matchThread, type PullRequestWatch, type ShellThread } from "../../base/lib/t3/index.ts";
 import { ownedPullRequests, subagentParent } from "../../pull-requests/lib/pr-owners.ts";
 import { ciRunningCode, lastGateRun } from "../../pull-requests/lib/proof.ts";
-import { closesOn, closingSettings } from "./closing-marks.ts";
 import { needsHuman } from "./lanes.ts";
 import { personName } from "./prose-question.ts";
 
@@ -151,6 +150,8 @@ function waitsOnSubagent(threads: ShellThread[], parent: ShellThread, depth = 0)
       || awaitsWork(child) || waitsOnSubagent(threads, child, depth + 1)));
 }
 
+const isSnoozed = (thread: ShellThread) => Boolean(thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now());
+
 export const waits = (threads: ShellThread[], thread: ShellThread) => awaitsWork(thread) || waitsOnSubagent(threads, thread);
 
 export async function proofStop(event: ProofStopEvent, options: ProofStopOptions): Promise<ProofStopBlock | undefined> {
@@ -167,14 +168,12 @@ export async function proofStop(event: ProofStopEvent, options: ProofStopOptions
 
 async function check(event: ProofStopEvent, options: ProofStopOptions, signal: AbortSignal): Promise<ProofStopBlock | undefined> {
   const { threadId, home } = options;
-  const { marks } = closingSettings(home);
-  const message = event.last_assistant_message ?? "";
-  if (event.stop_hook_active || !threadId || !event.cwd || waitsInClaude(event) || needsHuman(message) || closesOn(message, marks, ["snooze"])) return undefined;
+  if (event.stop_hook_active || !threadId || !event.cwd || waitsInClaude(event) || needsHuman(event.last_assistant_message ?? "")) return undefined;
   const processes = options.processes ?? realProcesses;
   if (nestedSession(await processes.table(signal), processes.pid)) return undefined;
   const { threads } = await options.shell();
   const thread = matchThread(threads, threadId, (item) => item.id);
-  if (!thread || thread.delegatedFrom || thread.pendingRuntimeRequest || waits(threads, thread)) return undefined;
+  if (!thread || thread.delegatedFrom || thread.pendingRuntimeRequest || isSnoozed(thread) || waits(threads, thread)) return undefined;
   const git = gitIn(options.git ?? realGit, event.cwd, signal);
   const layers = await layersOf(threads, thread.id, git);
   if (!layers.length || layers.some(awaitsCi)) return undefined;
@@ -193,7 +192,7 @@ async function check(event: ProofStopEvent, options: ProofStopOptions, signal: A
   const others = rest.length ? ` Also owed: ${rest.map((item) => item.pr).join(", ")}.` : "";
   return {
     decision: "block",
-    reason: `Hedge blocked this stop: your PR is not proven. ${first.step}.${others} If you are parking for ${person}, ask with the question tool or end with a \`NEEDS_HUMAN:\` line. If ${person} parked the PR, end on ${marks.snooze} with the park date. `
+    reason: `Hedge blocked this stop: your PR is not proven. ${first.step}.${others} If you are parking for ${person}, ask with the question tool or end with a \`NEEDS_HUMAN:\` line. `
       + `If this turn only answered ${person} and the work is not finished, say what is still owed and end the turn again.`,
   };
 }

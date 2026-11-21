@@ -2,7 +2,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type ShellThread, t3UserData } from "../../base/lib/t3/index.ts";
-import { closingSettings } from "../../orchestration/lib/closing-marks.ts";
 import { remoteLauncher } from "../../../src/hub/ssh.ts";
 import { runGh } from "./gh.ts";
 import { fullIdHint, guardedActions, isOrganize, listedThread, pinnedReason, prState, readHandovers, readT3Threads, settleRefusal, settleTarget } from "./pr-owners.ts";
@@ -89,10 +88,7 @@ export async function organizeRefusal(action: string, id: string, home: string, 
   const person = personName(home);
   const target = listedThread(threads, id);
   if (!target) return action === "snooze" && failOpen ? undefined : unlisted(action, id, fullIdHint(threads, id));
-  if (action !== "archive" && target.pinnedAt) {
-    const { marks, parking } = closingSettings(home);
-    return pinnedReason(person, parking && marks.snooze);
-  }
+  if (action !== "archive" && target.pinnedAt) return pinnedReason(person);
   if (action === "snooze") return undefined;
   return settleRefusal(target.id, { threads, handovers: () => readHandovers(home), prState: deps.prState }, person);
 }

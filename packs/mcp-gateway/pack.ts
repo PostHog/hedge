@@ -159,7 +159,7 @@ export default {
       default: false,
       requires: ["slack-bridge"],
       settings: [reviewSearch, reviewAsks],
-      sentence: "When a ready pull request of yours waits 4 hours on a review nobody gave, the T3 thread that links it wakes up, and again at 24 hours. A thread that has waited 30 minutes on a decision it put to you in prose, while a watch or its own snooze keeps it out of your inbox, is told once to ask with the question tool.",
+      sentence: "When a ready pull request of yours waits 4 hours on a review nobody gave, the T3 thread that links it wakes up, and again at 24 hours. A thread that has waited 30 minutes on a decision it put to you in prose, while a watch keeps it out of your inbox, is told once to ask with the question tool.",
       risk: "Reads your pull requests on GitHub and your own Slack messages from the last 12 hours. It messages your threads and changes nothing on GitHub or Slack.",
     });
     const reviewWaitOf = async (ctx: Context) => {
