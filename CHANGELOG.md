@@ -24,8 +24,9 @@
   A gate holds the lock of the pull request's judge directory while it asks
   the judge, so a second gate at the same moment that finds no saved
   verdict for its inputs stops and names the process that holds it, and
-  gates at once never pass the cap. That second gate shares no failure to
-  the decision ledger, so the pass of the first gate stands. A gate whose
+  gates at once never pass the cap. That second gate keeps no run record
+  and shares nothing to the decision ledger, so the merge gate counts the
+  pass of the first gate on every machine. A gate whose
   process ended leaves its lock to the next gate.
 
 ### A model row takes any T3 provider

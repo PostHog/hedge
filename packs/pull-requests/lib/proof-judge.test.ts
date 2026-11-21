@@ -6,6 +6,7 @@ import { cleanFixtures, lookup, checkout, type Checkout, verdict, fakeModel, rev
 import { riskCalloutOf, tierOf } from "./decision-ledger.ts";
 import { withoutReceipt } from "./proof-receipt.ts";
 import { spawnAsync } from "../../../src/testing/spawn.ts";
+import { mergeGate } from "../../guards/hooks/merge-gate.ts";
 
 const waitingJudges: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -428,7 +429,7 @@ test("while one gate asks the judge of a PR, a second gate of that PR with other
   expect(readFileSync(asked, "utf8")).toBe("asked\n");
 });
 
-test("a second gate stopped by the judge lock shares no failure at HEAD, so the decision ledger keeps the pass of the gate that held the lock", async () => {
+test("a second gate stopped by the judge lock leaves no failure at HEAD, so the merge gate on this machine counts the pass of the gate that held the lock", async () => {
   const pr = await checkout();
   pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo CONTINUE";
   await pr.commit("feature.txt", "greet new members\n");
@@ -448,6 +449,9 @@ test("a second gate stopped by the judge lock shares no failure at HEAD, so the 
   expect(second.output).toContain("holds its lock");
   expect((await first).code).toBe(0);
   expect(await gates()).toEqual([expect.objectContaining({ passed: true })]);
+  const head = await pr.git("rev-parse", "HEAD");
+  const github = { pull: async () => ({ head, base: "main", defaultBranch: "main", open: true }), pullFor: async () => undefined };
+  expect(await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home: pr.home, env: { HEDGE_SETTINGS: undefined }, github })).toBeUndefined();
 });
 
 test("a gate killed while it held the judge lock leaves the lock to the next gate, which asks the judge", async () => {

@@ -46,7 +46,9 @@ async function lastRunNumber(directory: string): Promise<number> {
   return Math.max(0, ...(await gateRunNames(directory)).map((name) => parseInt(name, 10)));
 }
 
-export async function startGateRun(home: string, identity: ProofIdentity, startedAt = new Date()): Promise<(record: GateRecord) => Promise<void>> {
+export type GateRun = ((record: GateRecord) => Promise<void>) & { discard: () => Promise<void> };
+
+export async function startGateRun(home: string, identity: ProofIdentity, startedAt = new Date()): Promise<GateRun> {
   const started = { startedAt: startedAt.toISOString() };
   const directory = gateRunDirectory(home, identity);
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -54,7 +56,7 @@ export async function startGateRun(home: string, identity: ProofIdentity, starte
     const path = join(directory, `${number}.json`);
     try {
       await writeFile(path, JSON.stringify({ ...unfinishedGateRun, ...started }) + "\n", { flag: "wx", mode: 0o600 });
-      return (record) => writeJson(path, { ...record, ...started });
+      return Object.assign((record: GateRecord) => writeJson(path, { ...record, ...started }), { discard: () => rm(path, { force: true }) });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
