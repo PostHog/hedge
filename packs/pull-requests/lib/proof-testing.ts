@@ -189,6 +189,18 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
 
 export type Checkout = Awaited<ReturnType<typeof checkout>>;
 
+export async function githubRepository(pr: Checkout) {
+  const user = "git";
+  const served = join(pr.repository, "../github.com");
+  const ssh = join(pr.repository, "../ssh");
+  writeFileSync(ssh, `#!/bin/sh\ncase "$1" in *@github.com) ;; *) exit 255;; esac\ncd "${served}/\${1%@*}" || exit 128\nexec sh -c "git \${2#git-}"\n`, { mode: 0o755 });
+  Object.assign(pr.env, { GIT_SSH_COMMAND: ssh, GIT_SSH_VARIANT: "simple", GIT_ALLOW_PROTOCOL: "file:ssh" });
+  const bare = join(served, user, "example/product.git");
+  mkdirSync(bare, { recursive: true });
+  await pr.git("init", "-q", "--bare", bare);
+  return { bare, url: `${user}@github.com:example/product.git` };
+}
+
 export const exitedPid = async () => (await spawnAsync(["true"])).pid;
 
 const panelModule = JSON.stringify(join(import.meta.dir, "proof-panel.ts"));

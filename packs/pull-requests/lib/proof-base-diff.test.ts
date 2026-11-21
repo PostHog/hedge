@@ -2,17 +2,25 @@ import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { spawnAsync } from "../../../src/testing/spawn.ts";
-import { checkout, cleanFixtures, fakeModel, fixture, reviewHead, verdict, type Checkout } from "./proof-testing.ts";
+import { runIn } from "./pr-ci.ts";
+import { remotesOf } from "./proof-checkout.ts";
+import { checkout, cleanFixtures, fakeModel, fixture, githubRepository, reviewHead, verdict, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
 async function publishBase(pr: Checkout, remote = "origin") {
-  const bare = join(fixture("hedge-proof-remote-"), "github.com/example/product.git");
+  const { bare, url } = await githubRepository(pr);
+  await pr.git("push", "-q", bare, "main:refs/heads/main");
+  await pr.git("remote", remote === "origin" ? "set-url" : "add", remote, url);
+  return bare;
+}
+
+async function publishMirror(pr: Checkout, tip = "main") {
+  const bare = join(fixture("hedge-proof-mirror-"), "github.com/example/product.git");
   mkdirSync(bare, { recursive: true });
   await pr.git("init", "-q", "--bare", bare);
-  await pr.git("push", "-q", bare, "main:refs/heads/main");
-  await pr.git("remote", remote === "origin" ? "set-url" : "add", remote, bare);
-  return bare;
+  await pr.git("push", "-q", bare, `${tip}:refs/heads/main`);
+  await pr.git("remote", "add", "mirror", bare);
 }
 
 async function mergeBaseBehindStaleRef(pr: Checkout) {
@@ -79,7 +87,7 @@ test("when one remote of the repository cannot be fetched, the judge reads the b
   const pr = await checkout();
   const stale = await mergeBaseBehindStaleRef(pr);
   await publishBase(pr, "upstream");
-  await pr.git("remote", "set-url", "origin", join(fixture("hedge-proof-gone-"), "github.com/example/product.git"));
+  await pr.git("remote", "set-url", "origin", "gone@github.com:example/product.git");
   await pr.git("update-ref", "refs/remotes/origin/main", stale);
   await pr.git("update-ref", "refs/remotes/upstream/main", stale);
 
@@ -154,4 +162,88 @@ test("when two remotes of the repository fetch different tips, the judge reads t
   const prompt = await judgePrompt(pr);
   expect(prompt).toContain("+greet the new member");
   expect(prompt).not.toContain("the base moves on");
+});
+
+test("a mirror that still serves a base tip GitHub dropped does not hide the branch's merge of that tip from the judge", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet the new member\n");
+  await pr.advanceBase("base.md", "a base change that is later dropped\n");
+  await pr.git("merge", "-q", "--no-edit", "main");
+  await publishMirror(pr);
+  await pr.git("checkout", "-q", "main");
+  await pr.git("reset", "-q", "--hard", "HEAD^");
+  await pr.commit("forced.md", "the force-pushed base\n");
+  await pr.git("checkout", "-q", "feature");
+  await publishBase(pr);
+  await pr.hedge("require", "--none", "--reason", "docs only");
+
+  const prompt = await judgePrompt(pr);
+  expect(prompt).toContain("+a base change that is later dropped");
+  expect(prompt).not.toContain("the force-pushed base");
+});
+
+test("when GitHub cannot be fetched, a lagging mirror does not pull the judge's base back behind the current base ref", async () => {
+  const pr = await checkout();
+  const stale = await mergeBaseBehindStaleRef(pr);
+  await githubRepository(pr);
+  await pr.git("remote", "set-url", "origin", "gone@github.com:example/product.git");
+  await publishMirror(pr, stale);
+
+  const prompt = await judgePrompt(pr);
+  expect(prompt).toContain("+greet the new member");
+  expect(prompt).not.toContain("the base moves on");
+});
+
+test("a mirror ahead of GitHub does not hide a base commit the branch merged from the mirror", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet the new member\n");
+  await pr.advanceBase("base.md", "only the mirror has this\n");
+  await pr.git("merge", "-q", "--no-edit", "main");
+  await publishMirror(pr);
+  const bare = await publishBase(pr);
+  await pr.git("push", "-q", "--force", bare, "main^:refs/heads/main");
+  await pr.hedge("require", "--none", "--reason", "docs only");
+
+  const prompt = await judgePrompt(pr);
+  expect(prompt).toContain("+greet the new member");
+  expect(prompt).toContain("+only the mirror has this");
+});
+
+test("only remotes on the github.com host count as the repository", async () => {
+  const pr = await checkout();
+  const urls = {
+    https: "https://github.com/example/product.js",
+    httpsGit: "https://github.com/example/product.js.git",
+    httpsSlash: "https://github.com/example/product.js/",
+    httpsUser: "https://the-user@github.com/example/product.js.git",
+    httpsPassword: "https://the-user:x@github.com/example/product.js",
+    scp: "git@github.com:example/product.js.git",
+    ssh: "ssh://git@github.com/example/product.js.git",
+    git: "git://github.com/example/product.js",
+    upperCase: "HTTPS://GitHub.COM/Example/Product.JS.git",
+    httpsMirror: "https://mirror.example/github.com/example/product.js",
+    sshMirror: "ssh://git@mirror.example/github.com/example/product.js.git",
+    scpMirror: "git@mirror.example:github.com/example/product.js.git",
+    localMirror: "/srv/mirror/github.com/example/product.js.git",
+    fileMirror: "file:///srv/mirror/github.com/example/product.js.git",
+    proxyMirror: "https://proxy.example/https://github.com/example/product.js",
+    lookalikeHost: "https://github.com.mirror.example/example/product.js",
+    userIsGithub: "https://github.com@mirror.example/example/product.js",
+    otherRepository: "https://github.com/example/productxjs",
+    otherOwner: "https://github.com/other/product.js",
+    longerPath: "https://github.com/example/product.js/more",
+  };
+  for (const [name, url] of Object.entries(urls)) await pr.git("remote", "add", name, url);
+
+  expect(remotesOf("example/product.js", runIn(pr.repository, pr.env)).sort()).toEqual(["git", "https", "httpsGit", "httpsPassword", "httpsSlash", "httpsUser", "scp", "ssh", "upperCase"]);
+});
+
+test("a checkout whose only remote of the repository is a mirror names the command that adds GitHub", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet the new member\n");
+  await pr.git("remote", "remove", "origin");
+  await publishMirror(pr);
+  await pr.hedge("require", "--none", "--reason", "docs only");
+
+  await expect(pr.hedge("review", "--lens", "correctness")).rejects.toThrow("no remote of this checkout points at example/product. Run the command in a checkout of example/product, or add one here: git remote add hedge-base https://github.com/example/product.git");
 });
