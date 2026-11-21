@@ -125,14 +125,15 @@ function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline
   const piped = paths.includes("-") && !found.stdin;
   const read = paths.map((path) => path === "-" ? found.stdin?.body ?? "" : io.readText(resolve(cwd ?? ".", found.chdir ?? ".", home(path))));
   const payloads = read.filter((text) => text !== undefined);
-  const unsettled = withJsonStrings([...inline, found.stdin?.body ?? "", ...line.writeFree ? [] : payloads]);
-  const texts = line.writeFree ? [...unsettled, ...withJsonStrings(payloads)] : unsettled;
+  const settled = line.writeFree && !paths.some((path) => path.split("/").includes(".."));
+  const unsettled = withJsonStrings([...inline, found.stdin?.body ?? "", ...settled ? [] : payloads]);
+  const texts = settled ? [...unsettled, ...withJsonStrings(payloads)] : unsettled;
   return { texts, unsettled, unread: read.includes(undefined), piped };
 }
 
 type Line = { raw: string; writeFree: boolean };
 const quietTargets = /^\/dev\/(?:null|stdout|stderr)$/;
-const readOnlyTools = new Set(["", "echo", "printf", "true", "false", ":", "test", "[", "cd", "pushd", "popd"]);
+const readOnlyTools = new Set(["", "echo", "printf", "true", "false", ":", "test", "["]);
 const readOnlyGh = /^(?:api .*|(?:pr|issue) (?:comment|review|view|close|reopen|ready|checks|list|status))$/s;
 const startsProgram = ({ flags }: Gh) => ["-e", "--editor", "-w", "--web"].some((flag) => flags.has(flag));
 const readOnlyGhCall = (args: string[]) => {
@@ -141,6 +142,7 @@ const readOnlyGhCall = (args: string[]) => {
 };
 const writesNothing = ({ name, args, env, outputs, writes, bare }: Command) => [...outputs, ...writes].every((target) => quietTargets.test(target))
   && [...env.keys()].every((key) => key === "GH_REPO")
+  && [...args, ...env.values()].every((word) => !word.includes("$")) && !(name === "printf" && args.some((arg) => arg.startsWith("-v")))
   && (bare[0] ?? "") === name && (readOnlyTools.has(name) || (name === "gh" && readOnlyGhCall(args)));
 
 const withJsonStrings = (texts: string[]) => [...texts, ...texts.flatMap(jsonStrings)];
