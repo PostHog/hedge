@@ -157,7 +157,8 @@ export function baseRefs(identity: ProofIdentity, run: Run) {
 
 export function remotesOf(repository: string, run: Run) {
   const remotes = run(["git", "remote"]).stdout.split("\n").filter(Boolean);
-  return remotes.filter((remote) => new RegExp(`github\\.com[:/]${repository.replace(/\./g, "\\.")}(\\.git)?/?$`, "i").test(run(["git", "remote", "get-url", remote]).stdout.trim()));
+  const onGithub = new RegExp(`^(?:(?:https?|ssh|git|git\\+ssh|ssh\\+git)://(?:[\\w.~%!$&'()*+,;=:-]+@)?(?:www\\.)?github\\.com/|(?:[^@/:]+@)?(?:www\\.)?github\\.com:)${repository.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}(?:\\.git)?/?$`, "i");
+  return remotes.filter((remote) => onGithub.test(run(["git", "remote", "get-url", remote]).stdout.trim()));
 }
 
 export function cleanBaseMerge(identity: ProofIdentity, run: Run): CleanBaseMerge {
