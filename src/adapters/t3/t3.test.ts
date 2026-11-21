@@ -603,6 +603,18 @@ describe("T3 provider instances", () => {
     expect(report.findings).toContainEqual({ id: `kept:${settingsFile}`, pack: "engine", say: `Kept your providerInstances.antigravity in ${settingsFile}. Run hedge apply --adopt ${settingsFile} to take Hedge's value.` });
   });
 
+  test("lets go of an instance once its entry leaves the plan, so re-adding it with another value keeps the live one", async () => {
+    const home = temp.make("home-");
+    const { server, adapter } = setup();
+    await apply(plan("linux", [agy]), { home, adapters: [adapter] });
+    await apply(plan("linux", []), { home, adapters: [adapter] });
+    write(home, settingsFile, { providerInstances: instancesOf(server) });
+    const moved = entry("providerInstances.antigravity", { driver: "antigravity", enabled: true, config: { binaryPath: "~/.local/bin/agy2" } }, "agents");
+    const report = await apply(plan("linux", [moved]), { home, adapters: [adapter] });
+    expect(instancesOf(server)).toEqual({ antigravity: instance(home, "antigravity", "agy") });
+    expect(report.findings).toContainEqual({ id: `kept:${settingsFile}`, pack: "engine", say: `Kept your providerInstances.antigravity in ${settingsFile}. Run hedge apply --adopt ${settingsFile} to take Hedge's value.` });
+  });
+
   test("still owns an instance while the pack that declares it cannot be fetched", async () => {
     const home = temp.make("home-");
     const { server, adapter } = setup();
