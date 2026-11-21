@@ -20,6 +20,7 @@ export const cliReason = `Hedge blocked this command: an agent enters the Trunk 
 export const graphqlReason = `Hedge blocked this call: a GraphQL merge, auto-merge, enqueue, or comment that posts \`/trunk merge\` skips the merge gate, and a query read from piped input or an unreadable file may be one. Enqueue with ${oneShape}, or merge with \`gh pr merge <number> --repo <owner>/<repo>\`.`;
 export const rawReason = `Hedge blocked this command: it merges a PR or posts \`/trunk merge\` straight to the GitHub API, or sends GitHub a payload the merge gate cannot read, which skips the merge gate. Enqueue with ${oneShape}.`;
 export const otherEndpointReason = `Hedge blocked this call: it writes \`/trunk merge\` somewhere other than a new PR comment, such as an edited comment or a review. Enqueue with ${oneShape}.`;
+export const unreadPayloadReason = "Hedge blocked this call: the merge gate cannot read the file it sends, such as one that this command writes before the call or a path it cannot open, so it cannot tell whether the call posts `/trunk merge`. Write the file in one call, then send it with a call of its own.";
 export const splitStringReason = "Hedge blocked this command: `env -S` runs a command line that the merge gate cannot read. Write the gh, trunk, or curl command out as its own words.";
 export const shellAliasReason = "Hedge blocked this command: it runs a gh alias that the merge gate cannot read, a shell alias or one with arguments. Write the gh command out.";
 const pipedVia = " (piped body)";
@@ -133,8 +134,10 @@ function jsonStrings(text: string): string[] {
 }
 
 const builtAtRunTime = /[$`]/;
-const sendsEnqueue = ({ texts, unread }: { texts: string[]; unread: boolean }, raw: string) =>
-  unread || texts.some((text) => enqueueLine.test(text)) || (texts.some((text) => builtAtRunTime.test(text)) && mentionsEnqueue.test(raw));
+type Sent = { texts: string[]; unread: boolean };
+const readsEnqueue = ({ texts }: Sent, raw: string) => texts.some((text) => enqueueLine.test(text)) || (texts.some((text) => builtAtRunTime.test(text)) && mentionsEnqueue.test(raw));
+const sendsEnqueue = (sent: Sent, raw: string) => sent.unread || readsEnqueue(sent, raw);
+const elsewhere = (sent: Sent, raw: string): MergeIntent => ({ targets: [], refusal: readsEnqueue(sent, raw) ? otherEndpointReason : unreadPayloadReason });
 
 const readOptions = {
   curl: { flags: "sSiILfvk", valued: "HoAwm", long: ["silent", "show-error", "include", "head", "location", "fail", "verbose", "insecure", "compressed"], longValued: ["header", "output", "user-agent", "write-out", "max-time", "connect-timeout"] },
@@ -211,7 +214,8 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
     return named ? { targets: [{ ...named, via: `gh ${gh.group} comment${sent.piped ? pipedVia : ""}` }] } : { targets: [], refusal: unnamedReason("posts `/trunk merge`") };
   }
   if (gh.group === "pr" && gh.action === "review") {
-    return sendsEnqueue(sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file")), raw) ? { targets: [], refusal: otherEndpointReason } : { targets: [] };
+    const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"));
+    return sendsEnqueue(sent, raw) ? elsewhere(sent, raw) : { targets: [] };
   }
   if (gh.group === "pr" && gh.action === "merge") {
     if (values(gh, "--disable-auto").some((value) => /^(?:|1|t|true)$/i.test(value))) return { targets: [] };
@@ -238,7 +242,7 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   if (merge) return { targets: [{ repository: merge[1]!, pr: Number(merge[2]), via: "gh api pulls/<n>/merge" }] };
   if (!enqueues) return { targets: [] };
   if (comment && method === "POST") return { targets: [{ repository: comment[1]!, pr: Number(comment[2]), via: "gh api issues/<n>/comments" }] };
-  return { targets: [], refusal: otherEndpointReason };
+  return elsewhere(sent, raw);
 }
 
 const strings = (value: unknown): string[] =>

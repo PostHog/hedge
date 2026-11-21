@@ -5,7 +5,7 @@ import { modelFor, type ModelRow } from "../../base/lib/models.ts";
 import { numberSetting } from "../../base/lib/settings.ts";
 import { covers, hubLedger, refText, riskCalloutOf, tierOf, type Env, type Ledger, type PrRef, type Ssh } from "./decision-ledger.ts";
 import { ciOf, readPullRequest, type PullRequest, type Run } from "./pr-ci.ts";
-import { askGap, authorOf, conditionName, isStandingCondition, judgeDirectory, judgeGap, judgeGapProof, listStanding, parseVerdict, prDirectory, proofGate, pullRequestDirectory, readDecisions, readJson, receiptOf, reviewRecords, withBrokenConditions, writeJson, type Arbiter, type Decisions, type JudgeSummary, type ProofIdentity, type ProofSummary, type PushedHead } from "./proof.ts";
+import { askGap, authorOf, ciRunningCode, conditionName, isStandingCondition, judgeDirectory, judgeGap, judgeGapProof, listStanding, parseVerdict, prDirectory, proofGate, pullRequestDirectory, readDecisions, readJson, receiptOf, reviewRecords, withBrokenConditions, writeJson, type Arbiter, type Decisions, type JudgeSummary, type ProofIdentity, type ProofSummary, type PushedHead } from "./proof.ts";
 import { displayEntry } from "./proof-display.ts";
 import { receiptMarker } from "./proof-receipt.ts";
 import { baseRefs, cleanBaseMerge, devPullOf, diffOf, mergeBase, pullRequestDetails, remotesOf, topLevel } from "./proof-checkout.ts";
@@ -69,17 +69,22 @@ export async function finalGate(head: ProofIdentity, context: GateContext, { lan
   const shown = pull === undefined ? undefined : receiptMarker((pull as PullRequest).body);
   const stale = shown && shown.head !== head.commit ? [`receipt: the PR body shows the receipt of ${shown.head.slice(0, 7)}, not HEAD ${head.commit.slice(0, 7)}. Refresh it with hedge proof receipt`] : [];
   const growth = await grownBy(home, head, run, pull);
+  const reason = judged.code === 0 ? "pass" : (judged.reason ?? `exit ${judged.code}`).replace(/\s*[\r\n]+\s*/g, " ");
   const gate = {
     code: judged.code,
-    reason: judged.code === 0 ? "pass" : judged.reason ?? `exit ${judged.code}`,
+    reason,
     lines: [...checked.lines, ...judged.lines, ...stale, ...unmeasured(head, run, pull, growth, landed)],
-    verdict: judged.code === 0 ? `gate: pass (${checked.summary}; judge: ${judged.covered})` : `gate: fail (exit ${judged.code})`,
+    verdict: verdictOf(judged.code, reason, `${checked.summary}; judge: ${judged.covered}`),
     summary: { ...checked.proofSummary, code: judged.code, judge: judged.judge, growth },
   };
   if (pull) await writeJson(savedPath(home, head, head.commit), { key: keyOf(pull, landed, await fingerprintOf(home, head, files, checked.decisions)), gate, conditions: checked.conditions } satisfies SavedGate);
   return gate;
 }
 
+const verdictOf = (code: number, reason: string, covered: string) =>
+  code === 0 ? `gate: pass (${covered})`
+    : code === ciRunningCode ? `gate: pending (exit ${code}): ${reason}. Run the gate again with --wait <minutes>, such as --wait 10, to wait for CI to finish`
+    : `gate: fail (exit ${code}): ${reason}`;
 
 function unmeasured(head: ProofIdentity, run: Run, pull: PullRequest | undefined, growth: Growth, landed: boolean) {
   if (growth.final || !isCommitSha(pull?.baseSha) || run(["env", "GIT_NO_LAZY_FETCH=1", "git", "cat-file", "-e", `${pull.baseSha}^{commit}`]).code === 0) return [];
@@ -155,6 +160,12 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: GateCon
   const reason = outcome.lines.find((line) => /^judge [a-z]+: fail\b/.test(line)) ?? outcome.lines[0];
   if (outcome.state === "pass") return { code: 0, lines: outcome.lines, covered: `pass by ${outcome.model}`, judge: verdict(outcome.lines) };
   const gap = weighedGap && withBrokenConditions(weighedGap, outcome.broken);
+  const unchecked = outcome.held ? [...new Set(known.conditions.map(({ id }) => id))] : [];
+  if (gap?.acceptance && unchecked.length) {
+    const line = `not accepted (the secret guard held the judge prompt, so no judge checked the condition of ${unchecked.map(conditionName).join(" and ")})`;
+    const lines = [...outcome.lines, `judge gap: ${line}: ${gap.reason}. ${endUnchecked(unchecked)}`];
+    return { code: 3, lines, covered: "", judge: verdict(lines, judgeGapProof(head.commit, { ...gap, acceptance: undefined, line })), reason: `judge gap: ${line}` };
+  }
   if (gap?.acceptance) {
     const lines = [...outcome.lines, `judge gap: ${gap.acceptance.line}: ${gap.reason}`];
     return { code: 0, lines, covered: `${outcome.state} accepted by ${gap.acceptance.by}`, judge: verdict(lines, judgeGapProof(head.commit, gap)) };
@@ -177,6 +188,12 @@ async function judgeDiff(head: ProofIdentity, known: Omit<JudgeInput, "cwd" | "f
     ask: (request) => askModel("judge", row, request, env, reviewLimit(env)), model: modelLabel("judge", row, env), arbiter: arbiterOf(context),
     directory: judgeDirectory(home, head), commit: known.commit, now: now?.() ?? new Date(),
   });
+}
+
+function endUnchecked(ids: string[]) {
+  const rules = ids.filter(isStandingCondition);
+  const decisions = endBroken(ids.filter((id) => !isStandingCondition(id)));
+  return [...decisions ? [decisions] : [], ...rules.length ? [`Remove the value the secret guard matches so the judge can check ${rules.join(" and ")}, then run hedge proof gate again`] : []].join(". ");
 }
 
 function endBroken(ids: string[]) {

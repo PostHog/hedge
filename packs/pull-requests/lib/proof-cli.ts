@@ -2,11 +2,11 @@ import { closeSync, existsSync, openSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { askGap, authorOf, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity } from "./proof.ts";
+import { askGap, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity } from "./proof.ts";
 import { AnswerTaken, appendOnce, decideAlone, hearUser, ledgerHolds, ledgerOf } from "./decision-cli.ts";
 import { HubUnreachable, keptOwed, refText, usersAcceptance, thisMachine, type Decision, type Ssh } from "./decision-ledger.ts";
 import { autonomyOf, gradeOf, type Autonomy, type Grade } from "./proof-autonomy.ts";
-import { readComment, readPullRequest, runIn } from "./pr-ci.ts";
+import { ciOf, readComment, readPullRequest, runIn } from "./pr-ci.ts";
 import { isCommitSha } from "./proof-end-table.ts";
 import { askModel, family, familyOf, isQuotaExhausted, modelLabel, quotaExitCode, readRubric, reviewerRow, sessionFamily, skillReferences, type Family } from "./proof-models.ts";
 import { runProof, type RunIO } from "./proof-run.ts";
@@ -37,7 +37,7 @@ export type { RunIO };
 
 export type ProofContext = {
   home: string; cwd: string; env: Record<string, string | undefined>; print: (text: string) => void; now?: () => Date; threadWords?: ThreadWords;
-  detach?: (args: string[], log: string) => Promise<number>; pause?: () => Promise<void>; github?: GitHub; runIO?: RunIO;
+  detach?: (args: string[], log: string) => Promise<number>; pause?: (ms?: number) => Promise<void>; github?: GitHub; runIO?: RunIO;
   ssh?: Ssh; pid?: number; startTime?: StartTime;
 };
 type Result = { code: number; stdout: string; stderr: string };
@@ -409,18 +409,28 @@ new pass. The end table of the receipt and of hedge decision report shows the la
     },
   },
   gate: {
-    usage: "gate [--landed] [--json]",
+    usage: "gate [--landed] [--json] [--wait <minutes>]",
     summary: `Check the owed proofs, the review and the answers to its findings, and the CI of the commit on GitHub, then let
 the judge weigh them. Exit 0 only on a pass: 1 means the owed proofs are not recorded, a proof is missing, the commit
 is not reviewed, a blocker or major finding has no answer, a "## Known issues" section of the PR body lists a blocker
 or misses a finding answered known,
-the commit is not the PR's head on GitHub, its checks are red or pending,
-or the judge failed or was unavailable; 3 means only unaccepted gaps remain. No gap waives the head check. The last
-line is the verdict and names what it covered. hedge reads the PR and its CI over GitHub's REST API. Only finding the PR of the
+the commit is not the PR's head on GitHub, its checks are red,
+or the judge failed or was unavailable; 3 means only unaccepted gaps remain; 75 means only CI that is still running
+holds the gate. No gap waives the head check. The last line is the verdict: on a pass it names what it covered, and
+on any other exit it names the check that held the gate, also when the gate itself fails with an error. --wait
+<minutes>, at most 120, waits up to that long for running CI to finish, reading CI every 30 seconds, and stops early
+when a read of GitHub fails, with a "ci: --wait stopped early" line that names the error. Then it runs the gate
+again, and still exits 75 when CI runs past the limit; then the verdict says to open the checks it waits on, since a
+required check that has not reported may never start. An error of that second run names the failed read that ended
+the wait. The limit bounds the waiting; a read of GitHub that has started
+still finishes. While it waits, the gate record holds exit 75 and the decision ledger holds a failure at the head, dated
+when the gate read CI as running, so no merge gate counts a pass shared before that read. When that failure cannot be shared, the gate does not wait:
+it exits 1 and its verdict names the ledger error to fix; the result after the wait is shared with the time the wait ended. A run longer than your shell's limit belongs in the background. hedge reads the PR and its CI over GitHub's REST API. Only finding the PR of the
 checkout without --repo and --pr uses gh pr view; pass both when GraphQL is out. A check that ran more than once
 counts with its newest run from each app, as GitHub's required checks do. The
 required checks of the base branch, from its rulesets and branch protection, decide CI; other checks print as not
-required. A stacked PR whose base requires nothing is held to the default branch's required checks. When no branch
+required. A required check that has not reported counts as still running, since GitHub can start it after other
+checks finished; the CI line then names the checks that failed, required or not. A stacked PR whose base requires nothing is held to the default branch's required checks. When no branch
 requires any, every check counts. On a draft, a required check named "<workflow> / <job>" that never reported counts
 as withheld from drafts when its workflow reported other checks on the commit and all of them passed. CI is unknown
 when GitHub does not answer for the rulesets or branch protection. A clean merge of the PR's base carries the review and the evidence of
@@ -457,25 +467,47 @@ HEDGE_PROOF_JUDGE replaces its command, and HEDGE_PROOF_JUDGE_MODEL its model.
 reused, carried, gap (with the decision that accepts it, or the 🤖 decision that lapsed and why), or missing; the
 review and its unanswered findings; the head; CI; the tier; the judge at HEAD as pass, fail, unavailable, or skipped
 when the gate's own checks fail first, with its lines and its judge gap; the lapsed and voided decision ids; and the
-receipt link once one is recorded. The gate's lines and hedge decision report come from the same summary.`,
-    examples: ["hedge proof gate", "hedge proof gate --landed", "hedge proof gate --json"], flags: ["--landed", "--json"],
-    run: async ({ flags }, identity, context) => {
+receipt link once one is recorded; reason, the check that held the gate, or "pass"; wait, when a failed read ended
+--wait; and ledger, how the result was shared in the decision ledger. An error prints only the
+code and the reason. The gate's lines and hedge decision report come from the same summary.`,
+    examples: ["hedge proof gate", "hedge proof gate --landed", "hedge proof gate --json", "hedge proof gate --wait 10"], flags: ["--landed", "--json"], options: ["--wait"],
+    run: async ({ flags, options }, identity, context) => {
       const { print, home } = context;
+      const wait = waitMinutes(options.get("--wait"));
       const head = identity();
-      const startedAt = context.now?.() ?? new Date();
+      const clock = () => context.now?.() ?? new Date();
+      const startedAt = clock();
       const record = await startGateRun(home, head, startedAt);
       let gate: FinalGate;
+      let gatedAt = startedAt;
+      let waited: Waited | undefined;
+      let unshared: Shared | undefined;
       try {
-        gate = await finalGate(head, context, { landed: flags.has("--landed") });
+        const gateHead = () => finalGate(head, context, { landed: flags.has("--landed") });
+        gate = await gateHead();
+        if (gate.code === ciRunningCode && wait) unshared = await shareGateResult(head, false, clock(), context);
+        if (gate.code === ciRunningCode && wait && !unshared?.failed) {
+          await record({ code: gate.code, reason: gate.reason });
+          waited = await untilCiFinishes(head, context, wait);
+          gatedAt = clock();
+          gate = await gateHead();
+          if (gate.code === ciRunningCode && waited.ranOut) gate = { ...gate, reason: `${gate.reason}. CI still ran after --wait ${wait}`, verdict: `gate: pending (exit ${gate.code}): ${gate.reason}. CI still ran after --wait ${wait}. Open the checks it waits on: a required check that has not reported may never start, such as when a check it needs failed. Wait again only while they run` };
+        }
       } catch (error) {
-        await record({ code: 1, reason: String((error as Error).message ?? error).split("\n")[0]! }).catch(() => {});
-        await shareGateResult(head, false, startedAt, context);
-        throw error;
+        const message = `${String((error as Error).message ?? error)}${waited?.failedRead ? ` (--wait stopped early at a failed read of GitHub: ${waited.failedRead})` : ""}`;
+        await record({ code: 1, reason: message.replace(/\s*[\r\n]+\s*/g, " ") }).catch(() => {});
+        await shareGateResult(head, false, gatedAt, context);
+        throw waited?.failedRead ? new Error(message) : error;
+      }
+      if (unshared?.failed) {
+        const reason = `${gate.reason}. --wait did not wait: the decision ledger did not take the failure (${unshared.error})`;
+        gate = { ...gate, code: 1, reason, summary: { ...gate.summary, code: 1 }, verdict: `gate: fail (exit 1): ${reason}. Fix the ledger's reach, such as the hub connection, then run the gate again` };
       }
       await record({ code: gate.code, reason: gate.reason });
-      const shared = await shareGateResult(head, gate.code === 0, startedAt, context);
-      if (flags.has("--json")) print(JSON.stringify(gate.summary));
-      else for (const line of [...gate.lines, ...shared ? [shared] : [], gate.verdict]) print(line);
+      const shared = unshared?.failed ? unshared.line : (await shareGateResult(head, gate.code === 0, gatedAt, context))?.line;
+      const waitLine = waited?.failedRead ? `ci: --wait stopped early at a failed read of GitHub: ${waited.failedRead}` : undefined;
+      if (flags.has("--json")) print(JSON.stringify({ ...gate.summary, reason: gate.reason, ...waitLine ? { wait: waitLine } : {}, ...shared ? { ledger: shared } : {} }));
+      else for (const line of [...gate.lines, ...waitLine ? [waitLine] : [], ...shared ? [shared] : [], gate.verdict]) print(line);
       return gate.code;
     },
   },
@@ -544,11 +576,17 @@ review. The printed id names the round for review-finish and respond. A final re
 across quiet commits is refused, unless --agent with your reason, or the user's --override, asks for it.
 A later round with --agent, or the user's --override, may be --scope full: it reviews
 the whole PR diff at HEAD again, such as after a restack.
+When the latest finished review read a commit that is not on HEAD's history, such as a final read run from another
+PR's checkout, a final read may also take --base with exactly the latest reviewed commit on HEAD's history, unless the first
+panel read a commit off that history. The gate still
+holds the findings of the read off that history until you answer them with respond. Without --commit, review and
+review-start refuse a checkout whose HEAD is neither the PR's head on GitHub nor a commit on top of it.
 ${overrideHelp}`,
     examples: ["hedge proof review-start --scope full", "hedge proof review-start --scope fixes --base 1a2b3c4", "hedge proof review-start --scope final --base 1a2b3c4"],
     options: ["--scope", "--base", "--phase", "--override", "--thread", "--agent", "--standing"],
     run: async ({ options }, identity, context) => {
       const head = identity();
+      requireCheckoutOfPull(options, head, context.run);
       const { round, id, directory } = await unrecordedRound(options, head, context) ?? await reserveRound(options, head, context, "author");
       await roundStep(directory, context, async () => {
         await takeOverride(directory, options, head, context);
@@ -589,6 +627,7 @@ type SingleRound = { round: number | "final"; id: string; directory: string; sco
 async function runReview(options: Map<string, string>, head: ProofIdentity, context: CommandContext) {
   const { home, run } = context;
   const author = await authorOf(home, head);
+  requireCheckoutOfPull(options, head, run);
   const pending = await unfinishedReview(home, head, "hedge");
   if (pending) requireSameRequest(pending, options, run);
   const reserved: SingleRound = pending
@@ -659,21 +698,31 @@ async function bloatJudge(head: ProofIdentity, context: CommandContext): Promise
   };
 }
 
+const onHistoryOf = (head: ProofIdentity, run: Run) => (commit: string) => commit === head.commit || run(["git", "merge-base", "--is-ancestor", commit, head.commit]).code === 0;
+
+function requireCheckoutOfPull(options: Map<string, string>, head: ProofIdentity, run: Run) {
+  if (options.has("--commit")) return;
+  const pull = pullOf(head, run);
+  if (!pull || !isCommitSha(pull.head) || onHistoryOf(head, run)(pull.head)) return;
+  throw new Error(`HEAD ${short(head.commit)} is not on ${head.repository}#${head.pr}, whose head on GitHub is ${short(pull.head)}. Run the review in that PR's checkout, push HEAD to the PR first, or pass --commit with the commit to review`);
+}
+
 async function reserveRound(options: Map<string, string>, head: ProofIdentity, context: CommandContext, capturedBy: CapturedBy, panel = false) {
+  const pull = pullOf(head, context.run);
   await settleStrandedRounds(head, context);
   const scope = options.get("--scope") ?? "full";
   const base = options.has("--base") ? resolveCommit(options.get("--base")!, context.run) : undefined;
   const lastRead = scope === "final" && (options.get("--phase") ?? "review") === "review";
   const from = lastRead ? await panelCommit(context.home, head) ?? base : rangeStart(scope, base, head, context.run);
   const { decision, ...permit } = await decisionOf(options, head, context);
-  const pull = pullOf(head, context.run);
   const tier = reviewTier(head, context.run, pull?.body);
   if (tier.name === "read" && capturedBy === "hedge" && !panel && !decision && !await panelCommit(context.home, head)) throw new Error("A PR of the Read tier gets one read, and it is the panel: run hedge proof review, which runs its combined lens");
   const firstPanel = panel && !await panelCommit(context.home, head);
   const limits = firstPanel ? permit.limits : { ...permit.limits, ceiling: tierCeiling(tier, permit.limits.ceiling) };
-  const dropUnanswered = (directory: string) => roundStep(directory, context, () => dropFinalRead(directory, head, (context.now ?? (() => new Date()))()));
+  const now = context.now ?? (() => new Date());
+  const dropUnanswered = (directory: string) => roundStep(directory, context, () => dropFinalRead(directory, head, now()));
   const emptyRange = () => from !== undefined && rangeIsEmpty(context.run, from, head.commit, mergeBase(head, context.run));
-  const reserved = await startReview(context.home, head, { dropUnanswered, emptyRange, opening: async () => panel && !await panelCommit(context.home, head), sanity: () => requireSanity(context.home, head, context.run, () => bloatJudge(head, context)), scope, base, from, ...isCommitSha(pull?.baseSha) ? { forkBase: pull.baseSha } : {}, ...permit, limits, decision, phase: options.get("--phase"), cleanBaseMerge: cleanBaseMerge(head, context.run), quietCommit: quietCommitIn(context.run, () => baseRefs(head, context.run)), capturedBy, lock: async (directory) => lockNewRound(directory, await context.lock()), lockBudget: async (reviews, step) => withRoundLock(reviews, await context.lock(), step), now: context.now ?? (() => new Date()) });
+  const reserved = await startReview(context.home, head, { dropUnanswered, emptyRange, onHistory: onHistoryOf(head, context.run), opening: async () => panel && !await panelCommit(context.home, head), sanity: () => requireSanity(context.home, head, context.run, () => bloatJudge(head, context)), scope, base, from, ...isCommitSha(pull?.baseSha) ? { forkBase: pull.baseSha } : {}, ...permit, limits, decision, phase: options.get("--phase"), cleanBaseMerge: cleanBaseMerge(head, context.run), quietCommit: quietCommitIn(context.run, () => baseRefs(head, context.run)), capturedBy, lock: async (directory) => lockNewRound(directory, await context.lock()), lockBudget: async (reviews, step) => withRoundLock(reviews, await context.lock(), step), now });
   return { ...reserved, scope, base, from, phase: options.get("--phase") };
 }
 
@@ -791,6 +840,7 @@ async function runPanel({ options, lists }: Parsed, head: ProofIdentity, context
   const author = await authorOf(home, head);
   const guide = await readPanelGuide(home);
   const knowledge = await knowledgeOf(lists.get("--knowledge") ?? [], context.cwd);
+  requireCheckoutOfPull(options, head, context.run);
   const pending = await unfinishedReview(context.home, head, "hedge");
   const planned = pending && (await readPlan(pending.directory) ?? await stagedPlan(pending.directory));
   const tier = planned ? planned.tier : tierOf(head, context);
@@ -1093,21 +1143,63 @@ export async function proofCommand(args: string[], context: ProofContext): Promi
   const split = args.indexOf("--");
   const own = split < 0 ? args : args.slice(0, split);
   if (own.includes("--help") || own.includes("-h")) { context.print(help(name, command)); return 0; }
-  if (split >= 0 && !command.takesCommand) throw usageError(name, "Unknown option --");
-  const run = runIn(context.cwd, context.env);
-  const parsed = { ...parse(name, command, own), ...split >= 0 ? { command: args.slice(split + 1) } : {} };
-  let identity: ProofIdentity | undefined;
-  let lock: Promise<RoundLock> | undefined;
-  return command.run(parsed, () => identity ??= resolveIdentity(parsed.options, run), { ...context, run, lock: () => lock ??= roundLock(lockOwner(context)) });
+  const json = own.includes("--json");
+  const execute = () => {
+    if (split >= 0 && !command.takesCommand) throw usageError(name, "Unknown option --");
+    const run = runIn(context.cwd, context.env);
+    const parsed = { ...parse(name, command, own), ...split >= 0 ? { command: args.slice(split + 1) } : {} };
+    let identity: ProofIdentity | undefined;
+    let lock: Promise<RoundLock> | undefined;
+    return command.run(parsed, () => identity ??= resolveIdentity(parsed.options, run), { ...context, run, lock: () => lock ??= roundLock(lockOwner(context)) });
+  };
+  return name === "gate" ? gateReporting(json, context, execute) : execute();
 }
 
-async function shareGateResult(head: ProofIdentity, passed: boolean, startedAt: Date, context: ProofContext): Promise<string | undefined> {
+async function gateReporting(json: boolean, { print }: ProofContext, gate: () => Promise<number>) {
+  try { return await gate(); } catch (error) {
+    const reason = String((error as Error).message ?? error).replace(/\s*[\r\n]+\s*/g, " ");
+    print(json ? JSON.stringify({ code: 1, reason }) : `gate: fail (exit 1): ${reason}`);
+    return 1;
+  }
+}
+
+const longestWait = 120;
+
+function waitMinutes(value: string | undefined) {
+  if (value === undefined) return undefined;
+  const minutes = Number(value);
+  if (!(minutes > 0 && minutes <= longestWait)) throw usageError("gate", `--wait takes a number of minutes up to ${longestWait}, such as --wait 10, not ${value}`);
+  return minutes;
+}
+
+const ciPollInterval = 30_000;
+
+type Waited = { ranOut: boolean; failedRead?: string };
+
+async function untilCiFinishes(head: ProofIdentity, context: CommandContext, minutes: number): Promise<Waited> {
+  const now = () => (context.now?.() ?? new Date()).getTime();
+  const deadline = now() + minutes * 60_000;
+  const sleep = context.pause ?? Bun.sleep;
+  while (now() < deadline) {
+    await sleep(Math.min(ciPollInterval, deadline - now()));
+    if (now() >= deadline) break;
+    const ci = ciOf(context.home, head, context.run, new Date(now()));
+    if (ci.state === "unknown") return { ranOut: false, failedRead: ci.detail };
+    if (ci.state !== "pending") return { ranOut: false };
+  }
+  return { ranOut: true };
+}
+
+type Shared = { line: string; failed: boolean; error?: string };
+
+async function shareGateResult(head: ProofIdentity, passed: boolean, startedAt: Date, context: ProofContext): Promise<Shared | undefined> {
   const result = passed ? "pass" : "failure";
   try {
     await ledgerOf(context).append({ type: "gate", repository: head.repository, pr: head.pr, commit: head.commit, passed, machine: thisMachine(context.env), at: startedAt.toISOString() });
-    return passed ? "merge gate: pass recorded in the decision ledger" : undefined;
-  } catch (error) {
+    return passed ? { line: "merge gate: pass recorded in the decision ledger", failed: false } : undefined;
+  } catch (failure) {
+    const error = String((failure as Error).message ?? failure).split(/[\r\n]/)[0]!;
     const reach = passed ? "an enqueue from another machine is refused until the gate passes there" : "another machine may still count an earlier pass at this head";
-    return `merge gate: ${result} recorded on this machine only (${String((error as Error).message ?? error).split("\n")[0]}); ${reach}`;
+    return { line: `merge gate: ${result} recorded on this machine only (${error}); ${reach}`, failed: true, error };
   }
 }

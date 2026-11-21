@@ -106,7 +106,7 @@ async function t3() {
   const linked: LinkedThread[] = [];
   const links: LinkedEnvironment[] = [];
   const delivered: { threadId: string; text: string }[] = [];
-  const linkedSends: { environmentId: string; threadId: string; message: string }[] = [];
+  const linkedSends: { environmentId: string; threadId: string; message: string; mode?: string }[] = [];
   const faults = { dispatch: false, list: false };
   let launched = 0;
   const stub = await startT3Stub({
@@ -122,8 +122,12 @@ async function t3() {
       if (name === "t3_thread_read") {
         const thread = linked.find((each) => each.threadId === args.threadId);
         const tail = linkedTails[args.threadId];
-        if (!thread || !tail || args.view !== "activity") throw new ToolRefusal("thread_not_found", "no such thread");
-        return { thread: { ...thread, archived: false, pendingRequestCount: tail.pendingRequestCount, branch: null, worktreePath: null }, items: tail.items, nextPosition: null, hasMore: false };
+        if (!thread) throw new ToolRefusal("thread_not_found", "no such thread");
+        if (args.view === "activity") {
+          if (!tail) throw new ToolRefusal("thread_not_found", "no such thread");
+          return { thread: { ...thread, archived: false, pendingRequestCount: tail.pendingRequestCount, branch: null, worktreePath: null }, items: tail.items, nextPosition: null, hasMore: false };
+        }
+        return { thread: { ...thread, archived: false, pendingRequestCount: tail?.pendingRequestCount ?? 0, branch: null, worktreePath: null }, items: [], nextPosition: null, hasMore: false };
       }
       if (name === "t3_project_list") return { projects: [], nextCursor: null };
       if (name === "t3_thread_send" && args.environmentId === undefined) {
@@ -133,8 +137,8 @@ async function t3() {
       }
       if (name === "t3_thread_send") {
         if (!linked.some((thread) => thread.threadId === args.threadId)) throw new ToolRefusal("thread_not_found", "no such thread");
-        linkedSends.push({ environmentId: args.environmentId, threadId: args.threadId, message: args.message });
-        return { threadId: args.threadId, messageId: "m-1", delivery: "queued" };
+        linkedSends.push({ environmentId: args.environmentId, threadId: args.threadId, message: args.message, mode: args.mode });
+        return { threadId: args.threadId, messageId: "m-1", delivery: args.mode === "queue" ? "queued" : "started" };
       }
     },
     rpc(tag, payload: any) {
@@ -219,7 +223,7 @@ test("a PR on a thread of a linked machine reaches that thread through the link"
   t3.linked.push(linkedThread("t-remote", "Export stack", [waiting]));
   at(4);
   expect(await check()).toBe(true);
-  expect(t3.linkedSends).toEqual([{ environmentId: "env-devbox", threadId: "t-remote", message: expect.stringContaining("app#7") }]);
+  expect(t3.linkedSends).toEqual([{ environmentId: "env-devbox", threadId: "t-remote", message: expect.stringContaining("app#7"), mode: "auto" }]);
   expect(t3.delivered).toEqual([]);
 });
 
@@ -635,6 +639,6 @@ describe("the parked question sweep", () => {
     t3.linkedTails["r-idle"] = { pendingRequestCount: 0, items: [tailItem("assistant_message", asks, 1)] };
     at(1);
     expect(await check()).toBe(true);
-    expect(t3.linkedSends).toEqual([{ environmentId: "env-devbox", threadId: "r-1", message: expect.stringContaining("Parked question") }]);
+    expect(t3.linkedSends).toEqual([{ environmentId: "env-devbox", threadId: "r-1", message: expect.stringContaining("Parked question"), mode: "auto" }]);
   });
 });

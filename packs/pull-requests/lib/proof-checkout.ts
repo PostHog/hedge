@@ -12,13 +12,19 @@ export function topLevel(run: Run) {
   return result.code === 0 ? result.stdout.trim() : undefined;
 }
 
+const baseOnly = ["--quiet", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--refmap="];
+
 /**
- * Where the PR branched from its base. A base branch this checkout has not fetched is fetched from the repository's
- * remote once; without such a remote, or without the commit, the error names the commands that fix it.
+ * Where the PR branched from its base as its remotes hold it now. When no remote can be fetched, the local base refs
+ * count, and a base branch this checkout has not fetched is fetched once; without such a remote, or without the
+ * commit, the error names the commands that fix it.
  */
 export function mergeBase(identity: ProofIdentity, run: Run) {
   const base = pullRequestDetails(identity, run).baseRefName;
   const remotes = remotesOf(identity.repository, run);
+  const fresh = remotes.filter((remote) => run(["git", "fetch", ...baseOnly, remote, `+refs/heads/${base}:refs/remotes/${remote}/${base}`]).code === 0);
+  const now = fresh.length ? run(["git", "merge-base", identity.commit, ...fresh.map((remote) => `refs/remotes/${remote}/${base}`)]) : undefined;
+  if (now?.code === 0) return now.stdout.trim();
   const found = () => {
     for (const remote of remotes) {
       const result = run(["git", "merge-base", `refs/remotes/${remote}/${base}`, identity.commit]);

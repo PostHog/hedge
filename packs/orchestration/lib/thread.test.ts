@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { startT3Stub, type T3Fixture, type T3Stub } from "../../base/lib/t3/testing.ts";
+import type { ShellThread } from "../../base/lib/t3/index.ts";
+import { startT3Stub, ToolRefusal, type T3Fixture, type T3Stub } from "../../base/lib/t3/testing.ts";
 import { runThread } from "./thread.ts";
 import { linkedEnvironment, linkedItem, linkedThread, linkedTools, minutesAgo, shellThread, type LinkedThreadFixture } from "./testing.ts";
 
@@ -19,28 +20,38 @@ const linkedThreads: LinkedThreadFixture[] = [
   linkedThread("mcp:remote-only"),
 ];
 
-function fixture(links = [linkedEnvironment], threads = linkedThreads): T3Fixture {
+function fixture(links = [linkedEnvironment], threads = linkedThreads, extraLocal: ShellThread[] = []): T3Fixture {
+  const localThreads = [
+    shellThread("mcp:local-busy", { status: "running", activeRunId: "run-1", latestRunStartedAt: minutesAgo(2) }),
+    shellThread("mcp:local-idle", { status: "completed", latestRunCompletedAt: minutesAgo(30) }),
+    shellThread("mcp:everywhere"),
+    shellThread("one:twin"),
+    shellThread("two:twin"),
+    ...extraLocal,
+  ];
   return {
     shell: {
       projects: [{ id: "project-local", title: "Local project", workspaceRoot: "/work/local" }],
-      threads: [
-        shellThread("mcp:local-busy", { status: "running", activeRunId: "run-1", latestRunStartedAt: minutesAgo(2) }),
-        shellThread("mcp:local-idle", { status: "completed", latestRunCompletedAt: minutesAgo(30) }),
-        shellThread("mcp:everywhere"),
-        shellThread("one:twin"),
-        shellThread("two:twin"),
-      ],
+      threads: localThreads,
     },
     archived: { projects: [], threads: [shellThread("mcp:local-archived", { archivedAt: minutesAgo(100) })] },
     links,
-    tools: (name, args) => (name === "t3_thread_send" && args.environmentId === undefined ? localSend(args) : linkedTools(threads)(name, args)),
+    tools: (name, args) => (name === "t3_thread_send" && args.environmentId === undefined ? localSend(args, localThreads) : linkedTools(threads)(name, args)),
     rpc: (tag) => (tag === "orchestration.dispatchCommand" ? { sequence: 1 } : undefined),
   };
 }
 
-function localSend(args: Record<string, unknown>) {
-  const delivery = args.threadId === "mcp:local-busy" ? "queued" : "started";
-  return { threadId: args.threadId, messageId: `message:${args.clientRequestId}`, runId: "run:local", status: delivery === "queued" ? "queued" : "starting", delivery };
+function localSend(args: Record<string, unknown>, threads: ShellThread[]) {
+  const target = threads.find((candidate) => candidate.id === args.threadId);
+  const steerable = Boolean(target?.status === "running" && target.activeRunId);
+  if (!steerable && (args.mode === "steer" || args.mode === "restart")) {
+    throw new ToolRefusal("no_steerable_run", `Thread ${args.threadId} has no running turn to ${args.mode}.`);
+  }
+  const delivery = steerable
+    ? (args.mode === "queue" ? "queued" : args.mode === "restart" ? "restarted" : "steered")
+    : "started";
+  const status = delivery === "queued" ? "queued" : delivery === "steered" ? "running" : "starting";
+  return { threadId: args.threadId, messageId: `message:${args.clientRequestId}`, runId: "run:local", status, delivery };
 }
 
 async function stub(given = fixture()): Promise<T3Stub> {
@@ -58,20 +69,17 @@ async function thread(t3: T3Stub, args: string[], stdin = "") {
 const dispatched = (t3: T3Stub) => t3.rpcCalls.filter((call) => call.tag === "orchestration.dispatchCommand").map((call) => call.payload as Record<string, unknown>);
 const sends = (t3: T3Stub) => t3.toolCalls.filter((call) => call.name === "t3_thread_send").map((call) => call.args);
 
-test("hedge thread send reaches a thread on a linked environment, found without --host, through T3's send tool", async () => {
+test("hedge thread send reaches a thread on a linked environment, found without --host, and steers a running turn by default", async () => {
   const t3 = await stub();
   const { code, output } = await thread(t3, ["send", "mcp:linked-busy", "Rebase", "on", "main"]);
 
   expect(code).toBe(0);
-  expect(JSON.parse(output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-busy", delivery: "queued" });
-  expect(sends(t3)).toEqual([{ environmentId: "env-linked", threadId: "mcp:linked-busy", message: "Rebase on main", mode: "queue", clientRequestId: expect.stringMatching(/^hedge-thread-send:/) }]);
+  expect(JSON.parse(output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-busy", delivery: "steered" });
+  expect(sends(t3)).toEqual([{ environmentId: "env-linked", threadId: "mcp:linked-busy", message: "Rebase on main", mode: "auto", clientRequestId: expect.stringMatching(/^hedge-thread-send:/) }]);
   expect(dispatched(t3)).toEqual([]);
 });
 
-// T3 stamps a message that comes over its WebSocket as typed by a person. A queue that a stopped or failed run
-// held lets such a message go only when someone types in the web or mobile app, so it never started. T3's send
-// tool stamps it as an agent's, which T3 releases once the thread completes a later run.
-test("hedge thread send takes the message from stdin and queues it behind the running turn of a thread on this machine as an agent's message", async () => {
+test("hedge thread send takes the message from stdin and steers the running turn of a thread on this machine as an agent's message", async () => {
   const t3 = await stub();
   const child = Bun.spawn(["bun", command, "send", "--host", hostname(), "mcp:local-busy"], { env: { ...Bun.env, HOME: t3.home, HEDGE_SETTINGS: "{}" }, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
   child.stdin.write("It's done'; rm -rf ~ #\n");
@@ -80,8 +88,8 @@ test("hedge thread send takes the message from stdin and queues it behind the ru
 
   expect(stderr).toBe("");
   expect(code).toBe(0);
-  expect(JSON.parse(stdout)).toMatchObject({ threadId: "mcp:local-busy", delivery: "queued" });
-  expect(sends(t3)).toEqual([{ threadId: "mcp:local-busy", message: "It's done'; rm -rf ~ #", mode: "queue", clientRequestId: expect.stringMatching(/^hedge-thread-send:/) }]);
+  expect(JSON.parse(stdout)).toMatchObject({ threadId: "mcp:local-busy", delivery: "steered" });
+  expect(sends(t3)).toEqual([{ threadId: "mcp:local-busy", message: "It's done'; rm -rf ~ #", mode: "auto", clientRequestId: expect.stringMatching(/^hedge-thread-send:/) }]);
   expect(dispatched(t3)).toEqual([]);
 });
 
@@ -91,7 +99,129 @@ test("an idle thread on this machine starts a turn with the message", async () =
 
   expect(code).toBe(0);
   expect(JSON.parse(output)).toMatchObject({ host: "this-box", threadId: "mcp:local-idle", delivery: "started" });
-  expect(sends(t3)).toEqual([expect.objectContaining({ threadId: "mcp:local-idle", message: "Go", mode: "queue" })]);
+  expect(sends(t3)).toEqual([expect.objectContaining({ threadId: "mcp:local-idle", message: "Go", mode: "auto" })]);
+});
+
+test("hedge thread send accepts --mode before --host", async () => {
+  const t3 = await stub();
+  const { output } = await thread(t3, ["send", "--mode", "queue", "--host", "devbox-2", "mcp:linked-busy", "Later"]);
+
+  expect(JSON.parse(output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-busy", delivery: "queued" });
+  expect(sends(t3)).toEqual([
+    expect.objectContaining({ environmentId: "env-linked", threadId: "mcp:linked-busy", message: "Later", mode: "queue" }),
+  ]);
+});
+
+test("hedge thread send accepts --mode after --host", async () => {
+  const t3 = await stub();
+  const { output } = await thread(t3, ["send", "--host", "this-box", "--mode", "restart", "mcp:local-busy", "Again"]);
+
+  expect(JSON.parse(output)).toMatchObject({ host: "this-box", threadId: "mcp:local-busy", delivery: "restarted" });
+  expect(sends(t3)).toEqual([
+    expect.objectContaining({ threadId: "mcp:local-busy", message: "Again", mode: "restart" }),
+  ]);
+});
+
+test("hedge thread send keeps --mode words after the thread id as part of the message", async () => {
+  const t3 = await stub();
+  const { output } = await thread(t3, ["send", "--host", "this-box", "mcp:local-busy", "Start", "--mode", "queue"]);
+
+  expect(JSON.parse(output)).toMatchObject({ host: "this-box", threadId: "mcp:local-busy", delivery: "steered" });
+  expect(sends(t3)).toEqual([
+    expect.objectContaining({ threadId: "mcp:local-busy", message: "Start --mode queue", mode: "auto" }),
+  ]);
+});
+
+test("hedge thread send refuses an unknown --mode without sending", async () => {
+  const t3 = await stub();
+
+  await expect(thread(t3, ["send", "--mode", "now", "mcp:local-busy", "Hi"])).rejects.toThrow("Unknown --mode now. Use one of: auto, queue, steer, restart.");
+  expect(sends(t3)).toEqual([]);
+});
+
+test("hedge thread send refuses a missing --mode value without sending", async () => {
+  const t3 = await stub();
+
+  await expect(thread(t3, ["send", "--mode"])).rejects.toThrow("Usage: hedge thread list");
+  expect(sends(t3)).toEqual([]);
+});
+
+test("hedge thread read refuses --mode", async () => {
+  const t3 = await stub();
+
+  await expect(thread(t3, ["read", "--mode", "queue", "mcp:local-idle"])).rejects.toThrow("Usage: hedge thread list");
+});
+
+test("hedge thread send queues behind a local question card by default", async () => {
+  const t3 = await stub(fixture([linkedEnvironment], linkedThreads, [
+    shellThread("mcp:local-card", { status: "running", activeRunId: "run-2", pendingRuntimeRequest: { id: "card-1", kind: "user_input" } }),
+  ]));
+
+  const { output } = await thread(t3, ["send", "--host", "this-box", "mcp:local-card", "FYI"]);
+
+  expect(JSON.parse(output)).toMatchObject({ threadId: "mcp:local-card", delivery: "queued" });
+  expect(sends(t3)).toEqual([
+    expect.objectContaining({ threadId: "mcp:local-card", message: "FYI", mode: "queue" }),
+  ]);
+});
+
+test("hedge thread send passes --mode steer through on a local question card", async () => {
+  const t3 = await stub(fixture([linkedEnvironment], linkedThreads, [
+    shellThread("mcp:local-card", { status: "running", activeRunId: "run-2", pendingRuntimeRequest: { id: "card-1", kind: "user_input" } }),
+  ]));
+
+  const { output } = await thread(t3, ["send", "--host", "this-box", "--mode", "steer", "mcp:local-card", "Replace card"]);
+
+  expect(JSON.parse(output)).toMatchObject({ threadId: "mcp:local-card", delivery: "steered" });
+  expect(sends(t3)).toEqual([
+    expect.objectContaining({ threadId: "mcp:local-card", message: "Replace card", mode: "steer" }),
+  ]);
+});
+
+test("hedge thread send queues behind a linked pending request by default", async () => {
+  const t3 = await stub(fixture([linkedEnvironment], [
+    ...linkedThreads,
+    linkedThread("mcp:linked-card", { status: "running", pendingRequestCount: 1 }),
+  ]));
+
+  const { output } = await thread(t3, ["send", "--host", "devbox-2", "mcp:linked-card", "FYI"]);
+
+  expect(JSON.parse(output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-card", delivery: "queued" });
+  expect(sends(t3)).toEqual([
+    expect.objectContaining({ environmentId: "env-linked", threadId: "mcp:linked-card", message: "FYI", mode: "queue" }),
+  ]);
+});
+
+test("hedge thread send passes --mode steer through on a linked pending request", async () => {
+  const t3 = await stub(fixture([linkedEnvironment], [
+    ...linkedThreads,
+    linkedThread("mcp:linked-card", { status: "running", pendingRequestCount: 1 }),
+  ]));
+
+  const { output } = await thread(t3, ["send", "--host", "devbox-2", "--mode", "steer", "mcp:linked-card", "Replace card"]);
+
+  expect(JSON.parse(output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-card", delivery: "steered" });
+  expect(sends(t3)).toEqual([
+    expect.objectContaining({ environmentId: "env-linked", threadId: "mcp:linked-card", message: "Replace card", mode: "steer" }),
+  ]);
+});
+
+test("hedge thread send fails closed to queue on a linked thread when checking pending requests fails", async () => {
+  const base = fixture();
+  const t3 = await stub({
+    ...base,
+    tools(name, args) {
+      if (name === "t3_thread_read") throw new ToolRefusal("orchestration_error", "timeout");
+      return base.tools!(name, args);
+    },
+  });
+
+  const result = await thread(t3, ["send", "--host", "devbox-2", "mcp:linked-busy", "FYI"]);
+
+  expect(JSON.parse(result.output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-busy", delivery: "queued" });
+  expect(sends(t3)).toEqual([
+    expect.objectContaining({ environmentId: "env-linked", threadId: "mcp:linked-busy", message: "FYI", mode: "queue" }),
+  ]);
 });
 
 test("hedge thread send refuses an archived thread, an empty message, and a thread it cannot place, and sends nothing", async () => {
