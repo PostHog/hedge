@@ -99,7 +99,7 @@ async function modelCommand(role: Role, row: ModelRow, request: ModelRequest, sc
   }
   const schema = request.schema ? join(scratch, "schema.json") : undefined;
   if (schema) await writeFile(schema, JSON.stringify(request.schema));
-  return ["codex", "exec", "--json", "-m", row.model, "-c", `model_reasoning_effort="${row.effort}"`, "-s", "read-only", "--ephemeral", "-C", request.cwd, "-o", output,
+  return ["codex", "exec", "--json", "-m", row.model, "-c", `model_reasoning_effort="${row.effort}"`, "-s", role === "arbiter" ? "read-only" : "danger-full-access", "--ephemeral", "-C", request.cwd, "-o", output,
     ...(schema ? ["--output-schema", schema] : []), ...(request.images ?? []).flatMap((image) => ["-i", image]), "-"];
 }
 

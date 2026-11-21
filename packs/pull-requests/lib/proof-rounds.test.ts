@@ -318,7 +318,7 @@ test("on the both plan, review is cross-family: the review row reads Claude's co
   const codex = recordingModel(pr, "codex", "No findings.");
 
   expect((await pr.hedge("review", "--single")).code).toBe(0);
-  expect(codex.calls()).toEqual([expect.stringMatching(/^exec --json -m review-model -c model_reasoning_effort="high" -s read-only --ephemeral -C \S+ -o \S+ -$/)]);
+  expect(codex.calls()).toEqual([expect.stringMatching(/^exec --json -m review-model -c model_reasoning_effort="high" -s danger-full-access --ephemeral -C \S+ -o \S+ -$/)]);
   expect(codex.prompt()).toContain("from the model family that did not write it");
   expect(JSON.parse(readFileSync(join(pr.pullRequest, "reviews/1/round.json"), "utf8"))).toMatchObject({ reviewer: "review-model" });
 

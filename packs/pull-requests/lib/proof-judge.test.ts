@@ -220,7 +220,7 @@ test("without a replacement command, the judge runs the reviewer's row of the mo
   const gate = await pr.hedge("gate");
   expect(gate.code).toBe(0);
   expect(gate.output.split("\n").at(-1)).toContain("judge: pass by review-model)");
-  expect(codex.calls()).toEqual([expect.stringMatching(/^exec --json -m review-model -c model_reasoning_effort="high" -s read-only --ephemeral -C \S+ -o \S+ --output-schema \S+ -$/)]);
+  expect(codex.calls()).toEqual([expect.stringMatching(/^exec --json -m review-model -c model_reasoning_effort="high" -s danger-full-access --ephemeral -C \S+ -o \S+ --output-schema \S+ -$/)]);
   expect(codex.prompt()).toContain("You judge it from the model family that did not write it");
 
   pr.env.HEDGE_MODELS = JSON.stringify([lookup, { role: "review", work: "Review code", provider: "claude", model: "solo-model", effort: "high" }]);
