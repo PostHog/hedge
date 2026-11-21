@@ -965,9 +965,10 @@ test("a Read tier review of Codex's PR casts its combined lens on the Codex row,
     pr.env.CODEX_THREAD_ID = "codex-thread";
     await pr.hedge("require", "--none", "--reason", "docs only");
     pr.env.HEDGE_MODELS = JSON.stringify([models[0], models[1], { role: "review-codex", work: "Review Codex's code", provider: "antigravity", model: "gemini-4-neon", effort: "high" }]);
-    recordingModel(pr, "codex", "FINDINGS:\n(none)\nCOVERED: README.md\n");
+    const codex = recordingModel(pr, "codex", "FINDINGS:\n(none)\nCOVERED: README.md\n");
 
     await pr.hedge("review", ...moved.flatMap((lens) => ["--lens", lens]));
     expect({ moved, lenses: (await readPlan(join(pr.pullRequest, "reviews/1")))!.lenses.map(({ name, family, model }) => ({ name, family, model })) }).toEqual({ moved, lenses: [{ name: "combined", family: "gpt", model: "review-model" }] });
+    expect({ moved, started: codex.calls().map((call) => call.split(" -s ")[0]) }).toEqual({ moved, started: [expect.stringMatching(/^exec --json -m review-model /)] });
   }
 });

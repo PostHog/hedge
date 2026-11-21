@@ -27,7 +27,11 @@ export function reconcileKeys(current: Document, previous: Field[], wanted: Fiel
     result.applied.push(field);
   }
   for (const field of previous) {
-    if (field.path[0] === "providerInstances" || wanted.some((item) => samePath(item.path, field.path))) continue;
+    if (wanted.some((item) => samePath(item.path, field.path))) continue;
+    if (field.path[0] === "providerInstances") {
+      if (options.outage && isProviderInstance(field.path)) result.record.push(field);
+      continue;
+    }
     const matches = matchesOf(field);
     const value = get(document, field.path);
     if (options.outage || (value !== undefined && !matches(value, field.value))) {

@@ -587,6 +587,34 @@ describe("T3 provider instances", () => {
     expect(instancesOf(server)).toEqual({ antigravity: instance(home, "antigravity", "agy2"), muse: instance(home, "muse", "muse") });
   });
 
+  test("keeps the user's instance as theirs when T3 refuses its adoption, so a later plain apply does not replace it", async () => {
+    const home = temp.make("home-");
+    const mine = instance(home, "antigravity", "agy-mine");
+    write(home, settingsFile, { providerInstances: { antigravity: mine } });
+    const { server, adapter } = setup({ settings: { providerInstances: { antigravity: mine } }, refuseInstances: ["antigravity"] });
+    const refused = await apply(plan("linux", [agy]), { home, adapters: [adapter], adopt: [settingsFile] });
+    expect(refused.ok).toBe(false);
+    server.state.refuseInstances = [];
+    const moved = entry("providerInstances.antigravity", { driver: "antigravity", enabled: true, config: { binaryPath: "~/.local/bin/agy2" } }, "agents");
+    const report = await apply(plan("linux", [moved]), { home, adapters: [adapter] });
+    expect(instancesOf(server)).toEqual({ antigravity: mine });
+    expect(report.findings).toContainEqual({ id: `kept:${settingsFile}`, pack: "engine", say: `Kept your providerInstances.antigravity in ${settingsFile}. Run hedge apply --adopt ${settingsFile} to take Hedge's value.` });
+  });
+
+  test("still owns an instance while the pack that declares it cannot be fetched", async () => {
+    const home = temp.make("home-");
+    const { server, adapter } = setup();
+    await apply(plan("linux", [agy]), { home, adapters: [adapter] });
+    const outage = plan("linux", []);
+    outage.packs = [{ name: "agents", source: "agents", ref: "main", available: false, reason: "not found; unreachable source agents" }];
+    await apply(outage, { home, adapters: [adapter] });
+    write(home, settingsFile, { providerInstances: instancesOf(server) });
+    const moved = entry("providerInstances.antigravity", { driver: "antigravity", enabled: true, config: { binaryPath: "~/.local/bin/agy2" } }, "agents");
+    const report = await apply(plan("linux", [moved]), { home, adapters: [adapter] });
+    expect(report).toMatchObject({ ok: true, actions: [{ target: "t3 settings", operation: "replace", reason: "set providerInstances.antigravity" }], findings: [] });
+    expect(instancesOf(server)).toEqual({ antigravity: instance(home, "antigravity", "agy2") });
+  });
+
   test("a dry run says which instances it would set, and changes nothing in T3", async () => {
     const home = temp.make("home-");
     const { server, adapter } = setup();

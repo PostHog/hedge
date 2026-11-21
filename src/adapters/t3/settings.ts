@@ -2,7 +2,7 @@ import { join } from "node:path";
 import type { Finding, Plan } from "../../pack/types.ts";
 import type { AdapterResult } from "../../reconciler/apply.ts";
 import { readFieldRecord, type FieldRecord } from "../provider-config/adapter.ts";
-import { checkPath, get, json, same, type Document, type Field } from "../provider-config/fields.ts";
+import { checkPath, get, json, same, samePath, type Document, type Field } from "../provider-config/fields.ts";
 import { readState, writeWithBackups, type Write } from "../provider-config/store.ts";
 import { holds, isProviderInstance, reconcileKeys, type Reconciled } from "./keys.ts";
 import type { T3Rpc } from "./port.ts";
@@ -70,7 +70,10 @@ export async function reconcileSettings(plan: Plan, home: string, options: Optio
       const merged = reconcileKeys(effectiveView(current, old, effective), old, fields, { adopt, outage: options.outage, matches: holds });
       keptFinding(target, merged, result);
       const refused = await throughServer(options.rpc, merged, effective, options.dryRun, result);
-      const record = merged.record.flatMap((field) => (refused.includes(field) ? heldBefore(field, effective) : [field]));
+      const record = merged.record.flatMap((field) => {
+        if (!refused.includes(field)) return [field];
+        return isProviderInstance(field.path) ? old.filter((item) => samePath(item.path, field.path)) : heldBefore(field, effective);
+      });
       if (record.length) next[target] = record;
       continue;
     }
