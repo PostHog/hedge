@@ -50,7 +50,8 @@ function localSend(args: Record<string, unknown>, threads: ShellThread[]) {
   const delivery = steerable
     ? (args.mode === "queue" ? "queued" : args.mode === "restart" ? "restarted" : "steered")
     : "started";
-  return { threadId: args.threadId, messageId: `message:${args.clientRequestId}`, runId: "run:local", status: delivery === "queued" ? "queued" : "starting", delivery };
+  const status = delivery === "queued" ? "queued" : delivery === "steered" ? "running" : "starting";
+  return { threadId: args.threadId, messageId: `message:${args.clientRequestId}`, runId: "run:local", status, delivery };
 }
 
 async function stub(given = fixture()): Promise<T3Stub> {
@@ -101,57 +102,106 @@ test("an idle thread on this machine starts a turn with the message", async () =
   expect(sends(t3)).toEqual([expect.objectContaining({ threadId: "mcp:local-idle", message: "Go", mode: "auto" })]);
 });
 
-test("hedge thread send passes an explicit --mode in either order with --host and keeps flag-like message words", async () => {
+test("hedge thread send accepts --mode before --host", async () => {
   const t3 = await stub();
-  const queued = await thread(t3, ["send", "--mode", "queue", "--host", "devbox-2", "mcp:linked-busy", "Later"]);
-  const restarted = await thread(t3, ["send", "--host", "this-box", "--mode", "restart", "mcp:local-busy", "Start", "--mode", "queue"]);
+  const { output } = await thread(t3, ["send", "--mode", "queue", "--host", "devbox-2", "mcp:linked-busy", "Later"]);
 
-  expect(JSON.parse(queued.output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-busy", delivery: "queued" });
-  expect(JSON.parse(restarted.output)).toMatchObject({ host: "this-box", threadId: "mcp:local-busy", delivery: "restarted" });
+  expect(JSON.parse(output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-busy", delivery: "queued" });
   expect(sends(t3)).toEqual([
     expect.objectContaining({ environmentId: "env-linked", threadId: "mcp:linked-busy", message: "Later", mode: "queue" }),
-    expect.objectContaining({ threadId: "mcp:local-busy", message: "Start --mode queue", mode: "restart" }),
   ]);
 });
 
-test("hedge thread send refuses an unknown or missing --mode and refuses --mode on read", async () => {
+test("hedge thread send accepts --mode after --host", async () => {
+  const t3 = await stub();
+  const { output } = await thread(t3, ["send", "--host", "this-box", "--mode", "restart", "mcp:local-busy", "Again"]);
+
+  expect(JSON.parse(output)).toMatchObject({ host: "this-box", threadId: "mcp:local-busy", delivery: "restarted" });
+  expect(sends(t3)).toEqual([
+    expect.objectContaining({ threadId: "mcp:local-busy", message: "Again", mode: "restart" }),
+  ]);
+});
+
+test("hedge thread send keeps --mode words after the thread id as part of the message", async () => {
+  const t3 = await stub();
+  const { output } = await thread(t3, ["send", "--host", "this-box", "mcp:local-busy", "Start", "--mode", "queue"]);
+
+  expect(JSON.parse(output)).toMatchObject({ host: "this-box", threadId: "mcp:local-busy", delivery: "steered" });
+  expect(sends(t3)).toEqual([
+    expect.objectContaining({ threadId: "mcp:local-busy", message: "Start --mode queue", mode: "auto" }),
+  ]);
+});
+
+test("hedge thread send refuses an unknown --mode without sending", async () => {
   const t3 = await stub();
 
   await expect(thread(t3, ["send", "--mode", "now", "mcp:local-busy", "Hi"])).rejects.toThrow("Unknown --mode now. Use one of: auto, queue, steer, restart.");
-  await expect(thread(t3, ["send", "--mode"])).rejects.toThrow("Usage: hedge thread list");
-  await expect(thread(t3, ["read", "--mode", "queue", "mcp:local-idle"])).rejects.toThrow("Usage: hedge thread list");
   expect(sends(t3)).toEqual([]);
 });
 
-test("hedge thread send queues behind a local question card by default, while --mode steer passes steer through", async () => {
+test("hedge thread send refuses a missing --mode value without sending", async () => {
+  const t3 = await stub();
+
+  await expect(thread(t3, ["send", "--mode"])).rejects.toThrow("Usage: hedge thread list");
+  expect(sends(t3)).toEqual([]);
+});
+
+test("hedge thread read refuses --mode", async () => {
+  const t3 = await stub();
+
+  await expect(thread(t3, ["read", "--mode", "queue", "mcp:local-idle"])).rejects.toThrow("Usage: hedge thread list");
+});
+
+test("hedge thread send queues behind a local question card by default", async () => {
   const t3 = await stub(fixture([linkedEnvironment], linkedThreads, [
     shellThread("mcp:local-card", { status: "running", activeRunId: "run-2", pendingRuntimeRequest: { id: "card-1", kind: "user_input" } }),
   ]));
 
-  const safe = await thread(t3, ["send", "--host", "this-box", "mcp:local-card", "FYI"]);
-  const forced = await thread(t3, ["send", "--host", "this-box", "--mode", "steer", "mcp:local-card", "Replace card"]);
+  const { output } = await thread(t3, ["send", "--host", "this-box", "mcp:local-card", "FYI"]);
 
-  expect(JSON.parse(safe.output)).toMatchObject({ threadId: "mcp:local-card", delivery: "queued" });
-  expect(JSON.parse(forced.output)).toMatchObject({ threadId: "mcp:local-card", delivery: "steered" });
+  expect(JSON.parse(output)).toMatchObject({ threadId: "mcp:local-card", delivery: "queued" });
   expect(sends(t3)).toEqual([
     expect.objectContaining({ threadId: "mcp:local-card", message: "FYI", mode: "queue" }),
+  ]);
+});
+
+test("hedge thread send passes --mode steer through on a local question card", async () => {
+  const t3 = await stub(fixture([linkedEnvironment], linkedThreads, [
+    shellThread("mcp:local-card", { status: "running", activeRunId: "run-2", pendingRuntimeRequest: { id: "card-1", kind: "user_input" } }),
+  ]));
+
+  const { output } = await thread(t3, ["send", "--host", "this-box", "--mode", "steer", "mcp:local-card", "Replace card"]);
+
+  expect(JSON.parse(output)).toMatchObject({ threadId: "mcp:local-card", delivery: "steered" });
+  expect(sends(t3)).toEqual([
     expect.objectContaining({ threadId: "mcp:local-card", message: "Replace card", mode: "steer" }),
   ]);
 });
 
-test("hedge thread send queues behind a linked pending request by default, while --mode steer passes steer through", async () => {
+test("hedge thread send queues behind a linked pending request by default", async () => {
   const t3 = await stub(fixture([linkedEnvironment], [
     ...linkedThreads,
     linkedThread("mcp:linked-card", { status: "running", pendingRequestCount: 1 }),
   ]));
 
-  const safe = await thread(t3, ["send", "--host", "devbox-2", "mcp:linked-card", "FYI"]);
-  const forced = await thread(t3, ["send", "--host", "devbox-2", "--mode", "steer", "mcp:linked-card", "Replace card"]);
+  const { output } = await thread(t3, ["send", "--host", "devbox-2", "mcp:linked-card", "FYI"]);
 
-  expect(JSON.parse(safe.output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-card", delivery: "queued" });
-  expect(JSON.parse(forced.output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-card", delivery: "steered" });
+  expect(JSON.parse(output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-card", delivery: "queued" });
   expect(sends(t3)).toEqual([
     expect.objectContaining({ environmentId: "env-linked", threadId: "mcp:linked-card", message: "FYI", mode: "queue" }),
+  ]);
+});
+
+test("hedge thread send passes --mode steer through on a linked pending request", async () => {
+  const t3 = await stub(fixture([linkedEnvironment], [
+    ...linkedThreads,
+    linkedThread("mcp:linked-card", { status: "running", pendingRequestCount: 1 }),
+  ]));
+
+  const { output } = await thread(t3, ["send", "--host", "devbox-2", "--mode", "steer", "mcp:linked-card", "Replace card"]);
+
+  expect(JSON.parse(output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-card", delivery: "steered" });
+  expect(sends(t3)).toEqual([
     expect.objectContaining({ environmentId: "env-linked", threadId: "mcp:linked-card", message: "Replace card", mode: "steer" }),
   ]);
 });

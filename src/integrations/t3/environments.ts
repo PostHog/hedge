@@ -98,7 +98,7 @@ export async function sendLinkedMessage(client: Pick<T3HttpClient, "callTool">, 
 }
 
 async function linkedHasPendingRequest(client: Pick<T3HttpClient, "callTool">, environmentId: string, threadId: string): Promise<boolean> {
-  const detail = await readLinkedThread(client, environmentId, { threadId, limit: 1 }).catch(() => undefined);
+  const detail = await readLinkedThread(client, environmentId, { threadId, limit: 1, maxCharsPerItem: 1 }).catch(() => undefined);
   return !detail || detail.thread.pendingRequestCount > 0;
 }
 
