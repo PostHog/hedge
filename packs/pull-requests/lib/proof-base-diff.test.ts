@@ -9,7 +9,7 @@ import { checkout, cleanFixtures, fakeModel, fixture, githubRepository, reviewHe
 afterEach(cleanFixtures);
 
 async function publishBase(pr: Checkout, remote = "origin") {
-  const { bare, url } = await githubRepository(pr);
+  const { bare, url } = await githubRepository(pr, remote);
   await pr.git("push", "-q", bare, "main:refs/heads/main");
   await pr.git("remote", remote === "origin" ? "set-url" : "add", remote, url);
   return bare;
@@ -220,6 +220,8 @@ test("only remotes on the github.com host count as the repository", async () => 
     scp: "git@github.com:example/product.js.git",
     ssh: "ssh://git@github.com/example/product.js.git",
     git: "git://github.com/example/product.js",
+    gitPlusSsh: "git+ssh://git@github.com/example/product.js.git",
+    sshPlusGit: "ssh+git://git@github.com/example/product.js",
     upperCase: "HTTPS://GitHub.COM/Example/Product.JS.git",
     httpsMirror: "https://mirror.example/github.com/example/product.js",
     sshMirror: "ssh://git@mirror.example/github.com/example/product.js.git",
@@ -235,7 +237,7 @@ test("only remotes on the github.com host count as the repository", async () => 
   };
   for (const [name, url] of Object.entries(urls)) await pr.git("remote", "add", name, url);
 
-  expect(remotesOf("example/product.js", runIn(pr.repository, pr.env)).sort()).toEqual(["git", "https", "httpsGit", "httpsPassword", "httpsSlash", "httpsUser", "scp", "ssh", "upperCase"]);
+  expect(remotesOf("example/product.js", runIn(pr.repository, pr.env)).sort()).toEqual(["git", "gitPlusSsh", "https", "httpsGit", "httpsPassword", "httpsSlash", "httpsUser", "scp", "ssh", "sshPlusGit", "upperCase"]);
 });
 
 test("a checkout whose only remote of the repository is a mirror names the command that adds GitHub", async () => {

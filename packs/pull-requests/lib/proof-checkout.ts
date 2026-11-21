@@ -157,7 +157,7 @@ export function baseRefs(identity: ProofIdentity, run: Run) {
 
 export function remotesOf(repository: string, run: Run) {
   const remotes = run(["git", "remote"]).stdout.split("\n").filter(Boolean);
-  const onGithub = new RegExp(`^(?:(?:https?|ssh|git)://(?:[^@/]+@)?github\\.com/|(?:[^@/:]+@)?github\\.com:)${repository.replace(/\./g, "\\.")}(?:\\.git)?/?$`, "i");
+  const onGithub = new RegExp(`^(?:(?:https?|ssh|git|git\\+ssh|ssh\\+git)://(?:[^@/]+@)?github\\.com/|(?:[^@/:]+@)?github\\.com:)${repository.replace(/\./g, "\\.")}(?:\\.git)?/?$`, "i");
   return remotes.filter((remote) => onGithub.test(run(["git", "remote", "get-url", remote]).stdout.trim()));
 }
 

@@ -189,8 +189,7 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
 
 export type Checkout = Awaited<ReturnType<typeof checkout>>;
 
-export async function githubRepository(pr: Checkout) {
-  const user = "git";
+export async function githubRepository(pr: Checkout, user = "git") {
   const served = join(pr.repository, "../github.com");
   const ssh = join(pr.repository, "../ssh");
   writeFileSync(ssh, `#!/bin/sh\ncase "$1" in *@github.com) ;; *) exit 255;; esac\ncd "${served}/\${1%@*}" || exit 128\nexec sh -c "git \${2#git-}"\n`, { mode: 0o755 });
