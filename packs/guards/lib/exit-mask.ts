@@ -82,7 +82,7 @@ function setting(program: Program, before: number, read: (args: string[]) => boo
     if (value === false) on = false;
     else if (value === true && alwaysRuns && command.redirects.length === 0 && inForeground()) on = true;
   });
-  return on && !changesTheShell(commands.slice(0, before));
+  return on && !changesTheShell(commands.slice(0, before), false);
 }
 
 const setsOption = (option: string) => (args: string[]) => {
@@ -183,8 +183,11 @@ function reachOf(program: Program, start: number): Reach {
   return reportedBy(next, false) ?? { how: separatorName(after) };
 }
 
-function changesTheShell(commands: Command[]): boolean {
-  return commands.some((command) => parens(command.scope) === 0 && (command.definesFunction || shellChangers.has(command.name) || command.rawPrefix.some((word) => shellChangers.has(word)) || command.env.has("IFS")));
+const setsIfs = (command: Command) => command.env.has("IFS") || command.rawArgs.some((raw) => raw.includes("IFS"));
+
+function changesTheShell(commands: Command[], splitting: boolean): boolean {
+  const changes = (command: Command) => command.definesFunction || shellChangers.has(command.name) || command.rawPrefix.some((word) => shellChangers.has(word)) || (splitting && setsIfs(command));
+  return commands.some((command) => parens(command.scope) === 0 && changes(command));
 }
 
 function hiddenIn(text: string, nesting: number): { found?: Finding; carries?: string } {
@@ -214,7 +217,7 @@ function hiddenIn(text: string, nesting: number): { found?: Finding; carries?: s
     const reach = reachOf(program, index);
     if (reach !== "exit" && "how" in reach) return { found: { what, how: reach.how } };
     if (reach !== "exit" && nesting > 0) return { found: { what, how: "the nested shell or `$(…)` that prints it" } };
-    if (reach !== "exit" && changesTheShell(commands.slice(0, reach.printedBy))) return { found: { what, how: "a command earlier in the call that changes how the shell prints, such as `exec >`," } };
+    if (reach !== "exit" && changesTheShell(commands.slice(0, reach.printedBy), true)) return { found: { what, how: "a command earlier in the call that changes how the shell prints, such as `exec >`," } };
     carries ??= what;
   }
   return { carries };
