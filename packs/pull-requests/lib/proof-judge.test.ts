@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { cleanFixtures, lookup, checkout, type Checkout, verdict, fakeModel, reviewHead, reviewHeadFixed, finishRound, recordingModel, stalledOnQuota, acceptGap, graded, settings } from "./proof-testing.ts";
@@ -7,6 +7,7 @@ import { riskCalloutOf, tierOf } from "./decision-ledger.ts";
 import { withoutReceipt } from "./proof-receipt.ts";
 import { spawnAsync } from "../../../src/testing/spawn.ts";
 import { mergeGate } from "../../guards/hooks/merge-gate.ts";
+import { lastGateRun } from "./proof.ts";
 
 const waitingJudges: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -359,7 +360,7 @@ test("once the judge budget is spent, the gate names each accepted gap's conditi
   pr.chooseGap("judge", "The judge misreads the copy");
   await acceptGap(pr, "judge");
   const accepted = await pr.hedge("gate");
-  expect(accepted.code).toBe(3);
+  expect(accepted.code).toBe(1);
   expect(accepted.output).toContain(stop);
   const saved = JSON.parse((await pr.hedge("gate", "--json")).output);
   expect(saved.judge.gap.accepted).toBeUndefined();
@@ -452,6 +453,28 @@ test("a second gate stopped by the judge lock leaves no failure at HEAD, so the 
   const head = await pr.git("rev-parse", "HEAD");
   const github = { pull: async () => ({ head, base: "main", defaultBranch: "main", open: true }), pullFor: async () => undefined };
   expect(await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home: pr.home, env: { HEDGE_SETTINGS: undefined }, github })).toBeUndefined();
+});
+
+test("a gate run with --wait that shared a failure and then meets the judge lock keeps a failing run record, so an earlier pass at HEAD is not its last run", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  fakeModel(pr, "JUDGE", verdict());
+  const head = await pr.git("rev-parse", "HEAD");
+  expect((await pr.hedge("gate")).code).toBe(0);
+  const saved = join(pr.pullRequest, "judge");
+  pr.ci([{ name: "test", bucket: "pending" }]);
+  pr.panel.onPause = async () => {
+    for (const name of readdirSync(saved).filter((file) => file.endsWith(".json"))) rmSync(join(saved, name));
+    writeFileSync(join(saved, "round.lock"), JSON.stringify({ pid: process.pid }));
+    pr.ci([{ name: "test", bucket: "pass" }]);
+  };
+
+  const waited = await pr.hedge("gate", "--wait", "10").catch((error: Error) => ({ code: 1, output: error.message }));
+
+  expect(waited.output).toContain("holds its lock");
+  expect((await lastGateRun(pr.home, { repository: "example/product", pr: 42, commit: head }))?.code).not.toBe(0);
 });
 
 test("a gate killed while it held the judge lock leaves the lock to the next gate, which asks the judge", async () => {

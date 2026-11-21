@@ -27,7 +27,8 @@
   gates at once never pass the cap. That second gate keeps no run record
   and shares nothing to the decision ledger, so the merge gate counts the
   pass of the first gate on every machine. A gate run with `--wait` keeps
-  the failure it shared when it read CI as running. A gate whose
+  the failure it shared when it read CI as running, and its failing run
+  record. A gate whose
   process ended leaves its lock to the next gate.
 
 ### A model row takes any T3 provider
