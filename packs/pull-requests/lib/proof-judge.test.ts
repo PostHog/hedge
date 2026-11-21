@@ -417,15 +417,37 @@ test("while one gate asks the judge of a PR, a second gate of that PR with other
   pr.env.HEDGE_PROOF_JUDGE = `cat >/dev/null; echo asked >> "${asked}"; if mkdir "${held}" 2>/dev/null; then echo > "${started}"; read line < "${go}"; fi; cat "${answer}"`;
   const gate = () => pr.hedge("gate").catch((error: Error) => ({ code: 1, output: error.message }));
 
-  const release = releaseOnce(go);
   const first = gate();
   await judgeStarted(started, first);
+  const release = releaseOnce(go);
   const second = await gateAfterResponse(pr, "A new answer.\n").catch((error: Error) => ({ code: 1, output: error.message })).finally(release);
 
   expect(second.output).toContain(`another hedge proof command, works on ${join(pr.pullRequest, "judge")} and holds its lock`);
   expect((await first).output).toContain("judge owed: fail: feature.txt is code, not docs");
   expect((await gate()).output).toContain("judge: budget spent: the judge failed 1 times");
   expect(readFileSync(asked, "utf8")).toBe("asked\n");
+});
+
+test("a second gate stopped by the judge lock shares no failure at HEAD, so the decision ledger keeps the pass of the gate that held the lock", async () => {
+  const pr = await checkout();
+  pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo CONTINUE";
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  const [started, go, held] = ["started", "go", "held"].map((name) => join(pr.home, name));
+  await spawnAsync(["mkfifo", started, go]);
+  pr.env.HEDGE_PROOF_JUDGE = `cat >/dev/null; if mkdir "${held}" 2>/dev/null; then echo > "${started}"; read line < "${go}"; fi; echo '${verdict().replaceAll("'", "")}'`;
+  const ledger = join(pr.home, ".local/state/hedge/decisions.jsonl");
+  const gates = async () => (await readFile(ledger, "utf8")).trim().split("\n").map((line) => JSON.parse(line)).filter((event) => event.type === "gate");
+
+  const first = pr.hedge("gate").catch((error: Error) => ({ code: 1, output: error.message }));
+  await judgeStarted(started, first);
+  const release = releaseOnce(go);
+  const second = await gateAfterResponse(pr, "A new answer.\n").catch((error: Error) => ({ code: 1, output: error.message })).finally(release);
+
+  expect(second.output).toContain("holds its lock");
+  expect((await first).code).toBe(0);
+  expect(await gates()).toEqual([expect.objectContaining({ passed: true })]);
 });
 
 test("a gate killed while it held the judge lock leaves the lock to the next gate, which asks the judge", async () => {

@@ -23,7 +23,9 @@
   still shows.
   A gate holds the lock of the pull request's judge directory while it asks
   the judge, so a second gate at the same moment that finds no saved
-  verdict for its inputs stops and names the command that holds it, and gates at once never pass the cap. A gate whose
+  verdict for its inputs stops and names the process that holds it, and
+  gates at once never pass the cap. That second gate shares no failure to
+  the decision ledger, so the pass of the first gate stands. A gate whose
   process ended leaves its lock to the next gate.
 
 ### A model row takes any T3 provider
