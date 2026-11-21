@@ -119,7 +119,7 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
   writeFileSync(join(home, ".agents/skills/qa-swarm/PANEL.md"), panelGuide);
   const clock = { now: new Date("2026-10-25T12:00:00Z") };
   const env: Record<string, string | undefined> = {
-    ...gitEnv, PATH: `${bin}:${process.env.PATH}`,
+    ...gitEnv, GIT_ALLOW_PROTOCOL: "file", PATH: `${bin}:${process.env.PATH}`,
     CLAUDE_CODE_SESSION_ID: "session-under-test", CODEX_THREAD_ID: undefined, HEDGE_SETTINGS: JSON.stringify(settings), HEDGE_MODELS: JSON.stringify(models),
     HEDGE_PROOF_JUDGE: `cat >/dev/null; echo '${verdict()}'`, HEDGE_PROOF_JUDGE_MODEL: "judge-under-test", HEDGE_PROOF_BLOAT_JUDGE: `cat >/dev/null; echo '{"cuttable":0,"hunks":[]}'`, HEDGE_PROOF_BLOAT_JUDGE_MODEL: "bloat-judge-under-test", T3CODE_THREAD_ID: "thread-1", HEDGE_PROOF_RETRY_DELAY_MS: "0",
   };
