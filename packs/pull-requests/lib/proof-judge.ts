@@ -204,7 +204,7 @@ const failureReasons = (verdict: Verdict) => [
 
 export type JudgeRecord = { commit: string; model: string; verdict: Verdict; passed: boolean; escalation?: string; judgedAt: string };
 export type JudgeDeps = { ask: (request: ModelRequest) => Promise<ModelAnswer>; model: string; arbiter: Arbiter; directory: string; commit: string; now: Date };
-export type JudgeOutcome = { state: "pass" | "fail" | "unavailable"; lines: string[]; model: string; broken: string[] };
+export type JudgeOutcome = { state: "pass" | "fail" | "unavailable"; lines: string[]; model: string; broken: string[]; held?: true };
 
 const freeJudgeFails = 2;
 const arbiterInstructions = `You decide if an agent may keep trying to pass a judge, or must ask the user. Below are the reasons a judge failed one pull request on each run, oldest first.
@@ -224,7 +224,7 @@ export async function judge(input: JudgeInput, deps: JudgeDeps): Promise<JudgeOu
   const path = join(deps.directory, `${await inputKey(deps.model, prompt, images)}.json`);
   const cached = await readFile(path, "utf8").then((text) => JSON.parse(text) as JudgeRecord, () => undefined);
   const record = cached ?? await askJudge(prompt, images, readable, input.cwd, askedQuestions(input.risk !== undefined), deps);
-  if ("cause" in record) return { state: "unavailable", lines: [`judge: unavailable (${record.cause})`], model: deps.model, broken: [] };
+  if ("cause" in record) return { state: "unavailable", lines: [`judge: unavailable (${record.cause})`], model: deps.model, broken: [], ...record.held ? { held: true } : {} };
   if (!cached) await writeRecord(path, record);
   const escalation = record.escalation ? [`judge: escalate to the user: ${record.escalation}. First record hedge proof gap --kind judge --reason <why>, then ask them the question it prints with the question tool. When they accept, record their answer with hedge decision record --mark 👤 --class proof-gap --kind judge --pr <owner/repo#n>`] : [];
   return { state: record.passed ? "pass" : "fail", lines: [...verdictLines(record.verdict), ...escalation], model: record.model, broken: brokenConditions(record.verdict, input.conditions) };
@@ -236,9 +236,9 @@ function brokenConditions(verdict: Verdict, conditions: JudgeInput["conditions"]
   return [...new Set(conditions.map(({ id }) => id))].filter(named);
 }
 
-async function askJudge(prompt: string, images: string[], readable: string[], cwd: string, asked: QuestionName[], deps: JudgeDeps): Promise<JudgeRecord | { cause: string }> {
+async function askJudge(prompt: string, images: string[], readable: string[], cwd: string, asked: QuestionName[], deps: JudgeDeps): Promise<JudgeRecord | { cause: string; held?: true }> {
   const answer = await deps.ask({ prompt, cwd, images, readable, schema: verdictSchema(asked) });
-  if (!answer.ok) return { cause: answer.cause };
+  if (!answer.ok) return { cause: answer.cause, ...answer.held ? { held: true } : {} };
   const verdict = parseVerdict(answer.text, asked);
   if (!verdict) return { cause: `unparseable answer: ${answer.text.split("\n")[0]!.slice(0, 200)}` };
   const record: JudgeRecord = { commit: deps.commit, model: answer.model, verdict, passed: passes(verdict), judgedAt: deps.now.toISOString() };

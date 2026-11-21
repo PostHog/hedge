@@ -121,14 +121,42 @@ test("a report over five minutes old, or one that says unknown, refuses nothing"
   expect((await t3Threads(models, { home: stub.home }).start({ ...request, key: "k2" })).id).toBe("thread-2");
 });
 
-test("a send delivers the text to the thread as a message T3 starts a turn for", async () => {
+test("a send delivers the text in auto mode for an idle thread", async () => {
   const stub = await t3({
     shell: { projects: [], threads: [{ id: "thread-7", title: "Mail", projectId: "scratch-1", status: "idle" }] },
     tools: (name, args) => (name === "t3_thread_send" ? { threadId: args.threadId, messageId: "message:1", delivery: "started" } : undefined),
   });
   expect(await t3Threads(models, { home: stub.home }).send({ id: "thread-7", text: "A new reply arrived." })).toBe(true);
   expect(stub.toolCalls).toEqual([
-    { name: "t3_thread_send", args: expect.objectContaining({ threadId: "thread-7", message: "A new reply arrived.", mode: "queue" }) },
+    { name: "t3_thread_send", args: expect.objectContaining({ threadId: "thread-7", message: "A new reply arrived.", mode: "auto" }) },
+  ]);
+});
+
+test("a send queues behind an active local question card", async () => {
+  const stub = await t3({
+    shell: {
+      projects: [],
+      threads: [{ id: "thread-card", title: "Card", projectId: "scratch-1", status: "running", activeRunId: "run-1", pendingRuntimeRequest: { id: "card-1", kind: "user_input" } }],
+    },
+    tools: (name, args) => (name === "t3_thread_send" ? { threadId: args.threadId, messageId: "message:1", delivery: "queued" } : undefined),
+  });
+  expect(await t3Threads(models, { home: stub.home }).send({ id: "thread-card", text: "Another reply." })).toBe(true);
+  expect(stub.toolCalls).toEqual([
+    { name: "t3_thread_send", args: expect.objectContaining({ threadId: "thread-card", message: "Another reply.", mode: "queue" }) },
+  ]);
+});
+
+test("a send queues behind an active local approval", async () => {
+  const stub = await t3({
+    shell: {
+      projects: [],
+      threads: [{ id: "thread-approval", title: "Approval", projectId: "scratch-1", status: "running", activeRunId: "run-2", pendingRuntimeRequest: { id: "approval-1", kind: "approval" } }],
+    },
+    tools: (name, args) => (name === "t3_thread_send" ? { threadId: args.threadId, messageId: "message:1", delivery: "queued" } : undefined),
+  });
+  expect(await t3Threads(models, { home: stub.home }).send({ id: "thread-approval", text: "Third reply." })).toBe(true);
+  expect(stub.toolCalls).toEqual([
+    { name: "t3_thread_send", args: expect.objectContaining({ threadId: "thread-approval", message: "Third reply.", mode: "queue" }) },
   ]);
 });
 
