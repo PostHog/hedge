@@ -504,10 +504,8 @@ code and the reason. The gate's lines and hedge decision report come from the sa
       } catch (error) {
         const message = `${String((error as Error).message ?? error)}${waited?.failedRead ? ` (--wait stopped early at a failed read of GitHub: ${waited.failedRead})` : ""}`;
         if (error instanceof RoundBusy && !waited) await record.discard();
-        else {
-          await record({ code: 1, reason: message.replace(/\s*[\r\n]+\s*/g, " ") }).catch(() => {});
-          await shareGateResult(head, false, gatedAt, context);
-        }
+        else await record({ code: 1, reason: message.replace(/\s*[\r\n]+\s*/g, " ") }).catch(() => {});
+        if (!(error instanceof RoundBusy)) await shareGateResult(head, false, gatedAt, context);
         throw waited?.failedRead ? new Error(message) : error;
       }
       if (unshared?.failed) {

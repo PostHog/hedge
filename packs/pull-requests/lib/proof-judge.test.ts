@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { cleanFixtures, lookup, checkout, type Checkout, verdict, fakeModel, reviewHead, reviewHeadFixed, finishRound, recordingModel, stalledOnQuota, acceptGap, graded, settings } from "./proof-testing.ts";
@@ -455,26 +455,64 @@ test("a second gate stopped by the judge lock leaves no failure at HEAD, so the 
   expect(await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home: pr.home, env: { HEDGE_SETTINGS: undefined }, github })).toBeUndefined();
 });
 
-test("a gate run with --wait that shared a failure and then meets the judge lock keeps a failing run record, so an earlier pass at HEAD is not its last run", async () => {
+test("a gate run with --wait that meets the judge lock of a second gate after its wait shares no later failure, so the merge gate counts the second gate's pass", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "greet new members\n");
   await reviewHead(pr);
   await pr.hedge("require", "--none", "--reason", "Docs only");
-  fakeModel(pr, "JUDGE", verdict());
+  const [started, go, held] = ["started", "go", "held"].map((name) => join(pr.home, name));
+  await spawnAsync(["mkfifo", started, go]);
+  pr.env.HEDGE_PROOF_JUDGE = `cat >/dev/null; if mkdir "${held}" 2>/dev/null; then echo > "${started}"; read line < "${go}"; fi; echo '${verdict().replaceAll("'", "")}'`;
   const head = await pr.git("rev-parse", "HEAD");
-  expect((await pr.hedge("gate")).code).toBe(0);
-  const saved = join(pr.pullRequest, "judge");
+  const github = { pull: async () => ({ head, base: "main", defaultBranch: "main", open: true }), pullFor: async () => undefined };
+  const merge = () => mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home: pr.home, env: { HEDGE_SETTINGS: undefined }, github });
+  const start = pr.clock.now.getTime();
+  let second: Promise<{ code: number; output: string }> | undefined;
+  let release: (() => Promise<void>) | undefined;
   pr.ci([{ name: "test", bucket: "pending" }]);
   pr.panel.onPause = async () => {
-    for (const name of readdirSync(saved).filter((file) => file.endsWith(".json"))) rmSync(join(saved, name));
-    writeFileSync(join(saved, "round.lock"), JSON.stringify({ pid: process.pid }));
     pr.ci([{ name: "test", bucket: "pass" }]);
+    pr.clock.now = new Date(start + 60_000);
+    second = pr.hedge("gate").catch((error: Error) => ({ code: 1, output: error.message }));
+    await judgeStarted(started, second);
+    release = releaseOnce(go);
+    pr.clock.now = new Date(start + 120_000);
   };
 
   const waited = await pr.hedge("gate", "--wait", "10").catch((error: Error) => ({ code: 1, output: error.message }));
+  await release?.();
 
   expect(waited.output).toContain("holds its lock");
-  expect((await lastGateRun(pr.home, { repository: "example/product", pr: 42, commit: head }))?.code).not.toBe(0);
+  expect((await second!).code).toBe(0);
+  expect(await merge()).toBeUndefined();
+});
+
+test("a gate run with --wait that the judge lock of an earlier gate stops after its wait keeps its failing run record, so this machine's last run agrees with the failure it shared", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  const [started, go, held] = ["started", "go", "held"].map((name) => join(pr.home, name));
+  await spawnAsync(["mkfifo", started, go]);
+  pr.env.HEDGE_PROOF_JUDGE = `cat >/dev/null; if mkdir "${held}" 2>/dev/null; then echo > "${started}"; read line < "${go}"; fi; echo '${verdict().replaceAll("'", "")}'`;
+  const head = await pr.git("rev-parse", "HEAD");
+  const github = { pull: async () => ({ head, base: "main", defaultBranch: "main", open: true }), pullFor: async () => undefined };
+  const merge = () => mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home: pr.home, env: { HEDGE_SETTINGS: undefined }, github });
+  const start = pr.clock.now.getTime();
+  const first = pr.hedge("gate").catch((error: Error) => ({ code: 1, output: error.message }));
+  await judgeStarted(started, first);
+  const release = releaseOnce(go);
+  pr.clock.now = new Date(start + 60_000);
+  pr.ci([{ name: "test", bucket: "pending" }]);
+  pr.panel.onPause = async () => { pr.ci([{ name: "test", bucket: "pass" }]); };
+
+  const waited = await pr.hedge("gate", "--wait", "10").catch((error: Error) => ({ code: 1, output: error.message }));
+  await release();
+
+  expect(waited.output).toContain("holds its lock");
+  expect((await first).code).toBe(0);
+  expect((await lastGateRun(pr.home, { repository: "example/product", pr: 42, commit: head }))?.code).toBe(1);
+  expect((await merge())?.hookSpecificOutput.permissionDecisionReason).toContain("has not passed at the head");
 });
 
 test("a gate killed while it held the judge lock leaves the lock to the next gate, which asks the judge", async () => {
