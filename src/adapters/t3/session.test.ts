@@ -37,3 +37,14 @@ test.if(process.platform === "linux")("works inside a session that the running T
   expect(answer).toEqual(shell);
   expect(await stub.cliCalls()).toEqual(["auth session issue --json --ttl 5m --label hedge --subject hedge", "auth session revoke shell-session"]);
 });
+
+test("rejects calls at once after T3 closes the connection, rather than waiting for the timeout", async () => {
+  const server = Bun.serve({ port: 0, fetch: (request, upgrade) => (upgrade.upgrade(request) ? undefined : new Response("no", { status: 400 })), websocket: { message: (socket) => socket.close() } });
+  try {
+    const t3 = await connect(`http://127.0.0.1:${server.port}`, "token");
+    await expect(t3.request("server.updateSettings", {}, false)).rejects.toThrow("T3 Code closed the connection");
+    await expect(t3.request("server.getConfig", {}, false)).rejects.toThrow("T3 Code closed the connection");
+  } finally {
+    await server.stop(true);
+  }
+}, 2000);

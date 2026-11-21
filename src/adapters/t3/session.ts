@@ -122,6 +122,7 @@ export async function connect(origin: string, token: string) {
   const request = <T>(tag: string, payload: unknown, stream: boolean) =>
     new Promise<T>((resolve, reject) => {
       const id = String(next++);
+      if (socket.readyState !== WebSocket.OPEN) return reject(new Error("T3 Code closed the connection"));
       const timer = setTimeout(() => (pending.delete(id), reject(new Error(`T3 Code did not answer ${tag}`))), timeoutMs);
       pending.set(id, { stream, resolve: (value) => (clearTimeout(timer), resolve(value as T)), reject: (error) => (clearTimeout(timer), reject(error)) });
       socket.send(JSON.stringify({ _tag: "Request", id, tag, payload, headers: [] }));

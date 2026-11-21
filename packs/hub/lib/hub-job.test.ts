@@ -30,6 +30,15 @@ test("a thread starts with the T3 provider and the model of its HEDGE_MODELS row
   expect(threadModel("implementation", "fallback-model", {})).toEqual({ provider: "claudeAgent", model: "fallback-model" });
 });
 
+test("a row of another T3 provider starts the thread on that provider's instance", () => {
+  const dir = temp.make("thread-");
+  stubT3(dir);
+  const choice = threadModel("implementation", "fallback-model", { HEDGE_MODELS: row("antigravity", "gemini-4-neon") });
+  const run = Bun.spawnSync(["sh", "-c", threadScript(dir, "Disk alert box-1", choice)], { stdin: Buffer.from("the task"), env: { PATH: `${dir}:/usr/bin:/bin`, HOME: dir } });
+  expect(run.exitCode).toBe(0);
+  expect(readFileSync(join(dir, "argv"), "utf8").split("\n")).toEqual(["thread", "start", "--title", "Disk alert box-1", "--provider", "antigravity", "--model", "gemini-4-neon", dir, "-", ""]);
+});
+
 test("the folder is registered as a project first, and a thread start that creates the thread but exits 1 is never tried again", () => {
   const dir = temp.make("thread-");
   stubT3(dir, 1);
