@@ -6,7 +6,8 @@
 
 - The `provider` of a model table row is the id of a T3 provider instance,
   such as `antigravity`. `claude` and `codex` still mean T3's `claudeAgent`
-  and `codex` instances. T3 threads and tasks start on the instance as it is
+  and `codex` instances, and a row names Claude as `claude`, never as
+  `claudeAgent`. T3 threads and tasks start on the instance as it is
   named, with no effort option, because Hedge knows the effort option of
   Claude and Codex only.
 - `hedge proof` and `hedge dream` run their models with the claude or codex

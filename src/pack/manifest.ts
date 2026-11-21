@@ -1,7 +1,7 @@
 import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { recordPack } from "./register.ts";
-import { isT3Slug } from "./t3-slug.ts";
+import { isRowProvider, isT3Slug } from "./t3-slug.ts";
 import { handlerSeams, needValues, type LoadedPack, type ModelRow, type PackManifest, type Workflow } from "./types.ts";
 
 export class PackError extends Error {}
@@ -274,7 +274,7 @@ function checkModels(models: unknown, fail: (message: string) => never) {
     if (!Array.isArray(rows)) fail(`models ${plan} must list rows`);
     const roles = new Set<string>();
     for (const row of rows as unknown[]) {
-      if (!isModelRow(row)) fail(`models ${plan}: each row needs a role, work, a provider that names a T3 provider instance, a model, and an effort`);
+      if (!isModelRow(row)) fail(`models ${plan}: each row needs a role, work, a provider that names a T3 provider instance (claude, not claudeAgent), a model, and an effort`);
       const { role } = row as ModelRow;
       if (roles.has(role)) fail(`models ${plan}: role ${role} is listed twice`);
       roles.add(role);
@@ -283,7 +283,7 @@ function checkModels(models: unknown, fail: (message: string) => never) {
 }
 
 export function isModelRow(row: unknown): row is ModelRow {
-  return isRecord(row) && ["role", "work", "model"].every((key) => typeof row[key] === "string") && isT3Slug(row.provider) && efforts.includes(row.effort as string)
+  return isRecord(row) && ["role", "work", "model"].every((key) => typeof row[key] === "string") && isRowProvider(row.provider) && efforts.includes(row.effort as string)
     && (row.serviceTier === undefined || (typeof row.serviceTier === "string" && row.serviceTier !== ""));
 }
 

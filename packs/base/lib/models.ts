@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, isAbsolute } from "node:path";
-import { isT3Slug } from "../../../src/pack/t3-slug.ts";
+import { isRowProvider } from "../../../src/pack/t3-slug.ts";
 
 type Env = Record<string, string | undefined>;
 
@@ -25,7 +25,7 @@ export function modelFor(role: string, env: Env = Bun.env): ModelRow {
 function isRow(value: unknown): value is ModelRow {
   const row = value as Partial<ModelRow>;
   return typeof row?.role === "string" && typeof row.model === "string" && typeof row.work === "string"
-    && isT3Slug(row.provider) && efforts.includes(row.effort as string) && (row.serviceTier === undefined || typeof row.serviceTier === "string");
+    && isRowProvider(row.provider) && efforts.includes(row.effort as string) && (row.serviceTier === undefined || typeof row.serviceTier === "string");
 }
 
 export function cliRow(row: ModelRow, command: string) {

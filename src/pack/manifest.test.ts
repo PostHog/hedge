@@ -290,10 +290,11 @@ describe("loadPacks", () => {
       [{ models: { gemini: [] } }, "models must map claude, codex, or both to rows"],
       [{ models: { claude: [{ role: "review", work: "Review", provider: "claude", model: "m", effort: "huge" }] } }, "each row needs a role, work"],
       [{ models: { claude: [row, row] } }, "models claude: role review is listed twice"],
-      [{ models: { claude: [{ ...row, provider: "" }] } }, "models claude: each row needs a role, work, a provider that names a T3 provider instance, a model, and an effort"],
+      [{ models: { claude: [{ ...row, provider: "" }] } }, "models claude: each row needs a role, work, a provider that names a T3 provider instance (claude, not claudeAgent), a model, and an effort"],
       [{ models: { claude: [{ ...row, provider: "gemini cli" }] } }, "each row needs a role, work, a provider that names a T3 provider instance"],
       [{ models: { claude: [{ ...row, provider: "a".repeat(65) }] } }, "each row needs a role, work, a provider that names a T3 provider instance"],
       [{ models: { claude: [{ ...row, provider: "constructor" }] } }, "each row needs a role, work, a provider that names a T3 provider instance"],
+      [{ models: { claude: [{ ...row, provider: "claudeAgent" }] } }, "each row needs a role, work, a provider that names a T3 provider instance"],
     ];
     for (const [fields, message] of cases) {
       expect(loadPacks(sourceWith({ base: { ...base, ...fields } }))).rejects.toThrow(message);

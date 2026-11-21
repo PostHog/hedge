@@ -18,7 +18,7 @@ test("reads the row of a role from the model table of the user's plan", () => {
 test("refuses a role the table lacks, a missing table, and a malformed row", () => {
   expect(() => modelFor("review-codex", env)).toThrow("the model table of your AI plan has no review-codex row");
   expect(() => modelFor("lookup", {})).toThrow("run this command as hedge <command>, so it gets your model table");
-  for (const provider of ["", "gemini cli", 3, "a".repeat(65), "constructor", "__proto__"]) expect(() => modelTable({ HEDGE_MODELS: JSON.stringify([{ ...rows[0], provider }]) })).toThrow("HEDGE_MODELS holds a malformed row");
+  for (const provider of ["", "gemini cli", 3, "a".repeat(65), "constructor", "__proto__", "claudeAgent"]) expect(() => modelTable({ HEDGE_MODELS: JSON.stringify([{ ...rows[0], provider }]) })).toThrow("HEDGE_MODELS holds a malformed row");
 });
 
 test("reads a row of any T3 provider instance", () => {

@@ -268,7 +268,7 @@ describe("saving answers", () => {
   test("takes a model row of any T3 provider instance in its overrides", async () => {
     const neon = { role: "survey", work: "Read docs", provider: "antigravity", model: "gemini-4-neon", effort: "high" as const };
     expect((await loadProfile(await profileRepo({ ...profile, overrides: { models: [neon] } }))).overrides?.models).toEqual([neon]);
-    expect(loadProfile(await profileRepo({ ...profile, overrides: { models: [{ ...neon, provider: "-x" }] } }))).rejects.toThrow("overrides.models must list rows with a role, work, a provider that names a T3 provider instance, a model, and an effort");
+    for (const provider of ["-x", "claudeAgent"]) await expect(loadProfile(await profileRepo({ ...profile, overrides: { models: [{ ...neon, provider }] } }))).rejects.toThrow("overrides.models must list rows with a role, work, a provider that names a T3 provider instance (claude, not claudeAgent), a model, and an effort");
   });
 
   test("takes a T3 provider instance in its overrides", async () => {

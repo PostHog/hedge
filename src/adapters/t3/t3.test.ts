@@ -540,7 +540,7 @@ describe("T3 provider instances", () => {
     expect(await apply(plan("linux", [agy, muse]), { home, adapters: [adapter] })).toMatchObject({ ok: true, actions: [], findings: [] });
   });
 
-  test("fails the apply when T3 refuses an instance, reports the one it took, and sends only the refused one next time", async () => {
+  test("fails the apply when T3 refuses an instance, reports the one it took, and still owns that one on the next apply", async () => {
     const home = temp.make("home-");
     const { server, adapter } = setup({ refuseInstances: ["muse"] });
     const failed = await apply(plan("linux", [agy, muse]), { home, adapters: [adapter] });
