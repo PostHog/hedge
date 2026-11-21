@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ModelRow } from "../../pack/types.ts";
 
-export type Provider = ModelRow["provider"];
+export type Provider = "claude" | "codex";
 export type ProviderStatus = "available" | "exhausted" | "unknown";
 export type Availability = { checkedAt: string; providers: Record<Provider, ProviderStatus> };
 
@@ -26,6 +26,6 @@ export function readAvailability(home: string, now: number): Availability | unde
 
 export function exhaustedRefusal(home: string, row: ModelRow, title: string, now: number): string | undefined {
   const report = readAvailability(home, now);
-  if (report?.providers[row.provider] !== "exhausted") return undefined;
+  if (!report || (row.provider !== "claude" && row.provider !== "codex") || report.providers[row.provider] !== "exhausted") return undefined;
   return `Hedge did not start "${title}": ${row.provider}, the provider of the ${row.role} model ${row.model}, has spent its quota (hedge providers checked ${report.checkedAt}). Wait until hedge providers says ${row.provider} is available, or start it on another model.`;
 }

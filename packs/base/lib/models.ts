@@ -1,10 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, isAbsolute } from "node:path";
+import { isRowProvider } from "../../../src/pack/t3-slug.ts";
 
 type Env = Record<string, string | undefined>;
 
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
-export type ModelRow = { role: string; work: string; provider: "claude" | "codex"; model: string; effort: Effort; serviceTier?: string };
+export type ModelRow = { role: string; work: string; provider: string; model: string; effort: Effort; serviceTier?: string };
 
 const efforts = ["low", "medium", "high", "xhigh", "max"];
 
@@ -24,7 +25,12 @@ export function modelFor(role: string, env: Env = Bun.env): ModelRow {
 function isRow(value: unknown): value is ModelRow {
   const row = value as Partial<ModelRow>;
   return typeof row?.role === "string" && typeof row.model === "string" && typeof row.work === "string"
-    && (row.provider === "claude" || row.provider === "codex") && efforts.includes(row.effort as string) && (row.serviceTier === undefined || typeof row.serviceTier === "string");
+    && isRowProvider(row.provider) && efforts.includes(row.effort as string) && (row.serviceTier === undefined || typeof row.serviceTier === "string");
+}
+
+export function cliRow(row: ModelRow, command: string) {
+  if (row.provider === "claude" || row.provider === "codex") return undefined;
+  return `${command} with the claude or codex CLI, and the ${row.role} row names provider ${row.provider}. Give that row a Claude or Codex model.`;
 }
 
 export function modelSessionEnv(env: Record<string, string | undefined>) {

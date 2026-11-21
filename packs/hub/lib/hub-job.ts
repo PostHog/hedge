@@ -82,13 +82,13 @@ export async function underLock(context: JobContext, name: string, label: string
 
 export type ThreadModel = { provider: string; model: string };
 
-const t3Providers = { claude: "claudeAgent", codex: "codex" } as const;
+const t3Providers = new Map([["claude", "claudeAgent"], ["codex", "codex"]]);
 
 export function threadModel(role: string, fallback: string, env: Env): ThreadModel {
   try {
     const row = modelFor(role, env);
-    return { provider: t3Providers[row.provider], model: row.model };
-  } catch { return { provider: t3Providers.claude, model: fallback }; }
+    return { provider: t3Providers.get(row.provider) ?? row.provider, model: row.model };
+  } catch { return { provider: "claudeAgent", model: fallback }; }
 }
 
 export function writeStateFile(path: string, value: unknown): void {

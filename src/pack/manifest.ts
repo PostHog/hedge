@@ -1,6 +1,7 @@
 import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { recordPack } from "./register.ts";
+import { isRowProvider, isT3Slug } from "./t3-slug.ts";
 import { handlerSeams, needValues, type LoadedPack, type ModelRow, type PackManifest, type Workflow } from "./types.ts";
 
 export class PackError extends Error {}
@@ -97,7 +98,25 @@ export function configEntryProblem(item: unknown) {
   if (item.provider === "t3" && t3ProjectKeys.includes(item.key)) return "T3 project settings hold Hedge's worktree scripts, so set those with t3ProjectScripts";
   if (item.provider === "claude" && item.key === "mcpServers") return "a Claude MCP server key names one server, such as mcpServers.<name>";
   if (item.provider === "claude" && item.key.startsWith("mcpServers.") && !isRecord(item.value)) return 'a Claude MCP server must be an object, such as { "type": "stdio", "command": ... }';
+  if (item.provider === "t3" && item.key.startsWith("providerInstances")) return providerInstanceProblem(item.key, item.value) ?? scopeProblem(item);
   return scopeProblem(item);
+}
+
+const slugRule = "a letter, then letters, digits, - or _, 64 at most";
+const instanceFields = ["driver", "enabled", "config"];
+
+
+function providerInstanceProblem(key: string, value: unknown) {
+  if (key === "providerInstances") return "declare one providerInstances.<id> entry per instance, not the whole providerInstances key";
+  const id = key.match(/^providerInstances\.(.+)$/)?.[1];
+  if (!isT3Slug(id)) return `a T3 provider instance key names one instance, such as providerInstances.<id>, and the id is ${slugRule}`;
+  if (id === "claudeAgent") return "Hedge's Claude recovery binds the claudeAgent instance, so give this instance another id";
+  if (id === "claude" || id === "codex") return "a model row's provider claude or codex always means T3's claudeAgent or codex instance, so give this instance another id";
+  if (!isRecord(value) || !isT3Slug(value.driver) || typeof value.enabled !== "boolean") return `a T3 provider instance needs a driver and enabled, such as { "driver": "antigravity", "enabled": true }, and the driver is ${slugRule}`;
+  if (value.driver === "claudeAgent") return "Hedge's Claude recovery owns Claude in T3, so a pack instance takes another driver than claudeAgent";
+  if (value.config !== undefined && !(isRecord(value.config) && filled(value.config.binaryPath))) return "config must be an object with a binaryPath that is a path";
+  if (Object.keys(value).some((field) => !instanceFields.includes(field)) || (isRecord(value.config) && Object.keys(value.config).some((field) => field !== "binaryPath"))) return "a T3 provider instance holds only driver, enabled and config, and its config only binaryPath, because T3 rewrites or redacts the rest";
+  return undefined;
 }
 
 /** Checks every nested item's shape before the manifest is trusted as a PackManifest. */
@@ -255,7 +274,7 @@ function checkModels(models: unknown, fail: (message: string) => never) {
     if (!Array.isArray(rows)) fail(`models ${plan} must list rows`);
     const roles = new Set<string>();
     for (const row of rows as unknown[]) {
-      if (!isModelRow(row)) fail(`models ${plan}: each row needs a role, work, a claude or codex provider, a model, and an effort`);
+      if (!isModelRow(row)) fail(`models ${plan}: each row needs a role, work, a provider that names a T3 provider instance (claude, not claudeAgent), a model, and an effort`);
       const { role } = row as ModelRow;
       if (roles.has(role)) fail(`models ${plan}: role ${role} is listed twice`);
       roles.add(role);
@@ -264,7 +283,7 @@ function checkModels(models: unknown, fail: (message: string) => never) {
 }
 
 export function isModelRow(row: unknown): row is ModelRow {
-  return isRecord(row) && ["role", "work", "model"].every((key) => typeof row[key] === "string") && (row.provider === "claude" || row.provider === "codex") && efforts.includes(row.effort as string)
+  return isRecord(row) && ["role", "work", "model"].every((key) => typeof row[key] === "string") && isRowProvider(row.provider) && efforts.includes(row.effort as string)
     && (row.serviceTier === undefined || (typeof row.serviceTier === "string" && row.serviceTier !== ""));
 }
 
