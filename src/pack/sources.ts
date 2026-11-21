@@ -6,6 +6,7 @@ import { loadPacks } from "./manifest.ts";
 import { tryLock, waitLock } from "../lock.ts";
 import type { AvailableSource, FetchedSource, LoadedPack, SourceRef } from "./types.ts";
 import { bunScript } from "../runner/bun.ts";
+import { withoutRepoEnv } from "../repo-env.ts";
 
 export const sourceName = /^[a-z0-9][a-z0-9-]*$/;
 const fetchTimeoutMs = 120_000;
@@ -147,7 +148,7 @@ async function checkout(dir: string, url: string, ref: string): Promise<string |
 
 /** Runs git without any prompt: no terminal, no askpass program, SSH in batch mode, and a time limit. */
 async function git(dir: string, ...args: string[]) {
-  const env = { ...Bun.env, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "true", SSH_ASKPASS: "true", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" };
+  const env = { ...withoutRepoEnv(), GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "true", SSH_ASKPASS: "true", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" };
   const process = Bun.spawn(["git", "-C", dir, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env, timeout: fetchTimeoutMs });
   const [code, stdout, stderr] = await Promise.all([process.exited, new Response(process.stdout).text(), new Response(process.stderr).text()]);
   const message = process.signalCode ? `git timed out after ${fetchTimeoutMs / 1000} seconds` : (stderr.trim().split("\n").at(-1) ?? "");

@@ -7,6 +7,7 @@ import { refuseLegacyPath } from "./legacy.ts";
 import { repoUrl, withoutUserinfo } from "./pack/sources.ts";
 import type { ProfileFile } from "./pack/types.ts";
 import { engineRepo } from "./setup/defaults.ts";
+import { withoutRepoEnv } from "./repo-env.ts";
 
 export type UpdateOptions = {
   home: string;
@@ -221,7 +222,7 @@ function compare(a: Version, b: Version) {
 }
 
 async function git(dir: string, ...args: string[]) {
-  const env = { ...Bun.env, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "true", SSH_ASKPASS: "true", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" };
+  const env = { ...withoutRepoEnv(), GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "true", SSH_ASKPASS: "true", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" };
   const child = Bun.spawn(["git", "-C", dir, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env, timeout: 120_000 });
   const [code, out, err] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
   return { ok: code === 0, out: out.trim(), err: err.trim().split("\n").at(-1) ?? "" };

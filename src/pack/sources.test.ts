@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
-import { fetchSource } from "./sources.ts";
+import { cachedSource, fetchSource } from "./sources.ts";
 
 isolateGit();
 const temp = tempDirs();
@@ -209,5 +209,43 @@ describe("fetchSource", () => {
     await fetchSource({ name: "team", repo: await packRepo("Old repo."), ref: "v1" }, cache);
     const fetched = await fetchSource({ name: "team", repo: join(temp.make(), "moved"), ref: "v1" }, cache);
     expect(fetched).toMatchObject({ error: expect.stringContaining("could not fetch v1") });
+  });
+});
+
+describe("inside a Git hook of another repository", () => {
+  const hookRepoEnv = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_PREFIX"] as const;
+  const saved = Object.fromEntries(hookRepoEnv.map((name) => [name, process.env[name]]));
+  afterEach(() => {
+    for (const name of hookRepoEnv) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+  });
+
+  function insideHookOf(repo: string) {
+    const gitDir = join(repo, ".git");
+    Object.assign(process.env, { GIT_DIR: gitDir, GIT_WORK_TREE: repo, GIT_INDEX_FILE: join(gitDir, "index"), GIT_COMMON_DIR: gitDir, GIT_OBJECT_DIRECTORY: join(gitDir, "objects"), GIT_PREFIX: "" });
+  }
+
+  test("fetches and loads its sources, not the hook's repository", async () => {
+    const source = await packRepo("Team rules v1.");
+    const caller = await packRepo("Caller repo.");
+    insideHookOf(caller);
+    const fetched = await fetchSource({ name: "team", repo: source, ref: "v1" }, temp.make("cache-"));
+    if ("error" in fetched) throw new Error(fetched.error);
+    expect(fetched.packs[0]?.manifest.summary).toBe("Team rules v1.");
+  });
+
+  test("reads the cached checkout, not the hook's repository", async () => {
+    const source = await packRepo("Team rules v1.");
+    const caller = await packRepo("Caller repo.");
+    await spawnGit(caller, "commit", "-q", "--allow-empty", "-m", "caller");
+    const cache = temp.make("cache-");
+    const ref = { name: "team", repo: source, ref: "v1" };
+    await fetchSource(ref, cache);
+    insideHookOf(caller);
+    const cached = await cachedSource(ref, cache);
+    if ("error" in cached) throw new Error(cached.error);
+    expect(cached.packs[0]?.manifest.summary).toBe("Team rules v1.");
   });
 });

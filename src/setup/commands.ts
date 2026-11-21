@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import { platform } from "node:os";
+import { envFor } from "../repo-env.ts";
 
 export type ExecResult = { code: number; output: string; stdout: string };
 /** input: text for the command's standard input, so a secret never goes on its command line. */
@@ -40,7 +41,7 @@ export const realMachine: Machine = {
     };
     if (limited) process.once("exit", endGroup).on("SIGINT", interrupted).on("SIGTERM", interrupted);
     try {
-      child = Bun.spawn(command, { cwd: options.cwd, stdin: options.input === undefined ? "ignore" : new Blob([options.input]), stdout: "pipe", stderr: "pipe", detached: limited });
+      child = Bun.spawn(command, { cwd: options.cwd, env: envFor(command), stdin: options.input === undefined ? "ignore" : new Blob([options.input]), stdout: "pipe", stderr: "pipe", detached: limited });
     } catch {
       release();
       return { code: 127, output: "", stdout: "" };

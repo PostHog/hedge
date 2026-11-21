@@ -7,6 +7,7 @@ import { linkOnPath, withLock } from "./adapters/provider-config/store.ts";
 import { writePrivateFile } from "./files/private.ts";
 import { loadProfile } from "./profile/profile.ts";
 import { asLedger } from "./reconciler/ledger.ts";
+import { withoutRepoEnv } from "./repo-env.ts";
 
 type State = { version: number; groups: Record<string, Record<string, unknown>> };
 
@@ -119,7 +120,7 @@ async function importMachine(home: string, claim: Claim): Promise<string[]> {
 }
 
 const gitIn = (dir: string, ...args: string[]) => {
-  const result = Bun.spawnSync(["git", "-C", dir, ...args], { stdout: "pipe", stderr: "ignore" });
+  const result = Bun.spawnSync(["git", "-C", dir, ...args], { env: withoutRepoEnv(), stdout: "pipe", stderr: "ignore" });
   return result.exitCode === 0 ? result.stdout.toString().trim() : undefined;
 };
 
