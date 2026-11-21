@@ -250,10 +250,11 @@ any other grade but high, or a grade hedge cannot read; the lenses correctness:o
 Panel: grade high; the lenses fresh-eyes, correctness, risk, design, and anti-overengineering. --lens adds lenses to the tier's set, such as security, ui, systems, or a
 Team perspective; it never removes one. The output and hedge proof show name the tier and why. An unfinished panel
 runs again with the lenses it started with when you pass no --lens.
---single, --scope fixes, and --scope final reserve a review round and run one reviewer yourself, read-only, from the model table of your AI plan: the review
+--single, --scope fixes, and --scope final reserve a review round and run one reviewer yourself from the model table of your AI plan: the review
 row for a PR that Claude wrote, and the review-codex row for a PR that Codex wrote when the table has one, else the
 review row. On the both plan that reviewer is the family that did not write the PR; on a single plan it is a fresh
-session of that provider. hedge builds the prompt from the diff, the PR title and description, and the coding
+session of that provider. A Claude reviewer gets only the Read, Grep, and Glob tools. A Codex reviewer runs without the
+Codex sandbox, which cannot start where Linux refuses user namespaces, and its prompt tells it to work read-only. hedge builds the prompt from the diff, the PR title and description, and the coding
 standards in ~/.agents/guides/coding-standards.md, and saves the reviewer's answer as the findings. hedge checks each
 finding's anchor against the diff and prints the result after the findings; it keeps it apart, in anchors.md. Answer them with hedge proof respond. Scope and --base work as for
 review-start. When the reviewer gives no answer, the round stays reserved and the next hedge proof review on the same
@@ -443,7 +444,7 @@ an earlier commit of the PR, and single-parent commits that only change, add, or
 files with an unchanged mode. A mode change, a symlink, a comment, a file in a test folder, or a test
 file whose name other code holds, such as an import of limits.test.ts, needs a review. The gate then prints "final read carried from <sha>: test-only delta" or "revert of a PR commit", and the receipt in
 carried/<HEAD>.json names the quiet commits and the reason. Evidence does not carry across quiet commits.
-When those checks pass, the judge runs read-only on the reviewer's row of the model table, as hedge proof review
+When those checks pass, the judge runs on the reviewer's row of the model table, with that reviewer's tools, as hedge proof review
 picks it. hedge hands it the diff from the merge base, CI, the owed kinds, the counted evidence, every review's
 findings and responses, and the coding standards in ~/.agents/guides/coding-standards.md. It answers four questions:
 does the evidence prove HEAD, do the owed kinds fit the diff, does the review hold, and how good is the code. A finding
