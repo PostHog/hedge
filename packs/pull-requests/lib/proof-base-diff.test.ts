@@ -223,6 +223,8 @@ test("only remotes on the github.com host count as the repository", async () => 
     gitPlusSsh: "git+ssh://git@github.com/example/product.js.git",
     sshPlusGit: "ssh+git://git@github.com/example/product.js",
     upperCase: "HTTPS://GitHub.COM/Example/Product.JS.git",
+    www: "https://www.github.com/example/product.js",
+    otherSubdomain: "https://gist.github.com/example/product.js",
     httpsMirror: "https://mirror.example/github.com/example/product.js",
     sshMirror: "ssh://git@mirror.example/github.com/example/product.js.git",
     scpMirror: "git@mirror.example:github.com/example/product.js.git",
@@ -237,7 +239,7 @@ test("only remotes on the github.com host count as the repository", async () => 
   };
   for (const [name, url] of Object.entries(urls)) await pr.git("remote", "add", name, url);
 
-  expect(remotesOf("example/product.js", runIn(pr.repository, pr.env)).sort()).toEqual(["git", "gitPlusSsh", "https", "httpsGit", "httpsPassword", "httpsSlash", "httpsUser", "scp", "ssh", "sshPlusGit", "upperCase"]);
+  expect(remotesOf("example/product.js", runIn(pr.repository, pr.env)).sort()).toEqual(["git", "gitPlusSsh", "https", "httpsGit", "httpsPassword", "httpsSlash", "httpsUser", "scp", "ssh", "sshPlusGit", "upperCase", "www"]);
 });
 
 test("a checkout whose only remote of the repository is a mirror names the command that adds GitHub", async () => {
