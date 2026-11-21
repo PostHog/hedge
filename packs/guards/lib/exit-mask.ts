@@ -17,6 +17,7 @@ const plainWord = new RegExp(String.raw`^(?:[\w=:,./+%@-]|'[^'\\]*'|"(?:[^$\\"']
 const failingCode = /^(?:[1-9]\d?|1\d\d|2[0-4]\d|25[0-5])$/;
 const printsToTheAgent = /^(?:2>&1|1?>&2)$/;
 const shellChangers = new Set(["exec", "enable", "alias", "shopt", "function", "eval", "source", ".", "trap", "setopt", "unsetopt", "emulate"]);
+const traps = new Set(["trap"]);
 
 function gitSubcommandAt(args: string[]): number {
   for (let index = 0; index < args.length; index++) {
@@ -74,15 +75,19 @@ function depthsOf(commands: Command[]): number[] {
 function setting(program: Program, before: number, read: (args: string[]) => boolean | undefined): boolean {
   const { commands, depths } = program;
   let on = false;
+  let undoneLater = false;
   commands.slice(0, before).forEach((command, index) => {
-    if (command.name !== "set" || parens(command.scope) > 0) return;
+    if (parens(command.scope) > 0) return;
+    if (command.definesFunction || command.name === "function") undoneLater = true;
+    if (named(command, shellChangers)) on = false;
+    if (command.name !== "set") return;
     const alwaysRuns = depths[index] === 0 && command.keywords.length === 0 && !["|", "&&", "||"].includes(commands[index - 1]?.after ?? "");
     const value = read(command.args);
     const inForeground = () => command.after !== "|" && commands[listEnd(program, index, 0)].after !== "&";
     if (value === false) on = false;
     else if (value === true && alwaysRuns && command.redirects.length === 0 && inForeground()) on = true;
   });
-  return on && !changesTheShell(commands.slice(0, before), false);
+  return on && !undoneLater;
 }
 
 const setsOption = (option: string) => (args: string[]) => {
@@ -183,11 +188,13 @@ function reachOf(program: Program, start: number): Reach {
   return reportedBy(next, false) ?? { how: separatorName(after) };
 }
 
+const named = (command: Command, names: Set<string>) => [command.name, ...command.rawPrefix].some((word) => names.has(word));
 const setsIfs = (command: Command) => command.env.has("IFS") || command.rawArgs.some((raw) => raw.includes("IFS"));
+const readsUnquoted = (command: Command) => command.rawArgs.some((raw) => new RegExp(statusRead).test(raw.replace(/'[^']*'|"[^"]*"/g, "")));
+const inThisShell = (commands: Command[]) => commands.filter((command) => parens(command.scope) === 0);
 
-function changesTheShell(commands: Command[], splitting: boolean): boolean {
-  const changes = (command: Command) => command.definesFunction || shellChangers.has(command.name) || command.rawPrefix.some((word) => shellChangers.has(word)) || (splitting && setsIfs(command));
-  return commands.some((command) => parens(command.scope) === 0 && changes(command));
+function changesHowItPrints(commands: Command[], reporter: Command): boolean {
+  return inThisShell(commands).some((command) => command.definesFunction || named(command, shellChangers) || (readsUnquoted(reporter) && setsIfs(command)));
 }
 
 function hiddenIn(text: string, nesting: number): { found?: Finding; carries?: string } {
@@ -214,10 +221,11 @@ function hiddenIn(text: string, nesting: number): { found?: Finding; carries?: s
   for (const [index, command] of commands.entries()) {
     const what = guarded[index];
     if (!what || command.tested) continue;
+    if (inThisShell(commands.slice(0, index)).some((each) => named(each, traps))) return { found: { what, how: "a `trap` earlier in the call" } };
     const reach = reachOf(program, index);
     if (reach !== "exit" && "how" in reach) return { found: { what, how: reach.how } };
     if (reach !== "exit" && nesting > 0) return { found: { what, how: "the nested shell or `$(…)` that prints it" } };
-    if (reach !== "exit" && changesTheShell(commands.slice(0, reach.printedBy), true)) return { found: { what, how: "a command earlier in the call that changes how the shell prints, such as `exec >`," } };
+    if (reach !== "exit" && changesHowItPrints(commands.slice(0, reach.printedBy), commands[reach.printedBy])) return { found: { what, how: "a command earlier in the call that changes how the shell prints, such as `exec >`," } };
     carries ??= what;
   }
   return { carries };
