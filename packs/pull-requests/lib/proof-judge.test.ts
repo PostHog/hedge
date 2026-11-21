@@ -373,6 +373,24 @@ test("once the judge budget is spent, a standing rule's condition that no judge 
   expect(spent.output).not.toContain("hedge decision void");
 });
 
+test("after an upgrade, the failing verdicts the previous engine saved on a PR count toward the judge cap, so the first gate that would ask the judge again stops", async () => {
+  const pr = await checkout();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.reviewCeiling": 3 });
+  const head = await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  const judge = fakeModel(pr, "JUDGE", verdict());
+  const saved = join(pr.pullRequest, "judge");
+  mkdirSync(saved, { recursive: true });
+  for (const name of ["first", "second", "third"]) writeFileSync(join(saved, `${name}.json`), JSON.stringify({ commit: head, model: "judge-under-test", verdict: JSON.parse(verdict({ owed: { verdict: "fail", reason: `the ${name} run of the previous engine`, citations: [] } })), passed: false, judgedAt: "2026-10-24T12:00:00.000Z" }) + "\n");
+
+  const gate = await pr.hedge("gate");
+
+  expect(gate.code).toBe(1);
+  expect(gate.output).toContain("judge: budget spent: the judge failed 3 times on this PR");
+  expect(judge.prompts()).toEqual([]);
+});
+
 test("while one gate asks the judge of a PR, a second gate of that PR with other judge inputs asks no judge and says which command holds the judge lock", async () => {
   const pr = await checkout();
   pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.reviewCeiling": 1 });
