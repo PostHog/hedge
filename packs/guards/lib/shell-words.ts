@@ -16,6 +16,7 @@ export type Command = {
   bare: string[];
   rawArgs: string[];
   rawPrefix: string[];
+  prefix: string[];
   definesFunction?: true;
   keywords: string[];
   processSubstitutions: string[];
@@ -461,7 +462,8 @@ export function parse(program: string, context: Context = { env: new Map(), inLo
     const bare = kept.slice(index).map((word) => word.bare);
     const rawArgs = kept.slice(index + 1).map((word) => word.raw);
     const rawPrefix = kept.slice(0, index).map((word) => word.raw);
-    pipeline.push({ name, args, env: commandEnv, substitutions, leadingSubstitutions, argSubstitutions, stdin, outputs, writes, redirects, bare, rawArgs, rawPrefix, keywords: stripped, processSubstitutions: words.flatMap((word) => word.processes), inLoop, tested, ...(after && { after }), scope, chdir });
+    const prefix = kept.slice(0, index).map((word) => basename(word.text));
+    pipeline.push({ name, args, env: commandEnv, substitutions, leadingSubstitutions, argSubstitutions, stdin, outputs, writes, redirects, bare, rawArgs, rawPrefix, prefix, keywords: stripped, processSubstitutions: words.flatMap((word) => word.processes), inLoop, tested, ...(after && { after }), scope, chdir });
     words = [];
     stdin = undefined;
   };
