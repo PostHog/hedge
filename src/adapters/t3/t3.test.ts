@@ -549,8 +549,10 @@ describe("T3 provider instances", () => {
     expect(failed.findings).toContainEqual({ id: "t3:settings", pack: "engine", say: "T3 Code did not take providerInstances.muse. Run hedge apply again; if it stays, set it in T3 Code's settings.", repair: "apply" });
     expect(failed.findings).toContainEqual(expect.objectContaining({ id: "t3:server", say: expect.stringContaining("write-managed-setting providerInstances.muse") }));
     server.state.refuseInstances = [];
-    const retried = await apply(plan("linux", [agy, muse]), { home, adapters: [adapter] });
-    expect(retried).toMatchObject({ ok: true, actions: [{ target: "t3 settings", operation: "replace", reason: "set providerInstances.muse" }], findings: [] });
+    const moved = entry("providerInstances.antigravity", { driver: "antigravity", enabled: true, config: { binaryPath: "~/.local/bin/agy2" } }, "agents");
+    const retried = await apply(plan("linux", [moved, muse]), { home, adapters: [adapter] });
+    expect(retried).toMatchObject({ ok: true, actions: [{ target: "t3 settings", operation: "replace", reason: "set providerInstances.antigravity, providerInstances.muse" }], findings: [] });
+    expect(instancesOf(server)).toEqual({ antigravity: instance(home, "antigravity", "agy2"), muse: instance(home, "muse", "muse") });
   });
 
   test("owns an instance T3 acknowledged though the connection closes before Hedge reads it back, and fails the apply", async () => {

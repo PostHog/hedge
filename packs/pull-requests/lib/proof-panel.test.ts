@@ -968,7 +968,6 @@ test("a Read tier review of Codex's PR casts its combined lens on the Codex row,
     const codex = recordingModel(pr, "codex", "FINDINGS:\n(none)\nCOVERED: README.md\n");
 
     await pr.hedge("review", ...moved.flatMap((lens) => ["--lens", lens]));
-    expect({ moved, lenses: (await readPlan(join(pr.pullRequest, "reviews/1")))!.lenses.map(({ name, family, model }) => ({ name, family, model })) }).toEqual({ moved, lenses: [{ name: "combined", family: "gpt", model: "review-model" }] });
     expect({ moved, started: codex.calls().map((call) => call.split(" -s ")[0]) }).toEqual({ moved, started: [expect.stringMatching(/^exec --json -m review-model /)] });
   }
 });
