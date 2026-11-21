@@ -7,13 +7,13 @@ import type { CommandRunner } from "../run.ts";
 import type { ModelSelection, T3Rpc, T3Server } from "./port.ts";
 import { readT3Settings } from "./settings.ts";
 
-const instances = { claude: { instanceId: "claudeAgent", effort: "effort" }, codex: { instanceId: "codex", effort: "reasoningEffort" } } as const;
+const instances = new Map([["claude", { instanceId: "claudeAgent", effort: "effort" }], ["codex", { instanceId: "codex", effort: "reasoningEffort" }]]);
 
 export function modelSelection(models: ModelRow[], role: string): ModelSelection | undefined {
   const row = models.find((item) => item.role === role);
   if (!row) return undefined;
-  const instance = instances[row.provider];
-  return { instanceId: instance.instanceId, model: row.model, options: [{ id: instance.effort, value: row.effort }] };
+  const instance = instances.get(row.provider);
+  return { instanceId: instance?.instanceId ?? row.provider, model: row.model, ...(instance ? { options: [{ id: instance.effort, value: row.effort }] } : {}) };
 }
 
 export type ShellProject = { id: string; workspaceRoot: string; deletedAt?: string | null };

@@ -4,7 +4,7 @@ import { T3Refusal, type T3Client } from "./session.ts";
 
 export type ThreadLaunch = { title: string; prompt: string; row: ModelRow; commandId?: string };
 
-const instances = { claude: { instanceId: "claudeAgent", effort: "effort" }, codex: { instanceId: "codex", effort: "reasoningEffort" } } as const;
+const instances = new Map([["claude", { instanceId: "claudeAgent", effort: "effort" }], ["codex", { instanceId: "codex", effort: "reasoningEffort" }]]);
 const launchTimeoutMs = 120_000;
 
 export class UnansweredLaunch extends Error {}
@@ -21,14 +21,16 @@ async function offeredTier(client: Pick<T3Client, "call">, instanceId: string, r
 
 export async function launchScratchThread(client: Pick<T3Client, "call">, launch: ThreadLaunch): Promise<string> {
   const { projectId } = await client.call<{ projectId: string }>("projects.ensureScratch", {});
-  const instance = instances[launch.row.provider];
-  const tier = await offeredTier(client, instance.instanceId, launch.row);
+  const instance = instances.get(launch.row.provider);
+  const instanceId = instance?.instanceId ?? launch.row.provider;
+  const tier = await offeredTier(client, instanceId, launch.row);
+  const options = [...(instance ? [{ id: instance.effort, value: launch.row.effort }] : []), ...(tier ? [{ id: "serviceTier", value: tier }] : [])];
   const { threadId } = await client.call<{ threadId: string }>("orchestration.launchThread", {
     commandId: launch.commandId ?? randomUUID(),
     projectId,
     title: launch.title,
     generateTitle: false,
-    modelSelection: { instanceId: instance.instanceId, model: launch.row.model, options: [{ id: instance.effort, value: launch.row.effort }, ...(tier ? [{ id: "serviceTier", value: tier }] : [])] },
+    modelSelection: { instanceId, model: launch.row.model, ...(options.length ? { options } : {}) },
     runtimeMode: "full-access",
     interactionMode: "default",
     workspaceStrategy: { type: "root" },

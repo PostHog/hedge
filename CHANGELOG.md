@@ -17,6 +17,55 @@
   when the guard can read the target thread, agents still cannot settle or
   snooze a pinned thread, and may snooze an unpinned one when asked.
 
+### A model row takes any T3 provider
+
+- The `provider` of a model table row is the id of a T3 provider instance,
+  such as `antigravity`. `claude` and `codex` still mean T3's `claudeAgent`
+  and `codex` instances, and a row names Claude as `claude`, never as
+  `claudeAgent`. T3 threads and tasks start on the instance as it is
+  named, with no effort option, because Hedge knows the effort option of
+  Claude and Codex only.
+- `hedge proof` and `hedge dream` run their models with the claude or codex
+  CLI. A row of another provider fails there with a sentence that names the
+  row, and counts as neither the Claude nor the GPT family.
+
+### Packs and profiles turn on T3 provider instances
+
+- A `t3` config entry whose key is `providerInstances.<id>` turns on one T3
+  provider instance, such as `antigravity` or `muse`. Its value holds the
+  `driver`, `enabled`, and an optional `config` with a `binaryPath`. A
+  `binaryPath` that starts with `~/` is under the user's home. T3 Code does
+  the install and the sign-in of the provider, or a human step of the pack
+  does.
+- Hedge sends each instance to T3 Code as one upsert when T3 does not hold
+  the declared value: a new instance, a changed declaration of an instance
+  Hedge set, or an instance the user hands over with `--adopt`. It never
+  touches an instance the profile does not
+  declare, such as the `claudeAgent` instance that recovery binds, or one it
+  declared before. Removing an entry leaves the instance as it is in T3; turn
+  it off in T3 Code's settings.
+- A pack that declared the whole `providerInstances` key must move to one
+  `providerInstances.<id>` entry per instance: Hedge refuses the whole key,
+  and never removes the map that an older engine recorded. After the move,
+  Hedge keeps each instance of that map as the user's until
+  `hedge apply --adopt .t3/userdata/settings.json`.
+- An instance id, its driver, and a model row's provider follow T3's slug
+  rule: a letter, then letters, digits, `-` or `_`, 64 at most. The names
+  `constructor`, `prototype` and `__proto__` are refused. The ids
+  `claudeAgent`, `claude` and `codex` and the driver `claudeAgent` are
+  refused: model rows and Claude recovery own them.
+- An instance holds only `driver`, `enabled` and `config`, and its `config`
+  only a filled `binaryPath`, because T3 rewrites or redacts the other fields
+  when it stores or serves the instance.
+- Hedge compares the whole instance. A field the pack drops leaves the
+  instance, and a field the user adds is kept and reported as drift.
+- When T3 refuses an upsert, `hedge apply` fails, reads T3's settings again,
+  and reports and saves as Hedge's only what that read shows. When that read
+  fails too, Hedge keeps each upsert T3 acknowledged as its own, and says it
+  could not read them back.
+- Claude recovery binds T3's implicit `claudeAgent` instance also when the
+  settings list only other instances.
+
 ### A final read never reads nothing
 
 - `hedge proof review --scope final` refuses a final read when the commits

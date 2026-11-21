@@ -345,6 +345,11 @@ test("recheck finding 4: findings.md and the run name only a fixed failure categ
   expect(readFileSync(join(run, "findings.md"), "utf8")).not.toContain("AnalystError");
 });
 
+test("an analyst row of a T3 provider that has no CLI here is refused with a sentence that names the row", () => {
+  const row: ModelRow = { ...lookup("claude"), provider: "antigravity", model: "gemini-4-neon" };
+  expect(() => modelAnalyst(row, hubHome(), {}, async () => ({ code: 0, stdout: "" }))).toThrow("hedge dream runs its models with the claude or codex CLI, and the lookup row names provider antigravity. Give that row a Claude or Codex model.");
+});
+
 test("recheck finding 4: a Codex analyst with no answer file fails as a bad answer", async () => {
   const analyst = modelAnalyst(lookup("codex"), hubHome(), {}, async () => ({ code: 0, stdout: "" }));
   await expect(analyst(digest(), "# index", temp.make("hedge-dream-run-"))).rejects.toThrow("bad answer");

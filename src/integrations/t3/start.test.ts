@@ -57,6 +57,14 @@ test("the model role starts the thread with that row's provider, model, and effo
   expect(stub.threads).toEqual([{ id: "thread-1", title: request.title, prompt: request.prompt, modelSelection: { instanceId: "codex", model: "gpt-small", options: [{ id: "reasoningEffort", value: "medium" }] } }]);
 });
 
+test("a row of another T3 provider starts the thread on that instance, and an availability report never refuses it", async () => {
+  const stub = await t3();
+  writeReport(stub.home, { claude: "exhausted", codex: "exhausted" });
+  const rows: ModelRow[] = [{ role: "survey", work: "Surveys", provider: "antigravity", model: "gemini-4-neon", effort: "high" }];
+  await t3Threads(rows, { home: stub.home }).start({ ...request, key: "k", modelRole: "survey" });
+  expect(stub.threads[0]!.modelSelection).toEqual({ instanceId: "antigravity", model: "gemini-4-neon" });
+});
+
 test("a row's service tier starts the thread on it when T3 offers it for the model, and on the standard tier otherwise", async () => {
   const offered = (tiers: string[]) => ({ providers: [{ instanceId: "codex", models: [{ slug: "gpt-small", capabilities: { optionDescriptors: [{ id: "reasoningEffort" }, { id: "serviceTier", options: tiers.map((id) => ({ id })) }] } }] }] });
   const rows: ModelRow[] = [{ role: "incident", work: "Incidents", provider: "codex", model: "gpt-small", effort: "high", serviceTier: "ultrafast" }];

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { leanClaude, type ModelRow } from "../../../base/lib/models.ts";
+import { cliRow, leanClaude, type ModelRow } from "../../../base/lib/models.ts";
 import type { Env } from "../../../hub/lib/coder.ts";
 import { memoryCheckout, stateDir, type Digest } from "./digest.ts";
 import { recordRuns } from "./scorecard.ts";
@@ -128,6 +128,8 @@ function answerIn<T>(read: () => T | undefined): T {
 export type Ask<T> = (input: string, cwd: string) => Promise<T>;
 
 export function modelAsk<T>(row: ModelRow, home: string, env: Env, spawn: Spawn, prompt: string, schema: object): Ask<T> {
+  const refused = cliRow(row, "hedge dream runs its models");
+  if (refused) throw new Error(refused);
   return async (input, cwd) => {
     if (row.provider === "claude") {
       const lean = leanClaude(analystCommand(row, cwd, prompt, schema), home, env);
