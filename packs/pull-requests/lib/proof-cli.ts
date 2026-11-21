@@ -8,7 +8,7 @@ import { HubUnreachable, keptOwed, refText, usersAcceptance, thisMachine, type D
 import { autonomyOf, gradeOf, type Autonomy, type Grade } from "./proof-autonomy.ts";
 import { readComment, readPullRequest, runIn } from "./pr-ci.ts";
 import { isCommitSha } from "./proof-end-table.ts";
-import { askModel, family, familyOf, isQuotaExhausted, modelLabel, quotaExitCode, readRubric, reviewerRow, sessionFamily, skillReferences, type Family } from "./proof-models.ts";
+import { askModel, family, isQuotaExhausted, otherFamily, modelLabel, quotaExitCode, readRubric, reviewerRow, sessionFamily, skillReferences, type Family } from "./proof-models.ts";
 import { runProof, type RunIO } from "./proof-run.ts";
 import { combinedLens, parseGuide, lensBrief, lensIdle, lensLog, panelGuideText, panelLines, publishPanel, readPanelGuide, readPlan, recordWorker, requeueFailed, resolveLens, runLens, stagedPlan, stagePanel, waitForPanel, withRoundLock, withSlot, lockNewRound, processStart, roundLock, RoundBusy, RoundGone, type Lens, type LockOwner, type PanelGuide, type PanelIO, type Plan, type RoundLock, type StartTime } from "./proof-panel.ts";
 import { evalsPath, promptTemplateHash, readRuns, reportLines, saveRun, scoreCases, type EvalIO } from "./proof-eval.ts";
@@ -625,7 +625,7 @@ async function askReviewer(reserved: SingleRound, head: ProofIdentity, author: F
   await writeFile(diffFile, diff, { mode: 0o600 });
   const guide = reserved.round === "final" && (reserved.phase ?? "review") === "review" ? await panelGuideText(home) : undefined;
   const lens = guide && parseGuide(guide.text, guide.path).lenses.get("correctness")?.text;
-  const prompt = reviewPrompt({ scope: reserved.scope, from, commit: head.commit, diff, diffFile, note: leftOutNote(leftOut), crossFamily: familyOf(row) !== author, title: pr.title, body: pr.body, rubric, references: skillReferences(home), reviewRules: rules, lens });
+  const prompt = reviewPrompt({ scope: reserved.scope, from, commit: head.commit, diff, diffFile, note: leftOutNote(leftOut), crossFamily: otherFamily(row, author), title: pr.title, body: pr.body, rubric, references: skillReferences(home), reviewRules: rules, lens });
   const answer = await askModel("reviewer", row, { prompt, cwd: topLevel(run) ?? cwd, readable: [join(home, ".agents/skills"), reserved.directory] }, env, limit);
   const label = reserved.round === "final" ? "The final read" : `Round ${reserved.round}`;
   if (!answer.ok) {
@@ -930,7 +930,7 @@ async function runEval(options: Map<string, string>, lists: Map<string, string[]
   };
   const io: EvalIO = {
     checkoutOf: checkoutsOf(lists.get("--checkout") ?? [], context), runIn: (cwd) => runIn(cwd, env),
-    crossFamily: async (miss) => { const { author, row } = await reviewerOf(miss); return familyOf(row) !== author; },
+    crossFamily: async (miss) => { const { author, row } = await reviewerOf(miss); return otherFamily(row, author); },
     review: async (miss, prompt, cwd, readable, slot) => askModel("reviewer", (await reviewerOf(miss)).row, { prompt, cwd, readable: [join(home, ".agents/skills"), readable], started: slot.recordReviewer }, env, reviewLimitMs),
     judge: (prompt, slot) => askModel("eval-judge", judgeRow, { prompt, cwd: tmpdir(), started: slot.recordReviewer }, env, evalJudgeLimit),
     slot: (work) => withSlot(panelIO(context), work), rubric, references,

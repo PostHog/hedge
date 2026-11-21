@@ -3,9 +3,16 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelRow } from "../../base/lib/models.ts";
-import { askModel, type Role } from "./proof-models.ts";
+import { askModel, sameFamilyRow, type Role } from "./proof-models.ts";
 
 const row: ModelRow = { role: "review", work: "Review", provider: "claude", model: "review-model", effort: "high" };
+
+test("a row of a T3 provider that has no CLI here fails with a cause that names the row", async () => {
+  const neon = { ...row, provider: "antigravity", model: "gemini-4-neon" };
+  expect(await askModel("reviewer", neon, { prompt: "Review it", cwd: tmpdir() }, { PATH: process.env.PATH }, 10_000)).toEqual({
+    ok: false, cause: "hedge proof runs its models with the claude or codex CLI, and the review row names provider antigravity. Give that row a Claude or Codex model.", model: "gemini-4-neon",
+  });
+});
 
 test.each<[Role, string]>([["judge", "HEDGE_PROOF_JUDGE"], ["reviewer", "HEDGE_PROOF_REVIEWER"], ["arbiter", "HEDGE_REVIEW_ARBITER"], ["eval-judge", "HEDGE_PROOF_EVAL_JUDGE"]])(
   "a %s session starts without the lane's T3 thread id, and the lane keeps it",
@@ -44,4 +51,10 @@ console.log(JSON.stringify({ type: "result", is_error: false, result: JSON.strin
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a GPT review lens takes the Codex reviewer row, not a row of another T3 provider listed first", () => {
+  const antigravity: ModelRow = { role: "review", work: "Review", provider: "antigravity", model: "gemini-4-neon", effort: "high" };
+  const codex: ModelRow = { role: "review-codex", work: "Review Claude's code", provider: "codex", model: "gpt-6.2", effort: "high" };
+  expect(sameFamilyRow("gpt", { HEDGE_MODELS: JSON.stringify([antigravity, codex]) })).toEqual(codex);
 });

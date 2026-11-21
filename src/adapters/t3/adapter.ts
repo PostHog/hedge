@@ -73,6 +73,7 @@ export function t3Adapter(options: T3Options = {}): T3Adapter {
 function merge(into: AdapterResult, from: AdapterResult) {
   into.actions.push(...from.actions);
   into.findings.push(...from.findings);
+  if (from.failed) into.failed = true;
 }
 
 type Owner = { who: string; off: string };

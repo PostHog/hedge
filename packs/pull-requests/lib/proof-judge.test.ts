@@ -534,3 +534,14 @@ test("stripping receipts never changes the merge-risk callout or tier the ledger
   expect(withoutReceipt(bodies[0]!)).toBe(`## Testing\n\n${callout("**Tier:** critical (b)")}`);
   expect(withoutReceipt(bodies[6]!)).toBe(`## Testing\n\n${callout("**Tier:** non-critical")}`);
 });
+
+test("a judge command over a review row of another T3 provider does not claim to judge from the other family", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHeadFixed(pr, "feature.txt:1", "greet new members");
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  pr.env.HEDGE_MODELS = JSON.stringify([lookup, { role: "review", work: "Review code", provider: "antigravity", model: "gemini-4-neon", effort: "high" }]);
+  const judge = fakeModel(pr, "JUDGE", verdict());
+  expect((await pr.hedge("gate")).code).toBe(0);
+  expect(judge.prompts().at(-1)).toContain("You judge it in a fresh session, apart from the session that wrote it");
+});

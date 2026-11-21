@@ -62,6 +62,6 @@ export async function claudeWrapperCommand(args: string[], context: ClaudeWrappe
 }
 
 function claudeInstances(instances: Record<string, ProviderInstance>): [string, ProviderInstance][] {
-  const listed = Object.keys(instances).length ? instances : { claudeAgent: { driver: "claudeAgent" } };
+  const listed = Object.hasOwn(instances, "claudeAgent") ? instances : { ...instances, claudeAgent: { driver: "claudeAgent" } };
   return Object.entries(listed).filter(([, instance]) => instance.driver === "claudeAgent" && instance.enabled !== false);
 }

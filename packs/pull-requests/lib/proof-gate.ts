@@ -15,7 +15,7 @@ import { autonomyOf } from "./proof-autonomy.ts";
 import { readSanity } from "./proof-sanity.ts";
 import { inputsDigest, readBloat } from "./proof-bloat.ts";
 import { judge, readCriticalPaths, type JudgeInput } from "./proof-judge.ts";
-import { askModel, familyOf, modelLabel, readRiskRubric, readRubric, reviewerRow, skillReferences } from "./proof-models.ts";
+import { askModel, modelLabel, otherFamily, readRiskRubric, readRubric, reviewerRow, skillReferences } from "./proof-models.ts";
 
 export type GateContext = { home: string; cwd: string; env: Env; run: Run; now?: () => Date; ssh?: Ssh };
 export type FinalGate = { code: number; reason: string; lines: string[]; verdict: string; summary: ProofSummary };
@@ -145,7 +145,7 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: GateCon
   const weighedGap = await judgeGap(home, head, today, checked.decisions, checked.tier);
   const known = {
     risk: riskRubric === undefined ? undefined : { rubric: riskRubric, body: pullRequestDetails(head, run).body },
-    commit: head.commit, crossFamily: familyOf(row) !== author, ci: checked.ci, owed: checked.owed!, ledger: checked.lines,
+    commit: head.commit, crossFamily: otherFamily(row, author), ci: checked.ci, owed: checked.owed!, ledger: checked.lines,
     evidence: checked.evidence, reviews: await reviewRecords(home, head), rubric: await readRubric(home), references: skillReferences(home),
     conditions: [...checked.conditions, ...weighedGap?.condition ? [weighedGap.condition] : []], criticalPaths: await readCriticalPaths(home, head.repository, env),
   };

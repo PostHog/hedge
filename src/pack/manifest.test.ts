@@ -93,6 +93,52 @@ describe("loadPacks", () => {
     expect(loadPacks(sourceWith({ base: { ...base, config: [{ provider: "claude", key: "a", value: 1, unless: "bridge" }] } }))).rejects.toThrow("config a: unless must list workflow ids");
   });
 
+  test("accepts a T3 provider instance by its id, and refuses the whole map, a malformed instance, and the claudeAgent instance that recovery binds", async () => {
+    const instance = (key: string, value: unknown) => [{ provider: "t3" as const, key, value }];
+    const agy = { driver: "antigravity", enabled: true, config: { binaryPath: "~/.local/bin/agy" } };
+    const [pack] = await loadPacks(sourceWith({ base: { ...base, config: instance("providerInstances.antigravity", agy) } }));
+    expect(pack!.manifest.config).toEqual(instance("providerInstances.antigravity", agy));
+    const longest = instance(`providerInstances.${"a".repeat(64)}`, { ...agy, driver: "d".repeat(64) });
+    expect((await loadPacks(sourceWith({ base: { ...base, config: longest } })))[0]!.manifest.config).toEqual(longest);
+    const cases: Array<[unknown[], string]> = [
+      [instance("providerInstances", { antigravity: agy }), "config providerInstances: a T3 provider instance key names one instance, such as providerInstances.<id>"],
+      [instance("providerInstances.agy cli", agy), "config providerInstances.agy cli: a T3 provider instance key names one instance, such as providerInstances.<id>"],
+      [instance("providerInstances.claudeAgent", { driver: "claudeAgent", enabled: true }), "config providerInstances.claudeAgent: Hedge's Claude recovery binds the claudeAgent instance, so give this instance another id"],
+      [instance("providerInstances.antigravity", { driver: "antigravity" }), 'config providerInstances.antigravity: a T3 provider instance needs a driver and enabled, such as { "driver": "antigravity", "enabled": true }'],
+      [instance("providerInstances.antigravity", { driver: "", enabled: true }), "a T3 provider instance needs a driver and enabled"],
+      [instance("providerInstances.antigravity", { ...agy, config: { binaryPath: 3 } }), "config providerInstances.antigravity: config must be an object, and its binaryPath a path"],
+      [instance(`providerInstances.${"a".repeat(65)}`, agy), "a T3 provider instance key names one instance, such as providerInstances.<id>"],
+      [instance("providerInstances.constructor", agy), "config providerInstances.constructor: a T3 provider instance key names one instance, such as providerInstances.<id>"],
+      [instance("providerInstances.prototype", agy), "config providerInstances.prototype: a T3 provider instance key names one instance"],
+      [instance("providerInstances.antigravity", { ...agy, driver: "agy cli" }), "config providerInstances.antigravity: a T3 provider instance needs a driver and enabled"],
+      [instance("providerInstances.antigravity", { ...agy, driver: "a".repeat(65) }), "config providerInstances.antigravity: a T3 provider instance needs a driver and enabled"],
+    ];
+    for (const [config, message] of cases) await expect(loadPacks(sourceWith({ base: { ...base, config } }))).rejects.toThrow(message);
+  });
+
+  test("refuses a T3 provider instance that T3 would rewrite, that drives Claude, or whose id a model row means for Claude or Codex", async () => {
+    const instance = (key: string, value: unknown) => [{ provider: "t3" as const, key, value }];
+    const agy = { driver: "antigravity", enabled: true, config: { binaryPath: "~/.local/bin/agy" } };
+    const cases: Array<[unknown[], string]> = [
+      [instance("providerInstances.antigravity", { ...agy, config: { ...agy.config, enabled: false } }), "config providerInstances.antigravity: a T3 provider instance holds only driver, enabled and config, and its config only binaryPath"],
+      [instance("providerInstances.antigravity", { ...agy, displayName: "Antigravity" }), "config providerInstances.antigravity: a T3 provider instance holds only driver, enabled and config, and its config only binaryPath"],
+      [instance("providerInstances.antigravity", { ...agy, environment: [] }), "config providerInstances.antigravity: a T3 provider instance holds only driver, enabled and config"],
+      [instance("providerInstances.antigravity", { ...agy, config: { ...agy.config, apiKey: { provider: "vault", name: "agy" } } }), "config providerInstances.antigravity: a T3 provider instance holds only driver, enabled and config, and its config only binaryPath"],
+      [instance("providerInstances.antigravity", { ...agy, config: { gcpProject: "p" } }), "config providerInstances.antigravity: a T3 provider instance holds only driver, enabled and config, and its config only binaryPath"],
+      [instance("providerInstances.myClaude", { driver: "claudeAgent", enabled: true }), "config providerInstances.myClaude: Hedge's Claude recovery owns Claude in T3, so a pack instance takes another driver than claudeAgent"],
+      [instance("providerInstances.claude", agy), "config providerInstances.claude: a model row's provider claude or codex always means T3's claudeAgent or codex instance, so give this instance another id"],
+      [instance("providerInstances.codex", agy), "config providerInstances.codex: a model row's provider claude or codex always means T3's claudeAgent or codex instance, so give this instance another id"],
+    ];
+    for (const [config, message] of cases) await expect(loadPacks(sourceWith({ base: { ...base, config } }))).rejects.toThrow(message);
+  });
+
+  test("accepts a model row of any T3 provider instance", async () => {
+    const neon = { role: "survey", work: "Read docs", provider: "antigravity", model: "gemini-4-neon", effort: "high" as const };
+    expect((await loadPacks(sourceWith({ base: { ...base, models: { claude: [neon] } } })))[0]?.manifest.models).toEqual({ claude: [neon] });
+    const longest = { ...neon, provider: "p".repeat(64) };
+    expect((await loadPacks(sourceWith({ base: { ...base, models: { claude: [longest] } } })))[0]?.manifest.models).toEqual({ claude: [longest] });
+  });
+
   test("rejects a workflow need outside the closed set", async () => {
     const workflows = [{ ...base.workflows[0], needs: ["laptop"] }];
     expect(loadPacks(sourceWith({ base: { ...base, workflows } }))).rejects.toThrow("workflow heavy has unknown need laptop");
@@ -243,6 +289,10 @@ describe("loadPacks", () => {
       [{ models: { gemini: [] } }, "models must map claude, codex, or both to rows"],
       [{ models: { claude: [{ role: "review", work: "Review", provider: "claude", model: "m", effort: "huge" }] } }, "each row needs a role, work"],
       [{ models: { claude: [row, row] } }, "models claude: role review is listed twice"],
+      [{ models: { claude: [{ ...row, provider: "" }] } }, "models claude: each row needs a role, work, a provider that names a T3 provider instance, a model, and an effort"],
+      [{ models: { claude: [{ ...row, provider: "gemini cli" }] } }, "each row needs a role, work, a provider that names a T3 provider instance"],
+      [{ models: { claude: [{ ...row, provider: "a".repeat(65) }] } }, "each row needs a role, work, a provider that names a T3 provider instance"],
+      [{ models: { claude: [{ ...row, provider: "constructor" }] } }, "each row needs a role, work, a provider that names a T3 provider instance"],
     ];
     for (const [fields, message] of cases) {
       expect(loadPacks(sourceWith({ base: { ...base, ...fields } }))).rejects.toThrow(message);

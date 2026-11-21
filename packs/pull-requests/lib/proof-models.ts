@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { leanClaude, modelFor, modelSessionEnv, modelTable, type ModelRow } from "../../base/lib/models.ts";
+import { cliRow, leanClaude, modelFor, modelSessionEnv, modelTable, type ModelRow } from "../../base/lib/models.ts";
 import { quotaGraceMs, quotaWatch } from "../../base/lib/quota.ts";
 
 export const families = ["claude", "gpt"] as const;
@@ -17,7 +17,9 @@ export function sessionFamily(env: Record<string, string | undefined>): Family |
   return claude === gpt ? undefined : claude ? "claude" : "gpt";
 }
 
-export const familyOf = (row: ModelRow): Family => row.provider === "claude" ? "claude" : "gpt";
+export const familyOf = (row: ModelRow): Family | undefined => row.provider === "claude" ? "claude" : row.provider === "codex" ? "gpt" : undefined;
+
+export const otherFamily = (row: ModelRow, author: Family) => familyOf(row) !== undefined && familyOf(row) !== author;
 
 export function reviewerRow(author: Family, env: Record<string, string | undefined>) {
   const codexReviewer = author === "gpt" ? modelTable(env).find((row) => row.role === "review-codex") : undefined;
@@ -53,6 +55,8 @@ export async function askModel(role: Role, row: ModelRow, request: ModelRequest,
   const prefix = prefixOf(role);
   const replacement = env[prefix];
   const model = modelLabel(role, row, env, pinned);
+  const refused = replacement ? undefined : cliRow(row, "hedge proof runs its models");
+  if (refused) return { ok: false, cause: refused, model };
   const timeout = Number(env[`${prefix}_TIMEOUT_MS`]) || limit;
   const scratch = await mkdtemp(join(tmpdir(), "hedge-proof-model-"));
   try {

@@ -18,7 +18,14 @@ test("reads the row of a role from the model table of the user's plan", () => {
 test("refuses a role the table lacks, a missing table, and a malformed row", () => {
   expect(() => modelFor("review-codex", env)).toThrow("the model table of your AI plan has no review-codex row");
   expect(() => modelFor("lookup", {})).toThrow("run this command as hedge <command>, so it gets your model table");
-  expect(() => modelTable({ HEDGE_MODELS: JSON.stringify([{ ...rows[0], provider: "gemini" }]) })).toThrow("HEDGE_MODELS holds a malformed row");
+  for (const provider of ["", "gemini cli", 3, "a".repeat(65), "constructor", "__proto__"]) expect(() => modelTable({ HEDGE_MODELS: JSON.stringify([{ ...rows[0], provider }]) })).toThrow("HEDGE_MODELS holds a malformed row");
+});
+
+test("reads a row of any T3 provider instance", () => {
+  const neon: ModelRow = { role: "survey", work: "Read docs", provider: "antigravity", model: "gemini-4-neon", effort: "high" };
+  expect(modelFor("survey", { HEDGE_MODELS: JSON.stringify([...rows, neon]) })).toEqual(neon);
+  const longest = { ...neon, provider: "p".repeat(64) };
+  expect(modelFor("survey", { HEDGE_MODELS: JSON.stringify([longest]) })).toEqual(longest);
 });
 
 test("an empty or relative CLAUDE_CONFIG_DIR never lets the checkout under review set a Claude reviewer's env or key helper", () => {

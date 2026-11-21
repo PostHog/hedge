@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync,
 import { join } from "node:path";
 import { cleanFixtures, settings, checkout, clean, verdict, fakeModel, recordingModel, fixture, stalledOnQuota, panelGuide, acceptGap, answerFixed, hubAt, exitedPid, productionMajor, reviewHead, reviewHeadFixed, models, type Checkout } from "./proof-testing.ts";
 import { askModel } from "./proof-models.ts";
-import { processStart, readPlan, withSlot, type PanelIO } from "./proof-panel.ts";
+import { combinedLens, processStart, readPlan, withSlot, type Lens, type PanelIO } from "./proof-panel.ts";
 
 afterEach(cleanFixtures);
 
@@ -954,4 +954,12 @@ test("a Security lane lens runs on the security row of the model table at its ef
   const security = (await readPlan(directory))!.lenses[0]!;
   expect([security.family, security.model, security.security]).toEqual(["claude", "candidate-model", undefined]);
   expect((await pr.hedge("review", "--wait")).code).toBe(0);
+});
+
+test("a combined review never casts a lens whose row has no model family, whichever order the lenses come in", () => {
+  const lens = (name: string, provider: string, family?: "gpt"): Lens => ({ name, title: name, ...(family ? { family } : {}), row: { role: "review", work: "Review", provider, model: `${provider}-model`, effort: "high" }, security: false, text: name, knowledge: "", context: true });
+  const risk = lens("risk", "antigravity");
+  const correctness = lens("correctness", "codex", "gpt");
+  expect(combinedLens([risk, correctness], "gpt").row.provider).toBe("codex");
+  expect(combinedLens([correctness, risk], "gpt").row.provider).toBe("codex");
 });

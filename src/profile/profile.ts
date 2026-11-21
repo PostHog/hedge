@@ -245,7 +245,7 @@ function checkProfile(file: Record<string, unknown>, path: string): ProfileFile 
     if (problem) fail(`overrides.config[${index}]: ${problem}`);
   });
   const models = isRecord(file.overrides) ? file.overrides.models : undefined;
-  if (models !== undefined && !(Array.isArray(models) && models.every(isModelRow))) fail("overrides.models must list rows with a role, work, a claude or codex provider, a model, and an effort");
+  if (models !== undefined && !(Array.isArray(models) && models.every(isModelRow))) fail("overrides.models must list rows with a role, work, a provider that names a T3 provider instance, a model, and an effort");
   return file as ProfileFile;
 }
 
