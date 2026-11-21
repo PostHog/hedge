@@ -3,6 +3,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { leanClaude, modelFor, modelSessionEnv, modelTable, type ModelRow } from "../../base/lib/models.ts";
 import { quotaGraceMs, quotaWatch } from "../../base/lib/quota.ts";
+import { secretKinds } from "../../base/hooks/secret-guard.ts";
 
 export const families = ["claude", "gpt"] as const;
 export type Family = (typeof families)[number];
@@ -54,6 +55,8 @@ export async function askModel(role: Role, row: ModelRow, request: ModelRequest,
   const replacement = env[prefix];
   const model = modelLabel(role, row, env, pinned);
   const timeout = Number(env[`${prefix}_TIMEOUT_MS`]) || limit;
+  const matched = secretKinds(request.prompt);
+  if (matched.length) return { ok: false, cause: `the secret guard matches this prompt: ${matched.join(", ")}`, model };
   const scratch = await mkdtemp(join(tmpdir(), "hedge-proof-model-"));
   try {
     const output = join(scratch, "answer.txt");
