@@ -2,7 +2,7 @@ import { basename } from "node:path";
 import { nestedProgramsAt, parse, type Command, type Scope } from "./shell-words.ts";
 
 type Finding = { what: string; how: string };
-type Reach = "exit" | "printed" | { how: string };
+type Reach = "exit" | { printedBy: number } | { how: string };
 type Program = { commands: Command[]; depths: number[] };
 
 const maxNesting = 8;
@@ -16,7 +16,7 @@ const statusRead = String.raw`\$(?:\?|\{\?\})`;
 const plainWord = new RegExp(String.raw`^(?:[\w=:,./+%@-]|'[^'\\]*'|"(?:[^$\\"']|${statusRead})*"|${statusRead})*$`);
 const failingCode = /^(?:[1-9]\d?|1\d\d|2[0-4]\d|25[0-5])$/;
 const printsToTheAgent = /^(?:2>&1|1?>&2)$/;
-const shellChangers = new Set(["exec", "enable", "alias", "shopt", "function", "eval", "source", "."]);
+const shellChangers = new Set(["exec", "enable", "alias", "shopt", "function", "eval", "source", ".", "trap"]);
 
 function gitSubcommandAt(args: string[]): number {
   for (let index = 0; index < args.length; index++) {
@@ -82,7 +82,7 @@ function setting(program: Program, before: number, read: (args: string[]) => boo
     if (value === false) on = false;
     else if (value === true && alwaysRuns && command.redirects.length === 0 && inForeground()) on = true;
   });
-  return on;
+  return on && !changesTheShell(commands.slice(0, before));
 }
 
 const setsOption = (option: string) => (args: string[]) => {
@@ -105,7 +105,7 @@ function statusReads(raw: string): number | undefined {
   return raw.replace(/'[^']*'/g, "").match(new RegExp(statusRead, "g"))?.length ?? 0;
 }
 
-function reporter(command: Command | undefined, reachable: boolean, failingExit: boolean): Reach | undefined {
+function reporter(command: Command | undefined, reachable: boolean, failingExit: boolean): "exit" | "printed" | undefined {
   if (!command || !reachable || command.keywords.length > 0 || command.rawPrefix.length > 0 || command.after === "|" || command.substitutions.length > 0) return undefined;
   const words = command.rawArgs.map(statusReads);
   if (words.some((word) => word === undefined)) return undefined;
@@ -160,6 +160,10 @@ function reachOf(program: Program, start: number): Reach {
   const { commands, depths } = program;
   const depth = depths[start];
   const reachable = (index: number) => depths[index] === depth && commands[listEnd(program, index, depth)].after !== "&";
+  const reportedBy = (index: number, failingExit: boolean): Reach | undefined => {
+    const found = reporter(commands[index], reachable(index), failingExit);
+    return found === "printed" ? { printedBy: index } : found;
+  };
   let end = pipelineEnd(program, start, depth);
   if (end !== start && !setting(program, start, setsOption("pipefail"))) return { how: "a pipe" };
   if (depth > 0) return closesOnly(program, end, depth) ? "exit" : { how: "the group or loop it runs in" };
@@ -172,14 +176,14 @@ function reachOf(program: Program, start: number): Reach {
   const next = end + 1;
   if (after === undefined) return "exit";
   if (after === "&") return { how: "running it in the background with `&`" };
-  if (after === "||") return reporter(commands[next], reachable(next), true) ?? { how: "the `||` after it" };
+  if (after === "||") return reportedBy(next, true) ?? { how: "the `||` after it" };
   const first = pipeStart(program, start);
   const errexitApplies = !chained && first !== undefined && !commands[first].keywords.includes("!");
   if (errexitApplies && separators.has(after) && setting(program, start, setsErrexit)) return "exit";
-  return reporter(commands[next], reachable(next), false) ?? { how: separatorName(after) };
+  return reportedBy(next, false) ?? { how: separatorName(after) };
 }
 
-function changesHowItPrints(commands: Command[]): boolean {
+function changesTheShell(commands: Command[]): boolean {
   return commands.some((command) => command.definesFunction || shellChangers.has(command.name) || command.rawPrefix.some((word) => shellChangers.has(word)) || command.env.has("IFS"));
 }
 
@@ -208,9 +212,9 @@ function hiddenIn(text: string, nesting: number): { found?: Finding; carries?: s
     const what = guarded[index];
     if (!what || command.tested) continue;
     const reach = reachOf(program, index);
-    if (typeof reach === "object") return { found: { what, how: reach.how } };
-    if (reach === "printed" && nesting > 0) return { found: { what, how: "the nested shell or `$(…)` that prints it" } };
-    if (reach === "printed" && changesHowItPrints(commands)) return { found: { what, how: "a command earlier in the call that changes how the shell prints, such as `exec >`," } };
+    if (reach !== "exit" && "how" in reach) return { found: { what, how: reach.how } };
+    if (reach !== "exit" && nesting > 0) return { found: { what, how: "the nested shell or `$(…)` that prints it" } };
+    if (reach !== "exit" && changesTheShell(commands.slice(0, reach.printedBy))) return { found: { what, how: "a command earlier in the call that changes how the shell prints, such as `exec >`," } };
     carries ??= what;
   }
   return { carries };
