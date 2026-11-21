@@ -133,7 +133,7 @@ function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline
 
 type Line = { raw: string; writeFree: boolean };
 const quietTargets = /^\/dev\/(?:null|stdout|stderr)$/;
-const readOnlyTools = new Set(["", "echo", "printf", "true", "false", ":", "test", "["]);
+const readOnlyTools = new Set(["", "echo", "true", ":", "test", "["]);
 const readOnlyGh = /^(?:api .*|(?:pr|issue) (?:comment|review|view|close|reopen|ready|checks|list|status))$/s;
 const startsProgram = ({ flags }: Gh) => ["-e", "--editor", "-w", "--web"].some((flag) => flags.has(flag));
 const readOnlyGhCall = (args: string[]) => {
@@ -142,7 +142,7 @@ const readOnlyGhCall = (args: string[]) => {
 };
 const writesNothing = ({ name, args, env, outputs, writes, bare }: Command) => [...outputs, ...writes].every((target) => quietTargets.test(target))
   && [...env.keys()].every((key) => key === "GH_REPO")
-  && [...args, ...env.values()].every((word) => !word.includes("$")) && !(name === "printf" && args.some((arg) => arg.startsWith("-v")))
+  && [...args, ...env.values()].every((word) => !word.includes("$"))
   && (bare[0] ?? "") === name && (readOnlyTools.has(name) || (name === "gh" && readOnlyGhCall(args)));
 
 const withJsonStrings = (texts: string[]) => [...texts, ...texts.flatMap(jsonStrings)];
