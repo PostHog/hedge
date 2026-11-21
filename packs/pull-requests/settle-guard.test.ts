@@ -56,7 +56,7 @@ describe("the settle guard", () => {
       const denial = await guardSettle(organize({ action }, name), home, deps([thread("mcp:me", { pullRequests: [pr(1)] })]));
       expect(denial?.hookSpecificOutput).toMatchObject({ hookEventName: "PreToolUse", permissionDecision: "deny" });
       expect(reasonOf(denial)).toBe("Hedge blocked this settle: the thread owns open PR(s) https://github.com/acme/app/pull/1, and no other open thread links them. "
-        + "If Robin parked them, snooze the thread until the park date instead. If they wait on someone else, snooze it until they move. "
+        + "If Robin parked them, snooze the thread until the park date instead. "
         + "Or hand each over first: send the thread that takes it over a message with t3_thread_send that asks it to link the PR with link_pull_request, "
         + "then run `hedge pr handover --pr <PR URL> --to <thread id>`, which counts only while that thread stays open and links the PR. Or close or merge the PR.");
     }
@@ -400,7 +400,7 @@ describe("the organize guard on a pinned thread", () => {
     const home = homeWith({ "guards.person": "Robin" });
     for (const action of ["settle", "snooze"]) {
       const reason = reasonOf(await guardSettle(organize({ action, threadId: "mcp:lane" }), home, deps([thread("mcp:lane", pinned)])));
-      expect(reason).toContain("Robin pinned this thread to keep it in view");
+      expect(reason).toBe("Hedge blocked this call: Robin pinned this thread to keep it in view, so leave it open. Only Robin snoozes it, in T3.");
     }
   });
 
@@ -408,13 +408,6 @@ describe("the organize guard on a pinned thread", () => {
     const home = homeWith();
     expect(await guardSettle(organize({ action: "archive", threadId: "mcp:lane" }), home, deps([thread("mcp:lane", pinned)]))).toBeUndefined();
     expect(await guardSettle(organize({ action: "snooze", threadId: "mcp:lane" }), home, deps([thread("mcp:lane", { pullRequests: [pr(1)] })]))).toBeUndefined();
-  });
-
-  test("names the snooze closing line only while parking runs, and sends the agent to the person otherwise", async () => {
-    const lane = deps([thread("mcp:lane", pinned)]);
-    const off = reasonOf(await guardSettle(organize({ action: "snooze", threadId: "mcp:lane" }), homeWith({ "guards.person": "Robin" }), lane));
-    const on = reasonOf(await guardSettle(organize({ action: "snooze", threadId: "mcp:lane" }), homeWith({ "guards.person": "Robin", "orchestration.waitSnoozeDays": 3, "orchestration.snoozeMark": "SNOOZE" }), lane));
-    expect([off, on]).toEqual([expect.stringContaining("Only Robin snoozes it, in T3."), expect.stringContaining("a line that starts with SNOOZE and names the wake time")]);
   });
 
   test("lets a snooze through when T3 does not answer, and still refuses a settle then", async () => {

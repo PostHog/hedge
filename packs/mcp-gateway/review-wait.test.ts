@@ -571,33 +571,6 @@ describe("the parked question sweep", () => {
     expect(t3.delivered.filter((message) => message.text.startsWith("Parked question"))).toHaveLength(2);
   });
 
-  test("tells a thread that snoozed itself at or before its prose question, since the snooze hides the question", async () => {
-    const { t3, at, check } = await setup();
-    t3.shell.threads.push(
-      watching("t-same", { pendingBackgroundTasks: [], snoozedUntil: iso(after(3 * 24 * 60)), snoozedAt: iso(after(1)) }),
-      watching("t-before", { snoozedUntil: iso(after(3 * 24 * 60)), snoozedAt: iso(after(0)) }),
-    );
-    t3.turnItems["t-same"] = turn(["assistant_message", asks, 1]);
-    t3.turnItems["t-before"] = turn(["assistant_message", asks, 1]);
-    at(1);
-    expect(await check()).toBe(true);
-    expect(t3.delivered.map((message) => message.threadId).sort()).toEqual(["t-before", "t-same"]);
-    expect(t3.delivered[0]!.text).toContain("even while it is snoozed");
-  });
-
-  test("leaves a thread alone whose snooze began after its prose question, or at an unknown time, since the person chose to see it later", async () => {
-    const { t3, at, check } = await setup();
-    t3.shell.threads.push(
-      watching("t-later", { pendingBackgroundTasks: [], snoozedUntil: iso(after(600)), snoozedAt: iso(after(5)) }),
-      watching("t-unknown", { pendingBackgroundTasks: [], snoozedUntil: iso(after(600)) }),
-    );
-    t3.turnItems["t-later"] = turn(["assistant_message", asks, 1]);
-    t3.turnItems["t-unknown"] = turn(["assistant_message", asks, 1]);
-    at(1);
-    expect(await check()).toBe(true);
-    expect(t3.delivered).toEqual([]);
-  });
-
   test("tells a snoozed thread nothing new once its snooze ends", async () => {
     const { t3, at, check } = await setup();
     t3.shell.threads.push(watching("t-1"));

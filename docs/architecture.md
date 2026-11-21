@@ -621,7 +621,7 @@ what the port changes. The Hub pack is gone after step 4.
 | --- | --- | --- | --- |
 | Base | `base` | Instructions, model table, the dispatcher and its hooks, T3 defaults, update and prune jobs: nodes. Disk watch: hub. | None |
 | Quality gates | `pull-requests` | Guides, settings, `hedge pr`, `hedge proof`: nodes. The quality loop, signal loop, and PR digest tasks: hub. Owns the seam `pull-requests/review-bot`. | Each task runs once, on the hub. Today it is planned on the hub and on every devbox. |
-| Orchestration | `orchestration` | Maps, side threads, and parking: commands and skills on nodes. | None |
+| Orchestration | `orchestration` | Maps and side threads: commands and skills on nodes. | None |
 | Communication | `communication` | Instructions and skills: nodes. | None |
 | Memory | `memory` | Config, sync job, memory-cap hook, the context library's prompt hook and sync: nodes. Dream job and skill: hub. | None. Dream and the Context library pack moved in before the port. A profile that lists `context-library` gets only the library. |
 | Hub: provider recovery | `cli-proxy` | The recovery sweep and the `claude` wrapper step: hub and each devbox. | None. The Recovery pack moved into the Hub pack before the port, and its workflow needs own-account balancing. A profile that lists `recovery` gets only that workflow. |

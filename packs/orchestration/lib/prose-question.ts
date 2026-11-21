@@ -15,13 +15,27 @@ export function asksForDecision(message: string): boolean {
 
 export const fallbackPerson = "the person";
 
-export function personName(home: string): string {
+function readSettings(home: string): Record<string, unknown> {
   const file = join(home, ".local/state/hedge/settings.json");
-  if (!existsSync(file)) return fallbackPerson;
+  if (!existsSync(file)) return {};
   try {
-    const person = (JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>)["guards.person"];
-    return typeof person === "string" && person.trim() ? person.trim() : fallbackPerson;
+    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
   } catch {
-    return fallbackPerson;
+    return {};
   }
 }
+
+export function personName(home: string): string {
+  const person = readSettings(home)["guards.person"];
+  return typeof person === "string" && person.trim() ? person.trim() : fallbackPerson;
+}
+
+const plain = (text: string) => text.replaceAll("\uFE0F", "");
+
+export function proseTitles(home: string): string[] {
+  const value = readSettings(home)["orchestration.proseTitles"];
+  return typeof value === "string" ? value.split(",").map((start) => plain(start).trim()).filter(Boolean) : [];
+}
+
+export const asksInProse = (title: string | undefined, starts: string[]) => title !== undefined && starts.some((start) => plain(title).startsWith(start));

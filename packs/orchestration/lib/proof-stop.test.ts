@@ -172,10 +172,11 @@ describe("the Stop proof check blocks a lane that owns an open PR", () => {
     expect(await check()).toBeUndefined();
   });
 
-  test("a plain background command, a Claude background shell, or a settled watch is no wait", async () => {
+  test("a plain background command, a Claude background shell, a settled watch, or an expired snooze is no wait", async () => {
     const { head, thread, check } = await lane();
     expect(await check([thread({ pendingBackgroundTasks: [{ kind: "command" }] })])).toBeDefined();
     expect(await check([thread()], { background_tasks: [{ id: "b1", type: "shell", status: "running" }] })).toBeDefined();
+    expect(await check([thread({ snoozedUntil: "2020-01-01T00:00:00Z" })])).toBeDefined();
     expect(await check([thread({ pullRequests: [pr(7, "feat", { watch: { headSha: head, passed: true } })] })])).toBeDefined();
     expect(await check([thread({ pullRequests: [pr(7, "feat", { watch: { headSha: head, failedChecks: ["test"] } })] })])).toBeDefined();
     const watchTask = { kind: "monitor", taskId: `pull-request-watch:github.com/${repository}#7` };
@@ -245,8 +246,8 @@ describe("the Stop proof check lets the stop pass", () => {
     ["outside a T3 thread", ({ check }) => check(undefined, {}, { threadId: undefined })],
     ["without the event's cwd", ({ check }) => check(undefined, { cwd: undefined })],
     ["while a question card is pending", ({ thread, check }) => check([thread({ pendingRuntimeRequest: { id: "r1", kind: "user_input" } })])],
+    ["while the thread is snoozed", ({ thread, check }) => check([thread({ snoozedUntil: "2999-01-01T00:00:00Z" })])],
     ["on a NEEDS_HUMAN: last line", ({ check }) => check(undefined, { last_assistant_message: "Parked.\n\n`NEEDS_HUMAN: pick a mode, from Robin`" })],
-    ["on a park that snoozes until its date", ({ check }) => check(undefined, { last_assistant_message: "Robin parked #7.\n\n💤 This thread **snoozes until 25th Nov 09:00**" })],
     ["while a child task runs", ({ thread, check }) => check([thread({ pendingBackgroundTasks: [{ kind: "task", childThreadId: "mcp:child" }] })])],
     ["while the lane awaits a shell command", ({ thread, check }) => check([thread({ pendingBackgroundTasks: [{ kind: "command", awaited: true }] })])],
     ["while the lane waits on another thread", ({ thread, check }) => check([thread({ blockedOnThreadWait: true })])],

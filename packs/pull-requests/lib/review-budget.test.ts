@@ -4,7 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawnAsync } from "../../../src/testing/spawn.ts";
 import { answeredFindings, reviewedFindings } from "./proof.ts";
-import { answerFixed, checkout, cleanFixtures, fakeModel, lockHolder, finishRound, fixture, graded, ledgerDecisions, markPanel, models, recordingModel, settings, stuckRoundLock, type Checkout } from "./proof-testing.ts";
+import { answerFixed, checkout, cleanFixtures, fakeModel, lockHolder, finishRound, fixture, githubRepository, graded, ledgerDecisions, markPanel, models, recordingModel, settings, stuckRoundLock, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
@@ -402,11 +402,9 @@ test("a docs-only PR gets the combined lens in a checkout that has not fetched i
   pr.pullRequestState({ body: "Greets new members." });
   await pr.commit("README.md", "Greet new members.\n");
   await pr.hedge("require", "--none", "--reason", "docs only");
-  const remote = join(fixture("hedge-proof-remote-"), "github.com/example/product.git");
-  mkdirSync(remote, { recursive: true });
-  await pr.git("init", "-q", "--bare", remote);
-  await pr.git("push", "-q", remote, "refs/remotes/origin/main:refs/heads/main");
-  await pr.git("remote", "set-url", "origin", remote);
+  const { bare, url } = await githubRepository(pr);
+  await pr.git("push", "-q", bare, "refs/remotes/origin/main:refs/heads/main");
+  await pr.git("remote", "set-url", "origin", url);
   await pr.git("update-ref", "-d", "refs/remotes/origin/main");
   fakeModel(pr, "REVIEWER", "FINDINGS:\n(none)\nCOVERED: README.md\n");
 

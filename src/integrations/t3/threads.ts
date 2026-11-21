@@ -5,16 +5,16 @@ import { readLinkedItemText, readLinkedMessages, type LinkedTimelineItem } from 
 import { t3StatePath, t3UserData } from "./server.ts";
 import type { T3Client, T3HttpClient } from "./session.ts";
 
-export type PullRequestWatch = { startedAt?: string; headSha?: string; passed?: boolean; checksPending?: boolean; failedChecks?: string[]; awaitingApproval?: string[] };
+export type PullRequestWatch = { headSha?: string; passed?: boolean; checksPending?: boolean; failedChecks?: string[]; awaitingApproval?: string[] };
 export type ShellPullRequest = { repository: string; number: number; url: string; source?: string; snapshot?: { state?: string; headBranch?: string } | null; watch?: PullRequestWatch | null };
 
 export type ShellThread = {
   id: string; title: string; projectId: string; status: string;
-  activeRunId?: string | null; latestRunId?: string | null; activityRunStatus?: string | null; pendingBackgroundTasks?: { kind: string; taskId?: string; childThreadId?: string; awaited?: boolean }[];
+  activeRunId?: string | null; activityRunStatus?: string | null; pendingBackgroundTasks?: { kind: string; taskId?: string; childThreadId?: string; awaited?: boolean }[];
   blockedOnThreadWait?: boolean; delegatedFrom?: { environmentId?: string; threadId?: string } | null;
   createdAt?: string; latestUserMessageAt?: string | null; latestRunRequestedAt?: string | null;
   latestRunStartedAt?: string | null; latestRunCompletedAt?: string | null;
-  archivedAt?: string | null; deletedAt?: string | null; settledAt?: string | null; pinnedAt?: string | null; snoozedUntil?: string | null; snoozedAt?: string | null; worktreePath?: string | null;
+  archivedAt?: string | null; deletedAt?: string | null; settledAt?: string | null; pinnedAt?: string | null; snoozedUntil?: string | null; worktreePath?: string | null;
   modelSelection?: { model: string }; lastError?: string | null;
   pendingRuntimeRequest?: unknown; latestVisibleMessage?: { updatedAt: string; text: string } | null;
   branch?: string | null; latestUserAuthoredMessageAt?: string | null;

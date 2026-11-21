@@ -3,10 +3,10 @@ export type BackgroundTask = { id?: string; type?: string; status?: string };
 type Block = { type?: string; id?: string; name?: string; input?: Record<string, unknown>; tool_use_id?: string; content?: unknown; text?: string };
 type TurnLine = { message?: { content?: unknown }; toolUseResult?: { backgroundTaskId?: unknown } };
 
-export const backgroundReason = (ids: string[], person: string, waitMark: string) => `Hedge blocked this stop: background task ${ids.join(", ")} started this turn and still runs, `
+export const backgroundReason = (ids: string[], person: string) => `Hedge blocked this stop: background task ${ids.join(", ")} started this turn and still runs, `
   + "and nothing waits on it, so its result lands after the turn and nobody acts on it. "
   + `Call t3_background_wait with taskIds ${JSON.stringify(ids)}, then end the turn; T3 wakes this thread when it ends. `
-  + `If the thread waits on someone else, end on a line that starts with ${waitMark}. If the task is a server meant to outlive the turn, end the turn again. `
+  + "If the task is a server meant to outlive the turn, end the turn again. "
   + `If you are not sure, stop and ask ${person}.`;
 
 const blocks = (line: TurnLine): Block[] => (Array.isArray(line.message?.content) ? (line.message.content as Block[]) : []);

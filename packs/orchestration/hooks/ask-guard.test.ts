@@ -1,4 +1,3 @@
-import { Database } from "bun:sqlite";
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -8,9 +7,8 @@ import { devbox, engineSource, resolveEngine, skillSources } from "../../../src/
 import { dispatch } from "../../base/hooks/run.ts";
 import { asksForDecision } from "../lib/prose-question.ts";
 import type { ShellThread } from "../../base/lib/t3/index.ts";
-import { settleWhenRunEnds, stillParks } from "../lib/closing-line.ts";
 import { startT3Stub } from "../../../src/integrations/t3/testing.ts";
-import { guardBackground, guardCard, guardSend, guardStop, hiddenIn, hook, hookWith, spawnSettle, type IsHidden, type SendEvent, type SendGuardOptions, type StopEvent } from "./ask-guard.ts";
+import { guardBackground, guardCard, guardSend, guardStop, hiddenIn, hook, hookWith, type IsHidden, type SendEvent, type SendGuardOptions, type StopEvent } from "./ask-guard.ts";
 
 const temp = tempDirs();
 afterEach(() => temp.cleanup());
@@ -189,8 +187,7 @@ describe("the hidden thread check", () => {
     expect(await check(thread as Partial<ShellThread>)).toMatchObject({ decision: "block" });
   });
 
-  test("blocks a prose question that closes on a park line, or while Claude runs a background agent", async () => {
-    expect(await check({}, "Should I merge it?\n\n⏳ **Waiting on** the reviewer")).toMatchObject({ decision: "block" });
+  test("blocks a prose question while Claude runs a background agent", async () => {
     expect(await check({}, question, { background_tasks: [{ id: "a1", type: "local_agent", status: "running" }] })).toMatchObject({ decision: "block" });
     expect(await check({}, question, { background_tasks: [{ id: "s1", type: "shell", status: "running" }] })).toBeUndefined();
   });
@@ -368,6 +365,20 @@ describe("the send guard", () => {
     expect(await hook("claude", async () => JSON.stringify(send({ mode: "auto" })), home())).toEqual({ code: 0, stdout: "", stderr: "" });
   });
 
+  test("the installed hook still denies a send when T3 session revocation fails after the shell read", async () => {
+    const stub = await startT3Stub({ shell: { projects: [], threads: [{ ...waiting, title: "Lane", projectId: "p", status: "running", pullRequests: [] }] } as never });
+    try {
+      const cliPath = join(stub.home, "t3-server.js");
+      writeFileSync(cliPath, (await Bun.file(cliPath).text()).replace("esac", '  *"auth session revoke"*) exit 1 ;;\nesac'));
+      const result = await hook("claude", async () => JSON.stringify(send({ mode: "auto" })), stub.home);
+      expect(result.stderr).toBe("");
+      expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+      expect((await stub.cliCalls()).some((line) => line.includes("auth session revoke"))).toBe(true);
+    } finally {
+      await stub.stop();
+    }
+  });
+
   test("the PreToolUse dispatcher hands the denial to the agent", async () => {
     const where = home("Robin");
     const target = join(where, ".config/hedge/hooks/PreToolUse/ask-guard.ts");
@@ -461,141 +472,9 @@ describe("the background work guard", () => {
     ["a wait names it", [...started("bgate1"), waitOn("bgate1"), claudeSays("Done.")], [running("bgate1")], {}, "lane"],
     ["an earlier turn started it", [...started("bold1"), claudePrompt("Next"), claudeSays("Done.")], [running("bold1")], {}, "lane"],
     ["only a subagent runs", [claudeSays("Done.")], [running("a1", "subagent")], {}, "lane"],
-    ["the turn closes waiting", [...started("bgate1"), claudeSays("Gate runs.\n\n⏳ **Waiting on** the gate")], [running("bgate1")], {}, "lane"],
     ["the stop was sent back once", [...started("bgate1"), claudeSays("Done.")], [running("bgate1")], { stop_hook_active: true }, "lane"],
     ["the session is outside T3", [...started("bgate1"), claudeSays("Done.")], [running("bgate1")], {}, ""],
   ] as const)("lets the stop through when %s", async (_, lines, inFlight, extra, threadId) => {
     expect(await background([...lines], [...inFlight], extra, threadId)).toBeUndefined();
-  });
-});
-
-describe("the closing line in the installed Stop hook", () => {
-  const lane = "mcp:lane-1";
-  const tree = { pid: 900, table: async () => ["1 0 systemd", "500 1 t3", "700 500 claude", "800 700 sh", "900 800 bun"].join("\n") };
-  const parking = (extra: Record<string, unknown> = {}) => {
-    const dir = temp.make("home-");
-    mkdirSync(join(dir, ".local/state/hedge"), { recursive: true });
-    writeFileSync(join(dir, ".local/state/hedge/settings.json"), JSON.stringify({ "guards.person": "Robin", "orchestration.waitSnoozeDays": 3, "orchestration.timeZone": "UTC", ...extra }));
-    return dir;
-  };
-  const run = async (message: string, where: string, extra: { elapsed?: () => number; lines?: object[]; event?: Record<string, unknown> } = {}) => {
-    const sent: Record<string, unknown>[] = [];
-    const threads = [{ id: lane, title: "Lane", projectId: "p", status: "running", activeRunId: "run-1" }] as ShellThread[];
-    const routed = hookWith(() => async () => ({ threads }), {
-      threadId: lane, processes: tree, now: () => new Date("2026-11-14T12:00:00Z"), elapsed: extra.elapsed ?? (() => 0),
-      park: { shell: async () => ({ threads }), dispatch: async (command) => { sent.push(command); } }, settleAfterRun: () => {},
-    });
-    const path = transcript(claudePrompt("Fix it"), ...(extra.lines ?? []), claudeSays(message));
-    const result = await routed("claude", async () => JSON.stringify({ transcript_path: path, last_assistant_message: message, ...extra.event }), where);
-    return { result, sent };
-  };
-  const scheduled = (where: string) => {
-    mkdirSync(join(where, ".t3/userdata"), { recursive: true });
-    const db = new Database(join(where, ".t3/userdata/statev2.sqlite"));
-    db.run("create table scheduled_tasks (task_id text primary key, thread_id text, enabled integer not null, next_run_at text)");
-    db.query("insert into scheduled_tasks values ('check', ?, 1, '2026-11-14T13:00:00.000Z')").run(lane);
-    db.close();
-    return where;
-  };
-
-  test("snoozes a thread whose turn closes waiting once the other stop checks pass", async () => {
-    const { result, sent } = await run("Pushed.\n\n⏳ **Waiting on** CI", parking());
-    expect(result).toEqual({ code: 0, stdout: "", stderr: "" });
-    expect(sent).toEqual([expect.objectContaining({ type: "thread.snooze", threadId: lane, snoozedUntil: "2026-11-17T12:00:00.000Z" })]);
-  });
-
-  test("leaves the thread alone when the prose guard blocks, the kill switch is on, or the hook ran too long already", async () => {
-    const asked = await run("Should I merge it?\n\n⏳ **Waiting on** the reviewer", parking());
-    expect(JSON.parse(asked.result.stdout).reason).toContain("asks Robin a decision in prose");
-    const off = parking();
-    mkdirSync(join(off, ".config/hedge"), { recursive: true });
-    writeFileSync(join(off, ".config/hedge/ask-guard.off"), "");
-    const switchedOff = await run("Pushed.\n\n⏳ **Waiting on** CI", off);
-    const late = await run("Pushed.\n\n⏳ **Waiting on** CI", parking(), { elapsed: () => 6_000 });
-    expect([asked.sent, switchedOff.sent, late.sent]).toEqual([[], [], []]);
-  });
-
-  test("reads a set wait mark for the hidden check, the background guard, and the snooze", async () => {
-    const where = parking({ "orchestration.waitMark": "WAIT:" });
-    const asked = await run("Should I merge it?\n\nWAIT: the reviewer", where);
-    expect(JSON.parse(asked.result.stdout).decision).toBe("block");
-    const waiting = await run("Pushed.\n\nWAIT: CI", where);
-    expect(waiting.sent).toEqual([expect.objectContaining({ type: "thread.snooze" })]);
-    const old = await run("Pushed.\n\n⏳ CI", where);
-    expect(old.sent).toEqual([]);
-    const busy = { lines: started("bgate1"), event: { background_tasks: [running("bgate1")] } };
-    const left = await run("Pushed.\n\nDone for now.", where, busy);
-    expect(JSON.parse(left.result.stdout).reason).toContain("end on a line that starts with WAIT:.");
-    expect((await run("Gate runs.\n\nWAIT: the gate", where, busy)).sent).toEqual([expect.objectContaining({ type: "thread.snooze" })]);
-  });
-
-  test("hands the settle the time the stop began, so a PR watch that starts while the hook runs keeps the thread open", async () => {
-    const settleThrough = async (watchStarts: boolean) => {
-      let tick = Date.parse("2026-11-14T12:00:00.000Z");
-      const threads = [{ id: lane, title: "Lane", projectId: "p", status: "running", activeRunId: "run-1", latestRunId: "run-1", settledAt: null, pullRequests: [] }] as ShellThread[];
-      const shell = async () => {
-        if (watchStarts) threads[0]!.pullRequests = [{ repository: "acme/app", number: 3, url: "https://github.com/acme/app/pull/3", snapshot: { state: "merged" }, watch: { startedAt: new Date(tick).toISOString() } }];
-        tick += 1_000;
-        return { threads };
-      };
-      const t3 = { shell: async () => ({ threads }), dispatch: async (command: Record<string, unknown>) => { if (command.type === "thread.settle") threads[0]!.settledAt = "settled"; } };
-      let settling: Promise<boolean> = Promise.resolve(false);
-      const where = scheduled(parking());
-      const routed = hookWith(() => shell, {
-        threadId: lane, processes: tree, elapsed: () => 0, now: () => new Date((tick += 1_000) - 1_000), park: t3,
-        settleAfterRun: (threadId, runId, since) => {
-          settling = settleWhenRunEnds(t3, { threadId, runId, since, stillParks: stillParks(where, () => new Date("2026-11-14T12:00:00.000Z")) },
-            { now: () => 0, sleep: async () => { Object.assign(threads[0]!, { status: "completed", activeRunId: null }); } });
-        },
-      });
-      const closing = "Pushed.\n\n🔕 This thread **settles until its check at 14th Nov 14:00**";
-      await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Fix it"), claudeSays(closing)), last_assistant_message: closing, cwd: where }), where);
-      await settling;
-      return threads[0]!.settledAt;
-    };
-    expect([await settleThrough(false), await settleThrough(true)]).toEqual(["settled", null]);
-  });
-
-  test("checks a snooze time against the clock when it parks, not the time the stop began", async () => {
-    const sent: Record<string, unknown>[] = [];
-    const threads = [{ id: lane, title: "Lane", projectId: "p", status: "running", activeRunId: "run-1" }] as ShellThread[];
-    let reads = 0;
-    const routed = hookWith(() => async () => ({ threads }), {
-      threadId: lane, processes: tree, elapsed: () => 0, now: () => new Date(reads++ === 0 ? "2026-11-14T11:59:59Z" : "2026-11-14T12:00:01Z"),
-      park: { shell: async () => ({ threads }), dispatch: async (command) => { sent.push(command); } }, settleAfterRun: () => {},
-    });
-    const closing = "Done.\n\n💤 This thread **snoozes until 14th Nov 12:00**";
-    const result = await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Fix it"), claudeSays(closing)), last_assistant_message: closing }), parking());
-    expect([JSON.parse(result.stdout).reason, sent]).toEqual([expect.stringContaining("Hedge read no future time in UTC"), []]);
-  });
-
-  test("the hook's settle-after process settles the thread once T3 shows its run complete", async () => {
-    const received: Record<string, unknown>[] = [];
-    const lead = { id: lane, title: "Lane", projectId: "p", status: "completed", activeRunId: null, latestRunId: "run-7", settledAt: null, pendingRuntimeRequest: null, pullRequests: [] };
-    const stub = await startT3Stub({
-      shell: { projects: [], threads: [lead] } as never,
-      rpc: (tag, payload) => (tag === "orchestration.dispatchCommand" ? (received.push(payload as Record<string, unknown>), { sequence: 1 }) : undefined),
-    });
-    try {
-      mkdirSync(join(stub.home, ".local/state/hedge"), { recursive: true });
-      writeFileSync(join(stub.home, ".local/state/hedge/settings.json"), JSON.stringify({ "orchestration.waitSnoozeDays": 3 }));
-      const db = new Database(join(stub.home, ".t3/userdata/statev2.sqlite"));
-      db.run("create table if not exists scheduled_tasks (task_id text primary key, thread_id text, enabled integer not null, next_run_at text)");
-      db.query("insert into scheduled_tasks values ('check', ?, 1, ?)").run(lane, new Date(Date.now() + 3_600_000).toISOString());
-      db.close();
-      const realHome = process.env.HOME;
-      process.env.HOME = stub.home;
-      const child = (() => {
-        try {
-          return spawnSettle(lane, "run-7", new Date(Date.now() - 60_000));
-        } finally {
-          process.env.HOME = realHome;
-        }
-      })();
-      await new Promise((resolve) => child.once("exit", resolve));
-      expect(received).toEqual([expect.objectContaining({ type: "thread.settle", threadId: lane, expectedLatestRunId: "run-7" })]);
-    } finally {
-      await stub.stop();
-    }
   });
 });
