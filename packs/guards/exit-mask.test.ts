@@ -311,12 +311,12 @@ describe("the exit-status mask guard", () => {
     expect(refused(command)).toBe(true);
   });
 
-  test.each(["( true ); git push > push.log 2>&1; echo \"exit=$?\"", "git commit -m 'Fix parse()' > commit.log 2>&1; echo \"exit=$?\"", "true | git push; echo \"exit=$?\"", "set -eo pipefail; true | git push > /dev/null 2>&1; echo done", "set -o pipefail; { echo main; } | xargs git push origin | cat; echo \"exit=$?\"", "git push > push.log 2>&1; echo \"exit=$?\"; exec cat push.log"])("allows the last stage's status or a pipefail pipe: %s", (command) => {
+  test.each(["( true ); git push > push.log 2>&1; echo \"exit=$?\"", "git commit -m 'Fix parse()' > commit.log 2>&1; echo \"exit=$?\"", "true | git push; echo \"exit=$?\"", "set -eo pipefail; true | git push > /dev/null 2>&1; echo done", "set -o pipefail; { echo main; } | xargs git push origin | cat; echo \"exit=$?\"", "git push > push.log 2>&1; echo \"exit=$?\"; exec cat push.log", "set -o pipefail; ( trap ':' EXIT ); git push | cat", "( exec > /dev/null ); git push > push.log 2>&1; echo \"exit=$?\""])("allows the last stage's status or a pipefail pipe: %s", (command) => {
     expect(exitMaskRisk(command, "Robin")).toBeUndefined();
     expect(shellShowsEveryFailure(command)).toBe(true);
   });
 
-  test.each(['alias echo=:; git push; echo "$?"', 'enable -n echo; git push; echo "$?"', 'shopt -s expand_aliases; git push; echo "$?"', 'builtin exec > /dev/null; git push; echo "$?"'])("refuses a printed status after a call that changes how the shell prints: %s", (command) => {
+  test.each(['alias echo=:; git push; echo "$?"', 'enable -n echo; git push; echo "$?"', 'shopt -s expand_aliases; git push; echo "$?"', 'builtin exec > /dev/null; git push; echo "$?"', "set -o pipefail; unsetopt pipefail; git push | cat", "set -o pipefail; setopt no_pipefail; git push | cat", "set -o pipefail; emulate sh; git push | cat"])("refuses a status after a call that changes how the shell prints or pipes: %s", (command) => {
     expect(refused(command)).toBe(true);
   });
 

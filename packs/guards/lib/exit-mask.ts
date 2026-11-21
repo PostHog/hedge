@@ -16,7 +16,7 @@ const statusRead = String.raw`\$(?:\?|\{\?\})`;
 const plainWord = new RegExp(String.raw`^(?:[\w=:,./+%@-]|'[^'\\]*'|"(?:[^$\\"']|${statusRead})*"|${statusRead})*$`);
 const failingCode = /^(?:[1-9]\d?|1\d\d|2[0-4]\d|25[0-5])$/;
 const printsToTheAgent = /^(?:2>&1|1?>&2)$/;
-const shellChangers = new Set(["exec", "enable", "alias", "shopt", "function", "eval", "source", ".", "trap"]);
+const shellChangers = new Set(["exec", "enable", "alias", "shopt", "function", "eval", "source", ".", "trap", "setopt", "unsetopt", "emulate"]);
 
 function gitSubcommandAt(args: string[]): number {
   for (let index = 0; index < args.length; index++) {
@@ -184,7 +184,7 @@ function reachOf(program: Program, start: number): Reach {
 }
 
 function changesTheShell(commands: Command[]): boolean {
-  return commands.some((command) => command.definesFunction || shellChangers.has(command.name) || command.rawPrefix.some((word) => shellChangers.has(word)) || command.env.has("IFS"));
+  return commands.some((command) => parens(command.scope) === 0 && (command.definesFunction || shellChangers.has(command.name) || command.rawPrefix.some((word) => shellChangers.has(word)) || command.env.has("IFS")));
 }
 
 function hiddenIn(text: string, nesting: number): { found?: Finding; carries?: string } {
