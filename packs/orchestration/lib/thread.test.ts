@@ -156,6 +156,24 @@ test("hedge thread send queues behind a linked pending request by default, while
   ]);
 });
 
+test("hedge thread send fails closed to queue on a linked thread when checking pending requests fails", async () => {
+  const base = fixture();
+  const t3 = await stub({
+    ...base,
+    tools(name, args) {
+      if (name === "t3_thread_read") throw new ToolRefusal("orchestration_error", "timeout");
+      return base.tools!(name, args);
+    },
+  });
+
+  const result = await thread(t3, ["send", "--host", "devbox-2", "mcp:linked-busy", "FYI"]);
+
+  expect(JSON.parse(result.output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-busy", delivery: "queued" });
+  expect(sends(t3)).toEqual([
+    expect.objectContaining({ environmentId: "env-linked", threadId: "mcp:linked-busy", message: "FYI", mode: "queue" }),
+  ]);
+});
+
 test("hedge thread send refuses an archived thread, an empty message, and a thread it cannot place, and sends nothing", async () => {
   const t3 = await stub();
 

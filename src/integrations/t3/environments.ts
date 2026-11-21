@@ -99,7 +99,7 @@ export async function sendLinkedMessage(client: Pick<T3HttpClient, "callTool">, 
 
 async function linkedHasPendingRequest(client: Pick<T3HttpClient, "callTool">, environmentId: string, threadId: string): Promise<boolean> {
   const detail = await readLinkedThread(client, environmentId, { threadId, limit: 1 }).catch(() => undefined);
-  return Boolean(detail && detail.thread.pendingRequestCount > 0);
+  return !detail || detail.thread.pendingRequestCount > 0;
 }
 
 async function pages<T>(tool: string, read: (cursor: number | null) => Promise<{ items: T[]; nextCursor: number | null }>): Promise<T[]> {
