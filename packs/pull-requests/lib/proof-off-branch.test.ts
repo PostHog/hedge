@@ -58,6 +58,16 @@ test("at the review ceiling, a final read from the latest review on HEAD's histo
   expect(read).not.toContain(short(stray));
 });
 
+test("at the review ceiling, a final read from the other branch's latest review names the latest review on HEAD's history as the start of the unread changes", async () => {
+  const { pr, fixed, stray } = await prWithStrayRead();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.reviewCeiling": 2 });
+
+  const read = await finalRead(pr, stray).then(() => "", (error: Error) => error.message);
+
+  expect(read).toContain(`The review budget of 2 reviews is spent, and no read checks the production changes since ${short(fixed)}. Revert each commit of the PR since ${short(fixed)}`);
+  expect(read).not.toContain(short(stray));
+});
+
 test("a final read from the latest reviewed commit keeps a final read of another branch", async () => {
   const { pr, stray } = await prWithStrayRead();
 
