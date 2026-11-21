@@ -111,6 +111,37 @@ test("a gate result in the ledger carries the time its run started, the order th
   expect(events(pr.home).filter((event) => event.type === "gate").at(-1)).toMatchObject({ passed: true, at: new Date(start).toISOString() });
 });
 
+test("a pass another machine shares after --wait starts but before it reads CI as running loses to the wait's failure", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "new\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "docs only");
+  const head = await pr.git("rev-parse", "HEAD");
+  const other = join(tmpdir(), `merge-gate-race-${process.pid}-${Date.now()}`);
+  mkdirSync(join(other, ".local/state/hedge"), { recursive: true });
+  writeFileSync(join(other, ".local/state/hedge/settings.json"), "{}");
+  const github = { pull: async () => ({ head, base: "main", defaultBranch: "main", open: true }), pullFor: async () => undefined };
+  const mergeThere = async () => {
+    writeFileSync(join(other, ".local/state/hedge/decisions.jsonl"), readFileSync(ledgerFile(pr.home), "utf8"));
+    return mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home: other, env: { HEDGE_SETTINGS: undefined }, github });
+  };
+  const start = pr.clock.now.getTime();
+  const shared = join(other, "pass-shared");
+  const pass = { type: "gate", repository: "example/product", pr: 42, commit: head, passed: true, machine: "other-box", at: new Date(start + 60_000).toISOString() };
+  pr.whileGithubReadsPull(`echo '${JSON.stringify(pass)}' >> "${ledgerFile(pr.home)}"; touch "${shared}"`);
+  Object.defineProperty(pr.clock, "now", { get: () => new Date(existsSync(shared) ? start + 120_000 : start), set: () => {}, configurable: true });
+  pr.ci([{ name: "test", bucket: "pending" }]);
+  try {
+    const whileWaiting: (string | undefined)[] = [];
+    pr.panel.onPause = async () => {
+      whileWaiting.push((await mergeThere())?.hookSpecificOutput.permissionDecisionReason);
+      pr.ci([{ name: "test", bucket: "pass" }]);
+    };
+    expect((await pr.hedge("gate", "--wait", "10")).code).toBe(0);
+    expect(whileWaiting[0]).toContain("has not passed at the head of example/product#42");
+  } finally { rmSync(other, { recursive: true, force: true }); }
+});
+
 test("while --wait waits for CI at a head that passed before, another machine's merge gate refuses the merge until the wait ends in a pass", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "new\n");
