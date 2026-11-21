@@ -133,9 +133,10 @@ function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline
 type Line = { raw: string; writeFree: boolean };
 const quietTargets = /^\/dev\/(?:null|stdout|stderr)$/;
 const readOnlyTools = new Set(["", "echo", "printf", "true", "false", ":", "test", "[", "cd", "pushd", "popd"]);
-const readOnlyGh = /^(?:api .*|(?:pr|issue) (?:comment|review|view|edit|close|reopen|ready|checks|list|status))$/s;
-const writesNothing = ({ name, args, outputs, writes }: Command) => [...outputs, ...writes].every((target) => quietTargets.test(target))
-  && (readOnlyTools.has(basename(name)) || (basename(name) === "gh" && readOnlyGh.test(`${parseGh(args).group} ${parseGh(args).action}`)));
+const readOnlyGh = /^(?:api .*|(?:pr|issue) (?:comment|review|view|close|reopen|ready|checks|list|status))$/s;
+const startsProgram = (args: string[]) => args.some((arg) => /^--(?:editor|web)(?:=|$)/.test(arg) || /^-[A-Za-z]*[ew]/.test(arg));
+const writesNothing = ({ name, args, outputs, writes, bare }: Command) => [...outputs, ...writes].every((target) => quietTargets.test(target))
+  && (bare[0] ?? "") === name && (readOnlyTools.has(name) || (name === "gh" && !startsProgram(args) && readOnlyGh.test(`${parseGh(args).group} ${parseGh(args).action}`)));
 
 const withJsonStrings = (texts: string[]) => [...texts, ...texts.flatMap(jsonStrings)];
 
