@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { checkout, cleanFixtures, fakeModel, markPanel, productionMajor, reviewHeadFixed, verdict, type Checkout } from "./proof-testing.ts";
+import { checkout, cleanFixtures, fakeModel, markPanel, productionMajor, reviewHeadFixed, settings, verdict, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
@@ -46,6 +46,16 @@ test("a final read continues from the latest review on HEAD's history, and the g
   writeFileSync(join(pr.repository, "responses.md"), `1. rejected: final read 2 read another PR's checkout, not ${head}\n`);
   expect((await pr.hedge("respond", "--round", "final-2", "responses.md")).code).toBe(0);
   expect((await pr.hedge("gate")).output).not.toContain("unanswered findings");
+});
+
+test("at the review ceiling, a final read from the latest review on HEAD's history names that review's commit as the start of the unread changes, not the other branch's", async () => {
+  const { pr, fixed, stray } = await prWithStrayRead();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.reviewCeiling": 2 });
+
+  const read = await finalRead(pr, fixed).then(() => "", (error: Error) => error.message);
+
+  expect(read).toContain(`The review budget of 2 reviews is spent, and no read checks the production changes since ${short(fixed)}. Revert each commit of the PR since ${short(fixed)}`);
+  expect(read).not.toContain(short(stray));
 });
 
 test("a final read from the latest reviewed commit keeps a final read of another branch", async () => {

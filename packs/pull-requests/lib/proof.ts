@@ -307,7 +307,7 @@ async function startFinalRead(home: string, identity: ProofIdentity, base: strin
     if (emptyRange?.()) throw new Error(nothingToRead(from ?? base, carried));
     if (!decision && carried) throw new Error(`HEAD needs no final read: ${carried.quiet.length ? `final read carried from ${short(carried.from)}: ${quietReason(carried.kinds)}. hedge proof gate counts the carry.` : `hedge proof gate carries the review of ${short(carried.from)} across ${carried.merges.length} clean merge(s) of the base.`}${retry}`);
     if (unfinished) throw new Error("A review is unfinished. Finish it before a final read.");
-    const stop = spent < ceiling ? undefined : carried ? budgetSpent(permit.limits) : onlyQuietSince(identity, counted, cleanBaseMerge, quietCommit) ? undefined : fixesUnread(permit.limits, latest.commit);
+    const stop = spent < ceiling ? undefined : carried ? budgetSpent(permit.limits) : onlyQuietSince(identity, counted, cleanBaseMerge, quietCommit) ? undefined : fixesUnread(permit.limits, (fromLatest ? latest : starts[1]!).commit);
     return permitReview(home, identity, spent >= free, stop, decision, permit);
   };
   return reserveWeighed(reviews, lockBudget, snapshot, permitRead, async ({ dropping }, verdict) => {
