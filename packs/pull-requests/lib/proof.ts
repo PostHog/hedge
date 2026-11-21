@@ -46,7 +46,9 @@ async function lastRunNumber(directory: string): Promise<number> {
   return Math.max(0, ...(await gateRunNames(directory)).map((name) => parseInt(name, 10)));
 }
 
-export async function startGateRun(home: string, identity: ProofIdentity, startedAt = new Date()): Promise<(record: GateRecord) => Promise<void>> {
+export type GateRun = ((record: GateRecord) => Promise<void>) & { discard: () => Promise<void> };
+
+export async function startGateRun(home: string, identity: ProofIdentity, startedAt = new Date()): Promise<GateRun> {
   const started = { startedAt: startedAt.toISOString() };
   const directory = gateRunDirectory(home, identity);
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -54,7 +56,7 @@ export async function startGateRun(home: string, identity: ProofIdentity, starte
     const path = join(directory, `${number}.json`);
     try {
       await writeFile(path, JSON.stringify({ ...unfinishedGateRun, ...started }) + "\n", { flag: "wx", mode: 0o600 });
-      return (record) => writeJson(path, { ...record, ...started });
+      return Object.assign((record: GateRecord) => writeJson(path, { ...record, ...started }), { discard: () => rm(path, { force: true }) });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
@@ -236,9 +238,10 @@ export function parseVerdict(output: string, model: string): ArbiterVerdict {
 
 export type ReviewLimits = { free: number; ceiling: number };
 
-export const atCeiling = `hedge proof asks nothing more. For each open blocker or major, revert the fix that brought it in, or list it in a "## Known issues" section of the PR body, one "- <blocker|major>: <file:line> <finding>" item each, and answer its finding "<n>. known: <why>". A blocker or major that the last read found in the fixes since the panel is reverted, never listed. An open blocker holds the merge; the user's merge word accepts the rest. Only the user's --override runs another review, or a final read of a HEAD that the gate does not carry`;
+export const atCeiling = `hedge proof asks nothing more. For each open blocker or major, revert the fix that brought it in, or list it in a "## Known issues" section of the PR body, one "- <blocker|major>: <file:line> <finding>" item each, and answer its finding "<n>. known: <why>". A blocker or major that the last read found in the fixes since the panel is reverted, never listed. An open blocker holds the merge; the user's merge word accepts the rest. Only the user's --override runs another review or final read, such as a read of the fix of an open blocker`;
 
 const budgetSpent = ({ ceiling }: ReviewLimits) => `The review budget of ${ceiling} reviews is spent. ${atCeiling}`;
+const fixesUnread = ({ ceiling }: ReviewLimits, latest: string) => `The review budget of ${ceiling} reviews is spent, and no read checks the production changes since ${short(latest)}. Revert each commit of the PR since ${short(latest)} that changes production code, never a merge of the base: the gate carries a revert of a PR commit. When a merge of the base holds them, such as a conflict resolution, only the user's --override reads them. ${atCeiling}`;
 
 async function permitReview(home: string, identity: ProofIdentity, due: boolean, ceiling: string | undefined, decision: DecisionMark | undefined, { arbiter, autonomy }: Permit) {
   if (decision?.mark === "👤") return undefined;
@@ -292,7 +295,7 @@ async function startFinalRead(home: string, identity: ProofIdentity, base: strin
     return { ...await reviewsSpent(reviews, phase, "unfinished spends", dropping), reviews: counted, counted: counted.map(({ name }) => name), dropping };
   };
   const permitRead = async ({ spent, names, finished: saved, reviews: finished }: Awaited<ReturnType<typeof snapshot>>) => {
-    const carried = gateCarry(identity, finished, cleanBaseMerge, quietCommit).found;
+    const { counted, found: carried } = gateCarry(identity, finished, cleanBaseMerge, quietCommit);
     const latest = finished.at(-1);
     if (!latest) throw new Error("A final read needs a finished earlier review");
     const latestOnHistory = onHistory && finished.findLast((review) => onHistory(review.commit));
@@ -306,7 +309,8 @@ async function startFinalRead(home: string, identity: ProofIdentity, base: strin
     if (emptyRange?.()) throw new Error(nothingToRead(from ?? base, carried));
     if (!decision && carried) throw new Error(`HEAD needs no final read: ${carried.quiet.length ? `final read carried from ${short(carried.from)}: ${quietReason(carried.kinds)}. hedge proof gate counts the carry.` : `hedge proof gate carries the review of ${short(carried.from)} across ${carried.merges.length} clean merge(s) of the base.`}${retry}`);
     if (unfinished) throw new Error("A review is unfinished. Finish it before a final read.");
-    return permitReview(home, identity, spent >= free, carried && spent >= ceiling ? budgetSpent(permit.limits) : undefined, decision, permit);
+    const stop = spent < ceiling ? undefined : carried ? budgetSpent(permit.limits) : onlyQuietSince(identity, counted, cleanBaseMerge, quietCommit) ? undefined : fixesUnread(permit.limits, (latestOnHistory || latest).commit);
+    return permitReview(home, identity, spent >= free, stop, decision, permit);
   };
   return reserveWeighed(reviews, lockBudget, snapshot, permitRead, async ({ dropping }, verdict) => {
     for (const name of dropping) if (!await dropUnanswered!(join(reviews, name))) throw new Error(`The reviews changed while this one weighed the budget. ${weighAgain}`);
@@ -1231,21 +1235,21 @@ export type CleanBaseMerge = (commit: string) => string | undefined;
 export type QuietCommit = (commit: string) => QuietStep | undefined;
 type Carried = { commit: string; from: string; merges: string[]; quiet?: string[]; reason?: string; recordedAt: string };
 const carriedPath = (home: string, identity: ProofIdentity, commit: string) => join(pullRequestDirectory(home, identity), "carried", `${commit}.json`);
-const maxCarriedMerges = 20;
-const maxQuietCommits = 30;
+const carryLimits = { merges: 20, quiet: 30 };
+const unlimited = { merges: Infinity, quiet: Infinity };
 
 function reviewedThroughMerges(start: string, reviewed: Set<string>, cleanBaseMerge: CleanBaseMerge) {
   const found = reviewedThrough(start, reviewed, cleanBaseMerge, () => undefined);
   return found && { from: found.from, merges: found.merges };
 }
 
-function reviewedThrough(start: string, reviewed: Set<string>, cleanBaseMerge: CleanBaseMerge, quietCommit: QuietCommit) {
+function reviewedThrough(start: string, reviewed: Set<string>, cleanBaseMerge: CleanBaseMerge, quietCommit: QuietCommit, limits = carryLimits) {
   const merges: string[] = [];
   const quiet: string[] = [];
   const kinds = new Set<DeltaKind>();
   const cancelled = new Map<string, string>();
   let commit: string | undefined = start;
-  while (commit && merges.length <= maxCarriedMerges && quiet.length <= maxQuietCommits) {
+  while (commit && merges.length <= limits.merges && quiet.length <= limits.quiet) {
     const undone = cancelled.get(commit);
     if (undone) { cancelled.delete(commit); commit = undone; continue; }
     if (reviewed.has(commit) && !cancelled.size) return { from: commit, merges, quiet, kinds: [...kinds] };
@@ -1260,6 +1264,9 @@ function reviewedThrough(start: string, reviewed: Set<string>, cleanBaseMerge: C
   }
   return undefined;
 }
+
+const onlyQuietSince = (identity: ProofIdentity, counted: FinishedReview[], cleanBaseMerge: CleanBaseMerge, quietCommit: QuietCommit) =>
+  reviewedThrough(identity.commit, new Set(counted.map((review) => review.commit)), cleanBaseMerge, quietCommit, unlimited) !== undefined;
 
 function gateCarry(identity: ProofIdentity, finished: FinishedReview[], cleanBaseMerge: CleanBaseMerge, quietCommit: QuietCommit) {
   const firstPanel = finished.find((review) => review.panel);
