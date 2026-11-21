@@ -462,7 +462,7 @@ condition of an accepted gap, so while one rests on a condition the gate names i
 how to end it: void a decision and decide it again without a condition, or have the user raise the ceiling for a
 standing rule. A gate holds
 the lock of the PR's judge directory while it asks the judge, and a second gate of that PR that finds no saved verdict for its
-inputs stops, names the process that holds it, and leaves no failure: no run record and nothing in the decision ledger. A gate whose process ended leaves its lock to the next gate. A judge gap on HEAD (gap
+inputs stops, names the process that holds it, and keeps no run record and shares nothing to the decision ledger. A gate run with --wait keeps the failure it shared when it read CI as running; run the gate again once the first ends. A gate whose process ended leaves its lock to the next gate. A judge gap on HEAD (gap
 --kind judge) lets the gate pass once a decision in the ledger accepts it: the user's answer, recorded with hedge
 decision record --mark 👤, or your own 🤖 decision when the PR's tier lets you. A refusal or a typed message never
 accepts it. The judge reads the condition of each accepted gap and fails one that HEAD breaks; the setting
