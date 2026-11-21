@@ -262,6 +262,18 @@ describe("saving answers", () => {
     expect(loadProfile(await profileRepo({ ...profile, overrides: { config: [{ provider: "claude", key: "model", value: "x", plans: {} }] } }))).rejects.toThrow("overrides.config[0]: plans must list claude, codex, or both");
     expect(loadProfile(await profileRepo({ ...profile, overrides: { config: [{ provider: "nope", key: "model", value: "x" }] } }))).rejects.toThrow("overrides.config[0]: needs a provider and a key");
     expect(loadProfile(await profileRepo({ ...profile, overrides: { config: [{ provider: "claude", key: "model", value: "x", after: "ready" }] } }))).rejects.toThrow("overrides.config[0]: after names a pack's check, so only a pack's own config item can wait for one");
+    expect(loadProfile(await profileRepo({ ...profile, overrides: { config: [{ provider: "t3", key: "providerInstances.muse", value: { driver: "muse", enabled: "yes" } }] } }))).rejects.toThrow("overrides.config[0]: a T3 provider instance needs a driver and enabled");
+  });
+
+  test("takes a model row of any T3 provider instance in its overrides", async () => {
+    const neon = { role: "survey", work: "Read docs", provider: "antigravity", model: "gemini-4-neon", effort: "high" as const };
+    expect((await loadProfile(await profileRepo({ ...profile, overrides: { models: [neon] } }))).overrides?.models).toEqual([neon]);
+    for (const provider of ["-x", "claudeAgent"]) await expect(loadProfile(await profileRepo({ ...profile, overrides: { models: [{ ...neon, provider }] } }))).rejects.toThrow("overrides.models must list rows with a role, work, a provider that names a T3 provider instance (claude, not claudeAgent), a model, and an effort");
+  });
+
+  test("takes a T3 provider instance in its overrides", async () => {
+    const muse = { provider: "t3" as const, key: "providerInstances.muse", value: { driver: "muse", enabled: true, config: { binaryPath: "~/.local/bin/muse" } } };
+    expect((await loadProfile(await profileRepo({ ...profile, overrides: { config: [muse] } }))).overrides?.config).toEqual([muse]);
   });
 });
 

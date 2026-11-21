@@ -87,7 +87,7 @@ test("once the mechanical gate passes, the other family's judge weighs the evide
   expect(failed.code).toBe(1);
   expect(failed.output).toContain("judge review: fail: The findings ignore feature.txt");
   expect(failed.output).toContain("judge quality: fail, high: greet has no test (feature.txt:1)");
-  expect(failed.output.split("\n").at(-1)).toBe("gate: fail (exit 1)");
+  expect(failed.output.split("\n").at(-1)).toBe("gate: fail (exit 1): judge review: fail: The findings ignore feature.txt");
 });
 
 test("a judge that keeps failing goes to the arbiter, and only the user's accepted judge gap on HEAD lets the gate pass", async () => {
@@ -200,7 +200,9 @@ test("a configured critical-path file the gate cannot read fails the gate and na
   await reviewHead(pr);
   await pr.hedge("require", "--none", "--reason", "Docs only");
   pr.env.HEDGE_SETTINGS = JSON.stringify({ ...JSON.parse(pr.env.HEDGE_SETTINGS!), "pull-requests.criticalPathFiles": "example/product=critical-paths.md" });
-  await expect(pr.hedge("gate")).rejects.toThrow(`Cannot read the critical-path file ${join(pr.home, "critical-paths.md")} of example/product`);
+  const gate = await pr.hedge("gate");
+  expect(gate.code).toBe(1);
+  expect(gate.output).toStartWith(`gate: fail (exit 1): Cannot read the critical-path file ${join(pr.home, "critical-paths.md")} of example/product`);
 });
 
 test("an answer the user gave before the judge gap was recorded never accepts it", async () => {
@@ -693,4 +695,15 @@ test("stripping receipts never changes the merge-risk callout or tier the ledger
   }
   expect(withoutReceipt(bodies[0]!)).toBe(`## Testing\n\n${callout("**Tier:** critical (b)")}`);
   expect(withoutReceipt(bodies[6]!)).toBe(`## Testing\n\n${callout("**Tier:** non-critical")}`);
+});
+
+test("a judge command over a review row of another T3 provider does not claim to judge from the other family", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHeadFixed(pr, "feature.txt:1", "greet new members");
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  pr.env.HEDGE_MODELS = JSON.stringify([lookup, { role: "review", work: "Review code", provider: "antigravity", model: "gemini-4-neon", effort: "high" }]);
+  const judge = fakeModel(pr, "JUDGE", verdict());
+  expect((await pr.hedge("gate")).code).toBe(0);
+  expect(judge.prompts().at(-1)).toContain("You judge it in a fresh session, apart from the session that wrote it");
 });

@@ -267,6 +267,15 @@ describe("hedge claude-wrapper", () => {
     expect(await t3.run("check")).toBe(0);
   });
 
+  test("binds T3's implicit Claude when T3 lists only another provider, such as one a pack turned on", async () => {
+    const antigravity = { driver: "antigravity", enabled: true, config: { binaryPath: "/opt/agy/bin/agy" } };
+    const t3 = await t3With({ antigravity });
+    expect(await t3.run("check")).toBe(1);
+    expect(await t3.run("bind")).toBe(0);
+    expect(t3.settings.providerInstances).toEqual({ antigravity, claudeAgent: { driver: "claudeAgent", config: { binaryPath: t3.wrapperPath } } });
+    expect(await t3.run("check")).toBe(0);
+  });
+
   test("creates the Claude instance on a fresh T3 that lists none", async () => {
     const t3 = await t3With({});
     expect(await t3.run("bind")).toBe(0);

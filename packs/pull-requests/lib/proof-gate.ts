@@ -5,7 +5,7 @@ import { modelFor, type ModelRow } from "../../base/lib/models.ts";
 import { numberSetting } from "../../base/lib/settings.ts";
 import { covers, hubLedger, refText, riskCalloutOf, tierOf, type Env, type Ledger, type PrRef, type Ssh } from "./decision-ledger.ts";
 import { ciOf, readPullRequest, type PullRequest, type Run } from "./pr-ci.ts";
-import { askGap, authorOf, conditionName, isStandingCondition, judgeDirectory, judgeGap, judgeGapProof, listStanding, parseVerdict, prDirectory, proofGate, pullRequestDirectory, readDecisions, readJson, receiptOf, reviewRecords, withBrokenConditions, writeJson, type Arbiter, type Decisions, type JudgeSummary, type ProofIdentity, type ProofSummary, type PushedHead } from "./proof.ts";
+import { askGap, authorOf, ciRunningCode, conditionName, isStandingCondition, judgeDirectory, judgeGap, judgeGapProof, listStanding, parseVerdict, prDirectory, proofGate, pullRequestDirectory, readDecisions, readJson, receiptOf, reviewRecords, withBrokenConditions, writeJson, type Arbiter, type Decisions, type JudgeSummary, type ProofIdentity, type ProofSummary, type PushedHead } from "./proof.ts";
 import { displayEntry } from "./proof-display.ts";
 import { receiptMarker } from "./proof-receipt.ts";
 import { baseRefs, cleanBaseMerge, devPullOf, diffOf, mergeBase, pullRequestDetails, remotesOf, topLevel } from "./proof-checkout.ts";
@@ -16,7 +16,7 @@ import { readSanity } from "./proof-sanity.ts";
 import { inputsDigest, readBloat } from "./proof-bloat.ts";
 import { judge, readCriticalPaths, type JudgeInput } from "./proof-judge.ts";
 import { withRoundLock, type RoundLock } from "./proof-panel.ts";
-import { askModel, familyOf, modelLabel, readRiskRubric, readRubric, reviewerRow, skillReferences } from "./proof-models.ts";
+import { askModel, modelLabel, otherFamily, readRiskRubric, readRubric, reviewerRow, skillReferences } from "./proof-models.ts";
 
 export type GateContext = { home: string; cwd: string; env: Env; run: Run; now?: () => Date; ssh?: Ssh };
 export type JudgingContext = GateContext & { lock: () => Promise<RoundLock> };
@@ -71,17 +71,22 @@ export async function finalGate(head: ProofIdentity, context: JudgingContext, { 
   const shown = pull === undefined ? undefined : receiptMarker((pull as PullRequest).body);
   const stale = shown && shown.head !== head.commit ? [`receipt: the PR body shows the receipt of ${shown.head.slice(0, 7)}, not HEAD ${head.commit.slice(0, 7)}. Refresh it with hedge proof receipt`] : [];
   const growth = await grownBy(home, head, run, pull);
+  const reason = judged.code === 0 ? "pass" : (judged.reason ?? `exit ${judged.code}`).replace(/\s*[\r\n]+\s*/g, " ");
   const gate = {
     code: judged.code,
-    reason: judged.code === 0 ? "pass" : judged.reason ?? `exit ${judged.code}`,
+    reason,
     lines: [...checked.lines, ...judged.lines, ...stale, ...unmeasured(head, run, pull, growth, landed)],
-    verdict: judged.code === 0 ? `gate: pass (${checked.summary}; judge: ${judged.covered})` : `gate: fail (exit ${judged.code})`,
+    verdict: verdictOf(judged.code, reason, `${checked.summary}; judge: ${judged.covered}`),
     summary: { ...checked.proofSummary, code: judged.code, judge: judged.judge, growth },
   };
   if (pull) await writeJson(savedPath(home, head, head.commit), { key: keyOf(pull, landed, await fingerprintOf(home, head, files, checked.decisions)), gate, conditions: checked.conditions } satisfies SavedGate);
   return gate;
 }
 
+const verdictOf = (code: number, reason: string, covered: string) =>
+  code === 0 ? `gate: pass (${covered})`
+    : code === ciRunningCode ? `gate: pending (exit ${code}): ${reason}. Run the gate again with --wait <minutes>, such as --wait 10, to wait for CI to finish`
+    : `gate: fail (exit ${code}): ${reason}`;
 
 function unmeasured(head: ProofIdentity, run: Run, pull: PullRequest | undefined, growth: Growth, landed: boolean) {
   if (growth.final || !isCommitSha(pull?.baseSha) || run(["env", "GIT_NO_LAZY_FETCH=1", "git", "cat-file", "-e", `${pull.baseSha}^{commit}`]).code === 0) return [];
@@ -147,7 +152,7 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
   const weighedGap = await judgeGap(home, head, today, checked.decisions, checked.tier);
   const known = {
     risk: riskRubric === undefined ? undefined : { rubric: riskRubric, body: pullRequestDetails(head, run).body },
-    commit: head.commit, crossFamily: familyOf(row) !== author, ci: checked.ci, owed: checked.owed!, ledger: checked.lines,
+    commit: head.commit, crossFamily: otherFamily(row, author), ci: checked.ci, owed: checked.owed!, ledger: checked.lines,
     evidence: checked.evidence, reviews: await reviewRecords(home, head), rubric: await readRubric(home), references: skillReferences(home),
     conditions: [...checked.conditions, ...weighedGap?.condition ? [weighedGap.condition] : []], criticalPaths: await readCriticalPaths(home, head.repository, env),
   };

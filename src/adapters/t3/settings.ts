@@ -1,9 +1,10 @@
+import { join } from "node:path";
 import type { Finding, Plan } from "../../pack/types.ts";
 import type { AdapterResult } from "../../reconciler/apply.ts";
 import { readFieldRecord, type FieldRecord } from "../provider-config/adapter.ts";
-import { checkPath, json, type Document, type Field } from "../provider-config/fields.ts";
+import { checkPath, get, json, same, samePath, type Document, type Field } from "../provider-config/fields.ts";
 import { readState, writeWithBackups, type Write } from "../provider-config/store.ts";
-import { holds, reconcileKeys, type Reconciled } from "./keys.ts";
+import { holds, isProviderInstance, reconcileKeys, type Reconciled } from "./keys.ts";
 import type { T3Rpc } from "./port.ts";
 
 export const settingsTarget = ".t3/userdata/settings.json";
@@ -14,8 +15,20 @@ type Options = { adopt: string[]; dryRun: boolean; outage: boolean; rpc?: T3Rpc 
 
 const finding = (id: string, say: string, repair?: Finding["repair"]): Finding => ({ id, pack: "engine", say, ...(repair ? { repair } : {}) });
 
+const instancesKey = "providerInstances.";
+
 export function settingsFields(plan: Plan): Field[] {
-  return plan.config.filter((entry) => entry.provider === "t3").map((entry) => ({ path: checkPath([entry.key], `t3 key ${entry.key}`), value: entry.value, pack: entry.pack }));
+  return plan.config.filter((entry) => entry.provider === "t3").map((entry) => {
+    const path = entry.key.startsWith(instancesKey) ? ["providerInstances", entry.key.slice(instancesKey.length)] : [entry.key];
+    return { path: checkPath(path, `t3 key ${entry.key}`), value: entry.value, pack: entry.pack };
+  });
+}
+
+function underHome(field: Field, home: string): Field {
+  const value = field.value as { config?: { binaryPath?: unknown } };
+  const binary = isProviderInstance(field.path) ? value.config?.binaryPath : undefined;
+  if (typeof binary !== "string" || !binary.startsWith("~/")) return field;
+  return { ...field, value: { ...value, config: { ...value.config, binaryPath: join(home, binary.slice(2)) } } };
 }
 
 export function desktopFields(plan: Plan): Field[] {
@@ -35,7 +48,7 @@ export async function reconcileSettings(plan: Plan, home: string, options: Optio
   const previous = await readFieldRecord(home, recordTarget);
   const next: FieldRecord = {};
   const writes: Array<Write & { reason: string }> = [];
-  for (const [target, fields] of [[settingsTarget, settingsFields(plan)], [desktopTarget, desktopFields(plan)]] as const) {
+  for (const [target, fields] of [[settingsTarget, settingsFields(plan).map((field) => underHome(field, home))], [desktopTarget, desktopFields(plan)]] as const) {
     const old = previous[target] ?? [];
     let before: string | undefined;
     let current: Document;
@@ -57,7 +70,10 @@ export async function reconcileSettings(plan: Plan, home: string, options: Optio
       const merged = reconcileKeys(effectiveView(current, old, effective), old, fields, { adopt, outage: options.outage, matches: holds });
       keptFinding(target, merged, result);
       const refused = await throughServer(options.rpc, merged, effective, options.dryRun, result);
-      const record = merged.record.flatMap((field) => (refused.includes(field) ? heldBefore(field, effective) : [field]));
+      const record = merged.record.flatMap((field) => {
+        if (!refused.includes(field)) return [field];
+        return isProviderInstance(field.path) ? old.filter((item) => samePath(item.path, field.path)) : heldBefore(field, effective);
+      });
       if (record.length) next[target] = record;
       continue;
     }
@@ -84,8 +100,11 @@ function effectiveView(file: Document, old: Field[], effective: Document): Docum
   return Object.fromEntries([...keys].map((key) => [key, key in effective ? effective[key] : file[key]]).filter(([, value]) => value !== undefined));
 }
 
+const name = (field: Field) => field.path.join(".");
+const instanceId = (field: Field) => field.path[1]!;
+
 function heldBefore(field: Field, effective: Document): Field[] {
-  const value = effective[field.path[0]!];
+  const value = get(effective, field.path);
   return value === undefined ? [] : [{ ...field, value }];
 }
 
@@ -93,17 +112,47 @@ function keptFinding(target: string, merged: Reconciled, result: AdapterResult) 
   if (merged.kept.length) result.findings.push(finding(`kept:${target}`, `Kept your ${merged.kept.join(", ")} in ${target}. Run hedge apply --adopt ${target} to take Hedge's value.`));
 }
 
+const takes = (field: Field, actual: unknown) => (isProviderInstance(field.path) ? same : holds)(actual, field.value);
+
 async function throughServer(rpc: T3Rpc, merged: Reconciled, effective: Document, dryRun: boolean, result: AdapterResult): Promise<Field[]> {
   if (merged.removed.length) result.findings.push(finding("t3:dropped", `Hedge no longer sets ${merged.removed.join(", ")} in T3 Code. T3 Code keeps the current value; change it in T3 Code's settings if you like.`));
-  const key = (field: Field) => field.path[0]!;
-  const changed = merged.applied.filter((field) => !holds(effective[key(field)], field.value));
+  const changed = merged.applied.filter((field) => !takes(field, get(effective, field.path)));
+  if (dryRun) {
+    if (changed.length) result.findings.push(finding("t3:settings", `T3 Code needs these settings: ${changed.map(name).join(", ")}.`, "apply"));
+    return [];
+  }
   if (!changed.length) return [];
-  if (dryRun) return result.findings.push(finding("t3:settings", `T3 Code needs these settings: ${changed.map(key).join(", ")}.`, "apply")), [];
-  await rpc.call("server.updateSettings", { patch: Object.fromEntries(changed.map((field) => [key(field), field.value])) });
-  const after = await readT3Settings(rpc);
-  const missing = changed.filter((field) => !holds(after[key(field)], field.value));
-  const taken = changed.filter((field) => !missing.includes(field));
-  if (taken.length) result.actions.push({ target: "t3 settings", operation: "replace", reason: `set ${taken.map(key).join(", ")}` });
-  if (missing.length) result.findings.push(finding("t3:settings", `T3 Code did not take ${missing.map(key).join(", ")}. Run hedge apply again; if it stays, set it in T3 Code's settings.`, "apply"));
-  return missing;
+  const patch = changed.filter((field) => !isProviderInstance(field.path));
+  const sent: Field[] = [];
+  let failure: unknown;
+  try {
+    if (patch.length) {
+      await rpc.call("server.updateSettings", { patch: Object.fromEntries(patch.map((field) => [name(field), field.value])) });
+      sent.push(...patch);
+    }
+    for (const field of changed.filter((item) => isProviderInstance(item.path))) {
+      await upsertInstance(rpc, instanceId(field), field.value);
+      sent.push(field);
+    }
+  } catch (error) {
+    failure = error;
+  }
+  let lost: unknown;
+  const after = await readT3Settings(rpc).catch((error: unknown) => {
+    lost = error;
+    return undefined;
+  });
+  const refused = changed.filter((field) => (after ? !takes(field, get(after, field.path)) : !sent.includes(field)));
+  const taken = changed.filter((field) => !refused.includes(field));
+  if (taken.length) result.actions.push({ target: "t3 settings", operation: "replace", reason: `set ${taken.map(name).join(", ")}` });
+  if (refused.length) result.findings.push(finding("t3:settings", `T3 Code did not take ${refused.map(name).join(", ")}. Run hedge apply again; if it stays, set it in T3 Code's settings.`, "apply"));
+  if (failure !== undefined || lost !== undefined) {
+    result.failed = true;
+    result.findings.push(finding("t3:server", failure !== undefined ? `T3 Code refused a settings write (${(failure as Error).message}). Run hedge apply again.` : `Hedge could not read back the settings T3 Code took (${(lost as Error).message}). Run hedge apply again.`, "apply"));
+  }
+  return refused;
+}
+
+async function upsertInstance(rpc: T3Rpc, instanceId: string, instance: unknown) {
+  await rpc.call("server.updateSettings", { patch: {}, providerInstanceMutation: { operation: "upsert", instanceId, instance } });
 }
