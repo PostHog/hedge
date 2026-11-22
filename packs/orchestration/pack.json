@@ -77,48 +77,6 @@
       "type": "string",
       "default": "",
       "ask": "never"
-    },
-    {
-      "key": "orchestration.waitMark",
-      "question": "Which mark starts a closing line that waits on someone else, so the thread snoozes?",
-      "type": "string",
-      "default": "⏳",
-      "ask": "never"
-    },
-    {
-      "key": "orchestration.snoozeMark",
-      "question": "Which mark starts a closing line that snoozes the thread until the time on the line?",
-      "type": "string",
-      "default": "💤",
-      "ask": "never"
-    },
-    {
-      "key": "orchestration.checkMark",
-      "question": "Which mark starts a closing line that settles the thread until its own scheduled check?",
-      "type": "string",
-      "default": "🔕",
-      "ask": "never"
-    },
-    {
-      "key": "orchestration.doneMark",
-      "question": "Which mark starts a closing line that says the work is done and you may settle the thread?",
-      "type": "string",
-      "default": "➡️",
-      "ask": "never"
-    },
-    {
-      "key": "orchestration.waitSnoozeDays",
-      "question": "For how many days does a closing line that waits on someone else snooze the thread?",
-      "type": "number",
-      "default": 3,
-      "ask": "never"
-    },
-    {
-      "key": "orchestration.timeZone",
-      "question": "In which time zone are the times on a snooze line, such as Europe/Berlin? Leave it empty to use this machine's time zone.",
-      "type": "string",
-      "default": "",
-      "ask": "never"
     }
   ],
   "workflows": [
@@ -149,23 +107,6 @@
         "orchestration.proseTitles"
       ],
       "sentence": "A top-level T3 thread that ends its turn with a decision for you in prose is stopped once and told to ask with the question tool, so the decision reaches you even while the thread waits on a watch. A thread whose title starts with one of your prose titles asks in prose instead, and its question cards are turned back, because a job queues messages into it. An agent message that would interrupt a thread waiting on your answer is turned back once and told to queue, so the question stays open. A T3 thread that owns an open pull request and ends its turn while the proof gate has not passed at the pushed head is sent back once, with the step still owed."
-    },
-    {
-      "id": "parking",
-      "name": "Closing-line parking",
-      "default": false,
-      "requires": [
-        "question-guard"
-      ],
-      "settings": [
-        "orchestration.waitMark",
-        "orchestration.snoozeMark",
-        "orchestration.checkMark",
-        "orchestration.doneMark",
-        "orchestration.waitSnoozeDays",
-        "orchestration.timeZone"
-      ],
-      "sentence": "A top-level T3 thread parks itself by the mark its last line starts with. A wait on someone else snoozes it for a few days, a snooze line snoozes it until its time, and a line that names its own scheduled check settles it once the turn ends. A thread you pinned stays in view, and a thread that settles while it alone links an open pull request is sent back once."
     }
   ],
   "files": [

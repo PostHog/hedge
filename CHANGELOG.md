@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+### Final reads and the judge stop at the review budget
+
+- At the review ceiling, `hedge proof review --scope final` no longer reads
+  a production fix that came after the last read. It says the budget is
+  spent and what to do: revert each commit of the PR since the last read
+  that changes production code, never a merge of the base, and list the
+  finding under `## Known issues`. The gate carries the revert. Only the
+  user's `--override` runs one more read. A
+  HEAD whose commits since the last read are only clean base merges and
+  quiet commits, past what the gate carries, still gets its final read
+  when those commits change files of the pull request.
+- The judge in `hedge proof gate` fails at most
+  `pull-requests.reviewCeiling` times on a pull request. After that the gate
+  runs it no more and says the judge budget is spent. A judge gap on HEAD
+  that a decision accepts ends it, as before. While an accepted gap rests
+  on a condition, which no judge checks now, the gate names it and passes no
+  judge gap: void the decision and decide it again without a condition, or,
+  for a standing rule, have the user raise the ceiling. A cached verdict
+  still shows.
+  A gate holds the lock of the pull request's judge directory while it asks
+  the judge, so a second gate at the same moment that finds no saved
+  verdict for its inputs stops and names the process that holds it, and
+  gates at once never pass the cap. That second gate keeps no run record
+  and shares nothing to the decision ledger, so the merge gate counts the
+  pass of the first gate on every machine. A gate run with `--wait` keeps
+  the failure it shared when it read CI as running, and its failing run
+  record. A gate whose
+  process ended leaves its lock to the next gate.
+
+### Closing-line auto-snooze removed
+
+- Removed the `parking` workflow of the Orchestration pack, its six settings
+  (`orchestration.waitMark`, `orchestration.snoozeMark`, `orchestration.checkMark`,
+  `orchestration.doneMark`, `orchestration.waitSnoozeDays`, and
+  `orchestration.timeZone`), the Stop hook's auto-snooze and detached
+  `settle-after` process, and the closing-mark exemptions in the question,
+  background-task, and proof stop checks. The Stop hook reads T3 only.
+- Removed the 3-day re-snooze instruction and self-snooze (`snoozedAt`)
+  heuristic from `review-wait`, and removed the wait-snooze advice from
+  `settle-guard`. Any active snooze now counts as the person's own snooze.
+- Pin protection and remote `hedge pr settle-check` stay in `settle-guard`:
+  when the guard can read the target thread, agents still cannot settle or
+  snooze a pinned thread, and may snooze an unpinned one when asked.
+
 ### A model row takes any T3 provider
 
 - The `provider` of a model table row is the id of a T3 provider instance,
