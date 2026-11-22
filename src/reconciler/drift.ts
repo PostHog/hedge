@@ -1,4 +1,5 @@
 import type { Finding, HumanStep, Owned, Plan } from "../pack/types.ts";
+import { withoutRepoEnv } from "../repo-env.ts";
 
 const healthLimitMs = 3000;
 
@@ -29,7 +30,7 @@ async function answers(url: string) {
 
 async function profileCommit(dir: string) {
   try {
-    const child = Bun.spawn(["git", "-C", dir, "rev-parse", "--short", "HEAD"], { stdout: "pipe", stderr: "ignore", stdin: "ignore" });
+    const child = Bun.spawn(["git", "-C", dir, "rev-parse", "--short", "HEAD"], { env: withoutRepoEnv(), stdout: "pipe", stderr: "ignore", stdin: "ignore" });
     const [out, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
     return code === 0 ? out.trim() || undefined : undefined;
   } catch {

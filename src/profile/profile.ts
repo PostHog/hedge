@@ -10,6 +10,7 @@ import { writePrivateFile } from "../files/private.ts";
 import { isKeptForBoxes } from "../hub/names.ts";
 import { profileFile, refuseLegacyPath } from "../legacy.ts";
 import { followCurrentDefaults } from "../setup/defaults.ts";
+import { withoutRepoEnv } from "../repo-env.ts";
 
 export class ProfileError extends Error {}
 
@@ -207,7 +208,7 @@ async function readJson(path: string): Promise<Record<string, unknown> | undefin
 }
 
 async function run(cwd: string, ...command: string[]) {
-  const process = Bun.spawn(command, { cwd, env: { ...Bun.env }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const process = Bun.spawn(command, { cwd, env: withoutRepoEnv(), stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   const [code, stdout, stderr] = await Promise.all([process.exited, new Response(process.stdout).text(), new Response(process.stderr).text()]);
   return { ok: code === 0, code, stdout: stdout.trim(), stderr: stderr.trim() };
 }
