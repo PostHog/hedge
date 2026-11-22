@@ -1,12 +1,15 @@
+import { isAbsolute, relative, resolve } from "node:path";
+import { legacyProfileFileName, profileFileName } from "../legacy.ts";
 import type { Finding, HumanStep, Owned, Plan } from "../pack/types.ts";
 import { withoutRepoEnv } from "../repo-env.ts";
 
 const healthLimitMs = 3000;
+const baseProfilePaths = [profileFileName, legacyProfileFileName, "about-me.md", "overrides", "guards", "packs", "install.sh", "README.md"];
 
 /** What doctor adds to tell nodes apart from the hub: the profile commit this machine follows, and on the hub and its named nodes each served service that does not answer at loopback. A solo machine has no nodes to drift from. The hub skips a service whose install step is still left, which doctor names already. */
 export async function drift(plan: Plan, left: Array<Owned<HumanStep>>): Promise<Finding[]> {
   const findings: Finding[] = [];
-  const commit = plan.machine.profileDir ? await profileCommit(plan.machine.profileDir) : undefined;
+  const commit = plan.machine.profileDir ? await profileCommit(plan.machine.profileDir, plan) : undefined;
   if (commit) findings.push({ id: "drift:profile", pack: "engine", say: `Your profile is at commit ${commit}. Every node of it should show the same commit.` });
   const isHub = plan.onHub && plan.hub !== undefined;
   if (!isHub && !plan.reachesHub) return findings;
@@ -28,9 +31,23 @@ async function answers(url: string) {
   }
 }
 
-async function profileCommit(dir: string) {
+function profilePaths(dir: string, plan: Plan) {
+  const root = resolve(dir);
+  const linked = plan.files.flatMap((file) => {
+    if (!("source" in file) || !file.source) return [];
+    const rel = relative(root, resolve(file.source));
+    return rel && !rel.startsWith("..") && !isAbsolute(rel) ? [rel] : [];
+  });
+  return [...new Set([...baseProfilePaths, ...linked])];
+}
+
+async function profileCommit(dir: string, plan: Plan) {
+  return (await gitOutput(dir, ["log", "-1", "--format=%h", "--", ...profilePaths(dir, plan)])) ?? (await gitOutput(dir, ["rev-parse", "--short", "HEAD"]));
+}
+
+async function gitOutput(dir: string, args: string[]) {
   try {
-    const child = Bun.spawn(["git", "-C", dir, "rev-parse", "--short", "HEAD"], { env: withoutRepoEnv(), stdout: "pipe", stderr: "ignore", stdin: "ignore" });
+    const child = Bun.spawn(["git", "-C", dir, ...args], { env: withoutRepoEnv(), stdout: "pipe", stderr: "ignore", stdin: "ignore" });
     const [out, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
     return code === 0 ? out.trim() || undefined : undefined;
   } catch {

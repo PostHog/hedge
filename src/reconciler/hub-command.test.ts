@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
 import { linkedHedges } from "../testing/linked.ts";
@@ -102,6 +102,36 @@ test("doctor names the profile commit", async () => {
   const { node, profile } = linkedHedges(temp);
   const commit = await committed(profile);
   expect((await node("doctor")).output).toContain(`Note: Your profile is at commit ${commit}. Every node of it should show the same commit.`);
+});
+
+test("doctor ignores commits outside the profile's own files and moves when a profile file changes", async () => {
+  const { node, profile } = linkedHedges(temp);
+  const profileCommit = await committed(profile);
+  mkdirSync(join(profile, "memory"), { recursive: true });
+  writeFileSync(join(profile, "memory/note.md"), "remember this\n");
+  await spawnGit(profile, "add", "memory/note.md");
+  await spawnGit(profile, "commit", "-qm", "memory: node-1");
+  expect((await node("doctor")).output).toContain(`Note: Your profile is at commit ${profileCommit}. Every node of it should show the same commit.`);
+
+  mkdirSync(join(profile, "packs/mine"), { recursive: true });
+  writeFileSync(join(profile, "packs/mine/pack.json"), "{}\n");
+  await spawnGit(profile, "add", "packs/mine/pack.json");
+  await spawnGit(profile, "commit", "-qm", "add personal pack");
+  const nextCommit = await spawnGit(profile, "rev-parse", "--short", "HEAD");
+  expect(nextCommit).not.toBe(profileCommit);
+  expect((await node("doctor")).output).toContain(`Note: Your profile is at commit ${nextCommit}. Every node of it should show the same commit.`);
+
+  mkdirSync(join(profile, "skills/custom"), { recursive: true });
+  writeFileSync(join(profile, "skills/custom/SKILL.md"), "---\nname: custom\n---\n");
+  const saved = JSON.parse(readFileSync(join(profile, "hedge.json"), "utf8"));
+  writeFileSync(join(profile, "hedge.json"), JSON.stringify({ ...saved, overrides: { skills: ["skills/custom"] } }));
+  await spawnGit(profile, "add", "hedge.json", "skills/custom/SKILL.md");
+  await spawnGit(profile, "commit", "-qm", "add profile skill");
+  writeFileSync(join(profile, "skills/custom/SKILL.md"), "---\nname: custom\n---\nupdated\n");
+  await spawnGit(profile, "add", "skills/custom/SKILL.md");
+  await spawnGit(profile, "commit", "-qm", "update profile skill");
+  const skillCommit = await spawnGit(profile, "rev-parse", "--short", "HEAD");
+  expect((await node("doctor")).output).toContain(`Note: Your profile is at commit ${skillCommit}. Every node of it should show the same commit.`);
 });
 
 test("on a node, doctor names a served service that does not answer at loopback and fails", async () => {

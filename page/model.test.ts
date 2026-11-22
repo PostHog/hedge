@@ -187,14 +187,14 @@ describe("the install prompt", () => {
     expect(named.toSorted()).toEqual(held.map((pack) => `packs/${pack}/SETUP.md`).toSorted());
   });
 
-  test("Memory's note leaves the memory repo to the command, and the command of the prompt makes it on a Hedge that already runs", async () => {
+  test("Memory's note leaves the memory repo to the command, and the command of the prompt shares the profile repo on a Hedge that already runs", async () => {
     const note = readFileSync(join(root, "packs/memory/SETUP.md"), "utf8").replace(/\s+/g, " ");
-    expect(note).toContain("`hedge setup` and `hedge packs --add memory` create it when it is missing. Add nothing to the command.");
+    expect(note).toContain("add nothing to the command. `hedge setup` and `hedge packs --add memory` set `context.repo` to their profile repo unless `<their GitHub login>/hedge-memory` or `fleet-memory` exists already.");
     const hub = await hubWithHedge();
     const command = installPrompt(data, select("memory")).match(/^ {3}hedge (packs .*)$/m)![1]!;
     expect(await hub.hedge(command.split(" "))).toBe(0);
-    expect(existsSync(githubRepo(hub.home, "nora/hedge-memory"))).toBe(true);
-    expect(await pushedAnswers(hub.home)).toMatchObject({ packs: expect.arrayContaining(["memory"]), settings: { "memory.repo": "nora/hedge-memory" } });
+    expect(existsSync(githubRepo(hub.home, "nora/hedge-memory"))).toBe(false);
+    expect(await pushedAnswers(hub.home)).toMatchObject({ packs: expect.arrayContaining(["memory"]), settings: { "context.repo": "nora/nora-hedge" } });
   });
 
   test("its command turns the selected packs on in the profile of a machine that runs Hedge", async () => {

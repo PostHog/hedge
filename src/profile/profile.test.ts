@@ -255,6 +255,77 @@ describe("saving answers", () => {
     expect((error as Error).message).not.toMatch(/hunter2|EXAMPLE_TOKEN|nora:/);
   });
 
+  test("retries once with fetch and rebase when another machine pushes a memory commit before push", async () => {
+    const { dir, remote } = await profileBehind();
+    const other = temp.make("memory-race-");
+    await spawnGit(other, "clone", "-q", remote, ".");
+    const marker = join(other, ".raced");
+    const hook = `#!/bin/sh\n[ -e '${marker}' ] && exit 0\ntouch '${marker}'\nunset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX\ncd '${other}' && mkdir -p memory && printf 'note\\n' > memory/a.md && git add memory/a.md && git commit -q -m 'memory: node-1' && git push -q\n`;
+    writeFileSync(join(dir, ".git/hooks/post-commit"), hook, { mode: 0o755 });
+
+    await saveAnswers(dir, { settings: { "team.one": 1 } }, { push: true });
+
+    expect(JSON.parse(await spawnGit(remote, "show", "main:hedge.json")).settings).toEqual({ "team.one": 1 });
+    expect(await spawnGit(remote, "show", "main:memory/a.md")).toBe("note");
+    expect(await spawnGit(remote, "rev-parse", "main")).toBe(await spawnGit(dir, "rev-parse", "HEAD"));
+  });
+
+  test("aborts cleanly and reports a conflict when another machine changes the same hedge.json field before push", async () => {
+    const { dir, remote } = await profileBehind();
+    const other = temp.make("conflict-race-");
+    await spawnGit(other, "clone", "-q", remote, ".");
+    const marker = join(other, ".raced");
+    const edited = JSON.stringify({ ...profile, plan: "codex" }, null, 2) + "\n";
+    const file = join(other, "other-hedge.json");
+    writeFileSync(file, edited);
+    const hook = `#!/bin/sh\n[ -e '${marker}' ] && exit 0\ntouch '${marker}'\nunset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX\ncd '${other}' && cp '${file}' hedge.json && git commit -q -am 'other plan' && git push -q\n`;
+    writeFileSync(join(dir, ".git/hooks/post-commit"), hook, { mode: 0o755 });
+
+    const error = await saveAnswers(dir, { plan: "claude" }, { push: true }).catch((caught: Error) => caught);
+
+    expect(error).toBeInstanceOf(ProfileError);
+    expect((error as Error).message).toContain(`${dir} and its remote both have changes the other lacks.`);
+    expect(await spawnGit(dir, "status", "--porcelain")).toBe("");
+    expect(JSON.parse(await spawnGit(remote, "show", "main:hedge.json")).plan).toBe("codex");
+    expect(JSON.parse(readFileSync(join(dir, "hedge.json"), "utf8")).plan).toBe("claude");
+  });
+
+  test("does not rebase over another machine's non-overlapping hedge.json change before push", async () => {
+    const { dir, remote } = await profileBehind();
+    const other = temp.make("other-key-race-");
+    await spawnGit(other, "clone", "-q", remote, ".");
+    const marker = join(other, ".raced");
+    const edited = JSON.stringify({ ...profile, packs: ["orchestration", "memory"] }, null, 2) + "\n";
+    const file = join(other, "other-hedge.json");
+    writeFileSync(file, edited);
+    const hook = `#!/bin/sh\n[ -e '${marker}' ] && exit 0\ntouch '${marker}'\nunset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX\ncd '${other}' && cp '${file}' hedge.json && git commit -q -am 'other packs' && git push -q\n`;
+    writeFileSync(join(dir, ".git/hooks/post-commit"), hook, { mode: 0o755 });
+
+    const error = await saveAnswers(dir, { workflows: { maps: false } }, { push: true }).catch((caught: Error) => caught);
+
+    expect(error).toBeInstanceOf(ProfileError);
+    expect((error as Error).message).toContain(`${dir} and its remote both have changes the other lacks.`);
+    expect(JSON.parse(await spawnGit(remote, "show", "main:hedge.json"))).toMatchObject({ packs: ["orchestration", "memory"], workflows: {} });
+  });
+
+  test("retries a raced push only once when the remote moves ahead again", async () => {
+    const { dir, remote } = await profileBehind();
+    const other = temp.make("double-race-");
+    await spawnGit(other, "clone", "-q", remote, ".");
+    const count = join(other, ".count");
+    writeFileSync(count, "0");
+    const hook = `#!/bin/sh\nn=$(cat '${count}')\n[ "$n" -ge 2 ] && exit 0\necho $((n + 1)) > '${count}'\nunset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX\ncd '${other}' && git pull -q && mkdir -p memory && printf '%s\\n' "$n" > "memory/n$n.md" && git add memory && git commit -q -m "memory: $n" && git push -q\n`;
+    writeFileSync(join(dir, ".git/hooks/pre-push"), hook, { mode: 0o755 });
+
+    const error = await saveAnswers(dir, { settings: { "team.one": 1 } }, { push: true }).catch((caught: Error) => caught);
+
+    expect(error).toBeInstanceOf(ProfileError);
+    expect((error as Error).message).toContain(`${dir} and its remote both have changes the other lacks.`);
+    expect(await spawnGit(remote, "show", "main:memory/n0.md")).toBe("0");
+    expect(await spawnGit(remote, "show", "main:memory/n1.md")).toBe("1");
+    expect(JSON.parse(await spawnGit(remote, "show", "main:hedge.json")).settings).toEqual({});
+  });
+
   test("rejects a profile with invalid fields", async () => {
     expect(loadProfile(await profileRepo({ ...profile, workflows: { maps: "false" } }))).rejects.toThrow("workflows must map ids to true or false");
     expect(loadProfile(await profileRepo({ schema: 1 }))).rejects.toThrow("engine needs a repo");

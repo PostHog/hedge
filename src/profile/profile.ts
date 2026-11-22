@@ -8,7 +8,7 @@ import { sourceName } from "../pack/sources.ts";
 import { withoutCredentials } from "../credentials.ts";
 import { writePrivateFile } from "../files/private.ts";
 import { isKeptForBoxes } from "../hub/names.ts";
-import { profileFile, refuseLegacyPath } from "../legacy.ts";
+import { legacyProfileFileName, profileFile, profileFileName, refuseLegacyPath } from "../legacy.ts";
 import { followCurrentDefaults } from "../setup/defaults.ts";
 import { withoutRepoEnv } from "../repo-env.ts";
 
@@ -89,9 +89,31 @@ export function bothChanged(dir: string, other: string) {
   return `${dir} and ${other} both have changes the other lacks.`;
 }
 
+export type GitRunner = (args: string[]) => Promise<{ ok: boolean; output: string }>;
+
+const defaultGit = (dir: string): GitRunner => async (args) => {
+  const result = await run(dir, "git", ...args);
+  return { ok: result.ok, output: result.ok ? result.stdout : result.stderr || result.stdout };
+};
+
+export async function rebaseNonProfileChanges(dir: string, remoteRef?: string, git: GitRunner = defaultGit(dir)) {
+  const fetchArgs = remoteRef ? ["fetch", "-q", "origin", remoteRef] : ["fetch", "-q"];
+  if (!(await git(fetchArgs)).ok) return false;
+  const target = remoteRef ? "FETCH_HEAD" : "@{upstream}";
+  const changed = await git(["log", "--format=", "--name-only", `HEAD..${target}`, "--", profileFileName, legacyProfileFileName]);
+  if (!changed.ok || changed.output.trim()) return false;
+  if ((await git(["rebase", "-q", "--no-autostash", target])).ok) return true;
+  await git(["rebase", "--abort"]);
+  return false;
+}
+
 async function push(dir: string) {
   const pushed = await run(dir, "git", "push", "-q");
-  if (!pushed.ok) throw pushFailed(dir, pushed.stderr);
+  if (pushed.ok) return;
+  if (!pushedBehind(pushed.stderr)) throw pushFailed(dir, pushed.stderr);
+  if (!(await rebaseNonProfileChanges(dir))) throw pushFailed(dir, pushed.stderr);
+  const retried = await run(dir, "git", "push", "-q");
+  if (!retried.ok) throw pushFailed(dir, retried.stderr);
 }
 
 export function pushFailed(dir: string, stderr: string) {
@@ -100,7 +122,7 @@ export function pushFailed(dir: string, stderr: string) {
   return new ProfileError(`${dir}: could not push answers${reason ? `: ${reason}.` : "."}${recovery}`);
 }
 
-export const pushedBehind = (stderr: string) => /\((fetch first|non-fast-forward)\)/.test(stderr);
+export const pushedBehind = (stderr: string) => /\((fetch first|non-fast-forward)\)|cannot lock ref .*: is at [0-9a-f]+ but expected [0-9a-f]+/.test(stderr);
 
 function gitReason(stderr: string) {
   const line = stderr.split("\n").map((text) => withoutCredentials(text).replace(/\s+/g, " ").trim()).find((text) => text && !text.startsWith("To ") && !text.startsWith("hint:"));

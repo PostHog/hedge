@@ -124,7 +124,7 @@ describe("hedge setup questions", () => {
     expect(answered.code).toBe(0);
     expect(answered.prompts).toEqual([]);
     expect(answered.output).toContain("Set up this machine");
-    expect(savedAnswers(home).settings).toEqual({ "orchestration.loopProject": "~/code/app", "orchestration.qualityArea": "src/api", "orchestration.ledgerRepo": "me/ledger", "slack.userId": "U012ABCDEF", "memory.repo": "nora/hedge-memory" });
+    expect(savedAnswers(home).settings).toEqual({ "orchestration.loopProject": "~/code/app", "orchestration.qualityArea": "src/api", "orchestration.ledgerRepo": "me/ledger", "slack.userId": "U012ABCDEF", "context.repo": "nora/nora-hedge" });
   });
 
   test("--non-interactive names the command that starts each sign-in it cannot wait for, so an agent can run it", async () => {
