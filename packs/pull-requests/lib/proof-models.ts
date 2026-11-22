@@ -46,6 +46,7 @@ export type Role = "arbiter" | "reviewer" | "judge" | "bloat-judge" | "eval-judg
 
 const prefixes: Record<Role, string> = { arbiter: "HEDGE_REVIEW_ARBITER", reviewer: "HEDGE_PROOF_REVIEWER", judge: "HEDGE_PROOF_JUDGE", "bloat-judge": "HEDGE_PROOF_BLOAT_JUDGE", "eval-judge": "HEDGE_PROOF_EVAL_JUDGE" };
 const prefixOf = (role: Role) => prefixes[role];
+const codexSandboxes: Record<Role, "read-only" | "danger-full-access"> = { arbiter: "read-only", "eval-judge": "read-only", reviewer: "danger-full-access", judge: "danger-full-access", "bloat-judge": "danger-full-access" };
 
 export function modelLabel(role: Role, row: ModelRow, env: Record<string, string | undefined>, pinned = false) {
   const replacement = env[prefixOf(role)];
@@ -103,7 +104,7 @@ async function modelCommand(role: Role, row: ModelRow, request: ModelRequest, sc
   }
   const schema = request.schema ? join(scratch, "schema.json") : undefined;
   if (schema) await writeFile(schema, JSON.stringify(request.schema));
-  return ["codex", "exec", "--json", "-m", row.model, "-c", `model_reasoning_effort="${row.effort}"`, "-s", "read-only", "--ephemeral", "-C", request.cwd, "-o", output,
+  return ["codex", "exec", "--json", "-m", row.model, "-c", `model_reasoning_effort="${row.effort}"`, "-s", codexSandboxes[role], "--ephemeral", "-C", request.cwd, "-o", output,
     ...(schema ? ["--output-schema", schema] : []), ...(request.images ?? []).flatMap((image) => ["-i", image]), "-"];
 }
 

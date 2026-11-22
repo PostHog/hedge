@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AdapterResult } from "../reconciler/apply.ts";
+import { envFor } from "../repo-env.ts";
 
 /** clearEnv names variables the command must not inherit. */
 /** inherit: the command uses this terminal, so its output is shown, not returned. */
@@ -27,7 +28,7 @@ export const spawnRunner: CommandRunner = async (command, options = {}) => {
       stdout: options.inherit ? "inherit" : "pipe",
       stderr: options.inherit ? "inherit" : "pipe",
       stdin: options.inherit ? "inherit" : options.input === undefined ? "ignore" : new TextEncoder().encode(options.input),
-      env: Object.fromEntries(Object.entries({ ...Bun.env, ...(options.home === undefined ? {} : { HOME: options.home }) }).filter(([name]) => !options.clearEnv?.includes(name))),
+      env: Object.fromEntries(Object.entries({ ...envFor(command), ...(options.home === undefined ? {} : { HOME: options.home }) }).filter(([name]) => !options.clearEnv?.includes(name))),
       ...(options.signal ? { detached: true } : {}),
     });
     started = child;
