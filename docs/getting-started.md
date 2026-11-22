@@ -110,12 +110,14 @@ Setup creates the private repo `<login>-hedge` in your GitHub account and
 saves your answers there. Setup shows the name before it creates the repo, and
 you can type another. It marks the repo with the GitHub topic
 `hedge-for-<login>`, so setup on your next machine finds it without the name.
-When setup cannot add the topic, it prints the command that adds it. When a
-team pack you picked names a profile org, setup creates `hedge-profile-<login>`
+When setup cannot add the topic, it prints the command that adds it. When a team pack you picked names a profile org, setup creates `<login>-hedge`
 in that org instead, private to the org, where teammates may read it.
 Setup first looks for a profile you already have, also with an older name
 such as `hedge-profile`, `hedge-profile-<login>` or `fleet-profile`, and
-keeps it with its name. If you already have a personal profile, setup keeps it
+keeps it with its name. When the Memory pack is on and you have no separate
+memory repo yet, setup points `context.repo` at that same profile repo, so
+memory (`memory/`), dreams (`dreams/`), and the context library live there too.
+If you already have a personal profile, setup keeps it
 and prints the two commands that move it to the org. Then it applies your
 packs to the hub and checks the result with `hedge doctor`. It ends with a
 screen that lists your packs and what runs by itself.

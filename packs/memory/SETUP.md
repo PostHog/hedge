@@ -15,19 +15,19 @@ and every machine reads it. The pack has three workflows:
 
 Ask with your question tool which repo to use:
 
-- **Their context repo** (recommended): add `--set context.repo=<owner/name>`.
+- **Their profile repo** (recommended): add nothing to the command.
+  `hedge setup` and `hedge packs --add memory` set `context.repo` to their
+  profile repo unless `<their GitHub login>/hedge-memory` or `fleet-memory`
+  exists already. Memory lives in `memory/`, dreams in `dreams/`, and the
+  context library and map tracker use the same repo, checked out at
+  `context.path` (`~/dev/context` unless set).
+- **Another context repo**: add `--set context.repo=<owner/name>`.
   Memory then lives in its `memory` folder, the context library and the map
   tracker use the whole repo, and the checkout is `context.path`,
   `~/dev/context` unless they set it. It may be a private repo of their
   team's org; Hedge refuses a public one.
-- **New repo**: the private repo `<their GitHub login>/hedge-memory`.
-  `hedge setup` and `hedge packs --add memory` create it when it is missing.
-  Add nothing to the command. The context library then waits for its own
-  repo: create a private repo, such as
-  `gh repo create <their login>/context-library --private --add-readme`, and
-  add `--set context-library.repo=<their login>/context-library`.
-- **Repos they already have**: add `--set memory.repo=<owner/name>`, and
-  `--set memory.subtree=<folder>` when the notes live in one folder of it.
+- **Separate repos they already have**: add `--set memory.repo=<owner/name>`,
+  and `--set memory.subtree=<folder>` when the notes live in one folder of it.
   Add `--set context-library.repo=<owner/name>` for the library, and
   `--set context-library.path=<folder>` when its checkout should live
   somewhere other than `~/dev/context-library`.

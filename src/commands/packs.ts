@@ -1,7 +1,7 @@
 import { oldNameOnly } from "../pack/aliases.ts";
 import { keptWorkflows, workflowDefaults } from "../profile/profile.ts";
 import { FlagError, parseSetupFlags } from "../setup/flags.ts";
-import { memoryRepo, namedMemory } from "../setup/profile.ts";
+import { memoryRepo, namedMemory, newMemoryRepo, privateProfileOrigin } from "../setup/profile.ts";
 import { catalogAliases, changedPacks, settingsFrom, title, unmetNeeds } from "../setup/questions.ts";
 import { activePacks, type ChangeContext, manifests, saveAndApply } from "./change.ts";
 
@@ -37,16 +37,28 @@ export async function packsCommand(args: string[], context: ChangeContext): Prom
       if (isOn && (!wasOn || flags.workflows[workflow.id] === true)) context.print(`Before you use ${workflow.name}: ${workflow.risk}`);
     }
   }
+  if (flags.add.includes("memory") && packs.includes("memory")) {
+    const { named, kind } = namedMemory({ ...context.profile.settings, ...settings });
+    const existing = await memoryRepo(context.machine, named, undefined, kind);
+    if (existing) {
+      await existing.make(context.print);
+      if (existing.repo !== named) settings[existing.key] = existing.repo;
+    } else {
+      const profile = await privateProfileOrigin(context.machine, context.profileDir);
+      if (profile) {
+        context.print(`✓ Using ${profile} for memory and context`);
+        settings["context.repo"] = profile;
+      } else {
+        const created = await newMemoryRepo(context.machine);
+        await created.make(context.print);
+        settings[created.key] = created.repo;
+      }
+    }
+  }
   const after = context.preview({ packs, workflows, settings: { ...context.profile.settings, ...settings } }).workflows;
   for (const [id, on] of Object.entries(flags.workflows)) {
     const state = after.find((workflow) => workflow.id === id);
     if (on && state && !state.active && state.reason) context.print(`${id} is on in your profile, but stays off: ${state.reason}.`);
-  }
-  if (flags.add.includes("memory") && packs.includes("memory")) {
-    const { named, kind } = namedMemory({ ...context.profile.settings, ...settings });
-    const memory = await memoryRepo(context.machine, named, undefined, kind);
-    await memory.make(context.print);
-    if (memory.repo !== named) settings["memory.repo"] = memory.repo;
   }
   return saveAndApply(context, { packs, workflows, settings }, "your packs");
 }

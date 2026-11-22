@@ -150,10 +150,23 @@ describe("hedge setup while another machine changes the profile", () => {
     expect((await pushedAnswers(home)).packs).toEqual(["pull-requests", "orchestration"]);
   });
 
-  test("a rerun whose profile push comes after another machine's stops and keeps its commit, stops at the next start until the checkout is up to date, and saves after git pull --rebase", async () => {
+  test("a rerun whose profile push comes after a non-profile push retries once with fetch and rebase and saves both", async () => {
     const home = temp.make("home-");
     expect((await hedgeSetup(home, ["--preset", "starter", "--plan", "claude"], ["", ""])).code).toBe(0);
     await changeOnFirstCommit(home, join(temp.make("elsewhere-"), "profile"), 'await Bun.write("about-me.md", "# Changed on another machine\\n");');
+    const args = ["--non-interactive", "--remove", "pull-requests"];
+
+    const retried = await hedgeSetup(home, args, []);
+
+    expect(retried.code).toBe(0);
+    expect((await pushedAnswers(home)).packs).toEqual([]);
+    expect(await spawnGit(home, "--git-dir", githubRepo(home, "nora/nora-hedge"), "show", "main:about-me.md")).toBe("# Changed on another machine");
+  });
+
+  test("a rerun whose profile push comes after another machine's hedge.json change stops and keeps its commit, stops at the next start until the checkout is up to date, and saves after git pull --rebase", async () => {
+    const home = temp.make("home-");
+    expect((await hedgeSetup(home, ["--preset", "starter", "--plan", "claude"], ["", ""])).code).toBe(0);
+    await changeOnFirstCommit(home, join(temp.make("elsewhere-"), "profile"), 'profile.plan = "both";');
     const args = ["--non-interactive", "--remove", "pull-requests"];
     const upToDate = `Commit or discard the changes in ${profilePath(home)} that are not committed. Bring it up to date with git -C ${profilePath(home)} pull --rebase`;
 
@@ -169,7 +182,7 @@ describe("hedge setup while another machine changes the profile", () => {
     await spawnGit(profilePath(home), "pull", "-q", "--rebase");
     expect((await hedgeSetup(home, args, [])).code).toBe(0);
     expect((await pushedAnswers(home)).packs).toEqual([]);
-    expect(await spawnGit(home, "--git-dir", githubRepo(home, "nora/nora-hedge"), "show", "main:about-me.md")).toBe("# Changed on another machine");
+    expect((await pushedAnswers(home)).plan).toBe("both");
   });
 
   function pushesAfterAnotherMachine(home: string, plan: string) {
@@ -240,11 +253,29 @@ describe("hedge setup while another machine changes the profile", () => {
 });
 
 describe("hedge packs --add memory", () => {
-  test("creates the private memory repo, as setup does, and points memory.repo at it", async () => {
+  test("shares the profile repo via context.repo when no separate memory repo exists", async () => {
     const { home, packs } = await packsAfterSetup();
     const added = await packs(["--add", "memory"]);
     expect(added.code).toBe(0);
-    expect(added.output).toContain("✓ Created the private repo nora/hedge-memory");
+    expect(added.output).toContain("✓ Using nora/nora-hedge for memory and context");
+    expect(existsSync(githubRepo(home, "nora/hedge-memory"))).toBe(false);
+    expect(await pushedAnswers(home)).toMatchObject({ packs: ["pull-requests", "memory"], settings: { "context.repo": "nora/nora-hedge" } });
+  });
+
+  test("reuses an existing hedge-memory repo via memory.repo", async () => {
+    const { home, packs } = await packsAfterSetup();
+    await spawnGit(home, "init", "-q", "--bare", githubRepo(home, "nora/hedge-memory"));
+    const added = await packs(["--add", "memory"]);
+    expect(added.code).toBe(0);
+    expect(added.output).toContain("✓ Reusing your repo nora/hedge-memory");
+    expect(await pushedAnswers(home)).toMatchObject({ packs: ["pull-requests", "memory"], settings: { "memory.repo": "nora/hedge-memory" } });
+  });
+
+  test("creates a private hedge-memory repo instead of sharing a public profile repo when adding memory", async () => {
+    const { home, packs } = await packsAfterSetup();
+    const result = await packs(["--add", "memory"], { publicRepos: ["nora/nora-hedge"] });
+    expect(result.code).toBe(0);
+    expect(result.output).toContain("✓ Created the private repo nora/hedge-memory");
     expect(existsSync(githubRepo(home, "nora/hedge-memory"))).toBe(true);
     expect(await pushedAnswers(home)).toMatchObject({ packs: ["pull-requests", "memory"], settings: { "memory.repo": "nora/hedge-memory" } });
   });
@@ -328,7 +359,7 @@ describe("hedge packs --add memory", () => {
   test("stops before it saves when GitHub refuses to make the repo", async () => {
     const { home, packs } = await packsAfterSetup();
     const before = savedAnswers(home);
-    const result = await packs(["--add", "memory"], { createFails: "nora" });
+    const result = await packs(["--add", "memory", "--set", "memory.repo=nora/custom-notes"], { createFails: "nora" });
     expect(result.code).toBe(1);
     expect(result.output).toContain("hedge: gh repo create failed: GraphQL: you cannot create repos in nora");
     expect(savedAnswers(home)).toEqual(before);

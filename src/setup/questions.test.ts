@@ -141,7 +141,7 @@ describe("a time-zone default that setup saved before it stopped", () => {
     expect(await unattendedSetup(home, "Europe/Lisbon", team)).toBe(2);
     await pushFromAnotherMachine(home, { "acme.region": "us" });
     expect(await unattendedSetup(home, "Europe/Lisbon", { ...team, set: ["acme.team=web", "orchestration.loopProject=~/code/web"] })).toBe(0);
-    expect((await pushedAnswers(home)).settings).toEqual({ "acme.region": "us", "acme.team": "web", "memory.repo": "nora/hedge-memory", "orchestration.loopProject": "~/code/web" });
+    expect((await pushedAnswers(home)).settings).toEqual({ "acme.region": "us", "acme.team": "web", "context.repo": "nora/nora-hedge", "orchestration.loopProject": "~/code/web" });
   });
 
   test("stays out of the draft an older engine would resume as answers", async () => {

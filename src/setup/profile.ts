@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { PackManifest, Profile, ProfileFile, SettingValue } from "../pack/types.ts";
-import { bothChanged, loadProfile, pullProfile, pushedBehind, pushedFirst, pushFailed, saveAnswers } from "../profile/profile.ts";
+import { bothChanged, loadProfile, pullProfile, pushedBehind, pushedFirst, pushFailed, rebaseNonProfileChanges, saveAnswers, type GitRunner } from "../profile/profile.ts";
 import type { Machine } from "./commands.ts";
 import { defaultSources, engineRepo } from "./defaults.ts";
 import { profileFile } from "../legacy.ts";
@@ -57,16 +57,23 @@ function github(machine: Machine) {
 const kinds = {
   memory: { key: "memory.repo", noun: "memory repo", description: "My agents' shared memory" },
   context: { key: "context.repo", noun: "context repo", description: "What my agents learn and record" },
-};
+} as const;
 
 export function namedMemory(settings: Record<string, unknown>) {
   return settings["memory.repo"] !== undefined ? { named: settings["memory.repo"], kind: "memory" as const } : { named: settings["context.repo"], kind: "context" as const };
 }
 
-export async function memoryRepo(machine: Machine, named: unknown, login?: string, kind: keyof typeof kinds = "memory") {
+export type MemoryTarget = {
+  repo: string;
+  key: "memory.repo" | "context.repo";
+  missing: boolean;
+  make: (print: (line: string) => void) => Promise<void>;
+};
+
+export async function memoryRepo(machine: Machine, named: unknown, login?: string, kind: keyof typeof kinds = "memory"): Promise<MemoryTarget | undefined> {
   const { key, noun, description } = kinds[named === undefined ? "memory" : kind];
   const onGitHub = typeof named === "string" ? githubSlug(named, key) : undefined;
-  if (typeof named === "string" && !onGitHub) return { repo: named, missing: false, make: async (print: (line: string) => void) => print(`✓ Using your ${noun} ${named}`) };
+  if (typeof named === "string" && !onGitHub) return { repo: named, key, missing: false, make: async (print) => print(`✓ Using your ${noun} ${named}`) };
   const { gh, visibility, login: signedIn } = github(machine);
   const owner = onGitHub ? undefined : (login ?? (await signedIn()));
   let slug = onGitHub ?? `${owner}/${memoryRepoName}`;
@@ -77,12 +84,37 @@ export async function memoryRepo(machine: Machine, named: unknown, login?: strin
     if (legacySeen !== undefined) [slug, seen] = [legacy, legacySeen];
   }
   const missing = seen === undefined;
-  if (!missing && !isPrivate(seen)) throw new Error(`${slug} is not private, and agents write notes about you there. Make it private, or name a private repo with --set ${key}=<owner/name>.`);
+  if (missing && named === undefined) return undefined;
+  if (!missing && !isPrivate(seen)) throw privateRepoError(slug, key);
   const make = async (print: (line: string) => void) => {
     if (missing) await gh("repo", "create", slug, "--private", "--description", description);
     print(missing ? `✓ Created the private repo ${slug}` : `✓ Reusing your repo ${slug}`);
   };
-  return { repo: typeof named === "string" && /:\/\/|@/.test(named) ? named : slug, missing, make };
+  return { repo: typeof named === "string" && /:\/\/|@/.test(named) ? named : slug, key, missing, make };
+}
+
+export async function newMemoryRepo(machine: Machine, login?: string): Promise<MemoryTarget> {
+  const { gh, login: signedIn } = github(machine);
+  const slug = `${login ?? (await signedIn())}/${memoryRepoName}`;
+  return {
+    repo: slug,
+    key: "memory.repo",
+    missing: true,
+    make: async (print) => {
+      await gh("repo", "create", slug, "--private", "--description", kinds.memory.description);
+      print(`✓ Created the private repo ${slug}`);
+    },
+  };
+}
+
+export async function privateProfileOrigin(machine: Machine, dir: string) {
+  const repo = await githubOrigin(machine, dir);
+  if (!repo) return undefined;
+  return isPrivate(await github(machine).visibility(repo)) ? repo : undefined;
+}
+
+function privateRepoError(repo: string, key: string) {
+  return new Error(`${repo} is not private, and agents write notes about you there. Make it private, or name a private repo with --set ${key}=<owner/name>.`);
 }
 
 function githubSlug(named: string, key: string) {
@@ -100,13 +132,14 @@ async function lookUp(machine: Machine, home: string, packs: PackManifest[], pic
   const name = profileRepoName(login);
   const personal = `${login}/${oldProfileRepoName}`;
   const org = profileOrg(packs, picked);
-  const team = org && `${org}/${oldProfileRepoName}-${login}`;
+  const team = org && `${org}/${name}`;
+  const oldTeam = org && `${org}/${oldProfileRepoName}-${login}`;
   const own = current ? await githubOrigin(machine, current) : undefined;
   const dir = own && current ? current : profilePath(home);
   const inUse = own ?? (await clonedProfile(machine, dir, login));
   const legacyTeam = org && `${org}/${legacyProfileRepoName}-${login}`;
   let found: string | undefined;
-  for (const repo of [inUse, team, `${login}/${name}`, personal, legacyTeam, `${login}/${legacyProfileRepoName}`]) if (!found && repo && (await exists(repo))) found = repo;
+  for (const repo of [inUse, team, oldTeam, `${login}/${name}`, personal, legacyTeam, `${login}/${legacyProfileRepoName}`]) if (!found && repo && (await exists(repo))) found = repo;
   found ??= await markedProfile(gh, login);
   if (found && !same(found, personal)) await requirePrivate(machine, found);
   if (found) await checkout(machine, home, dir, found);
@@ -137,9 +170,16 @@ async function makeProfile(context: ProfileContext) {
   const saved = found ? savedSettings(dir) : {};
   const chosen = namedMemory({ ...saved, ...draft.settings });
   const shared = draft.packs?.includes("memory") ? chosen : chosen.kind === "context" && chosen.named !== undefined && draft.packs?.includes("context-library") ? chosen : undefined;
-  const memory = shared && (await memoryRepo(machine, shared.named, login, shared.kind));
+  let memory = shared && (await memoryRepo(machine, shared.named, login, shared.kind));
+  const personal = `${login}/${oldProfileRepoName}`;
+  const canShare = !found || !same(found, personal) || isPrivate(await github(machine).visibility(found));
+  const shareProfile = Boolean(shared && !memory && canShare);
+  if (shared && !memory && !canShare) memory = await newMemoryRepo(machine, login);
   const own = `${login}/${name}`;
-  const typed = await confirm(context, found || team ? undefined : own, [...(found || !team ? [] : [team]), ...(memory?.missing ? [memory.repo] : [])], org && !found ? org : undefined, exists);
+  const proposed = found || team ? undefined : own;
+  const others = [...(found || !team ? [] : [team]), ...(memory?.missing ? [memory.repo] : [])];
+  const sharesAtConfirm = shareProfile || Boolean(memory && same(memory.repo, proposed ?? team));
+  const typed = await confirm(context, proposed, others, org && !found ? org : undefined, exists, sharesAtConfirm);
   let profileRepo = found ?? team ?? typed ?? own;
   if (!found) {
     const made = await create(profileRepo);
@@ -155,10 +195,11 @@ async function makeProfile(context: ProfileContext) {
     }
     terminal.print(`  ✓ Created the private repo ${profileRepo}${same(profileRepo, team) ? ` in the ${org} org` : ""}`);
   } else terminal.print(`  ✓ Reusing your repo ${found}`);
-  await memory?.make((line) => terminal.print(`  ${line}`));
+  if (shareProfile || (memory && same(memory.repo, profileRepo))) terminal.print(`  ✓ Using ${profileRepo} for memory and context`);
+  else await memory?.make((line) => terminal.print(`  ${line}`));
   if (team && movable) {
     terminal.print(`  · Your team keeps profiles in the ${org} org. To move yours there, run:`);
-    terminal.print(`      gh api -X POST repos/${found}/transfer -f new_owner=${org} -f new_name=${oldProfileRepoName}-${login}`);
+    terminal.print(`      gh api -X POST repos/${found}/transfer -f new_owner=${org} -f new_name=${name}`);
     terminal.print(`      git -C ${dir} remote set-url origin https://github.com/${team}.git`);
   }
 
@@ -171,10 +212,11 @@ async function makeProfile(context: ProfileContext) {
   const answeredElsewhere = (draft.inferred ?? []).filter((key) => Object.hasOwn(saved, key));
   Object.assign(draft, { settings: { ...draft.settings, ...Object.fromEntries(answeredElsewhere.map((key) => [key, saved[key] as SettingValue])) } });
   const { inferred: _inferred, ...picked } = draft;
+  const memorySetting = shareProfile ? { "context.repo": profileRepo } : memory && memory.repo !== shared?.named ? { [memory.key]: memory.repo } : undefined;
   const answers: Partial<ProfileFile> = {
     ...(existsSync(profileFile(dir)) ? {} : { schema: 1, engine: await enginePin(context), sources: defaultSources, plan: "both", settings: {}, workflows: {} }),
     ...picked,
-    ...(memory && memory.repo !== shared?.named ? { settings: { ...draft.settings, "memory.repo": memory.repo } } : {}),
+    ...(memorySetting ? { settings: { ...draft.settings, ...memorySetting } } : {}),
   };
   if (started.length) {
     await git(machine, dir, "add", "--", ...started);
@@ -192,20 +234,29 @@ export async function saveSettings(machine: Machine, dir: string, settings: Reco
   await pushAnswers(machine, dir, target, await saveAnswers(dir, { settings }));
 }
 
-export async function pushAnswers(machine: Machine, dir: string, target: string[], committed: boolean) {
-  const pushed = await machine.exec(["git", "-C", dir, "push", "-q", ...target]);
-  if (pushed.code !== 0) throw pushedBehind(pushed.output) ? new Error(pushedFirst(dir, committed)) : pushFailed(dir, pushed.output);
+export type PushTarget = { args: string[]; remoteRef: string };
+
+export async function pushAnswers(machine: Machine, dir: string, target: PushTarget, committed: boolean) {
+  const runGit: GitRunner = async (args) => {
+    const result = await machine.exec(["git", "-C", dir, ...args]);
+    return { ok: result.code === 0, output: result.output };
+  };
+  const pushed = await runGit(["push", "-q", ...target.args]);
+  if (pushed.ok) return;
+  if (!pushedBehind(pushed.output)) throw pushFailed(dir, pushed.output);
+  if (!(await rebaseNonProfileChanges(dir, target.remoteRef, runGit))) throw new Error(pushedFirst(dir, committed));
+  const retried = await runGit(["push", "-q", ...target.args]);
+  if (!retried.ok) throw pushedBehind(retried.output) ? new Error(pushedFirst(dir, committed)) : pushFailed(dir, retried.output);
 }
 
-/** The profile repo this machine's clone already uses, when its name is one setup makes for this login. */
 async function clonedProfile(machine: Machine, dir: string, login: string) {
   const repo = await githubOrigin(machine, dir);
   const seen = repo?.toLowerCase();
   const ours = (name: string) => seen !== undefined && (seen === `${login}/${name}`.toLowerCase() || seen.endsWith(`/${name}-${login}`.toLowerCase()));
-  return seen === `${login}/${profileRepoName(login)}`.toLowerCase() || ours(oldProfileRepoName) || ours(legacyProfileRepoName) ? repo : undefined;
+  return seen?.endsWith(`/${profileRepoName(login)}`) || ours(oldProfileRepoName) || ours(legacyProfileRepoName) ? repo : undefined;
 }
 
-async function githubOrigin(machine: Machine, dir: string) {
+export async function githubOrigin(machine: Machine, dir: string) {
   if (!existsSync(join(dir, ".git"))) return undefined;
   const origin = await machine.exec(["git", "-C", dir, "config", "--get", "remote.origin.url"]);
   return origin.code === 0 ? githubRepoOf(origin.output.trim()) : undefined;
@@ -259,15 +310,15 @@ export async function takeFetched(machine: Machine, dir: string) {
   return merged.code === 0 ? undefined : merged;
 }
 
-export async function saveTarget(machine: Machine, dir: string) {
+export async function saveTarget(machine: Machine, dir: string): Promise<PushTarget> {
   if ((await machine.exec(["git", "-C", dir, "rev-parse", "--verify", "-q", "HEAD"])).code !== 0) {
     await git(machine, dir, "symbolic-ref", "HEAD", "refs/heads/main");
-    return ["-u", "origin", "main"];
+    return { args: ["-u", "origin", "main"], remoteRef: "main" };
   }
   const branch = await currentBranch(machine, dir);
   const merge = await upstreamOf(machine, dir, branch);
   if (!merge) throw new Error(`${dir} is on the branch ${branch}, which tracks no remote branch, so setup does not know where to save your answers. Run git -C ${dir} branch --set-upstream-to origin/<branch>, then run hedge setup again.`);
-  return ["origin", `HEAD:${merge}`];
+  return { args: ["origin", `HEAD:${merge}`], remoteRef: merge };
 }
 
 const isPrivate = (visibility: string | undefined) => visibility === "PRIVATE" || visibility === "INTERNAL";
@@ -281,13 +332,14 @@ function profileOrg(packs: PackManifest[], picked: string[]) {
   return packs.find((pack) => pack.profileOrg && picked.includes(pack.name))?.profileOrg;
 }
 
-async function confirm({ terminal, nonInteractive }: ProfileContext, proposed: string | undefined, others: string[], org: string | undefined, exists: (repo: string) => Promise<boolean>) {
+async function confirm({ terminal, nonInteractive }: ProfileContext, proposed: string | undefined, others: string[], org: string | undefined, exists: (repo: string) => Promise<boolean>, sharesMemory: boolean) {
   if ((!proposed && !others.length) || nonInteractive) return proposed;
   let profile = proposed;
   const where = org ? `in the ${org} GitHub org, private to the org,` : "in your GitHub account";
+  const what = sharesMemory ? "your answers, memory, and context" : "your answers";
   const show = () => {
-    const missing = [...(profile ? [profile] : []), ...others];
-    terminal.print(`  Hedge creates ${missing.length === 1 ? "the private repo" : "the private repos"} ${missing.join(" and ")} ${where} and pushes your answers there.`);
+    const missing = [...(profile ? [profile] : []), ...others].filter((repo, index, all) => all.findIndex((item) => same(item, repo)) === index);
+    terminal.print(`  Hedge creates ${missing.length === 1 ? "the private repo" : "the private repos"} ${missing.join(" and ")} ${where} and pushes ${what} there.`);
   };
   show();
   for (;;) {

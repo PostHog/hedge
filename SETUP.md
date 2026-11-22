@@ -226,9 +226,9 @@ request for every fix. A **pack** is a set of workflows that you turn on as
 a whole. Your answers go to your **profile**, a private GitHub repo named
 `<login>-hedge`, so every box you add gets the same setup. Setup proposes the
 name, and you can type another. A team pack can keep its members' profiles in
-the team's GitHub org instead, as `hedge-profile-<login>`, so teammates can
+the team's GitHub org instead, as `<login>-hedge`, so teammates can
 read each other's setup. A profile from before keeps its name, such as
-`hedge-profile`.
+`hedge-profile` or `hedge-profile-<login>`.
 
 ## 4. The hub and the nodes
 
