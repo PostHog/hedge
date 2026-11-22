@@ -15,13 +15,14 @@ describe("get.sh", () => {
   test("on Linux installs gh and T3 Code, fetches the engine at its pin, and applies the profile", () => {
     const box = sandbox("Linux");
     const result = getSh(box, ["--ref", "v0.1.0", "--profile", profile()]);
-    expect(result.output).toContain("Applied 16 changes.");
+    expect(result.output).toContain("Applied 17 changes.");
     expect(result.code).toBe(0);
     expect(existsSync(join(box.home, ".local/bin/gh"))).toBe(true);
     expect(result.calls).toContain("t3 installer channel=nightly");
     expect(result.calls).not.toContain("brew");
     expect(git(join(box.home, ".local/share/hedge/engine"), "describe", "--tags")).toBe("v0.1.0");
     expect(readFileSync(join(box.home, ".agents/AGENTS.md"), "utf8")).toStartWith("# Agent rules\n");
+    expect(readFileSync(join(box.home, ".gemini/AGENTS.md"), "utf8")).toStartWith("# Agent rules\n");
   });
 
   test("--install-only installs the tools and the engine, then stops before setup", () => {

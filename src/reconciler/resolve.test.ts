@@ -65,6 +65,7 @@ describe("resolve", () => {
     const content = file(plan({ aboutMe: "I review every diff.\n" }), ".agents/AGENTS.md");
     expect(content).toBe("# Agent rules\n\nConfirm before a destructive action.\n\n## Pull requests\n\nOpen every pull request as a draft.\n\n## About me\n\nI review every diff.\n");
     expect(file(plan(), ".codex/AGENTS.md")).toBe(file(plan(), ".claude/rules/hedge.md"));
+    expect(file(plan(), ".gemini/AGENTS.md")).toBe(file(plan(), ".agents/AGENTS.md"));
   });
 
   test("appends named sections from other packs to the owning guide", () => {
@@ -89,8 +90,10 @@ describe("resolve", () => {
     expect(links).toEqual([
       { target: ".agents/skills/full-stop", source: join(fixtures, "engine/packs/pull-requests/skills/full-stop") },
       { target: ".claude/skills/full-stop", source: join(fixtures, "engine/packs/pull-requests/skills/full-stop") },
+      { target: ".gemini/config/skills/full-stop", source: join(fixtures, "engine/packs/pull-requests/skills/full-stop") },
       { target: ".agents/skills/writing-voice", source: join(fixtures, "agent-skills/skills/communication/writing-voice") },
       { target: ".claude/skills/writing-voice", source: join(fixtures, "agent-skills/skills/communication/writing-voice") },
+      { target: ".gemini/config/skills/writing-voice", source: join(fixtures, "agent-skills/skills/communication/writing-voice") },
     ]);
   });
 
@@ -101,6 +104,7 @@ describe("resolve", () => {
     expect(result.files.filter((item) => item.target.endsWith("/writing-voice"))).toEqual([
       { target: ".agents/skills/writing-voice", source: join(dir, "skills/writing-voice") },
       { target: ".claude/skills/writing-voice", source: join(dir, "skills/writing-voice") },
+      { target: ".gemini/config/skills/writing-voice", source: join(dir, "skills/writing-voice") },
     ]);
     expect(result.dropped).toContainEqual({ pack: "pull-requests", item: "skill agent-skills:communication/writing-voice", reason: "your profile replaces it" });
   });

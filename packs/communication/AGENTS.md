@@ -2,4 +2,5 @@
 
 - Before you draft anything I send or publish, such as a chat message, an email, a pull request description, or a doc, read the `writing-voice` skill and write in that voice.
 - When I ask for an update, lead with the outcome, then what is left and what waits on me.
+- Write Markdown links directly, never wrapped in backticks. Use inline code only for commands, flags, code symbols, and file paths; write pull request numbers, names, timestamps, counts, and status words in plain text.
 - To share a plan, report, or page with other people, publish it with the `share-plan` skill and give me the link. Say that anyone with the link can read it.

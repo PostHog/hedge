@@ -487,7 +487,7 @@ function instructionFiles(order: Candidate[], profile: Profile, models: ModelRow
   ]);
   if (profile.aboutMe?.trim()) fragments.push(`## About me\n\n${profile.aboutMe.trim()}\n`);
   const content = fragments.map((fragment) => fragment.trim()).join("\n\n") + "\n";
-  return [".agents/AGENTS.md", ".codex/AGENTS.md", ".claude/rules/hedge.md"].map((target) => ({ target, content }));
+  return [".agents/AGENTS.md", ".codex/AGENTS.md", ".claude/rules/hedge.md", ".gemini/AGENTS.md"].map((target) => ({ target, content }));
 }
 
 function guideFiles(order: Candidate[], settings: Array<PackSetting & { pack: string }>, values: Record<string, SettingValue>): DesiredFile[] {
@@ -542,6 +542,7 @@ function skillFiles(order: Candidate[], profile: Profile, sources: FetchedSource
   return [...links].flatMap(([name, { dir }]) => [
     { target: `.agents/skills/${name}`, source: dir },
     { target: `.claude/skills/${name}`, source: dir },
+    { target: `.gemini/config/skills/${name}`, source: dir },
   ]);
 }
 
