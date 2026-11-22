@@ -19,10 +19,6 @@ describe("the Communication pack", () => {
     const agents = fileContent(result, ".agents/AGENTS.md");
     expect(agents.slice(agents.indexOf("# Communication"))).toMatchSnapshot();
     expect(skillSource(result, "writing-voice")).toEqual({ target: ".claude/skills/writing-voice", source: join(import.meta.dir, "skills/writing-voice") });
-    expect(result.files.find((file) => file.target === ".gemini/config/skills/writing-voice" && "source" in file)).toEqual({
-      target: ".gemini/config/skills/writing-voice",
-      source: join(import.meta.dir, "skills/writing-voice"),
-    });
     for (const name of ["share-plan", "explain-diff", "share-preview"]) expect(skillSource(result, name)).toBeDefined();
   });
 

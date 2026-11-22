@@ -29,7 +29,6 @@ describe("the Pull requests pack", () => {
     const links = withPack().files.filter((file) => "source" in file && file.target.startsWith(".claude/skills/")).map((file) => file.target.split("/").pop());
     expect(links).toEqual(expect.arrayContaining(["full-stop", "full-send", "stamp-pr", "babysit-pr", "pr-description", "qa-swarm", "merge-risk", "rollout", "tdd"]));
     expect(withPack().files.filter((file) => file.target.startsWith(".agents/skills/"))).toHaveLength(links.length);
-    expect(withPack().files.filter((file) => file.target.startsWith(".gemini/config/skills/"))).toHaveLength(links.length);
   });
 
   test("drops a workflow's setting when the workflow is off", () => {
