@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Antigravity rules, skills, and Markdown link formatting
+
+- `hedge apply` and `hedge refresh` now write the global rules file to
+  `~/.gemini/AGENTS.md` (alongside `.agents/AGENTS.md`, `.codex/AGENTS.md`, and
+  `.claude/rules/hedge.md`) and link every pack skill under
+  `~/.gemini/config/skills/<name>` (alongside `.agents/skills/` and
+  `.claude/skills/`), so Antigravity CLI and T3 Code Antigravity sessions load
+  your global rules and skills automatically.
+- The `communication` and `pull-requests` packs now state that Markdown links
+  are never wrapped in backticks and that inline code is reserved for commands,
+  flags, code symbols, and file paths.
+
 ### Final reads and the judge stop at the review budget
 
 - At the review ceiling, `hedge proof review --scope final` no longer reads

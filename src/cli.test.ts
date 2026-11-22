@@ -58,6 +58,7 @@ describe("hedge apply", () => {
     expect(result).toMatchObject({ code: 0 });
     expect(readFileSync(join(home, ".agents/AGENTS.md"), "utf8")).toStartWith("# Agent rules\n");
     expect(readFileSync(join(home, ".codex/AGENTS.md"), "utf8")).toBe(readFileSync(join(home, ".agents/AGENTS.md"), "utf8"));
+    expect(readFileSync(join(home, ".gemini/AGENTS.md"), "utf8")).toBe(readFileSync(join(home, ".agents/AGENTS.md"), "utf8"));
     expect(JSON.parse(readFileSync(join(home, ".config/hedge/machine.json"), "utf8"))).toEqual({ schema: 1, role: "linux", profileDir: profile, name: hostname() });
     expect((await hedge(["apply"], home)).output).toContain("Applied 0 changes.");
   });
@@ -296,7 +297,7 @@ describe("hedge apply", () => {
   test("--dry-run previews without writing machine state", async () => {
     const home = temp.make("home-");
     const result = await hedge(["apply", "--dry-run", "--profile", profileDir()], home);
-    expect(result.output).toContain("Preview: 14 changes to apply. Nothing was written.");
+    expect(result.output).toContain("Preview: 15 changes to apply. Nothing was written.");
     expect(readdirSync(home)).toEqual([]);
   });
 

@@ -74,7 +74,9 @@ describe("hedge refresh", () => {
 
     expect(box.read(guide)).toBe("Rules v2.\n");
     expect(box.read(".agents/AGENTS.md")).toContain("Team v2.");
+    expect(box.read(".gemini/AGENTS.md")).toContain("Team v2.");
     expect(box.read(".agents/skills/plan/SKILL.md")).toBe("# plan\n");
+    expect(box.read(".gemini/config/skills/plan/SKILL.md")).toBe("# plan\n");
     expect(box.read(".codex/AGENTS.md")).toBe("My own edit.\n");
     expect(lstatSync(join(box.home, ".claude/skills/plan")).isSymbolicLink()).toBe(false);
     expect(box.read(".claude/skills/plan/SKILL.md")).toBe("# my plan\n");
