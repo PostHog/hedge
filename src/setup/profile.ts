@@ -65,6 +65,7 @@ export function namedMemory(settings: Record<string, unknown>) {
 
 export type MemoryTarget = {
   repo: string;
+  slug?: string;
   key: "memory.repo" | "context.repo";
   missing: boolean;
   make: (print: (line: string) => void) => Promise<void>;
@@ -90,7 +91,7 @@ export async function memoryRepo(machine: Machine, named: unknown, login?: strin
     if (missing) await gh("repo", "create", slug, "--private", "--description", description);
     print(missing ? `✓ Created the private repo ${slug}` : `✓ Reusing your repo ${slug}`);
   };
-  return { repo: typeof named === "string" && /:\/\/|@/.test(named) ? named : slug, key, missing, make };
+  return { repo: typeof named === "string" && /:\/\/|@/.test(named) ? named : slug, slug, key, missing, make };
 }
 
 export async function newMemoryRepo(machine: Machine, login?: string): Promise<MemoryTarget> {
@@ -98,6 +99,7 @@ export async function newMemoryRepo(machine: Machine, login?: string): Promise<M
   const slug = `${login ?? (await signedIn())}/${memoryRepoName}`;
   return {
     repo: slug,
+    slug,
     key: "memory.repo",
     missing: true,
     make: async (print) => {
@@ -107,10 +109,20 @@ export async function newMemoryRepo(machine: Machine, login?: string): Promise<M
   };
 }
 
-export async function privateProfileOrigin(machine: Machine, dir: string) {
+export async function shareableProfileOrigin(machine: Machine, dir: string) {
   const repo = await githubOrigin(machine, dir);
-  if (!repo) return undefined;
+  if (!repo || !(await supportsMain(machine, dir))) return undefined;
   return isPrivate(await github(machine).visibility(repo)) ? repo : undefined;
+}
+
+async function supportsMain(machine: Machine, dir: string) {
+  if ((await machine.exec(["git", "-C", dir, "rev-parse", "--verify", "-q", "HEAD"])).code !== 0) return true;
+  const head = await machine.exec(["git", "-C", dir, "symbolic-ref", "-q", "--short", "HEAD"]);
+  if (head.code !== 0) return false;
+  const branch = head.output.trim();
+  const remote = await machine.exec(["git", "-C", dir, "config", "--get", `branch.${branch}.remote`]);
+  const merge = await machine.exec(["git", "-C", dir, "config", "--get", `branch.${branch}.merge`]);
+  return remote.code === 0 && remote.output.trim() === "origin" && merge.code === 0 && merge.output.trim() === "refs/heads/main";
 }
 
 function privateRepoError(repo: string, key: string) {
@@ -172,13 +184,12 @@ async function makeProfile(context: ProfileContext) {
   const shared = draft.packs?.includes("memory") ? chosen : chosen.kind === "context" && chosen.named !== undefined && draft.packs?.includes("context-library") ? chosen : undefined;
   let memory = shared && (await memoryRepo(machine, shared.named, login, shared.kind));
   const personal = `${login}/${oldProfileRepoName}`;
-  const canShare = !found || !same(found, personal) || isPrivate(await github(machine).visibility(found));
-  const shareProfile = Boolean(shared && !memory && canShare);
-  if (shared && !memory && !canShare) memory = await newMemoryRepo(machine, login);
+  const shareProfile = Boolean(shared && !memory) && (!found || ((await supportsMain(machine, dir)) && (!same(found, personal) || isPrivate(await github(machine).visibility(found)))));
+  if (shared && !memory && !shareProfile) memory = await newMemoryRepo(machine, login);
   const own = `${login}/${name}`;
   const proposed = found || team ? undefined : own;
-  const others = [...(found || !team ? [] : [team]), ...(memory?.missing ? [memory.repo] : [])];
-  const sharesAtConfirm = shareProfile || Boolean(memory && same(memory.repo, proposed ?? team));
+  const others = [...(found || !team ? [] : [team]), ...(memory?.missing ? [memory.slug ?? memory.repo] : [])];
+  const sharesAtConfirm = shareProfile || Boolean(memory && same(memory.slug, proposed ?? team));
   const typed = await confirm(context, proposed, others, org && !found ? org : undefined, exists, sharesAtConfirm);
   let profileRepo = found ?? team ?? typed ?? own;
   if (!found) {
@@ -195,12 +206,14 @@ async function makeProfile(context: ProfileContext) {
     }
     terminal.print(`  ✓ Created the private repo ${profileRepo}${same(profileRepo, team) ? ` in the ${org} org` : ""}`);
   } else terminal.print(`  ✓ Reusing your repo ${found}`);
-  if (shareProfile || (memory && same(memory.repo, profileRepo))) terminal.print(`  ✓ Using ${profileRepo} for memory and context`);
+  if (shareProfile || (memory && same(memory.slug, profileRepo))) terminal.print(`  ✓ Using ${profileRepo} for memory and context`);
   else await memory?.make((line) => terminal.print(`  ${line}`));
   if (team && movable) {
+    const movedKey = shareProfile ? "context.repo" : memory && same(memory.slug, found) ? memory.key : (["context.repo", "memory.repo"] as const).find((key) => typeof saved[key] === "string" && same(githubRepoOf(saved[key]) ?? saved[key], found));
     terminal.print(`  · Your team keeps profiles in the ${org} org. To move yours there, run:`);
     terminal.print(`      gh api -X POST repos/${found}/transfer -f new_owner=${org} -f new_name=${name}`);
     terminal.print(`      git -C ${dir} remote set-url origin https://github.com/${team}.git`);
+    if (movedKey) terminal.print(`      hedge set ${movedKey}=${team}`);
   }
 
   if (!found) await checkout(machine, home, dir, profileRepo);
@@ -336,9 +349,9 @@ async function confirm({ terminal, nonInteractive }: ProfileContext, proposed: s
   if ((!proposed && !others.length) || nonInteractive) return proposed;
   let profile = proposed;
   const where = org ? `in the ${org} GitHub org, private to the org,` : "in your GitHub account";
-  const what = sharesMemory ? "your answers, memory, and context" : "your answers";
   const show = () => {
     const missing = [...(profile ? [profile] : []), ...others].filter((repo, index, all) => all.findIndex((item) => same(item, repo)) === index);
+    const what = sharesMemory && (!profile || !others.length || others.some((repo) => same(repo, profile))) ? "your answers, memory, and context" : "your answers";
     terminal.print(`  Hedge creates ${missing.length === 1 ? "the private repo" : "the private repos"} ${missing.join(" and ")} ${where} and pushes ${what} there.`);
   };
   show();
@@ -351,7 +364,7 @@ async function confirm({ terminal, nonInteractive }: ProfileContext, proposed: s
     }
     if (!proposed) continue;
     const typed = `${owner(proposed)}/${reply}`;
-    const clash = others.find((other) => same(other.split("/")[1], reply));
+    const clash = others.find((other) => !same(other, proposed) && same(other.split("/")[1], reply));
     if (!/^[\w.-]+$/.test(reply) || /^\.+$/.test(reply)) terminal.print("  A repo name has only letters, digits, -, _ and dots.");
     else if (clash) terminal.print(`  ${clash} is the memory repo. Type another name, or press ↵ for ${profile}.`);
     else if (await exists(typed)) terminal.print(`  ${typed} exists already. Type another name, or press ↵ for ${profile}.`);

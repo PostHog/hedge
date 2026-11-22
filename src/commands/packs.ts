@@ -1,7 +1,7 @@
 import { oldNameOnly } from "../pack/aliases.ts";
 import { keptWorkflows, workflowDefaults } from "../profile/profile.ts";
 import { FlagError, parseSetupFlags } from "../setup/flags.ts";
-import { memoryRepo, namedMemory, newMemoryRepo, privateProfileOrigin } from "../setup/profile.ts";
+import { memoryRepo, namedMemory, newMemoryRepo, shareableProfileOrigin } from "../setup/profile.ts";
 import { catalogAliases, changedPacks, settingsFrom, title, unmetNeeds } from "../setup/questions.ts";
 import { activePacks, type ChangeContext, manifests, saveAndApply } from "./change.ts";
 
@@ -44,7 +44,7 @@ export async function packsCommand(args: string[], context: ChangeContext): Prom
       await existing.make(context.print);
       if (existing.repo !== named) settings[existing.key] = existing.repo;
     } else {
-      const profile = await privateProfileOrigin(context.machine, context.profileDir);
+      const profile = await shareableProfileOrigin(context.machine, context.profileDir);
       if (profile) {
         context.print(`✓ Using ${profile} for memory and context`);
         settings["context.repo"] = profile;

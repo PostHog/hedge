@@ -280,6 +280,22 @@ describe("hedge packs --add memory", () => {
     expect(await pushedAnswers(home)).toMatchObject({ packs: ["pull-requests", "memory"], settings: { "memory.repo": "nora/hedge-memory" } });
   });
 
+  test("creates a private hedge-memory repo instead of sharing a profile repo without a main branch when adding memory", async () => {
+    const { home, packs } = await packsAfterSetup();
+    const remote = githubRepo(home, "nora/nora-hedge");
+    const checkout = profilePath(home);
+    await spawnGit(remote, "symbolic-ref", "HEAD", "refs/heads/master");
+    await spawnGit(remote, "branch", "-m", "main", "master");
+    await spawnGit(checkout, "branch", "-m", "main", "master");
+    await spawnGit(checkout, "fetch", "-q", "--prune", "origin");
+    await spawnGit(checkout, "branch", "--set-upstream-to", "origin/master", "master");
+    const result = await packs(["--add", "memory"]);
+    expect(result.code).toBe(0);
+    expect(result.output).toContain("✓ Created the private repo nora/hedge-memory");
+    expect(existsSync(githubRepo(home, "nora/hedge-memory"))).toBe(true);
+    expect(JSON.parse(await spawnGit(remote, "show", "master:hedge.json"))).toMatchObject({ packs: ["pull-requests", "memory"], settings: { "memory.repo": "nora/hedge-memory" } });
+  });
+
   test("reuses the memory repo the profile names when the pack comes back", async () => {
     const { home, packs } = await packsAfterSetup();
     expect((await packs(["--add", "memory", "--set", "memory.repo=nora/custom-notes"])).code).toBe(0);

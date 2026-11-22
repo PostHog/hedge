@@ -93,7 +93,7 @@ export type GitRunner = (args: string[]) => Promise<{ ok: boolean; output: strin
 
 const defaultGit = (dir: string): GitRunner => async (args) => {
   const result = await run(dir, "git", ...args);
-  return { ok: result.ok, output: result.stderr || result.stdout };
+  return { ok: result.ok, output: result.ok ? result.stdout : result.stderr || result.stdout };
 };
 
 export async function rebaseNonProfileChanges(dir: string, remoteRef?: string, git: GitRunner = defaultGit(dir)) {
@@ -103,8 +103,7 @@ export async function rebaseNonProfileChanges(dir: string, remoteRef?: string, g
   const changed = await git(["log", "--format=", "--name-only", `HEAD..${target}`, "--", profileFileName, legacyProfileFileName]);
   if (!changed.ok || changed.output.trim()) return false;
   if ((await git(["rebase", "-q", "--no-autostash", target])).ok) return true;
-  const paths = await git(["rev-parse", "--git-path", "rebase-merge", "--git-path", "rebase-apply"]);
-  if (paths.ok && paths.output.trim().split("\n").some((path) => existsSync(resolve(dir, path)))) await git(["rebase", "--abort"]);
+  await git(["rebase", "--abort"]);
   return false;
 }
 

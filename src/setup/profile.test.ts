@@ -92,8 +92,22 @@ describe("hedge setup profile", () => {
     expect(rerun.output).toContain("  · Your team keeps profiles in the acme org. To move yours there, run:");
     expect(rerun.output).toContain("      gh api -X POST repos/nora/nora-hedge/transfer -f new_owner=acme -f new_name=nora-hedge");
     expect(rerun.output).toContain(`      git -C ${profilePath(home)} remote set-url origin https://github.com/acme/nora-hedge.git`);
+    expect(rerun.output).not.toContain("hedge set context.repo=");
     expect(existsSync(githubRepo(home, "acme/nora-hedge"))).toBe(false);
     expect((await pushedAnswers(home)).packs).toContain("posthog");
+  });
+
+  test("with a team pack and a personal profile shared as context.repo, also prints hedge set context.repo in the move hint", async () => {
+    const home = temp.make("home-");
+    expect((await hedgeSetup(home, ["--non-interactive", "--preset", "starter", "--add", "memory", "--plan", "claude"])).code).toBe(0);
+    rmSync(join(home, ".config/hedge"), { recursive: true });
+    rmSync(profilePath(home), { recursive: true });
+
+    const rerun = await teamSetup(home, ["--non-interactive", "--preset", "starter", "--add", "memory", "--plan", "claude"], []);
+    expect(rerun.code).toBe(0);
+    expect(rerun.output).toContain("      gh api -X POST repos/nora/nora-hedge/transfer -f new_owner=acme -f new_name=nora-hedge");
+    expect(rerun.output).toContain(`      git -C ${profilePath(home)} remote set-url origin https://github.com/acme/nora-hedge.git`);
+    expect(rerun.output).toContain("      hedge set context.repo=acme/nora-hedge");
   });
 
   test("with a team pack whose org refuses the repo, creates the profile in the user's account and says why", async () => {
@@ -156,6 +170,19 @@ describe("hedge setup profile", () => {
     expect((await pushedAnswers(home)).plan).toBe("claude");
     expect(machineFile(home).profileDir).toBe(checkout);
     expect(existsSync(profilePath(home))).toBe(false);
+  });
+
+  test("with Memory on and a profile checkout on a branch other than main, creates hedge-memory instead of writing notes to main", async () => {
+    const home = temp.make("home-");
+    const { dotfiles } = await branchCheckout(home);
+    const mainBefore = await spawnGit(dotfiles, "rev-parse", "main");
+
+    const rerun = await hedgeSetup(home, ["--non-interactive", "--add", "memory", "--plan", "claude"], []);
+
+    expect(rerun.code).toBe(0);
+    expect(existsSync(githubRepo(home, "nora/hedge-memory"))).toBe(true);
+    expect(JSON.parse(await spawnGit(dotfiles, "show", "hub:hedge.json")).settings).toEqual({ "memory.repo": "nora/hedge-memory" });
+    expect(await spawnGit(dotfiles, "rev-parse", "main")).toBe(mainBefore);
   });
 
   test("stops before it saves when the checkout's branch tracks no remote branch, and never renames that branch or moves a local main", async () => {
@@ -324,13 +351,15 @@ describe("hedge setup profile", () => {
     expect((await pushedAnswers(home, "nora/my-setup")).settings).toEqual({ "context.repo": "nora/my-setup" });
   });
 
-  test("with Memory on and context.repo naming the new profile repo, creates it once and does not prompt twice", async () => {
-    const home = temp.make("home-");
-    const result = await hedgeSetup(home, ["--preset", "starter", "--add", "memory", "--plan", "claude", "--set", "context.repo=nora/nora-hedge"], ["", ""]);
-    expect(result.code).toBe(0);
-    expect(result.output).toContain("  Hedge creates the private repo nora/nora-hedge in your GitHub account and pushes your answers, memory, and context there.");
-    expect(ownedRepos(home, "nora")).toEqual(["nora/nora-hedge"]);
-    expect((await pushedAnswers(home)).settings).toEqual({ "context.repo": "nora/nora-hedge" });
+  test("with Memory on and context.repo naming the new profile repo as owner/name or URL, creates it once and does not prompt twice", async () => {
+    for (const value of ["nora/nora-hedge", "https://github.com/nora/nora-hedge.git"]) {
+      const home = temp.make("home-");
+      const result = await hedgeSetup(home, ["--preset", "starter", "--add", "memory", "--plan", "claude", "--set", `context.repo=${value}`], ["", ""]);
+      expect(result.code).toBe(0);
+      expect(result.output).toContain("  Hedge creates the private repo nora/nora-hedge in your GitHub account and pushes your answers, memory, and context there.");
+      expect(ownedRepos(home, "nora")).toEqual(["nora/nora-hedge"]);
+      expect((await pushedAnswers(home)).settings).toEqual({ "context.repo": value });
+    }
   });
 
   test("with Memory on and a team pack, shares the org profile repo via context.repo, or falls back to the personal profile repo", async () => {
@@ -366,6 +395,22 @@ describe("hedge setup profile", () => {
     expect(result.code).toBe(0);
     expect(existsSync(githubRepo(home, "nora/hedge-memory"))).toBe(true);
     expect((await pushedAnswers(home, "nora/hedge-profile")).settings).toEqual({ "memory.repo": "nora/hedge-memory" });
+  });
+
+  test("with Memory on and an existing private profile repo without a main branch, creates hedge-memory instead of sharing it", async () => {
+    const home = temp.make("home-");
+    const remote = githubRepo(home, "nora/nora-hedge");
+    const seed = temp.make("seed-");
+    await spawnGit(home, "init", "-q", "--bare", "-b", "master", remote);
+    await spawnGit(seed, "init", "-q", "-b", "master");
+    writeFileSync(join(seed, "README.md"), "# Profile\n");
+    await spawnGit(seed, "add", "README.md");
+    await spawnGit(seed, "commit", "-q", "-m", "Start");
+    await spawnGit(seed, "push", "-q", remote, "master");
+    const result = await hedgeSetup(home, ["--non-interactive", "--preset", "starter", "--add", "memory", "--plan", "claude"]);
+    expect(result.code).toBe(0);
+    expect(existsSync(githubRepo(home, "nora/hedge-memory"))).toBe(true);
+    expect(JSON.parse(await spawnGit(remote, "show", "master:hedge.json")).settings).toEqual({ "memory.repo": "nora/hedge-memory" });
   });
 
   test("with Memory on it refuses a memory repo that is public, before it creates anything", async () => {

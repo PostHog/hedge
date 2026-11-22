@@ -37,11 +37,11 @@ A Git repo that holds packs, fetched at a pinned ref. The engine repo is one, an
 _Avoid_: Registry, marketplace, tap
 
 **Profile**:
-One person's private repo of answers and files: `hedge.json`, an optional `about-me.md`, and `overrides/`. It is also their dotfiles repo.
+One person's private repo of answers and files: `hedge.json`, an optional `about-me.md`, `install.sh`, and `overrides/`. It is also their dotfiles repo, and when Memory is on it holds their memory and context too unless they pick a separate repo.
 _Avoid_: Personal layer, config, dotfiles
 
 **Context repo**:
-One person's repo of what their agents learn and record: memory, dreams, notes, to-dos, ideas, research, maps, and logs such as the lessons log and the rollout log. It is meant to be shared with their team, so it may live in the team's GitHub org, but it is never public. The profile holds private answers and is read by Hedge; the context repo holds shared knowledge and is read and written by agents. `context.repo` names it, and the memory, library, map, and log settings take it as their default.
+The private repo that holds what a person's agents learn and record: memory, dreams, notes, to-dos, ideas, research, maps, and logs such as the lessons log and the rollout log. By default it is the same repo as the profile, and it may live in the team's GitHub org so teammates can read it, but it is never public. `context.repo` names it, and the memory, library, map, and log settings take it as their default.
 _Avoid_: Personal repo, notes repo, knowledge base
 
 **Workflow**:

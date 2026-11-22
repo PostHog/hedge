@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ProfileFile } from "../pack/types.ts";
 import { defaultSources } from "../setup/defaults.ts";
@@ -321,7 +321,9 @@ describe("saving answers", () => {
 
     expect(error).toBeInstanceOf(ProfileError);
     expect((error as Error).message).toContain(`${dir} and its remote both have changes the other lacks.`);
-    expect(readFileSync(count, "utf8").trim()).toBe("2");
+    expect(await spawnGit(remote, "show", "main:memory/n0.md")).toBe("0");
+    expect(await spawnGit(remote, "show", "main:memory/n1.md")).toBe("1");
+    expect(JSON.parse(await spawnGit(remote, "show", "main:hedge.json")).settings).toEqual({});
   });
 
   test("rejects a profile with invalid fields", async () => {
