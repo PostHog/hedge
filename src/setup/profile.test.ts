@@ -377,6 +377,26 @@ describe("hedge setup profile", () => {
     expect((await pushedAnswers(fallbackHome, "nora/nora-hedge")).settings).toEqual({ "context.repo": "nora/nora-hedge" });
   });
 
+  test("adding Memory to an existing org profile confirms before storing memory and context where teammates can read them", async () => {
+    const home = temp.make("home-");
+    expect((await teamSetup(home, starter, ["", ""])).code).toBe(0);
+
+    const declined = await teamSetup(home, ["--add", "memory"], ["", "n"]);
+    expect(declined.code).toBe(130);
+    expect(declined.output).toContain("  Hedge stores your memory and context in acme/nora-hedge, where teammates in acme can read them.");
+    expect(declined.output).toContain("  Nothing was changed.");
+    expect((await pushedAnswers(home, "acme/nora-hedge")).settings).toEqual({});
+
+    const accepted = await teamSetup(home, ["--add", "memory"], ["", ""]);
+    expect(accepted.code).toBe(0);
+    expect(accepted.output).toContain("  Hedge stores your memory and context in acme/nora-hedge, where teammates in acme can read them.");
+    expect((await pushedAnswers(home, "acme/nora-hedge")).settings).toEqual({ "context.repo": "acme/nora-hedge" });
+
+    const rerun = await teamSetup(home, ["--plan", "claude"], []);
+    expect(rerun.code).toBe(0);
+    expect(rerun.prompts).toEqual([]);
+  });
+
   test("with Memory on and an existing hedge-memory or fleet-memory repo, reuses it via memory.repo", async () => {
     for (const existing of ["nora/hedge-memory", "nora/fleet-memory"]) {
       const home = temp.make("home-");

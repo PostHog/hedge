@@ -190,7 +190,8 @@ async function makeProfile(context: ProfileContext) {
   const proposed = found || team ? undefined : own;
   const others = [...(found || !team ? [] : [team]), ...(memory?.missing ? [memory.slug ?? memory.repo] : [])];
   const sharesAtConfirm = shareProfile || Boolean(memory && same(memory.slug, proposed ?? team));
-  const typed = await confirm(context, proposed, others, org && !found ? org : undefined, exists, sharesAtConfirm);
+  const shareOrg = shareProfile && found && !same(owner(found), login) ? found : undefined;
+  const typed = await confirm(context, proposed, others, org && !found ? org : undefined, exists, sharesAtConfirm, shareOrg);
   let profileRepo = found ?? team ?? typed ?? own;
   if (!found) {
     const made = await create(profileRepo);
@@ -345,12 +346,16 @@ function profileOrg(packs: PackManifest[], picked: string[]) {
   return packs.find((pack) => pack.profileOrg && picked.includes(pack.name))?.profileOrg;
 }
 
-async function confirm({ terminal, nonInteractive }: ProfileContext, proposed: string | undefined, others: string[], org: string | undefined, exists: (repo: string) => Promise<boolean>, sharesMemory: boolean) {
-  if ((!proposed && !others.length) || nonInteractive) return proposed;
+async function confirm({ terminal, nonInteractive }: ProfileContext, proposed: string | undefined, others: string[], org: string | undefined, exists: (repo: string) => Promise<boolean>, sharesMemory: boolean, shareOrg?: string) {
+  if ((!proposed && !others.length && !shareOrg) || nonInteractive) return proposed;
   let profile = proposed;
   const where = org ? `in the ${org} GitHub org, private to the org,` : "in your GitHub account";
   const show = () => {
     const missing = [...(profile ? [profile] : []), ...others].filter((repo, index, all) => all.findIndex((item) => same(item, repo)) === index);
+    if (!missing.length && shareOrg) {
+      terminal.print(`  Hedge stores your memory and context in ${shareOrg}, where teammates in ${owner(shareOrg)} can read them.`);
+      return;
+    }
     const what = sharesMemory && (!profile || !others.length || others.some((repo) => same(repo, profile))) ? "your answers, memory, and context" : "your answers";
     terminal.print(`  Hedge creates ${missing.length === 1 ? "the private repo" : "the private repos"} ${missing.join(" and ")} ${where} and pushes ${what} there.`);
   };
@@ -359,7 +364,7 @@ async function confirm({ terminal, nonInteractive }: ProfileContext, proposed: s
     const reply = (await terminal.ask(proposed ? "  Go ahead? (Y/n, or type another name for your profile repo) " : "  Go ahead? (Y/n) ")).trim();
     if (["", "y", "yes"].includes(reply.toLowerCase())) return profile;
     if (["n", "no"].includes(reply.toLowerCase())) {
-      terminal.print("  Nothing was created.");
+      terminal.print(shareOrg && !proposed && !others.length ? "  Nothing was changed." : "  Nothing was created.");
       throw new Stopped();
     }
     if (!proposed) continue;
