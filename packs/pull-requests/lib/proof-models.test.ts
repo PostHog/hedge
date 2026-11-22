@@ -53,6 +53,25 @@ console.log(JSON.stringify({ type: "result", is_error: false, result: JSON.strin
   }
 });
 
+test.each<[Role, string]>([["reviewer", "danger-full-access"], ["judge", "danger-full-access"], ["bloat-judge", "danger-full-access"], ["arbiter", "read-only"], ["eval-judge", "read-only"]])(
+  "a Codex %s runs with the %s sandbox",
+  async (role, sandbox) => {
+    const root = mkdtempSync(join(tmpdir(), "hedge-codex-sandbox-"));
+    try {
+      writeFileSync(join(root, "codex"), `#!/usr/bin/env bun
+await Bun.stdin.text();
+const argv = process.argv.slice(2);
+await Bun.write(argv[argv.indexOf("-o") + 1]!, argv[argv.indexOf("-s") + 1]!);
+`, { mode: 0o755 });
+      const codex: ModelRow = { ...row, provider: "codex" };
+      const answer = await askModel(role, codex, { prompt: "Review it", cwd: root }, { HOME: root, PATH: `${root}:${process.env.PATH}` }, 10_000);
+      expect(answer).toMatchObject({ ok: true, text: sandbox });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
 test("a GPT review lens takes the Codex reviewer row, not a row of another T3 provider listed first", () => {
   const antigravity: ModelRow = { role: "review", work: "Review", provider: "antigravity", model: "gemini-4-neon", effort: "high" };
   const codex: ModelRow = { role: "review-codex", work: "Review Claude's code", provider: "codex", model: "gpt-6.2", effort: "high" };
