@@ -490,7 +490,7 @@ export function parse(program: string, context: Context = { env: new Map(), inLo
       if (token.operator === "(") scope = { parent: scope };
       if (token.operator === ")") scope = scope.parent ?? scope;
       const named = definition ? pipelines.at(-1)?.at(-1) : undefined;
-      if (named) named.definesFunction = true;
+      if (named?.name && named.args.length === 0 && !named.name.includes("=")) named.definesFunction = true;
     }
     if ("operator" in token) closedGroup = token.operator === ")";
   }

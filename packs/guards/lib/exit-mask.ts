@@ -159,6 +159,7 @@ function closesOnly({ commands, depths }: Program, end: number, depth: number): 
   return commands.slice(end + 1).every((command, offset) => closers.has(command.name) && command.name !== "done" && depths[end + 1 + offset] < depth && separators.has(command.after));
 }
 
+const changedPrinting = "a command earlier in the call that changes how the shell prints, such as `exec >`,";
 const separatorName = (after: string | undefined) => (after === "\n" ? "the next line after it" : `the \`${after}\` after it`);
 
 function reachOf(program: Program, start: number): Reach {
@@ -167,6 +168,7 @@ function reachOf(program: Program, start: number): Reach {
   const reachable = (index: number) => depths[index] === depth && commands[listEnd(program, index, depth)].after !== "&";
   const reportedBy = (index: number, failingExit: boolean): Reach | undefined => {
     const found = reporter(commands[index], reachable(index), failingExit);
+    if (found === "exit" && changesHowItPrints(commands.slice(0, index), commands[index])) return { how: changedPrinting };
     return found === "printed" ? { printedBy: index } : found;
   };
   let end = pipelineEnd(program, start, depth);
@@ -225,7 +227,7 @@ function hiddenIn(text: string, nesting: number): { found?: Finding; carries?: s
     const reach = reachOf(program, index);
     if (reach !== "exit" && "how" in reach) return { found: { what, how: reach.how } };
     if (reach !== "exit" && nesting > 0) return { found: { what, how: "the nested shell or `$(…)` that prints it" } };
-    if (reach !== "exit" && changesHowItPrints(commands.slice(0, reach.printedBy), commands[reach.printedBy])) return { found: { what, how: "a command earlier in the call that changes how the shell prints, such as `exec >`," } };
+    if (reach !== "exit" && changesHowItPrints(commands.slice(0, reach.printedBy), commands[reach.printedBy])) return { found: { what, how: changedPrinting } };
     carries ??= what;
   }
   return { carries };

@@ -182,6 +182,8 @@ describe("the exit-status mask guard", () => {
     "printf -v IFS 0123; git push > /dev/null 2>&1; echo $?",
     "read -r I''FS <<< 0123456789; git push > /dev/null 2>&1; echo $?",
     'printf -v "I""FS" 0123; git push > /dev/null 2>&1; echo $?',
+    "exit() { :; }; git push > /dev/null 2>&1; exit $?",
+    "exit() { :; }; git push > /dev/null 2>&1 || exit 1",
     "trap 'exit 0' EXIT; git push > /dev/null 2>&1",
     "function quiet { set +o pipefail; }; set -o pipefail; quiet; git push > /dev/null 2>&1 | cat",
     "trap 'rm -f push.log; exit $?' EXIT; git push > push.log 2>&1; exit \"$?\"",
@@ -319,7 +321,7 @@ describe("the exit-status mask guard", () => {
     expect(refused(command)).toBe(true);
   });
 
-  test.each(["( true ); git push > push.log 2>&1; echo \"exit=$?\"", "git commit -m 'Fix parse()' > commit.log 2>&1; echo \"exit=$?\"", "true | git push; echo \"exit=$?\"", "set -eo pipefail; true | git push > /dev/null 2>&1; echo done", "set -o pipefail; { echo main; } | xargs git push origin | cat; echo \"exit=$?\"", "git push > push.log 2>&1; echo \"exit=$?\"; exec cat push.log", "set -o pipefail; ( trap ':' EXIT ); git push | cat", "( exec > /dev/null ); git push > push.log 2>&1; echo \"exit=$?\"", "IFS= read -r branch <<< main; set -o pipefail; git push origin \"$branch\" | tee push.log", "git push origin fix-CIFS > push.log 2>&1; echo \"exit=$?\"; cat push.log", "read -r IFS <<< 013; git push > push.log 2>&1; echo \"exit=$?\"", "printf 'x=1\\n' > env.sh; source ./env.sh; set -o pipefail; git push | cat"])("allows the last stage's status or a pipefail pipe: %s", (command) => {
+  test.each(["( true ); git push > push.log 2>&1; echo \"exit=$?\"", "git commit -m 'Fix parse()' > commit.log 2>&1; echo \"exit=$?\"", "true | git push; echo \"exit=$?\"", "set -eo pipefail; true | git push > /dev/null 2>&1; echo done", "set -o pipefail; { echo main; } | xargs git push origin | cat; echo \"exit=$?\"", "git push > push.log 2>&1; echo \"exit=$?\"; exec cat push.log", "set -o pipefail; ( trap ':' EXIT ); git push | cat", "( exec > /dev/null ); git push > push.log 2>&1; echo \"exit=$?\"", "IFS= read -r branch <<< main; set -o pipefail; git push origin \"$branch\" | tee push.log", "git push origin fix-CIFS > push.log 2>&1; echo \"exit=$?\"; cat push.log", "read -r IFS <<< 013; git push > push.log 2>&1; echo \"exit=$?\"", "printf 'x=1\\n' > env.sh; source ./env.sh; set -o pipefail; git push | cat", "args=(); set -o pipefail; git push | cat", "files=(); git push > push.log 2>&1; echo \"exit=$?\"", "declare -a list=(); set -o pipefail; git push | cat"])("allows the last stage's status or a pipefail pipe: %s", (command) => {
     expect(exitMaskRisk(command, "Robin")).toBeUndefined();
     expect(shellShowsEveryFailure(command)).toBe(true);
   });
