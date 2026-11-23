@@ -381,18 +381,20 @@ describe("the exit-status mask guard", () => {
     ["git commit -F - <<'EOF'\nFix; the | gate\nEOF\ngit push", "git commit -F - <<'EOF' || exit\nFix; the | gate\nEOF\ngit push"],
     ["git commit -F - <<EOF\nline one \\\nEOF\ngit push\nEOF\necho done", "git commit -F - <<EOF || exit\nline one \\\nEOF\ngit push\nEOF\necho done"],
     ["set -e; git commit -m 'a; b' ; git push; echo done", "set -e; git commit -m 'a; b' || exit; git push || exit; echo done"],
-    ["cd . && git push 2>&1 | tail -3; echo done", "set -o pipefail; cd . && git push 2>&1 | tail -3 || exit; set +o pipefail; echo done"],
-    ["git push 2>&1 | tail -3\necho done | cat", "set -o pipefail; git push 2>&1 | tail -3 || exit; set +o pipefail\necho done | cat"],
+    ["cd . && git push 2>&1 | tail -3; echo done", "set -o pipefail; cd . && git push 2>&1 | tail -3 || exit; echo done"],
+    ["git push 2>&1 | tail -3\necho done", "set -o pipefail; git push 2>&1 | tail -3 || exit\necho done"],
     ["git commit -m x; git push | tail -3", "set -o pipefail; git commit -m x || exit; git push | tail -3"],
     ["git push; if true; then echo pushed; fi", "git push || exit; if true; then echo pushed; fi"],
     ["git push; true || exit 1", "git push || exit; true || exit 1"],
     ["git push; echo pushed || exit 1; echo done", "git push || exit; echo pushed || exit 1; echo done"],
     ["git push; false; echo done", "git push || exit; false; echo done"],
-    ["git push && echo ok; echo done", "git push && echo ok || exit; echo done"],
+    ["git push && echo ok; echo done", "git push || exit && echo ok; echo done"],
+    ["git push && false; echo cleanup", "git push || exit && false; echo cleanup"],
+    ["cd . && git push && echo ok\necho done", "cd . && git push || exit && echo ok\necho done"],
     ["git push; sleep 0 &", "git push || exit; sleep 0 &"],
     ["git commit -F - <<'EOF'\nline one \\\nEOF\ngit push", "git commit -F - <<'EOF' || exit\nline one \\\nEOF\ngit push"],
     ["( git push | tail -3 )", "set -o pipefail; ( git push | tail -3 )"],
-    ["git push | tail -3 && echo ok; echo done", "set -o pipefail; git push | tail -3 && echo ok || exit; set +o pipefail; echo done"],
+    ["git push | tail -3 && echo ok; echo done", "set -o pipefail; git push | tail -3 || exit && echo ok; echo done"],
     ["git push; true || echo extra", "git push || exit; true || echo extra"],
   ])("rewrites a hidden status into a form that shows it: %s", (command, rewrite) => {
     expect(exitMaskRewrite(command)).toBe(rewrite);
@@ -447,12 +449,30 @@ describe("the exit-status mask guard", () => {
     "git commit -m \"$(git log -1 --format=%s | tr a-z A-Z)\" | tail -1",
     "git push | tail -3; git commit -m x | tail -1",
     "{ git push | tail -3; }; echo done",
+    "git push 2>&1 | tail -3\necho done | cat",
+    "git push | cat; false | true",
+    ": marker; git push | cat; printf '%s\\n' \"$_\"",
     "git commit -F - <<EOF | tail -1\n$(git log | head -1)\nEOF",
     "git push | tail -3; shopt -o > options.txt",
     "bash <<EOF\ngit push \\\n| tail -3\nEOF",
   ])("refuses instead of rewriting when no rewrite keeps every other command as it was: %s", (command) => {
     expect(exitMaskRewrite(command)).toBeUndefined();
     expect(refused(command)).toBe(true);
+  });
+
+  test("keeps the text a heredoc gives a real commit when it rewrites the call", () => {
+    const command = "git commit -q --allow-empty -F - <<EOF\nline one \\\nEOF\nsecond line\nEOF\necho done";
+    const rewrite = exitMaskRewrite(command);
+    expect(rewrite).toBe("git commit -q --allow-empty -F - <<EOF || exit\nline one \\\nEOF\nsecond line\nEOF\necho done");
+    const messageAfter = (text: string) => {
+      const repo = temp.make("heredoc-repo-");
+      const env = { PATH: "/usr/bin:/bin", HOME: repo, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "Robin", GIT_AUTHOR_EMAIL: "robin@example.invalid", GIT_COMMITTER_NAME: "Robin", GIT_COMMITTER_EMAIL: "robin@example.invalid" };
+      expect(spawnSync("git", ["init", "-q"], { cwd: repo, env }).status).toBe(0);
+      const run = spawnSync("bash", ["-c", text], { cwd: repo, env, encoding: "utf8" });
+      return { status: run.status, output: run.stdout, message: spawnSync("git", ["log", "-1", "--format=%B"], { cwd: repo, env, encoding: "utf8" }).stdout };
+    };
+    expect(messageAfter(rewrite ?? "")).toEqual(messageAfter(command));
+    expect(messageAfter(command).message).toBe("line one EOF\nsecond line\n\n");
   });
 
   test("leaves a command alone that already shows the status", () => {
@@ -472,8 +492,8 @@ describe("the exit-status mask guard", () => {
     const answer = runHookProcess("claude", bash("git push 2>&1 | tail -3; echo done"));
     expect(answer).toEqual({
       hookEventName: "PreToolUse",
-      updatedInput: { command: "set -o pipefail; git push 2>&1 | tail -3 || exit; set +o pipefail; echo done", description: "Push" },
-      additionalContext: expect.stringContaining("`set -o pipefail; git push 2>&1 | tail -3 || exit; set +o pipefail; echo done`"),
+      updatedInput: { command: "set -o pipefail; git push 2>&1 | tail -3 || exit; echo done", description: "Push" },
+      additionalContext: expect.stringContaining("`set -o pipefail; git push 2>&1 | tail -3 || exit; echo done`"),
     });
   });
 

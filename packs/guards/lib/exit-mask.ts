@@ -158,6 +158,7 @@ function reachOf(program: Program, start: number): Reach {
     return found === "printed" ? { printedBy: index } : found;
   };
   let end = pipelineEnd(program, start, depth);
+  const pipeEnd = end;
   if (end !== start && !setting(program, start, setsOption("pipefail"))) return { how: "a pipe", fix: pipefailFix(program, start, end) };
   if (depth > 0) return closesOnly(program, end, depth) ? "exit" : { how: "the group or loop it runs in" };
   while (commands[end].after === "&&" && end + 1 < commands.length) end = pipelineEnd(program, end + 1, depth);
@@ -166,21 +167,17 @@ function reachOf(program: Program, start: number): Reach {
   if (after === undefined) return "exit";
   if (after === "&") return { how: "running it in the background with `&`" };
   if (after === "||") return reportedBy(next, true) ?? { how: "the `||` after it" };
-  return reportedBy(next, false) ?? { how: separatorName(after), fix: exitFix(commands[end]) };
+  return reportedBy(next, false) ?? { how: separatorName(after), fix: exitFix(commands[pipeEnd]) };
 }
 
-const exitFix = ({ after, afterAt }: Command): Fix | undefined => (after !== undefined && afterAt !== undefined && separators.has(after) ? { exitAt: afterAt } : undefined);
+const exitFix = ({ after, afterAt }: Command): Fix | undefined =>
+  (after !== undefined && afterAt !== undefined && (separators.has(after) || after === "&&") ? { exitAt: afterAt } : undefined);
 
-function pipefailFix(program: Program, start: number, pipeEnd: number): Fix | undefined {
-  const { commands } = program;
-  let last = pipeEnd;
-  while (commands[last].after === "&&" && last + 1 < commands.length) last = pipelineEnd(program, last + 1, 0);
-  const reached = commands.slice(0, last + 1);
-  const otherPipe = reached.some((command, index) => command.after === "|" && (index < start || index >= pipeEnd));
-  const nested = reached.some((command) => command.substitutions.length > 0);
-  if (otherPipe || nested) return undefined;
-  if (commands[last].after === undefined) return { pipefail: true };
-  const after = exitFix(commands[last]);
+function pipefailFix({ commands }: Program, start: number, pipeEnd: number): Fix | undefined {
+  const otherPipe = commands.some((command, index) => command.after === "|" && (index < start || index >= pipeEnd));
+  if (otherPipe || commands.some((command) => command.substitutions.length > 0)) return undefined;
+  if (commands[pipeEnd].after === undefined) return { pipefail: true };
+  const after = exitFix(commands[pipeEnd]);
   return after && { pipefail: true, ...after };
 }
 
@@ -243,7 +240,7 @@ export function exitMaskRisk(command: string, person: string): string | undefine
 
 const pipefail = "set -o pipefail; ";
 const maxRewrites = 64;
-const readsStatus = /\$\{?\?|PIPESTATUS|pipestatus|SHELLOPTS|pipefail|\bshopt\b|\bset\s+[-+]o\s*(?:$|[;&|)>#\n])/;
+const readsStatus = /\$\{?[?_]|PIPESTATUS|pipestatus|SHELLOPTS|pipefail|\bshopt\b|\bset\s+[-+]o\s*(?:$|[;&|)>#\n])/;
 const hidesCode = new Set(["trap", "eval", "source", "."]);
 
 function pipefailKeepsEveryCommand(text: string): boolean {
@@ -251,15 +248,15 @@ function pipefailKeepsEveryCommand(text: string): boolean {
   return !commandsIn(text).some((command) => command.after === "||" || command.tested || named(command, hidesCode));
 }
 
-function exitingAt(text: string, at: number, restoring: boolean): string {
+function exitingAt(text: string, at: number): string {
   const spaced = /\s/.test(text[at - 1] ?? " ") ? "" : " ";
-  const restore = restoring ? "; set +o pipefail" : "";
-  return `${text.slice(0, at)}${spaced}|| exit${restore}${text[at] === "#" ? " " : ""}${text.slice(at)}`;
+  const after = text[at] === "#" || text[at] === "&" ? " " : "";
+  return `${text.slice(0, at)}${spaced}|| exit${after}${text.slice(at)}`;
 }
 
-/** The command in a form whose every push, commit, merge, gate and watch shows its exit status: `|| exit` after such a
- * command where a `;` or line break follows it, and `set -o pipefail` around a pipe it runs in. The other commands run
- * as before while it succeeds, and none runs after it fails. Undefined when the command needs no rewrite or has no
+/** The command in a form whose every push, commit, merge, gate and watch shows its exit status: `|| exit` right after
+ * such a command where a `;`, `&&` or line break follows it, and `set -o pipefail` first when it runs in the only pipe
+ * of the call. The other commands run as before while it succeeds, and none runs after it fails. Undefined when the command needs no rewrite or has no
  * such form, such as when `!` negates a pipeline or a `function` keyword hides a body. */
 export function exitMaskRewrite(command: string): string | undefined {
   let text = command;
@@ -273,7 +270,7 @@ export function exitMaskRewrite(command: string): string | undefined {
       if (needsPipefail && !pipefailKeepsEveryCommand(command)) return undefined;
       const shift = needsPipefail ? pipefail.length : 0;
       if (needsPipefail) text = pipefail + text;
-      if (exitAt !== undefined) text = exitingAt(text, exitAt + shift, needsPipefail === true);
+      if (exitAt !== undefined) text = exitingAt(text, exitAt + shift);
     }
   } catch {
     return undefined;
