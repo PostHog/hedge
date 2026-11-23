@@ -809,7 +809,7 @@ const isFindingLabel = (item: unknown): item is FindingLabel => {
 export async function readLabels<T extends { ok?: boolean; labels: FindingLabel[] }>(directory: string) {
   const saved = await readJson<unknown>(labelsPath(directory), undefined).catch(() => undefined);
   const labels = (saved as { labels?: unknown } | undefined)?.labels;
-  return Array.isArray(labels) && labels.every(isFindingLabel) ? saved as T : undefined;
+  return Array.isArray(labels) && labels.every(isFindingLabel) && new Set(labels.map(({ finding }) => finding)).size === labels.length ? saved as T : undefined;
 }
 
 export async function advisoryLabels(directory: string) {

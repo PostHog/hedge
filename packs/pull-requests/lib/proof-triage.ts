@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { optionalStringSetting } from "../../base/lib/settings.ts";
@@ -191,7 +190,7 @@ export async function triageRuns(directory: string) {
 }
 
 export async function labelsDue(directory: string, setting: TriageSetting) {
-  return await triageRuns(directory) && (setting !== "off" || existsSync(labelsPath(directory)));
+  return await triageRuns(directory) && (setting !== "off" || await savedLabels(directory) !== undefined);
 }
 
 export const savedLabels = (directory: string) => readLabels<Triaged>(directory);
@@ -208,8 +207,8 @@ export async function labelRound(directory: string, setting: TriageSetting, ask:
 }
 
 export function labelLines({ labels, ok }: Triaged) {
-  const advisory = labels.filter(({ label }) => label === "advisory");
-  const needed = labels.filter(({ label }) => label === "needs-answer").map(({ finding }) => finding);
+  const advisory = ok ? labels.filter(({ label }) => label === "advisory") : [];
+  const needed = labels.filter(({ label }) => !ok || label === "needs-answer").map(({ finding }) => finding);
   return [
     ...advisory.length || needed.length ? ["", "Triage of the blocker, major and unrated findings:"] : [],
     ...advisory.map(({ finding, severity, reason }) => `- Advisory, needs no answer, do not fix it in this pull request: finding ${finding} (${severity}): ${reason}`),

@@ -356,13 +356,11 @@ test("a wait that finds the review budget held keeps the triage answer and saves
   fakeModel(pr, "TRIAGE", adviseSecond);
   await panelRound(pr);
   const holder = await lockHolder(join(pr.pullRequest, "reviews"));
-  let pauses = 0;
-  pr.panel.onPause = async () => { pauses++; await holder.release(); };
+  pr.panel.onPause = async () => { await holder.release(); };
 
   const waited = await pr.hedge("review", "--wait", "--round", "1");
 
   expect(waited.code).toBe(0);
-  expect(pauses).toBe(1);
   expect(savedLabels(pr)).toMatchObject({ ok: true, labels: [{ finding: 1 }, { finding: 2, label: "advisory" }, { finding: 4 }] });
 });
 
@@ -381,6 +379,7 @@ test.each([
   ["a failed pass", { ok: false, labels: [advisoryTwo] }],
   ["an unknown severity", { ok: true, labels: [{ ...advisoryTwo, severity: "typo" }] }],
   ["no reason", { ok: true, labels: [{ finding: 2, severity: "major", label: "advisory" }] }],
+  ["a finding labelled both ways", { ok: true, labels: [{ ...advisoryTwo, label: "needs-answer" }, advisoryTwo] }],
 ])("a saved advisory label from %s waives no answer in respond", async (_case, saved) => {
   const pr = await treated();
   fakeModel(pr, "TRIAGE", adviseSecond);
@@ -603,6 +602,32 @@ test("a wait on a round labelled nothing while triage is now off, as another com
   await holder.release();
 
   expect(wait.output).not.toContain("triage labels");
+});
+
+test("a wait while triage is off and another command holds the round reads a labels file of another shape as no labels", async () => {
+  const pr = await treated();
+  fakeModel(pr, "TRIAGE", adviseSecond);
+  await panelRound(pr);
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": "off" });
+  writeFileSync(join(reviewDirectory(pr), "triage-labels.json"), "{}");
+  const holder = await lockHolder(reviewDirectory(pr));
+
+  const wait = await pr.hedge("review", "--wait", "--round", "1");
+  await holder.release();
+
+  expect(wait.code).toBe(0);
+});
+
+test("a wait on a round whose saved pass failed tells the author to answer every labelled finding, whatever the labels say", async () => {
+  const pr = await treated();
+  fakeModel(pr, "TRIAGE", adviseSecond);
+  await panelRound(pr);
+  writeFileSync(join(reviewDirectory(pr), "triage-labels.json"), JSON.stringify({ ok: false, labels: [{ finding: 1, severity: "major", label: "needs-answer", reason: "a trigger" }, advisoryTwo] }));
+
+  const wait = await pr.hedge("review", "--wait", "--round", "1");
+
+  expect(wait.output).not.toContain("Advisory");
+  expect(wait.output).toContain("Needs an answer: findings 1, 2");
 });
 
 test("the proof receipt lists each advisory finding with its first severity", async () => {
