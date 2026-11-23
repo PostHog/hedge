@@ -75,7 +75,7 @@ export const tierLenses: Record<TierName, string[]> = {
 
 export const tierCeiling = (tier: ReviewTier, ceiling: number) => tier.name === "read" ? Math.min(2, ceiling) : ceiling;
 
-function gradeOf(body: string | undefined) {
+export function mergeRiskGrade(body: string | undefined) {
   if (body === undefined) return "unreadable";
   const grade = /Merge risk:\**\s*(low|medium|high)(?![\w/-])(?!\s+[/-]\s*(?:low|medium|high)\b)/i.exec(riskCalloutOf(body) ?? body)?.[1]?.toLowerCase();
   return grade ?? (/merge[- ]risk/i.test(body) ? "unreadable" : "none");
@@ -108,6 +108,10 @@ const productionLines = (identity: ProofIdentity, run: Run) => {
   return changed && linesOf(changed, authored);
 };
 
+export function changedFiles(identity: ProofIdentity, run: Run) {
+  try { return changedLines(identity, run, mergeBase(identity, run), false)?.map(({ path }) => path); } catch { return undefined; }
+}
+
 export type DiffSize = { production: number; tests: number; docs: number };
 
 const offline = (run: Run): Run => (command) => run(["env", "GIT_NO_LAZY_FETCH=1", ...command]);
@@ -126,7 +130,7 @@ export function diffSize(identity: ProofIdentity, run: Run, start: string): Diff
 }
 
 export function reviewTier(identity: ProofIdentity, run: Run, body: string | undefined): ReviewTier {
-  const grade = gradeOf(body);
+  const grade = mergeRiskGrade(body);
   if (grade === "high") return { name: "panel", why: "merge-risk grade high" };
   let lines: number | undefined;
   try { lines = productionLines(identity, run); } catch { lines = undefined; }

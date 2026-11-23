@@ -117,6 +117,27 @@
       "ask": "never"
     },
     {
+      "key": "pull-requests.triage",
+      "question": "Should a model sort the blockers and majors of each review into findings that need an answer and advisory ones, which the pull request does not fix?",
+      "type": "choice",
+      "default": "off",
+      "ask": "never",
+      "choices": [
+        {
+          "value": "off",
+          "label": "No"
+        },
+        {
+          "value": "split",
+          "label": "On half of the pull requests, to compare"
+        },
+        {
+          "value": "on",
+          "label": "On every pull request"
+        }
+      ]
+    },
+    {
       "key": "pull-requests.reviewTimeoutMinutes",
       "question": "How many minutes may one review run before it counts as failed?",
       "type": "number",
@@ -192,7 +213,8 @@
         "pull-requests.freeReviews",
         "pull-requests.reviewCeiling",
         "pull-requests.reviewTimeoutMinutes",
-        "pull-requests.panelSlots"
+        "pull-requests.panelSlots",
+        "pull-requests.triage"
       ],
       "sentence": "Every fix or feature ends as a proven, reviewed draft pull request that you mark ready yourself."
     },

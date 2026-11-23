@@ -22,9 +22,11 @@ import { publisherSeam } from "./proof-receipt-publisher.ts";
 import { reviewPrompt } from "./proof-review.ts";
 import { leftOutNote, rangeIsEmpty, reviewRange } from "./proof-range.ts";
 import { quietCommitIn } from "./proof-delta.ts";
-import { baseRefs, baseTip, cleanBaseMerge, mergeBase, pullRequestDetails, remotesOf, reviewTier, tierCeiling, tierLenses, topLevel, type ReviewTier } from "./proof-checkout.ts";
+import { baseRefs, baseTip, changedFiles, cleanBaseMerge, mergeBase, pullRequestDetails, remotesOf, reviewTier, tierCeiling, tierLenses, topLevel, type ReviewTier } from "./proof-checkout.ts";
 import { arbiterOf, finalGate, reviewLimit, type FinalGate } from "./proof-gate.ts";
 import { anchorCheck } from "./finding-anchors.ts";
+import { pathOf, readTriage, recordTriage, triageSetting, type TriageSetting } from "./proof-triage.ts";
+import { readCriticalPaths } from "./proof-judge.ts";
 import { reviewRules } from "./review-rules.ts";
 import { recordSanity, requireSanity } from "./proof-sanity.ts";
 import type { BloatJudge } from "./proof-bloat.ts";
@@ -654,7 +656,7 @@ async function runReview(options: Map<string, string>, head: ProofIdentity, cont
 
 async function printSavedReview({ round, id, directory }: SingleRound, { print }: CommandContext) {
   const reservation = await readReservation(directory);
-  print(JSON.stringify({ round, id, directory, reviewer: reservation?.reviewer }));
+  print(JSON.stringify({ round, id, directory, reviewer: reservation?.reviewer, ...await readTriage(directory) }));
   print((await readFile(join(directory, "findings.md"), "utf8")).trim());
   const anchors = await readFile(join(directory, "anchors.md"), "utf8").catch(() => "");
   if (anchors) print(`\n${anchors.trim()}`);
@@ -688,7 +690,7 @@ async function askReviewer(reserved: SingleRound, head: ProofIdentity, author: F
   const anchors = anchorCheck(answer.text, diff, await reviewRecords(home, head));
   await storeCapturedFindings(reserved.directory, head, roundId(reserved.id), answer.text, answer.model, answer.usage);
   if (anchors) await writeFile(join(reserved.directory, "anchors.md"), anchors + "\n", { mode: 0o600 });
-  print(JSON.stringify({ round: reserved.round, id: reserved.id, directory: reserved.directory, reviewer: answer.model }));
+  print(JSON.stringify({ round: reserved.round, id: reserved.id, directory: reserved.directory, reviewer: answer.model, ...await readTriage(reserved.directory) }));
   print(answer.text.trim());
   if (anchors) print(`\n${anchors}`);
   return 0;
@@ -725,6 +727,7 @@ async function reserveRound(options: Map<string, string>, head: ProofIdentity, c
   const lastRead = scope === "final" && (options.get("--phase") ?? "review") === "review";
   const from = lastRead ? await panelCommit(context.home, head) ?? base : rangeStart(scope, base, head, context.run);
   const { decision, ...permit } = await decisionOf(options, head, context);
+  const triage = triageSetting(context.env);
   const tier = reviewTier(head, context.run, pull?.body);
   if (tier.name === "read" && capturedBy === "hedge" && !panel && !decision && !await panelCommit(context.home, head)) throw new Error("A PR of the Read tier gets one read, and it is the panel: run hedge proof review, which runs its combined lens");
   const firstPanel = panel && !await panelCommit(context.home, head);
@@ -733,7 +736,14 @@ async function reserveRound(options: Map<string, string>, head: ProofIdentity, c
   const dropUnanswered = (directory: string) => roundStep(directory, context, () => dropFinalRead(directory, head, now()));
   const emptyRange = () => from !== undefined && rangeIsEmpty(context.run, from, head.commit, mergeBase(head, context.run));
   const reserved = await startReview(context.home, head, { dropUnanswered, emptyRange, onHistory: onHistoryOf(head, context.run), opening: async () => panel && !await panelCommit(context.home, head), sanity: () => requireSanity(context.home, head, context.run, () => bloatJudge(head, context)), scope, base, from, ...isCommitSha(pull?.baseSha) ? { forkBase: pull.baseSha } : {}, ...permit, limits, decision, phase: options.get("--phase"), cleanBaseMerge: cleanBaseMerge(head, context.run), quietCommit: quietCommitIn(context.run, () => baseRefs(head, context.run)), capturedBy, lock: async (directory) => lockNewRound(directory, await context.lock()), lockBudget: async (reviews, step) => withRoundLock(reviews, await context.lock(), step), now });
+  await markTriage(head, reserved.directory, triage, pull?.body, context);
   return { ...reserved, scope, base, from, phase: options.get("--phase") };
+}
+
+async function markTriage(head: ProofIdentity, directory: string, setting: TriageSetting, body: string | undefined, { home, env, run }: CommandContext) {
+  if (setting === "off") return;
+  const criticalPaths = await readCriticalPaths(home, head.repository, env).catch((error: Error) => error);
+  await recordTriage(home, head, directory, setting, pathOf({ body, changedFiles: changedFiles(head, run), criticalPaths }));
 }
 
 async function unrecordedRound(options: Map<string, string>, head: ProofIdentity, context: CommandContext) {
@@ -862,7 +872,7 @@ async function runPanel({ options, lists }: Parsed, head: ProofIdentity, context
   if (pending) requireSameRequest(pending, options, context.run);
   const directory = pending ? await rerunPanel(pending, options, head, lenses, guide, context) : await reservePanel(options, head, lenses, guide, context, { tier, arguments: lensArguments });
   const round = (await readJson<{ round: number | "final" }>(join(directory, "round.json"), { round: 0 })).round;
-  print(JSON.stringify({ round, directory, ...tier ? { tier } : {}, lenses: lenses.map(({ name, family }) => ({ name, family })) }));
+  print(JSON.stringify({ round, directory, ...tier ? { tier } : {}, ...await readTriage(directory), lenses: lenses.map(({ name, family }) => ({ name, family })) }));
   if (tier) print(tierLine(tier));
   print("The lenses run in the background. Run hedge proof review --wait for the findings, and hedge proof show to see each lens.");
   return 0;
