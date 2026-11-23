@@ -231,7 +231,7 @@ async function arbiterPrompt(home: string, identity: ProofIdentity) {
 async function advisoryNote(directory: string, findings: string) {
   const advisory = new Set((await advisoryLabels(directory)).map(({ finding }) => finding));
   const texts = labelCandidates(findings).filter(({ finding }) => advisory.has(finding)).map(({ text }) => text);
-  return texts.length ? `\n\nThe triage labelled these findings advisory: they need no answer, and buy no round.\n${texts.join("\n")}` : "";
+  return texts.length ? `\n\nThe triage labelled these findings advisory: they need no answer, and buy no round.\n${cut(texts.join("\n"), responsesCap)}` : "";
 }
 
 const namesEscalate = (output: string) => /escalate/i.test(output);

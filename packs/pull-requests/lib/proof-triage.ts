@@ -118,7 +118,9 @@ ${untrusted("the diff of the pull request", diff.length > diffLimit ? `${diff.sl
 }
 
 function labelsObject(text: string) {
-  const start = text.search(/\{\s*"labels"\s*:/);
+  const starts = [...text.matchAll(/\{\s*"labels"\s*:/g)];
+  if (starts.length !== 1) return undefined;
+  const start = starts[0]!.index;
   for (let end = text.lastIndexOf("}"); start >= 0 && end > start; end = text.lastIndexOf("}", end - 1)) {
     try { return JSON.parse(text.slice(start, end + 1)) as { labels?: unknown }; } catch { continue; }
   }
@@ -157,9 +159,13 @@ export async function triageFindings(findings: string, diff: string, ask: AskTri
   return { ...answer.model ? { model: answer.model } : {}, ok: answer.ok && replied !== undefined, ...cause ? { cause } : {}, durationMs, ...answer.ok && answer.usage ? { usage: answer.usage } : {}, labels };
 }
 
-export async function labelRound(directory: string, setting: TriageSetting, ask: AskTriage): Promise<Triaged | undefined> {
+export async function triageRuns(directory: string) {
   const { triage } = await readTriage(directory) as { triage?: TriageMark };
-  if (triage?.arm !== "treated" || triage.path === "excluded") return undefined;
+  return triage?.arm === "treated" && triage.path !== "excluded";
+}
+
+export async function labelRound(directory: string, setting: TriageSetting, ask: AskTriage): Promise<Triaged | undefined> {
+  if (!await triageRuns(directory)) return undefined;
   const saved = await readJson<Triaged | undefined>(labelsPath(directory), undefined).catch(() => undefined);
   if (saved?.ok || setting === "off") return saved;
   const findings = await readFile(join(directory, "findings.md"), "utf8");
