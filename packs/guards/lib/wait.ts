@@ -104,17 +104,10 @@ export const isBackgroundWait = (name = "") => /^mcp__t3[-_]code__t3_background_
 const fieldReason = 'Hedge blocked this call: `t3_background_wait` takes `taskIds`, a list of IDs, as in `{"taskIds": ["<id>"]}`. '
   + "Pass the ID of a background command or Monitor that this thread started and that still runs.";
 
-type Entry = TranscriptEntry & { origin?: { kind?: unknown }; attachment?: { prompt?: unknown; origin?: { kind?: unknown } } };
+type Entry = TranscriptEntry & { origin?: { kind?: unknown }; attachment?: { prompt?: unknown; origin?: { kind?: unknown } }; toolUseResult?: { agentId?: unknown } };
 type Result = Block & { tool_use_id?: unknown; content?: unknown };
 
 const endedStatuses = new Set(["completed", "failed", "killed", "stopped"]);
-const launchedAgent = /^agentId: (\S+)/gm;
-
-const textsOf = (content: unknown): string[] => {
-  if (typeof content === "string") return [content];
-  if (!Array.isArray(content)) return [];
-  return content.flatMap((block: { type?: string; text?: unknown }) => (block?.type === "text" && typeof block.text === "string" ? [block.text] : []));
-};
 
 function notificationOf(entry: Entry): string | undefined {
   const content = entry.message?.content;
@@ -134,19 +127,20 @@ function stoppedTaskOf(block: Result): string | undefined {
   }
 }
 
-type Calls = { stops: Set<string>; agents: Set<string>; stopped: Map<string, string>; launched: Map<string, string[]> };
+type Calls = { stops: Set<string>; agents: Set<string>; stopped: Map<string, string>; launched: Map<string, string> };
 
 function callsIn(entry: Entry, calls: Calls) {
   const content = entry.message?.content;
   if (!Array.isArray(content)) return;
+  const results = (content as Result[]).filter((block) => block?.type === "tool_result");
+  const agentId = entry.toolUseResult?.agentId;
   for (const block of content as Result[]) {
     if (block?.type === "tool_use" && block.id && block.name === "TaskStop") calls.stops.add(block.id);
     if (block?.type === "tool_use" && block.id && block.name === "Agent") calls.agents.add(block.id);
     if (block?.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
     const stopped = stoppedTaskOf(block);
     if (stopped) calls.stopped.set(block.tool_use_id, stopped);
-    const agents = textsOf(block.content).flatMap((text) => [...text.matchAll(launchedAgent)].map(([, id]) => id));
-    if (agents.length > 0) calls.launched.set(block.tool_use_id, agents);
+    if (typeof agentId === "string" && results.length === 1) calls.launched.set(block.tool_use_id, agentId);
   }
 }
 
@@ -156,7 +150,7 @@ function seenIn(path: string | undefined): Seen {
   const calls: Calls = { stops: new Set(), agents: new Set(), stopped: new Map(), launched: new Map() };
   try {
     for (const line of linesFromEnd(path)) {
-      if (![notificationStart, "agentId: ", stoppedStart, '"TaskStop"', '"Agent"'].some((mark) => line.includes(mark))) continue;
+      if (![notificationStart, '"agentId":"', stoppedStart, '"TaskStop"', '"Agent"'].some((mark) => line.includes(mark))) continue;
       const entry = parse(line) as Entry | undefined;
       if (!entry) continue;
       callsIn(entry, calls);
@@ -169,7 +163,7 @@ function seenIn(path: string | undefined): Seen {
   } catch {
     return seen;
   }
-  for (const [callId, ids] of calls.launched) if (calls.agents.has(callId)) for (const id of ids) seen.subagents.add(id);
+  for (const [callId, id] of calls.launched) if (calls.agents.has(callId)) seen.subagents.add(id);
   for (const [callId, id] of calls.stopped) if (calls.stops.has(callId) && !seen.finished.has(id)) seen.finished.set(id, { status: "stopped" });
   return seen;
 }

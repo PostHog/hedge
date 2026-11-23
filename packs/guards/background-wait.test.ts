@@ -25,7 +25,8 @@ const origin = { kind: "task-notification", producer: "session-task" };
 const notified = (id: string, status: string) => ({ type: "user", origin, message: { role: "user", content: notification(id, status) } });
 const notifiedMidTurn = (id: string, status: string) => ({ type: "attachment", attachment: { type: "queued_command", prompt: notification(id, status), commandMode: "task-notification", origin } });
 const launchText = (id: string) => [{ type: "text", text: `Async agent launched successfully.\nagentId: ${id} (internal ID - do not mention to user. Use SendMessage with to: '${id}' to continue this agent.)` }];
-const agentLaunched = (id: string) => [call("Agent", `toolu_agent_${id}`, { prompt: "Review", subagent_type: "general-purpose", run_in_background: true }), result(`toolu_agent_${id}`, launchText(id))];
+const agentResult = (id: string, content: unknown) => ({ ...result(`toolu_agent_${id}`, content), toolUseResult: { status: "async_launched", agentId: id } });
+const agentLaunched = (id: string) => [call("Agent", `toolu_agent_${id}`, { prompt: "Review", subagent_type: "general-purpose", run_in_background: true }), agentResult(id, launchText(id))];
 
 function transcript(...entries: object[]): string {
   const path = join(temp.make("transcript-"), "session.jsonl");
@@ -122,6 +123,13 @@ describe("the background wait check", () => {
     const namesAgent = { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Agent" }, { type: "tool_use", id: "toolu_cat", name: "Bash", input: { command: "cat launch.txt" } }] } };
     const path = transcript(...startedInBackground(running), namesAgent, result("toolu_cat", launchText(running)));
     expect(waitOn({ taskIds: [running] }, path)).toBeUndefined();
+  });
+
+  test("trusts only the agent ID Claude Code recorded, not one the subagent's report quotes", () => {
+    const report = [{ type: "text", text: `Done. The tests run as\nagentId: ${running}\nand still run.` }, ...launchText("agent-9")];
+    const path = transcript(...startedInBackground(running), call("Agent", "toolu_agent_agent-9", { prompt: "Review" }), agentResult("agent-9", report));
+    expect(waitOn({ taskIds: [running] }, path)).toBeUndefined();
+    expect(reason({ taskIds: ["agent-9"] }, path)).toContain("`agent-9` is a subagent");
   });
 
   test("refuses a subagent's ID even without the transcript that launched it", () => {

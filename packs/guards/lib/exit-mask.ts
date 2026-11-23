@@ -197,9 +197,11 @@ function exitGroup(program: Program, start: number, end: number): boolean {
   return commands[listEnd(program, end + 2, 0)].after !== "&" && !changesHowItPrints(commands.slice(0, end + 1), exit);
 }
 
+const passesThrough = ({ name, args, rawPrefix, redirects }: Command) => ["tail", "cat"].includes(name) && args.every((arg) => /^(-[a-z0-9]*|[0-9]+)$/.test(arg)) && rawPrefix.length + redirects.length === 0;
+
 function pipefailFix({ commands }: Program, start: number, pipeEnd: number): Fix | undefined {
   const otherPipe = commands.some((command, index) => command.after === "|" && index < start);
-  const plainChain = commands.slice(start, pipeEnd).every((command) => command.after === "|") && plainStages(commands, start, pipeEnd);
+  const plainChain = commands.slice(start, pipeEnd).every((command) => command.after === "|") && plainStages(commands, start, pipeEnd) && commands.slice(start + 1, pipeEnd + 1).every(passesThrough);
   if (otherPipe || !plainChain || commands[pipeEnd].after !== undefined) return undefined;
   return commands.slice(0, start).every((command) => writeStep(command) || stopsShell(command)) ? { pipefail: true } : undefined;
 }

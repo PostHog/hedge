@@ -411,6 +411,7 @@ describe("the exit-status mask guard", () => {
     ["git push; sleep 0 &", "git push || exit; sleep 0 &"],
     ["git commit -F - <<'EOF'\nline one \\\nEOF\ngit push", "git commit -F - <<'EOF' || exit\nline one \\\nEOF\ngit push"],
     ["( git push | tail -3 )", "set -o pipefail; ( git push | tail -3 )"],
+    ["git push 2>&1 | tail -n 20 | cat", "set -o pipefail; git push 2>&1 | tail -n 20 | cat"],
     ["git push; true || echo extra", "git push || exit; true || echo extra"],
   ])("rewrites a hidden status into a form that shows it: %s", (command, rewrite) => {
     expect(exitMaskRewrite(command)).toBe(rewrite);
@@ -510,6 +511,14 @@ describe("the exit-status mask guard", () => {
     "cd . && ( printf msg ) | git commit -F -; echo cleanup",
     "cd . || git push | ( set -o ) | cat",
     "git push | ( cat )",
+    "git push | grep -q needle | cat",
+    "git push | set -o 2>&1",
+    "git push | tee push.log",
+    "git push | head -5",
+    "git push | tail -3 push.log",
+    "git push | tail -3 > out.log",
+    "git push | timeout 1 tail -3",
+    "git push | tail -3 < push.log",
     "git commit -F - <<EOF | tail -1\n$(git log | head -1)\nEOF",
     "git push | tail -3; shopt -o > options.txt",
     "bash <<EOF\ngit push \\\n| tail -3\nEOF",
