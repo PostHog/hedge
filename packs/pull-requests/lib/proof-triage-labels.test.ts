@@ -618,11 +618,11 @@ test("a wait while triage is off and another command holds the round reads a lab
   expect(wait.code).toBe(0);
 });
 
-test("a wait on a round whose saved pass failed tells the author to answer every labelled finding, whatever the labels say", async () => {
+test.each([false, "false"])("a wait on a round whose saved pass has ok %p tells the author to answer every labelled finding, whatever the labels say", async (ok) => {
   const pr = await treated();
   fakeModel(pr, "TRIAGE", adviseSecond);
   await panelRound(pr);
-  writeFileSync(join(reviewDirectory(pr), "triage-labels.json"), JSON.stringify({ ok: false, labels: [{ finding: 1, severity: "major", label: "needs-answer", reason: "a trigger" }, advisoryTwo] }));
+  writeFileSync(join(reviewDirectory(pr), "triage-labels.json"), JSON.stringify({ ok, labels: [{ finding: 1, severity: "major", label: "needs-answer", reason: "a trigger" }, advisoryTwo] }));
 
   const wait = await pr.hedge("review", "--wait", "--round", "1");
 

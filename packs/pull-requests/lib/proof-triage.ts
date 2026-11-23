@@ -207,12 +207,13 @@ export async function labelRound(directory: string, setting: TriageSetting, ask:
 }
 
 export function labelLines({ labels, ok }: Triaged) {
-  const advisory = ok ? labels.filter(({ label }) => label === "advisory") : [];
-  const needed = labels.filter(({ label }) => !ok || label === "needs-answer").map(({ finding }) => finding);
+  const passed = ok === true;
+  const advisory = passed ? labels.filter(({ label }) => label === "advisory") : [];
+  const needed = labels.filter(({ label }) => !passed || label === "needs-answer").map(({ finding }) => finding);
   return [
     ...advisory.length || needed.length ? ["", "Triage of the blocker, major and unrated findings:"] : [],
     ...advisory.map(({ finding, severity, reason }) => `- Advisory, needs no answer, do not fix it in this pull request: finding ${finding} (${severity}): ${reason}`),
     ...needed.length ? [`- Needs an answer: finding${needed.length > 1 ? "s" : ""} ${needed.join(", ")}`] : [],
-    ...!ok && labels.length ? ["- The triage labelled none of them; triage-labels.json in the round's folder says why."] : [],
+    ...!passed && labels.length ? ["- The triage labelled none of them; triage-labels.json in the round's folder says why."] : [],
   ];
 }
