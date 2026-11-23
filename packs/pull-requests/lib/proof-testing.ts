@@ -77,13 +77,15 @@ case "$*" in
     cat "${github}/branch-$branch" 2>/dev/null || echo '{"protected":false}'; exit 0;;
   "api apps/"*)
     all="$*"; slug=\${all#api apps/}; slug=\${slug%% *}
+    [ -f "${github}/app-error-$slug" ] && { cat "${github}/app-error-$slug" >&2; exit 1; }
     cat "${github}/app-$slug" 2>/dev/null || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }; exit 0;;
   "api "*"/statuses"*)
-    all="$*"; sha=\${all#*/commits/}; sha=\${sha%%/*}; filter=.; previous=
+    all="$*"; sha=\${all#*/commits/}; sha=\${sha%%/*}; filter=; previous=
     for arg in "$@"; do [ "$previous" = "--jq" ] && filter=$arg; previous=$arg; done
+    [ "$filter" = ".[]" ] || { echo "the fake gh serves statuses only through --jq .[], not $filter" >&2; exit 1; }
     file="${github}/statuses-$sha"; [ -f "$file" ] || file="${github}/statuses-any"
     [ -f "$file" ] || exit 0
-    jq -c "$filter" "$file"; exit $?;;
+    "${process.execPath}" -e 'for (const status of JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))) console.log(JSON.stringify(status));' "$file"; exit $?;;
   "api "*)
     all="$*"; sha=; case "$all" in */commits/*/*) sha=\${all#*/commits/}; sha=\${sha%%/*};; esac
     case "$*" in *"/check-runs"*) kind=check-runs;; *) kind=statuses;; esac
@@ -112,7 +114,7 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
     if (baseSha !== undefined) writeFileSync(join(github, "base-sha"), JSON.stringify(baseSha));
   };
   const statuses = (list: { context: string; state: string; by?: string }[], commit = "any") => writeFileSync(join(github, `statuses-${commit}`), JSON.stringify(list.map(({ context, state, by = "the-user" }) => ({ context, state, creator: { login: by, type: by.endsWith("[bot]") ? "Bot" : "User" } }))));
-  const githubApp = (slug: string, id: number) => writeFileSync(join(github, `app-${slug}`), JSON.stringify({ id, slug, name: slug }));
+  const githubApp = (slug: string, app: number | { error: string }) => typeof app === "number" ? writeFileSync(join(github, `app-${slug}`), JSON.stringify({ id: app, slug, name: slug })) : writeFileSync(join(github, `app-error-${slug}`), app.error);
   const githubHead = (commit: string | undefined, next?: string) => {
     if (commit) writeFileSync(join(github, "head"), commit); else rmSync(join(github, "head"), { force: true });
     if (next) writeFileSync(join(github, "next-head"), next);
