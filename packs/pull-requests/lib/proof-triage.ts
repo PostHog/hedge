@@ -144,11 +144,11 @@ function labelsObject(text: string) {
   } catch { return undefined; }
 }
 
-type GivenLabel = { finding: number; label: FindingLabel["label"]; reason?: string };
+type GivenLabel = { finding: number; label: FindingLabel["label"]; reason: string };
 
 const isGivenLabel = (item: unknown): item is GivenLabel => {
   const { finding, label, reason } = (item ?? {}) as Record<string, unknown>;
-  return Number.isInteger(finding) && (label === "advisory" || label === "needs-answer") && (reason === undefined || typeof reason === "string");
+  return Number.isInteger(finding) && (label === "advisory" || label === "needs-answer") && typeof reason === "string" && reason.trim() !== "";
 };
 
 function parsedLabels(text: string) {
@@ -157,7 +157,7 @@ function parsedLabels(text: string) {
   const given = new Map<number, { label: FindingLabel["label"]; reason: string }>();
   for (const item of labels) {
     const earlier = given.get(item.finding);
-    given.set(item.finding, earlier && earlier.label !== item.label ? { label: "needs-answer", reason: "the triage gave conflicting labels" } : earlier ?? { label: item.label, reason: typeof item.reason === "string" ? oneLine(item.reason) : "" });
+    given.set(item.finding, earlier && earlier.label !== item.label ? { label: "needs-answer", reason: "the triage gave conflicting labels" } : earlier ?? { label: item.label, reason: oneLine(item.reason) });
   }
   return given;
 }
@@ -176,7 +176,7 @@ export async function triageFindings(findings: string, diff: string, ask: AskTri
   const labels = candidates.map((candidate) => {
     const given = replied?.get(candidate.finding);
     return unrated(candidate) ?? (failed ? label(candidate, "needs-answer", failed)
-      : given ? label(candidate, given.label, given.reason || "no reason given")
+      : given ? label(candidate, given.label, given.reason)
       : label(candidate, "needs-answer", "the triage gave no label"));
   });
   const cause = !answer.ok ? oneLine(answer.cause) : !replied ? `the triage reply is not readable, ${answer.text.length} characters` : undefined;
@@ -205,13 +205,13 @@ export async function labelRound(directory: string, setting: TriageSetting, ask:
   return triaged;
 }
 
-export function labelLines({ labels, cause }: Triaged) {
+export function labelLines({ labels, ok }: Triaged) {
   const advisory = labels.filter(({ label }) => label === "advisory");
   const needed = labels.filter(({ label }) => label === "needs-answer").map(({ finding }) => finding);
   return [
     ...advisory.length || needed.length ? ["", "Triage of the blocker, major and unrated findings:"] : [],
     ...advisory.map(({ finding, severity, reason }) => `- Advisory, needs no answer, do not fix it in this pull request: finding ${finding} (${severity}): ${reason}`),
     ...needed.length ? [`- Needs an answer: finding${needed.length > 1 ? "s" : ""} ${needed.join(", ")}`] : [],
-    ...cause && labels.length ? [`- The triage labelled none of them: ${cause}`] : [],
+    ...!ok && labels.length ? ["- The triage labelled none of them; triage-labels.json in the round's folder says why."] : [],
   ];
 }

@@ -144,7 +144,7 @@ async function roundsOf(reviews: ReceiptReview[]): Promise<Round[]> {
       const seconds = status?.startedAt && status.finishedAt ? Math.round((Date.parse(status.finishedAt) - Date.parse(status.startedAt)) / 1000) : undefined;
       return { title: lens.title, model: lens.model, ...seconds !== undefined ? { seconds } : {}, ...answer !== undefined ? { answer } : {}, ...status?.finishedAt ? { finishedAt: status.finishedAt } : {} };
     }));
-    const findings = review.findings.map((finding) => findingOf(finding.text, finding.answer ? finding.answer.text.replace(/^\s*(?:[-*]\s+)?\d+[.):]\s+/, "") : finding.advisory ? "advisory, needs no answer" : "unknown"));
+    const findings = review.findings.map((finding) => findingOf(finding.text, finding.answer ? `${finding.answer.text.replace(/^\s*(?:[-*]\s+)?\d+[.):]\s+/, "")}${finding.advisory ? " (advisory, needs no answer)" : ""}` : finding.advisory ? "advisory, needs no answer" : "unknown"));
     const finished = lenses.map((lens) => lens.finishedAt).filter((value): value is string => !!value).sort().at(-1);
     return {
       label: review.label, commit: review.commit, scope: reserved?.scope ?? "full", ...reserved?.base ? { base: reserved.base } : {}, ...review.reviewer ? { reviewer: review.reviewer } : {},

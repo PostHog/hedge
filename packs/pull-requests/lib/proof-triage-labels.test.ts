@@ -144,6 +144,8 @@ test("the triage cannot read a reply with anything besides one labels object, an
     JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, { finding: 2.5, label: "needs-answer", reason: "a trigger" }] }),
     JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, { finding: 2, label: "needs-answer", reason: ["a trigger"] }] }),
     JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, null] }),
+    JSON.stringify({ labels: JSON.parse(adviseSecond).labels.map(({ finding, label }: { finding: number; label: string }) => ({ finding, label })) }),
+    JSON.stringify({ labels: JSON.parse(adviseSecond).labels.map((item: { reason: string }) => ({ ...item, reason: " " })) }),
   ];
   for (const reply of replies) {
     const pr = await treated();
@@ -262,6 +264,17 @@ test("with triage switched off, a single read that resumes a round reserved whil
   expect(existsSync(join(reviewDirectory(pr), "triage-labels.json"))).toBe(false);
 });
 
+test("a failed triage call prints none of the model's own output", async () => {
+  const pr = await treated();
+  pr.env.HEDGE_PROOF_TRIAGE = "cat >/dev/null; echo 'provider said: private-detail' >&2; exit 3";
+
+  const review = await pr.hedge("review", "--single");
+
+  expect(savedLabels(pr).cause).toContain("private-detail");
+  expect(review.output).not.toContain("private-detail");
+  expect(review.output).toContain("- The triage labelled none of them; triage-labels.json in the round's folder says why.");
+});
+
 test("a triage call that throws before the model answers labels every blocker and major finding needs-answer", async () => {
   const triaged = await triageFindings(findings, "", async () => { throw new Error("settings.json is not readable"); });
 
@@ -374,7 +387,7 @@ test("on a Codex lookup row, which cannot run without tools, the triage asks no 
   const review = await pr.hedge("review", "--single");
 
   expect(codex.argv()).toBe("");
-  expect(review.output).toContain("- The triage labelled none of them: the triage runs only on a Claude lookup row, which has no tools");
+  expect(review.output).toContain("- The triage labelled none of them; triage-labels.json in the round's folder says why.");
   expect(savedLabels(pr)).toMatchObject({ ok: false, cause: "the triage runs only on a Claude lookup row, which has no tools", labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "needs-answer" }, { finding: 4 }] });
 });
 
@@ -446,6 +459,21 @@ test("the full receipt answers an unanswered advisory finding as advisory", asyn
   await pr.hedge("receipt");
 
   expect(readFileSync(join(pr.home, "published.json"), "utf8")).toContain("advisory, needs no answer");
+});
+
+test("the full receipt keeps the advisory mark beside an answer the author gave anyway", async () => {
+  const pr = await treated();
+  pr.pullRequestState({ body: `## Testing\n\nThe greeting.\n\n${graded("non-critical", "medium")}` });
+  pr.env.HEDGE_HANDLERS = JSON.stringify({ "proof-receipt": publisherScript(pr) });
+  fakeModel(pr, "TRIAGE", adviseSecond);
+  await pr.hedge("review", "--single");
+  markPanel(pr, "1");
+  await respond(pr, "1. fixed in abc1234: greets\n2. rejected: a matter of taste\n4. rejected: fine\n6. fixed in abc1234: test\n");
+  await pr.hedge("gate");
+
+  await pr.hedge("receipt");
+
+  expect(readFileSync(join(pr.home, "published.json"), "utf8")).toContain("rejected: a matter of taste (advisory, needs no answer)");
 });
 
 function argvModel(pr: Checkout, provider: "claude" | "codex", answer: string) {

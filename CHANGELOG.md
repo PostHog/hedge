@@ -15,12 +15,11 @@
   the tokens in `triage-labels.json`, and prints them. An advisory finding
   needs no answer and buys no further round; the gate and the judge count it
   as answered, and the proof receipt lists it. The first pass of a round
-  stays its labels. A
-  failed or unreadable pass labels every finding `needs-answer`, and so does
-  a lookup row that is not a Claude model, since only Claude runs with no
-  tools. The review then prints why the triage labelled nothing. A wait
-  that finds the round held before its labels are saved exits 2, as while
-  lenses still run.
+  stays its labels. A failed or unreadable pass labels every finding
+  `needs-answer`, and so does a lookup row that is not a Claude model, since
+  only Claude runs with no tools. The review then says the triage labelled
+  nothing, and `triage-labels.json` says why. A wait that finds the round
+  held before its labels are saved exits 2, as while lenses still run.
 - `hedge proof triage --findings <file> --diff <file>` prints the labels of a
   findings file as JSON and touches no proof ledger.
 
