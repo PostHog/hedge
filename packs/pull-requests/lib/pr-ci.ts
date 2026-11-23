@@ -156,13 +156,12 @@ function listOf(names: string[], limit = 8) {
 
 const names = (check: RequiredCheck, entry: Entry) => entry.status ? sameContext(entry.name, check.context) : entry.name === check.context;
 const reportedBy = (check: RequiredCheck, entry: Entry) => check.appId === undefined || entry.appId === check.appId;
-const ranBy = (check: RequiredCheck, entry: Entry) => !entry.status && reportedBy(check, entry);
 
 function withheldFromDraft(check: RequiredCheck, entries: Entry[]) {
   const split = check.context.indexOf(" / ");
   if (split <= 0 || entries.some((entry) => names(check, entry))) return false;
-  const siblings = entries.filter((entry) => entry.name.startsWith(check.context.slice(0, split + 3)) && ranBy(check, entry));
-  return siblings.length > 0 && siblings.every((entry) => entry.outcome === "pass");
+  const siblings = entries.filter((entry) => entry.name.startsWith(check.context.slice(0, split + 3)) && (entry.status || reportedBy(check, entry)));
+  return siblings.some((entry) => !entry.status) && siblings.every((entry) => entry.outcome === "pass");
 }
 
 function everyCheck(entries: Entry[], commit: string): CiResult {

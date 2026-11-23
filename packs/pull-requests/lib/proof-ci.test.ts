@@ -137,6 +137,15 @@ test("on a draft, a status from the pinned app's bot passes its own check but wi
   expect(ciLine(gate.output)).toBe("ci: pending, required not reported yet: CI / scan");
 });
 
+test("on a draft, a pending status of the same workflow keeps a missing required check unreported", async () => {
+  const { pr } = await reviewed();
+  pr.pullRequestState({ draft: true });
+  pr.required("main", [{ context: "CI / scan" }]);
+  pr.ci([{ name: "CI / lint", bucket: "pass" }]);
+  pr.statuses([{ context: "CI / build", state: "pending", by: "ci[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: pending, required not reported yet: CI / scan");
+});
+
 test("on a draft, a status never stands in as a finished sibling of an unpinned check", async () => {
   const { pr } = await reviewed();
   pr.pullRequestState({ draft: true });
