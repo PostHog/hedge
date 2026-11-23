@@ -391,6 +391,10 @@ describe("the exit-status mask guard", () => {
     ["git push && echo ok; echo done", "git push || exit && echo ok; echo done"],
     ["git push && false; echo cleanup", "git push || exit && false; echo cleanup"],
     ["cd . && git push && echo ok\necho done", "cd . && git push || exit && echo ok\necho done"],
+    ["git add -A && git commit -m x; git push", "git add -A && git commit -m x || exit; git push"],
+    ["gh pr ready 1 && gh pr merge 1 --squash; echo done", "gh pr ready 1 || exit && gh pr merge 1 --squash || exit; echo done"],
+    ["printf 'msg' | git commit -F -; echo done", "printf 'msg' | git commit -F - || exit; echo done"],
+    ["cd . && printf 'msg' | git commit -F -; echo done", "cd . && printf 'msg' | git commit -F - || exit; echo done"],
     ["git push; sleep 0 &", "git push || exit; sleep 0 &"],
     ["git commit -F - <<'EOF'\nline one \\\nEOF\ngit push", "git commit -F - <<'EOF' || exit\nline one \\\nEOF\ngit push"],
     ["( git push | tail -3 )", "set -o pipefail; ( git push | tail -3 )"],
@@ -452,6 +456,15 @@ describe("the exit-status mask guard", () => {
     "git push 2>&1 | tail -3\necho done | cat",
     "git push | cat; false | true",
     ": marker; git push | cat; printf '%s\\n' \"$_\"",
+    "git push | cat; bash -c 'false | true && echo visible'",
+    "false && git push && echo skipped; echo cleanup",
+    "[ -n \"$branch\" ] && git push; echo cleanup",
+    "git diff --quiet && git commit -m x; echo cleanup",
+    "grep -q main branch.txt || git push; echo cleanup",
+    "if true; then :; fi && git push; echo cleanup",
+    "[ -n \"$branch\" ] && git push | tail -3; echo cleanup",
+    "git fetch || git push; echo cleanup",
+    "[ -n \"$branch\" ] && exit && git push; echo cleanup",
     "git commit -F - <<EOF | tail -1\n$(git log | head -1)\nEOF",
     "git push | tail -3; shopt -o > options.txt",
     "bash <<EOF\ngit push \\\n| tail -3\nEOF",
@@ -473,6 +486,37 @@ describe("the exit-status mask guard", () => {
     };
     expect(messageAfter(rewrite ?? "")).toEqual(messageAfter(command));
     expect(messageAfter(command).message).toBe("line one EOF\nsecond line\n\n");
+  });
+
+  describe("with a real git and a local remote", () => {
+    const pushRepo = (accepts: boolean) => {
+      const root = temp.make("push-repo-");
+      const env = { PATH: "/usr/bin:/bin", HOME: root, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "Robin", GIT_AUTHOR_EMAIL: "robin@example.invalid", GIT_COMMITTER_NAME: "Robin", GIT_COMMITTER_EMAIL: "robin@example.invalid" };
+      const git = (...args: string[]) => expect(spawnSync("git", args, { cwd: root, env }).status).toBe(0);
+      git("init", "-q", "--bare", "remote.git");
+      writeFileSync(join(root, "remote.git/hooks/pre-receive"), `#!/bin/sh\nexit ${accepts ? 0 : 1}\n`);
+      chmodSync(join(root, "remote.git/hooks/pre-receive"), 0o755);
+      git("init", "-q", "work");
+      git("-C", "work", "commit", "-q", "--allow-empty", "-m", "first");
+      git("-C", "work", "remote", "add", "origin", "../remote.git");
+      return (command: string) => {
+        const run = spawnSync("bash", ["-c", command], { cwd: join(root, "work"), env, encoding: "utf8" });
+        return { status: run.status, stdout: run.stdout };
+      };
+    };
+
+    test.each([
+      ["git push -q origin HEAD:main && false; echo cleanup", "git push -q origin HEAD:main || exit && false; echo cleanup"],
+      ["cd . && git push -q origin HEAD:main 2>&1 | tail -3; echo cleanup", "set -o pipefail; cd . && git push -q origin HEAD:main 2>&1 | tail -3 || exit; echo cleanup"],
+      ["git push -q origin HEAD:main; git log -1 --format=%s", "git push -q origin HEAD:main || exit; git log -1 --format=%s"],
+    ])("runs the same commands as the original after an accepted push, and stops after a rejected one: %s", (command, rewrite) => {
+      expect(exitMaskRewrite(command)).toBe(rewrite);
+      expect(pushRepo(true)(rewrite)).toEqual(pushRepo(true)(command));
+      const rejected = pushRepo(false)(rewrite);
+      expect(rejected.status).not.toBe(0);
+      expect(rejected.stdout).not.toContain("cleanup");
+      expect(pushRepo(false)(command).status).toBe(0);
+    });
   });
 
   test("leaves a command alone that already shows the status", () => {

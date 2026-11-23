@@ -167,7 +167,21 @@ function reachOf(program: Program, start: number): Reach {
   if (after === undefined) return "exit";
   if (after === "&") return { how: "running it in the background with `&`" };
   if (after === "||") return reportedBy(next, true) ?? { how: "the `||` after it" };
-  return reportedBy(next, false) ?? { how: separatorName(after), fix: exitFix(commands[pipeEnd]) };
+  return reportedBy(next, false) ?? { how: separatorName(after), fix: failsOnlyOnError(program, start) ? exitFix(commands[pipeEnd]) : undefined };
+}
+
+const gitSteps = new Set(["add", "commit", "push", "pull", "fetch", "checkout", "switch", "rebase", "merge", "reset", "restore", "rm", "mv", "tag", "cherry-pick", "revert"]);
+
+function failsOnlyOnError({ commands }: Program, start: number): boolean {
+  let first = start;
+  while (first > 0 && commands[first - 1].after === "|") first--;
+  const steps: Command[] = [];
+  for (let index = first - 1; index >= 0 && ["&&", "||"].includes(commands[index].after ?? ""); index--) {
+    const exitsOnFailure = commands[index].name === "exit" && commands[index - 1]?.after === "||";
+    if (exitsOnFailure) index--;
+    else steps.push(commands[index]);
+  }
+  return steps.every((step) => step.after !== "||" && (step.name === "cd" || (step.name === "git" && gitSteps.has(step.args[gitSubcommandAt(step.args)]))));
 }
 
 const exitFix = ({ after, afterAt }: Command): Fix | undefined =>
@@ -177,7 +191,7 @@ function pipefailFix({ commands }: Program, start: number, pipeEnd: number): Fix
   const otherPipe = commands.some((command, index) => command.after === "|" && (index < start || index >= pipeEnd));
   if (otherPipe || commands.some((command) => command.substitutions.length > 0)) return undefined;
   if (commands[pipeEnd].after === undefined) return { pipefail: true };
-  const after = exitFix(commands[pipeEnd]);
+  const after = failsOnlyOnError({ commands, depths: [] }, start) ? exitFix(commands[pipeEnd]) : undefined;
   return after && { pipefail: true, ...after };
 }
 
@@ -248,6 +262,8 @@ function pipefailKeepsEveryCommand(text: string): boolean {
   return !commandsIn(text).some((command) => command.after === "||" || command.tested || named(command, hidesCode));
 }
 
+const pipesIn = (commands: Command[]) => commands.filter((command) => command.after === "|").length;
+
 function exitingAt(text: string, at: number): string {
   const spaced = /\s/.test(text[at - 1] ?? " ") ? "" : " ";
   const after = text[at] === "#" || text[at] === "&" ? " " : "";
@@ -267,7 +283,7 @@ export function exitMaskRewrite(command: string): string | undefined {
       if (!found) return step === 0 ? undefined : text;
       if (!found.fix) return undefined;
       const { pipefail: needsPipefail, exitAt } = found.fix;
-      if (needsPipefail && !pipefailKeepsEveryCommand(command)) return undefined;
+      if (needsPipefail && !(pipefailKeepsEveryCommand(command) && pipesIn(commandsIn(command)) === pipesIn(parse(command).flat()))) return undefined;
       const shift = needsPipefail ? pipefail.length : 0;
       if (needsPipefail) text = pipefail + text;
       if (exitAt !== undefined) text = exitingAt(text, exitAt + shift);
