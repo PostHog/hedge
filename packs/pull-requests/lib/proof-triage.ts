@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { redactSecrets } from "../../base/hooks/secret-guard.ts";
 import { optionalStringSetting } from "../../base/lib/settings.ts";
 import { gradeOf } from "./proof-autonomy.ts";
 import { riskCalloutOf } from "./decision-ledger.ts";
@@ -135,11 +136,13 @@ function repeatsAKey(json: string) {
   return false;
 }
 
+const onlyWholeNumbers = (json: string) => [...json.matchAll(/"(?:[^"\\]|\\.)*"|-?\d[\d.eE+-]*/g)].every(([token]) => token.startsWith('"') || /^\d+$/.test(token));
+
 function labelsObject(text: string) {
   const reply = text.trim().replace(/^(```|~~~)(?:json)?\s*\n([\s\S]*)\n\1$/i, "$2");
   try {
     const parsed = JSON.parse(reply) as unknown;
-    if (repeatsAKey(reply)) return undefined;
+    if (repeatsAKey(reply) || !onlyWholeNumbers(reply)) return undefined;
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) && Object.keys(parsed).join() === "labels" ? parsed as { labels: unknown } : undefined;
   } catch { return undefined; }
 }
@@ -169,17 +172,17 @@ export async function triageFindings(findings: string, diff: string, ask: AskTri
   const unrated = (candidate: LabelCandidate) => candidate.severity === "none" ? label(candidate, "needs-answer", "the finding states no severity") : undefined;
   if (!rated.length) return { ok: true, durationMs: 0, labels: candidates.map((candidate) => unrated(candidate)!) };
   const started = performance.now();
-  const answer = await ask(triagePrompt(rated, diff)).catch((): ModelAnswer => ({ ok: false, cause: "the call threw before the model answered", model: "" }));
+  const answer = await Promise.resolve().then(() => ask(triagePrompt(rated, diff))).catch((): ModelAnswer => ({ ok: false, cause: "the call threw before the model answered", model: "" }));
   const durationMs = Math.round(performance.now() - started);
   const replied = answer.ok ? parsedLabels(answer.text) : undefined;
-  const failed = !answer.ok ? `the triage call failed: ${oneLine(answer.cause)}` : !replied ? "the triage reply is not readable" : undefined;
+  const cause = !answer.ok ? oneLine(redactSecrets(answer.cause)) : !replied ? `the triage reply is not readable, ${answer.text.length} characters` : undefined;
+  const failed = !answer.ok ? `the triage call failed: ${cause}` : !replied ? "the triage reply is not readable" : undefined;
   const labels = candidates.map((candidate) => {
     const given = replied?.get(candidate.finding);
     return unrated(candidate) ?? (failed ? label(candidate, "needs-answer", failed)
       : given ? label(candidate, given.label, given.reason)
       : label(candidate, "needs-answer", "the triage gave no label"));
   });
-  const cause = !answer.ok ? oneLine(answer.cause) : !replied ? `the triage reply is not readable, ${answer.text.length} characters` : undefined;
   return { ...answer.model ? { model: answer.model } : {}, ok: answer.ok && replied !== undefined, ...cause ? { cause } : {}, durationMs, ...answer.ok && answer.usage ? { usage: answer.usage } : {}, labels };
 }
 

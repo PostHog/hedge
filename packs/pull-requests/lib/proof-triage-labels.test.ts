@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { armOf, triageFindings } from "./proof-triage.ts";
 import { checkout, cleanFixtures, fakeModel, graded, lockHolder, lookup, models, settings, verdict, type Checkout } from "./proof-testing.ts";
@@ -145,6 +145,8 @@ test("the triage cannot read a reply with anything besides one labels object, an
     JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, { finding: 2, label: null, reason: "unsure" }] }),
     JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, { finding: "2", label: "needs-answer", reason: "a trigger" }] }),
     JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, { finding: 2.5, label: "needs-answer", reason: "a trigger" }] }),
+    adviseSecond.replace('{"finding":1,"label":"needs-answer"', '{"finding":1.00000000000000001,"label":"advisory"'),
+    adviseSecond.replace('{"finding":1,"label":"needs-answer"', '{"finding":1e0,"label":"advisory"'),
     JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, { finding: 2, label: "needs-answer", reason: ["a trigger"] }] }),
     JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, null] }),
     JSON.stringify({ labels: JSON.parse(adviseSecond).labels.map(({ finding, label }: { finding: number; label: string }) => ({ finding, label })) }),
@@ -271,6 +273,69 @@ test("a failed triage call prints none of the model's own output", async () => {
   expect(savedLabels(pr).cause).toContain("private-detail");
   expect(review.output).not.toContain("private-detail");
   expect(review.output).toContain("- The triage labelled none of them; triage-labels.json in the round's folder says why.");
+});
+
+test("a triage call that throws at once, before it returns a promise, labels every blocker and major finding needs-answer", async () => {
+  const triaged = await triageFindings(findings, "", () => { throw new Error("private-detail"); });
+
+  expect(triaged).toMatchObject({ ok: false, cause: "the call threw before the model answered", labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "needs-answer" }, { finding: 4 }] });
+  expect(JSON.stringify(triaged)).not.toContain("private-detail");
+});
+
+test("a failed triage call keeps its cause with secrets redacted, in the cause and in each reason", async () => {
+  const pr = await treated();
+  const token = ["ghp", "_", "A1b2C3d4".repeat(5)].join("");
+  pr.env.HEDGE_PROOF_TRIAGE = `cat >/dev/null; echo 'provider said: token=${token}' >&2; exit 3`;
+  pr.env.HEDGE_PROOF_TRIAGE_MODEL = "triage-model";
+
+  await pr.hedge("review", "--single");
+
+  const saved = readFileSync(join(reviewDirectory(pr), "triage-labels.json"), "utf8");
+  expect(saved).not.toContain(token);
+  expect(savedLabels(pr)).toMatchObject({ ok: false, cause: expect.stringContaining("token=[redacted GitHub token]"), labels: [{ finding: 1, reason: expect.stringContaining("token=[redacted GitHub token]") }, { finding: 2 }, { finding: 4 }] });
+});
+
+test("a single read stopped after its findings are saved and before its labels labels them when it runs again", async () => {
+  const pr = await treated();
+  fakeModel(pr, "TRIAGE", adviseSecond);
+  await pr.hedge("review", "--single");
+  rmSync(join(reviewDirectory(pr), "triage-labels.json"));
+
+  const again = await pr.hedge("review", "--single");
+
+  expect(JSON.parse(again.output.split("\n")[0]!)).toMatchObject({ id: "1" });
+  expect(again.output).toContain("- Advisory, needs no answer, do not fix it in this pull request: finding 2 (major)");
+  expect(savedLabels(pr)).toMatchObject({ ok: true, labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "advisory" }, { finding: 4 }] });
+  expect(existsSync(reviewDirectory(pr, "2"))).toBe(false);
+});
+
+test("a final read stopped before its labels labels them when it runs again", async () => {
+  const pr = await treated();
+  fakeModel(pr, "TRIAGE", adviseSecond);
+  await pr.hedge("review", "--single");
+  const base = JSON.parse(readFileSync(join(reviewDirectory(pr), "round.json"), "utf8")).commit;
+  await pr.commit("feature.ts", "export const greet = (name: string) => name.trim();\n");
+  await pr.hedge("review", "--scope", "final", "--base", base);
+  rmSync(join(reviewDirectory(pr, "final-1"), "triage-labels.json"));
+
+  const again = await pr.hedge("review", "--scope", "final", "--base", base);
+
+  expect(JSON.parse(again.output.split("\n")[0]!)).toMatchObject({ id: "final-1" });
+  expect(savedLabels(pr, "final-1")).toMatchObject({ ok: true, labels: [{ finding: 1 }, { finding: 2, label: "advisory" }, { finding: 4 }] });
+});
+
+test("a review at a HEAD read before runs as today when its read needs no labels: triage off, labels saved, or a panel left to its wait", async () => {
+  const off = await treated("off");
+  await off.hedge("review", "--single");
+  const labelled = await treated();
+  fakeModel(labelled, "TRIAGE", adviseSecond);
+  await labelled.hedge("review", "--single");
+  const panel = await treated();
+  const triage = fakeModel(panel, "TRIAGE", adviseSecond);
+  await panelRound(panel);
+
+  for (const pr of [off, labelled, panel]) await expect(pr.hedge("review", "--single")).rejects.toThrow("Round 2 needs --scope fixes");
+  expect(triage.prompts()).toEqual([]);
 });
 
 test("a triage call that throws before the model answers labels every blocker and major finding needs-answer, and keeps none of the error's text", async () => {
