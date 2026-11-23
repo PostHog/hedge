@@ -237,6 +237,11 @@ describe("on the hub", () => {
     writeMcpHubSettings(home);
     gatewayServer({ home });
     expect((await hedge(["mcp-gateway", "doctor"])).code).toBe(0);
+    mkdirSync(join(home, ".config/hedge/mcp-gateway/upstreams"), { recursive: true });
+    writeFileSync(join(home, ".config/hedge/mcp-gateway/upstreams/broken.json"), "{");
+    const unread = await hedge(["mcp-gateway", "doctor"]);
+    expect(unread.code).toBe(1);
+    expect(unread.output).toContain("Hedge cannot read the declared upstreams, so it checks only the built-in apps' sign-ins:");
     const slackHome = join(home, ".local/share/hedge-mcphub/data/slack-codex");
     mkdirSync(slackHome, { recursive: true });
     writeFileSync(join(slackHome, "auth.json"), "{}");
@@ -245,12 +250,6 @@ describe("on the hub", () => {
     const revoked = await hedge(["mcp-gateway", "doctor"]);
     expect(revoked.code).toBe(1);
     expect(revoked.output).toEndWith("Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps.");
-    mkdirSync(join(home, ".config/hedge/mcp-gateway/upstreams"), { recursive: true });
-    writeFileSync(join(home, ".config/hedge/mcp-gateway/upstreams/broken.json"), "{");
-    const unread = await hedge(["mcp-gateway", "doctor"]);
-    expect(unread.code).toBe(1);
-    expect(unread.output).toContain("Hedge cannot read the declared upstreams, so it checks only the built-in apps' sign-ins:");
-    expect(unread.output).toContain("Slack needs re-auth");
   });
 
   test("a failure before the bridge starts goes to standard error, never onto the MCP stream", async () => {

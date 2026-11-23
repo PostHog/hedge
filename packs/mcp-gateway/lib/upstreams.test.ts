@@ -229,10 +229,10 @@ test("an app whose call found its sign-in revoked counts as signed out until the
   utimesSync(join(google, "sign-in-lost-google-drive"), 2500, 2500);
   expect(await appSignedIn(hub, gmail)).toBe(true);
   expect(await appSignedIn(hub, googleDrive)).toBe(false);
-  expect(await lostSignIns(hub)).toEqual([{ apps: [googleDrive], since: 2_500_000 }]);
+  expect(await lostSignIns(hub)).toEqual([{ app: googleDrive, since: 2_500_000 }]);
   writeFileSync(join(google, "sign-in-lost-gmail"), "");
   utimesSync(join(google, "sign-in-lost-gmail"), 2000, 2000);
-  expect(await lostSignIns(hub)).toEqual([{ apps: [gmail, googleDrive], since: 2_000_000 }]);
+  expect(await lostSignIns(hub)).toEqual([{ app: gmail, since: 2_000_000 }, { app: googleDrive, since: 2_500_000 }]);
   utimesSync(join(google, "auth.json"), 3000, 3000);
   for (const app of googleApps) expect(await appSignedIn(hub, app)).toBe(true);
   expect(await lostSignIns(hub)).toEqual([]);
@@ -246,7 +246,7 @@ test("a declared upstream file that is not an upstream hides no lost sign-in of 
   utimesSync(join(slackHome, "auth.json"), 1000, 1000);
   writeFileSync(join(slackHome, "sign-in-lost-slack"), "");
   utimesSync(join(slackHome, "sign-in-lost-slack"), 2000, 2000);
-  expect(await lostSignIns(hub)).toEqual([{ apps: [slack], since: 2_000_000 }]);
+  expect(await lostSignIns(hub)).toEqual([{ app: slack, since: 2_000_000 }]);
 });
 
 test("a sign-in reloads every Google route even when the gateway fails to list one route's tools", async () => {

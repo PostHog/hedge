@@ -68,14 +68,10 @@ const refuseTheirs = (config: Config | undefined, upstream: Upstream) => {
 export const appSignedIn = async (hub: Pick<Hub, "home">, app: CodexApp) =>
   (await exists(join(appHome(hub.home, app), "auth.json"))) && (await signInLostSince(appHome(hub.home, app), app.name)) === undefined;
 
-export async function lostSignIns(hub: Pick<Hub, "home">): Promise<LostSignIn[]> {
-  const lost: LostSignIn[] = [];
-  const apps = await codexApps(hub.home).catch(() => builtInApps);
-  for (const [home, sharing] of Map.groupBy(apps, (app) => appHome(hub.home, app))) {
-    const found = (await Promise.all(sharing.map(async (app) => ({ app, since: await signInLostSince(home, app.name) })))).filter((each): each is { app: CodexApp; since: number } => each.since !== undefined);
-    if (found.length) lost.push({ apps: found.map(({ app }) => app), since: Math.min(...found.map(({ since }) => since)) });
-  }
-  return lost;
+export async function lostSignIns(hub: Pick<Hub, "home">, apps?: CodexApp[]): Promise<LostSignIn[]> {
+  const checked = apps ?? (await codexApps(hub.home).catch(() => builtInApps));
+  const found = await Promise.all(checked.map(async (app) => ({ app, since: await signInLostSince(appHome(hub.home, app), app.name) })));
+  return found.filter((each): each is LostSignIn & { app: CodexApp } => each.since !== undefined);
 }
 
 export async function registerUpstream(hub: Hub, upstream: Upstream) {
