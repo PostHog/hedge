@@ -39,7 +39,7 @@ async function panelRound(pr: Checkout) {
   const first = join(pr.home, "first-lens");
   writeFileSync(join(pr.home, "lens-findings"), `FINDINGS:\n${findings}\nCOVERED: feature.ts\n`);
   writeFileSync(join(pr.home, "lens-clean"), "FINDINGS:\n(none)\nCOVERED: feature.ts\n");
-  pr.env.HEDGE_PROOF_REVIEWER = `cat >/dev/null; if [ -e "${first}" ]; then cat "${pr.home}/lens-clean"; else touch "${first}"; cat "${pr.home}/lens-findings"; fi`;
+  pr.env.HEDGE_PROOF_REVIEWER = `cat >/dev/null; if mkdir "${first}" 2>/dev/null; then cat "${pr.home}/lens-findings"; else cat "${pr.home}/lens-clean"; fi`;
   pr.env.HEDGE_PROOF_REVIEWER_MODEL = "lens-model";
   await pr.hedge("review");
 }
@@ -127,7 +127,7 @@ test("the triage fails closed: a failed call, an unreadable reply, an unknown la
 });
 
 test("the triage reads a reply that is one labels object, bare or in a code fence", async () => {
-  for (const reply of [adviseSecond, `\`\`\`json\n${adviseSecond}\n\`\`\``, `\`\`\`JSON\n${adviseSecond}\n\`\`\``, `~~~json\n${adviseSecond}\n~~~`, `~~~\n${adviseSecond}\n~~~`, `\`\`\`\`json\n${adviseSecond}\n\`\`\`\``, `\`\`\`json\n${adviseSecond}\n\`\`\`\``, `\`\`\` json\n${adviseSecond}\n  \`\`\``]) {
+  for (const reply of [adviseSecond, `\`\`\`json\n${adviseSecond}\n\`\`\``, `\`\`\`JSON\n${adviseSecond}\n\`\`\``, `~~~json\n${adviseSecond}\n~~~`, `~~~\n${adviseSecond}\n~~~`, `\`\`\`\`json\n${adviseSecond}\n\`\`\`\``, `\`\`\`json\n${adviseSecond}\n\`\`\`\``, `\`\`\` json\n${adviseSecond}\n  \`\`\``, `\`\`\`json\r\n${adviseSecond}\r\n\`\`\`\r\n`]) {
     const pr = await treated();
     fakeModel(pr, "TRIAGE", reply);
 
@@ -147,6 +147,7 @@ test("the triage cannot read a reply with anything besides one labels object, an
     JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, { finding: "2", label: "needs-answer", reason: "a trigger" }] }),
     JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, { finding: 2.5, label: "needs-answer", reason: "a trigger" }] }),
     adviseSecond.replace('{"finding":1,"label":"needs-answer"', '{"finding":1.00000000000000001,"label":"advisory"'),
+    `\`\`\`json\n${adviseSecond}\n\`\`\`~~~`,
     labels([0, "needs-answer", "names a trigger"], [1, "advisory", "names no trigger and no requirement"]),
     labels([1, "needs-answer", "names a trigger"], [2, "advisory", "names no trigger"], [4, "advisory", "a matter of taste"]),
     adviseSecond.replace('{"finding":1,"label":"needs-answer"', '{"finding":1e0,"label":"advisory"'),
@@ -313,7 +314,9 @@ test("a round that weighs the budget while a wait saves the labels of the round 
   pr.env.HEDGE_REVIEW_ARBITER = `cat >/dev/null; echo > "${started}"; read line < "${go}"; echo CONTINUE`;
 
   const slow = pr.hedge("review-start", "--scope", "fixes", "--base", base);
-  await readFile(started, "utf8");
+  const paused = await Promise.race([readFile(started, "utf8").then(() => "paused"), slow.then(() => "reserved", (error: Error) => error.message)]);
+  if (paused !== "paused") writeFileSync(started, "");
+  expect(paused).toBe("paused");
   const wait = await pr.hedge("review", "--wait", "--round", "1");
   await writeFile(go, "go\n");
 
