@@ -239,20 +239,27 @@ function readDelimiter(text: string, start: number) {
   return { delimiter, literal, end: index };
 }
 
-const continues = (line: string) => (line.match(/\\*$/)?.[0].length ?? 0) % 2 === 1;
-const continued = (line: string) => (continues(line) ? line.slice(0, -1) : line);
+function continues(line: string): boolean {
+  let backslashes = 0;
+  while (backslashes < line.length && line[line.length - 1 - backslashes] === "\\") backslashes++;
+  return backslashes % 2 === 1;
+}
 
 function readBodies(text: string, start: number, pending: Heredoc[], mustClose = false): number {
   let index = start;
   for (const heredoc of pending) {
     let closed = false;
     while (index < text.length && !closed) {
-      let line = "";
+      const parts: string[] = [];
+      let part = "";
       do {
         const lineEnd = text.indexOf("\n", index) < 0 ? text.length : text.indexOf("\n", index);
-        line = continued(line) + text.slice(index, lineEnd);
+        if (parts.length > 0) parts[parts.length - 1] = parts[parts.length - 1].slice(0, -1);
+        part = text.slice(index, lineEnd);
+        parts.push(part);
         index = lineEnd + 1;
-      } while (!heredoc.literal && continues(line) && index < text.length);
+      } while (!heredoc.literal && continues(part) && index < text.length);
+      const line = parts.join("");
       closed = (heredoc.stripTabs ? line.replace(/^\t+/, "") : line) === heredoc.delimiter;
       if (!closed) heredoc.body += `${line}\n`;
     }

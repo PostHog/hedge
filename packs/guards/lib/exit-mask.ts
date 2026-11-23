@@ -175,11 +175,15 @@ const gitSteps = new Set(["init", "add", "commit", "push", "pull", "fetch", "che
 
 const writeStep = (step: Command) => step.name === "cd" || (step.name === "git" && gitSteps.has(step.args[gitSubcommandAt(step.args)]));
 
+const plainStage = (command: Command, scope: Command["scope"]) => command.scope === scope && !closers.has(command.name);
+const plainStages = (commands: Command[], first: number, last: number) => commands.slice(first, last + 1).every((command) => plainStage(command, commands[first].scope));
 const pipelineStart = (commands: Command[], index: number): number => (index > 0 && commands[index - 1].after === "|" ? pipelineStart(commands, index - 1) : index);
 function exitFix(commands: Command[], start: number, pipeEnd: number): Fix | undefined {
   const { after, afterAt } = commands[pipeEnd];
   if (after === undefined || afterAt === undefined || !(separators.has(after) || after === "&&")) return undefined;
-  const before = commands[pipelineStart(commands, start) - 1];
+  const first = pipelineStart(commands, start);
+  if (!plainStages(commands, first, pipeEnd)) return undefined;
+  const before = commands[first - 1];
   if (!["&&", "||"].includes(before?.after ?? "")) return { exitAt: afterAt };
   return before.afterAt === undefined ? undefined : { exitAt: afterAt, groupAt: before.afterAt + 2 };
 }
@@ -189,12 +193,13 @@ function exitGroup(program: Program, start: number, end: number): boolean {
   const [exit, closer] = [commands[end + 1], commands[end + 2]];
   const opensHere = depths[first] === 1 && commands[first].keywords.join(" ") === "{";
   const closesAfterExit = exit !== undefined && stopsShell(exit) && exit.after === ";" && closer?.bare.join(" ") === "}";
-  return opensHere && commands[end].after === "||" && closesAfterExit && closer.after !== "|" && commands[listEnd(program, end + 2, 0)].after !== "&";
+  if (!opensHere || commands[end].after !== "||" || !closesAfterExit || closer.after === "|") return false;
+  return commands[listEnd(program, end + 2, 0)].after !== "&" && !changesHowItPrints(commands.slice(0, end + 1), exit);
 }
 
 function pipefailFix({ commands }: Program, start: number, pipeEnd: number): Fix | undefined {
   const otherPipe = commands.some((command, index) => command.after === "|" && index < start);
-  const plainChain = commands.slice(start, pipeEnd).every((command) => command.after === "|");
+  const plainChain = commands.slice(start, pipeEnd).every((command) => command.after === "|") && plainStages(commands, start, pipeEnd);
   if (otherPipe || !plainChain || commands[pipeEnd].after !== undefined) return undefined;
   return commands.slice(0, start).every((command) => writeStep(command) || stopsShell(command)) ? { pipefail: true } : undefined;
 }
