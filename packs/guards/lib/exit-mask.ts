@@ -170,6 +170,7 @@ function reachOf(program: Program, start: number): Reach {
   return reportedBy(next, false) ?? { how: separatorName(after), fix: failsOnlyOnError(commands, start) ? exitFix(commands[pipeEnd]) : undefined };
 }
 
+const stopsShell = ({ name, rawPrefix, stdin, redirects, scope }: Command) => name === "exit" && rawPrefix.length === 0 && stdin === undefined && redirects.length === 0 && parens(scope) === 0;
 const gitSteps = new Set(["init", "add", "commit", "push", "pull", "fetch", "checkout", "switch", "rebase", "merge", "reset", "restore", "rm", "mv", "tag", "cherry-pick", "revert"]);
 
 function failsOnlyOnError(commands: Command[], start: number): boolean {
@@ -177,7 +178,7 @@ function failsOnlyOnError(commands: Command[], start: number): boolean {
   while (first > 0 && commands[first - 1].after === "|") first--;
   const steps: Command[] = [];
   for (let index = first - 1; index >= 0 && ["&&", "||"].includes(commands[index].after ?? ""); index--) {
-    const exitsOnFailure = commands[index].name === "exit" && commands[index].redirects.length === 0 && parens(commands[index].scope) === 0 && commands[index - 1]?.after === "||";
+    const exitsOnFailure = stopsShell(commands[index]) && commands[index - 1]?.after === "||";
     if (exitsOnFailure) break;
     steps.push(commands[index]);
   }
