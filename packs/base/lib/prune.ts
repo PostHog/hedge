@@ -124,9 +124,66 @@ const children = (path: string) => isDirectory(path) ? readdirSync(path).map((na
 export type T3State = { ok: boolean; threads: Map<string, Thread>; projects: string[] };
 
 type StateRow = {
-  path: string; archived: string | null; deleted: string | null; created: string; override: string | null; settled: string | null; messaged: string | null; pending: number; status: string | null; turned: string | null;
+  id: string | null; path: string; archived: string | null; deleted: string | null; created: string; override: string | null; settled: string | null; messaged: string | null; pending: number; status: string | null; turned: string | null;
   relation: string | null; scheduled: string | null; watched: string | null;
 };
+
+type LineageRow = {
+  id: string; archived: string | null; deleted: string | null; parent: string | null; relation: string | null; prs: string | null;
+};
+
+type LineageNode = {
+  archived: boolean; deleted: boolean; parent: string | null; relation: string | null;
+  linked: { key: string; label: string }[]; watched: Map<string, string>;
+};
+
+function parsePullRequests(raw: string | null): { linked: { key: string; label: string }[]; watched: Map<string, string> } {
+  const linked: { key: string; label: string }[] = [];
+  const watched = new Map<string, string>();
+  if (!raw) return { linked, watched };
+  let items: unknown;
+  try { items = JSON.parse(raw); } catch { return { linked, watched }; }
+  if (!Array.isArray(items)) return { linked, watched };
+  for (const entry of items as Array<{ repository?: unknown; number?: unknown; source?: unknown; watch?: unknown }>) {
+    if (typeof entry?.repository !== "string" || (typeof entry.number !== "number" && typeof entry.number !== "string")) continue;
+    const label = `${entry.repository}#${entry.number}`;
+    const key = label.toLowerCase();
+    if (entry.source !== "stack-dismissed") linked.push({ key, label });
+    if (entry.watch != null) watched.set(key, label);
+  }
+  return { linked, watched };
+}
+
+function readLineage(db: Database): Map<string, LineageNode> {
+  const rows = db.query(`select thread_id id, archived_at archived, deleted_at deleted,
+      json_extract(payload_json, '$.lineage.parentThreadId') parent,
+      json_extract(payload_json, '$.lineage.relationshipToParent') relation,
+      json_extract(payload_json, '$.pullRequests') prs
+    from orchestration_v2_projection_threads`).all() as LineageRow[];
+  return new Map(rows.map((row) => [row.id, {
+    archived: Boolean(row.archived), deleted: Boolean(row.deleted), parent: row.parent, relation: row.relation, ...parsePullRequests(row.prs),
+  }]));
+}
+
+function inheritedWatch(id: string | null, lineage: Map<string, LineageNode>): string | null {
+  if (!id) return null;
+  const node = lineage.get(id);
+  if (!node || node.archived || node.deleted || node.relation !== "subagent" || !node.linked.length) return null;
+  let parentId = node.parent;
+  const seen = new Set<string>([id]);
+  for (let steps = 0; parentId && steps < 64 && !seen.has(parentId); steps++) {
+    seen.add(parentId);
+    const ancestor = lineage.get(parentId);
+    if (!ancestor || ancestor.archived || ancestor.deleted) return null;
+    for (const pr of node.linked) {
+      const label = ancestor.watched.get(pr.key);
+      if (label) return `watches ${label} via its parent`;
+    }
+    if (ancestor.relation !== "subagent") return null;
+    parentId = ancestor.parent;
+  }
+  return null;
+}
 
 function hasTable(db: Database, name: string): boolean {
   return Boolean(db.query("select 1 from sqlite_master where type = 'table' and name = ?").get(name));
@@ -139,7 +196,7 @@ function scheduledRuns(db: Database): string {
 }
 
 function orchestrationRows(db: Database): StateRow[] {
-  return db.query(`select json_extract(t.payload_json, '$.worktreePath') path, t.archived_at archived, t.deleted_at deleted, t.created_at created,
+  return db.query(`select t.thread_id id, json_extract(t.payload_json, '$.worktreePath') path, t.archived_at archived, t.deleted_at deleted, t.created_at created,
       json_extract(t.payload_json, '$.settledOverride') override, json_extract(t.payload_json, '$.settledAt') settled,
       json_extract(t.payload_json, '$.lineage.relationshipToParent') relation, s.next_run scheduled,
       (select json_extract(p.value, '$.repository') || '#' || json_extract(p.value, '$.number') from json_each(t.payload_json, '$.pullRequests') p
@@ -155,7 +212,7 @@ function orchestrationRows(db: Database): StateRow[] {
 function legacyRows(db: Database): StateRow[] {
   const columns = new Set((db.query("pragma table_info(projection_threads)").all() as Array<{ name: string }>).map((column) => column.name));
   const settle = columns.has("settled_override") ? "t.settled_override override, t.settled_at settled" : "null override, null settled";
-  return db.query(`select t.worktree_path path, t.archived_at archived, t.deleted_at deleted, t.created_at created,
+  return db.query(`select null id, t.worktree_path path, t.archived_at archived, t.deleted_at deleted, t.created_at created,
       ${settle}, null relation, null scheduled, null watched,
       t.latest_user_message_at messaged, t.pending_approval_count + t.pending_user_input_count pending, s.status status,
       (select max(coalesce(completed_at, started_at, requested_at)) from projection_turns u where u.thread_id = t.thread_id) turned
@@ -168,14 +225,17 @@ export function readState(statePath: string): T3State {
   let db: Database | undefined;
   try {
     db = new Database(statePath, { readonly: true });
-    const rows = hasTable(db, "orchestration_v2_projection_threads") ? orchestrationRows(db) : legacyRows(db);
+    const v2 = hasTable(db, "orchestration_v2_projection_threads");
+    const rows = v2 ? orchestrationRows(db) : legacyRows(db);
+    const lineage = v2 ? readLineage(db) : new Map<string, LineageNode>();
     const shared = new Map<string, Thread[]>();
     const led = new Set<string>();
     for (const row of rows) {
+      const ownWake = row.scheduled ? `has a scheduled run at ${row.scheduled}` : row.watched ? `watches ${row.watched}` : null;
       const thread: Thread = {
         status: row.status, archived: Boolean(row.archived), deleted: Boolean(row.deleted), pending: row.pending > 0,
         settled: row.override !== "active" && (row.override === "settled" || row.settled !== null),
-        wake: row.scheduled ? `has a scheduled run at ${row.scheduled}` : row.watched ? `watches ${row.watched}` : null,
+        wake: ownWake ?? inheritedWatch(row.id, lineage),
         activeAt: Math.max(...[row.created, row.messaged, row.turned].map((value) => Date.parse(value ?? "") || 0)), openLead: false,
       };
       const key = resolve(row.path);

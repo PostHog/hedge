@@ -2,9 +2,9 @@
   "schema": 1,
   "name": "orchestration",
   "summary": "Type /build and say what you want: small work goes straight to a pull request, big work becomes a map that a conductor thread works through, and side work gets its own thread.",
-  "day": "You type /build and say what you want. The agent sizes the work: a small change goes straight to a draft pull request, a feature gets one plan to approve, and a large change becomes a map, where a conductor thread starts one worker thread per ticket. A side fix starts in its own thread.",
-  "cost": "Each worker thread spends your AI plan's usage like any thread. Maps live as issues in a repo you name.",
-  "risk": "A conductor starts worker threads without asking for each one. Each pull request still stays a draft until you say otherwise.",
+  "day": "You type /build and say what you want. The agent sizes the work: a small change goes straight to a draft pull request, a feature gets one plan to approve, and a large change becomes a map, where a conductor thread starts one subthread per ticket under its lineage (and sidebar threads only for live grilling and prototypes). A side fix starts in its own thread.",
+  "cost": "Each subthread spends your AI plan's usage like any thread. Maps live as issues in a repo you name.",
+  "risk": "A conductor starts subthreads without asking for each one. Each pull request still stays a draft until you say otherwise.",
   "requires": [
     "pull-requests"
   ],
@@ -91,7 +91,7 @@
         "orchestration.goals",
         "orchestration.analyticsProject"
       ],
-      "sentence": "Big work becomes a map of tickets, and a conductor thread works through it with one worker thread per ticket."
+      "sentence": "Big work becomes a map of tickets, and a conductor thread works through it with one subthread per ticket under its lineage."
     },
     {
       "id": "side-threads",

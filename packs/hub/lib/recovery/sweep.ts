@@ -17,10 +17,11 @@ export async function recoverCommand(args: string[], context: RecoverContext): P
   const failed = await withT3Session(async (client) => {
     const now = context.now();
     const threads = await listLocalThreads(client);
+    const byId = new Map(threads.map((thread) => [thread.id, thread]));
     let report: Promise<Availability> | undefined;
     const sweep: Sweep = { client, context, availability: () => (report ??= currentAvailability(context)), failed: false };
-    for (const thread of threads.filter((candidate) => stoppedOnLimit(candidate, now))) await continueLimited(sweep, thread);
-    await sweepOutages(sweep, threads, now);
+    for (const thread of threads.filter((candidate) => stoppedOnLimit(candidate, now, byId))) await continueLimited(sweep, thread);
+    await sweepOutages(sweep, threads, now, byId);
     return sweep.failed;
   }, { ...context.session, scopes: recoveryScopes });
   return failed ? 1 : 0;
@@ -33,15 +34,15 @@ async function continueLimited(sweep: Sweep, thread: StoppedThread) {
   if (sent) sweep.context.print(`${label(thread)}: continued after a usage limit; ${provider} is available.`);
 }
 
-async function sweepOutages(sweep: Sweep, threads: StoppedThread[], now: number) {
+async function sweepOutages(sweep: Sweep, threads: StoppedThread[], now: number, byId: Map<string, StoppedThread>) {
   const { home } = sweep.context;
   const state = readOutageState(home);
   const next: OutageState = { version: 1, threads: {} };
   const ranOut: StoppedThread[] = [];
   for (const thread of threads) {
     const entry = state.threads[thread.id];
-    if (entry && held(thread, now) && (thread.activeRunId || thread.status === "failed")) next.threads[thread.id] = entry;
-    if (!stoppedByOutage(thread, now)) continue;
+    if (entry && held(thread, now, byId) && (thread.activeRunId || thread.status === "failed")) next.threads[thread.id] = entry;
+    if (!stoppedByOutage(thread, now, byId)) continue;
     const kept: OutageEntry = entry ?? { tries: 0 };
     next.threads[thread.id] = kept;
     if (kept.tries >= maxOutageTries) {
@@ -84,18 +85,18 @@ async function send(sweep: Sweep, thread: StoppedThread, message: ContinueMessag
 
 const label = (thread: StoppedThread) => `${thread.title ?? "Untitled thread"} (${thread.id})`;
 
-function stoppedByError(thread: StoppedThread, now: number): boolean {
+function stoppedByError(thread: StoppedThread, now: number, byId?: Map<string, StoppedThread>): boolean {
   if (thread.status !== "failed" || !thread.latestRunId || thread.latestRunStopRequested) return false;
   if (!providerOf[thread.modelSelection.instanceId] || thread.providerInstanceId !== thread.modelSelection.instanceId) return false;
-  return !held(thread, now);
+  return !held(thread, now, byId);
 }
 
-export function stoppedOnLimit(thread: StoppedThread, now: number): boolean {
-  return stoppedByError(thread, now) && thread.limitRecovery?.autoResume !== false && usageLimited(thread);
+export function stoppedOnLimit(thread: StoppedThread, now: number, byId?: Map<string, StoppedThread>): boolean {
+  return stoppedByError(thread, now, byId) && thread.limitRecovery?.autoResume !== false && usageLimited(thread);
 }
 
-export function stoppedByOutage(thread: StoppedThread, now: number): boolean {
-  if (!stoppedByError(thread, now) || (thread.lastErrorClass !== "provider_error" && thread.lastErrorClass !== "transport_error")) return false;
+export function stoppedByOutage(thread: StoppedThread, now: number, byId?: Map<string, StoppedThread>): boolean {
+  if (!stoppedByError(thread, now, byId) || (thread.lastErrorClass !== "provider_error" && thread.lastErrorClass !== "transport_error")) return false;
   return outageError.test(`${thread.lastErrorCode ?? ""} ${thread.lastError ?? ""}`) && !usageLimited(thread);
 }
 
@@ -105,9 +106,28 @@ export function usageLimited(thread: StoppedThread): boolean {
   return isQuotaError(`${thread.lastErrorCode ?? ""} ${thread.lastError ?? ""}`);
 }
 
-export function held(thread: StoppedThread, now: number): boolean {
+const maxParentDepth = 64;
+
+function heldSubagent(thread: StoppedThread, byId?: Map<string, StoppedThread>): boolean {
+  if (thread.lineage?.relationshipToParent !== "subagent") return false;
+  if (thread.creationSource === "provider") return true;
+  let current = thread;
+  const seen = new Set<string>([thread.id]);
+  for (let steps = 0; steps < maxParentDepth; steps++) {
+    const parentId = current.lineage?.parentThreadId;
+    if (!parentId || seen.has(parentId)) return true;
+    seen.add(parentId);
+    const parent = byId?.get(parentId);
+    if (!parent || parent.archivedAt || parent.deletedAt || parent.settledAt || parent.settledOverride === "settled") return true;
+    if (parent.lineage?.relationshipToParent !== "subagent") return false;
+    current = parent;
+  }
+  return true;
+}
+
+export function held(thread: StoppedThread, now: number, byId?: Map<string, StoppedThread>): boolean {
   return Boolean(thread.archivedAt || thread.deletedAt || thread.activeRunId || thread.pendingRuntimeRequest
     || thread.settledAt || thread.settledOverride === "settled"
     || (thread.snoozedUntil && Date.parse(thread.snoozedUntil) > now)
-    || thread.lineage?.relationshipToParent === "subagent");
+    || heldSubagent(thread, byId));
 }

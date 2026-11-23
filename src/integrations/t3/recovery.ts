@@ -20,7 +20,7 @@ export type StoppedThread = {
   settledOverride?: string | null;
   snoozedUntil?: string | null;
   creationSource?: string;
-  lineage?: { relationshipToParent?: string | null };
+  lineage?: { parentThreadId?: string | null; rootThreadId?: string | null; relationshipToParent?: string | null };
   limitRecovery?: { autoResume: boolean } | null;
 };
 

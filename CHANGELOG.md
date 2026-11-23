@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Conductor-managed lanes default to T3 subthreads
+
+- The `base` T3 guide, `orchestration` pack rules and docs, and the pinned
+  `agent-skills` ref now default conductor- and coordinator-managed lanes
+  (including Wayfinder `spec`, `task`, and `implement` stacks and critical
+  loop lanes) to T3 `delegate_task` subthreads under the conductor's lineage,
+  reserving top-level sidebar threads (`t3_thread_launch`) for side fixes,
+  prototypes, grilling, and isolated dedicated threads. Conductors hold
+  `watch_pull_request` on their subthreads' pull requests and wake the same
+  subthread via `t3_thread_send` on CI, review, conflict, answer, or merge
+  events.
+- `hedge recover` now resumes failed T3 delegated subthreads whose owning
+  ancestor is open (even when snoozed), while continuing to skip
+  provider-native subagents and subthreads under archived, deleted, or settled
+  parents.
+- `hedge prune` now keeps a subthread's worktree (and protects it from early
+  disk-pressure eviction) while an open ancestor holds an active PR watch on a
+  pull request the subthread links.
+- The `ask-guard` Stop proof check no longer blocks a conductor for pull
+  requests linked by an open subagent in its own separate worktree, while still
+  checking the conductor's own pull requests and shared-checkout subagents.
+
 ### Antigravity rules, skills, and Markdown link formatting
 
 - `hedge apply` and `hedge refresh` now write the global rules file to
