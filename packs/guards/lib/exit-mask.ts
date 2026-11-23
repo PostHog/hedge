@@ -167,19 +167,19 @@ function reachOf(program: Program, start: number): Reach {
   if (after === undefined) return "exit";
   if (after === "&") return { how: "running it in the background with `&`" };
   if (after === "||") return reportedBy(next, true) ?? { how: "the `||` after it" };
-  return reportedBy(next, false) ?? { how: separatorName(after), fix: failsOnlyOnError(program, start) ? exitFix(commands[pipeEnd]) : undefined };
+  return reportedBy(next, false) ?? { how: separatorName(after), fix: failsOnlyOnError(commands, start) ? exitFix(commands[pipeEnd]) : undefined };
 }
 
-const gitSteps = new Set(["add", "commit", "push", "pull", "fetch", "checkout", "switch", "rebase", "merge", "reset", "restore", "rm", "mv", "tag", "cherry-pick", "revert"]);
+const gitSteps = new Set(["init", "clone", "add", "commit", "push", "pull", "fetch", "checkout", "switch", "rebase", "merge", "reset", "restore", "rm", "mv", "tag", "cherry-pick", "revert"]);
 
-function failsOnlyOnError({ commands }: Program, start: number): boolean {
+function failsOnlyOnError(commands: Command[], start: number): boolean {
   let first = start;
   while (first > 0 && commands[first - 1].after === "|") first--;
   const steps: Command[] = [];
   for (let index = first - 1; index >= 0 && ["&&", "||"].includes(commands[index].after ?? ""); index--) {
-    const exitsOnFailure = commands[index].name === "exit" && commands[index - 1]?.after === "||";
-    if (exitsOnFailure) index--;
-    else steps.push(commands[index]);
+    const exitsOnFailure = commands[index].name === "exit" && parens(commands[index].scope) === 0 && commands[index - 1]?.after === "||";
+    if (exitsOnFailure) break;
+    steps.push(commands[index]);
   }
   return steps.every((step) => step.after !== "||" && (step.name === "cd" || (step.name === "git" && gitSteps.has(step.args[gitSubcommandAt(step.args)]))));
 }
@@ -191,7 +191,7 @@ function pipefailFix({ commands }: Program, start: number, pipeEnd: number): Fix
   const otherPipe = commands.some((command, index) => command.after === "|" && (index < start || index >= pipeEnd));
   if (otherPipe || commands.some((command) => command.substitutions.length > 0)) return undefined;
   if (commands[pipeEnd].after === undefined) return { pipefail: true };
-  const after = failsOnlyOnError({ commands, depths: [] }, start) ? exitFix(commands[pipeEnd]) : undefined;
+  const after = failsOnlyOnError(commands, start) ? exitFix(commands[pipeEnd]) : undefined;
   return after && { pipefail: true, ...after };
 }
 
