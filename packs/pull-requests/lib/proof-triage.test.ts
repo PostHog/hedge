@@ -97,10 +97,12 @@ test("each review records the arm its setting gives the pull request, the same u
   expect((await firstLine(pr, "--single", ...target("Example/Product"))).triage).toMatchObject({ setting: "split", arm: "control" });
 });
 
-test("a test file in a danger area keeps the standard path, and a critical-path file hedge cannot read puts the pull request on the strict path", async () => {
+test("a test file in a danger area keeps the standard path", async () => {
   const tests = await triaged("on", graded("non-critical", "medium"), "email-sender.test.ts", "test(\"sends\", () => {});\n");
   expect((await firstLine(tests)).triage).toEqual({ setting: "on", arm: "treated", path: "standard", why: [] });
+});
 
+test("a critical-path file hedge cannot read puts the pull request on the strict path", async () => {
   const unreadable = await triaged("on", graded("non-critical", "medium"));
   unreadable.env.HEDGE_SETTINGS = JSON.stringify({ ...JSON.parse(unreadable.env.HEDGE_SETTINGS!), "pull-requests.criticalPathFiles": "example/product=missing.md" });
   expect((await firstLine(unreadable)).triage).toEqual({ setting: "on", arm: "treated", path: "strict", why: ["critical-path list unreadable"] });
@@ -145,4 +147,14 @@ test("a review reserved with triage on keeps its mark when it is retried after t
   await pr.commit("feature.ts", "export const greet = (name: string) => `hi ${name}`;\n");
   expect(await firstLine(pr, "--scope", "final", "--base", reviewed)).not.toHaveProperty("triage");
   expect(roundRecord(pr, "final-1")).not.toHaveProperty("triage");
+});
+
+test("a final read that changes only a plain file keeps the strict path of a danger-area file an earlier commit changed", async () => {
+  const pr = await triaged("on", graded("non-critical", "medium"), "send-mail.ts", "export const send = () => {};\n");
+  expect((await firstLine(pr)).triage).toMatchObject({ path: "strict" });
+  const reviewed = await pr.git("rev-parse", "HEAD");
+  await pr.commit("feature.ts", "export const greet = (name: string) => name;\n");
+  fakeModel(pr, "REVIEWER", noFindings("feature.ts"));
+
+  expect((await firstLine(pr, "--scope", "final", "--base", reviewed)).triage).toEqual({ setting: "on", arm: "treated", path: "strict", why: ["sends: send-mail.ts"] });
 });
