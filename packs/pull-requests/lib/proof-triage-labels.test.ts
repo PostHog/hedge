@@ -39,6 +39,7 @@ async function panelRound(pr: Checkout) {
   writeFileSync(join(pr.home, "lens-findings"), `FINDINGS:\n${findings}\nCOVERED: feature.ts\n`);
   writeFileSync(join(pr.home, "lens-clean"), "FINDINGS:\n(none)\nCOVERED: feature.ts\n");
   pr.env.HEDGE_PROOF_REVIEWER = `cat >/dev/null; if [ -e "${first}" ]; then cat "${pr.home}/lens-clean"; else touch "${first}"; cat "${pr.home}/lens-findings"; fi`;
+  pr.env.HEDGE_PROOF_REVIEWER_MODEL = "lens-model";
   await pr.hedge("review");
 }
 
