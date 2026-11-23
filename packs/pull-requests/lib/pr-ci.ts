@@ -15,10 +15,10 @@ export const runIn = (cwd: string, env: Record<string, string | undefined>): Run
 export type PullRequest = { title: string; body: string; draft: boolean; state: "open" | "closed" | "merged"; head: string; base: string; baseSha: string; defaultBranch?: string; mergedAt?: string; mergeCommit?: string };
 
 type CheckRun = { id: number; name: string; status: string; conclusion: string | null; app?: number | null };
-type CommitStatus = { context: string; state: string };
+type CommitStatus = { context: string; state: string; creator?: { login?: string; type?: string } | null };
 type RequiredCheck = { context: string; appId?: number };
 type Outcome = "pass" | "fail" | "pending";
-type Entry = { name: string; outcome: Outcome; appId?: number; status?: true };
+type Entry = { name: string; outcome: Outcome; appId?: number; status?: true; botLogin?: string };
 
 const passing = new Set(["success", "neutral", "skipped"]);
 const rank: Record<Outcome, number> = { pass: 0, pending: 1, fail: 2 };
@@ -112,12 +112,50 @@ function entriesOf(identity: ProofIdentity, run: Run): Entry[] {
     if ((newest.get(key)?.id ?? -1) < check.id) newest.set(key, check);
     return newest;
   }, new Map<string, CheckRun>()).values()];
-  const statuses = commitRecords<CommitStatus>(identity, run, "statuses", ".[] | {context, state}");
+  const statuses = commitRecords<CommitStatus>(identity, run, "statuses", ".[]");
   const newest = statuses.filter((status, index) => statuses.findIndex((other) => other.context === status.context) === index);
   return [
     ...newestRuns.map((check): Entry => ({ name: check.name, appId: check.app ?? undefined, outcome: check.status !== "completed" ? "pending" : passing.has(check.conclusion ?? "") ? "pass" : "fail" })),
-    ...newest.map((status): Entry => ({ name: status.context, status: true, outcome: status.state === "success" ? "pass" : status.state === "pending" ? "pending" : "fail" })),
+    ...newest.map((status): Entry => ({ name: status.context, status: true, ...botOf(status), outcome: status.state === "success" ? "pass" : status.state === "pending" ? "pending" : "fail" })),
   ];
+}
+
+const botSuffix = "[bot]";
+const botOf = ({ creator }: CommitStatus) => creator?.type === "Bot" && creator.login?.endsWith(botSuffix) ? { botLogin: creator.login } : {};
+
+function appOfBot(bot: string, run: Run): number | undefined {
+  const result = run(["gh", "api", `apps/${bot.slice(0, -botSuffix.length)}`]);
+  if (result.code === 0) {
+    const { id } = JSON.parse(result.stdout) as { id?: unknown };
+    return typeof id === "number" ? id : undefined;
+  }
+  if (/HTTP 404/.test(result.stderr)) return undefined;
+  throw new Error(`cannot read the app behind ${bot} over REST (${firstLine(result.stderr)})`);
+}
+
+const workflowOf = (context: string) => {
+  const split = context.indexOf(" / ");
+  return split > 0 ? context.slice(0, split + 3) : undefined;
+};
+
+function withPinnedStatuses(entries: Entry[], required: RequiredCheck[], draft: boolean, run: Run): Entry[] {
+  const pins = required.filter((check) => check.appId !== undefined);
+  const apps = new Map<string, number | undefined>();
+  const appOf = (bot: string) => apps.has(bot) ? apps.get(bot) : apps.set(bot, appOfBot(bot, run)).get(bot);
+  const spelledTwice = (entry: Entry) => entries.some((other) => other.status && other.name !== entry.name && other.name.toLowerCase() === entry.name.toLowerCase());
+  const canWaive = (check: RequiredCheck, workflow: string) => {
+    const runs = entries.filter((other) => !other.status && other.appId === check.appId && other.name.startsWith(workflow));
+    return draft && !entries.some((other) => other.name === check.context) && runs.length > 0 && runs.every((other) => other.outcome === "pass");
+  };
+  const nearPin = (entry: Entry) => pins.some((check) => {
+    const workflow = workflowOf(check.context);
+    return check.context === entry.name || (entry.outcome !== "pass" && workflow !== undefined && entry.name.startsWith(workflow) && canWaive(check, workflow));
+  });
+  return entries.map((entry) => {
+    if (!entry.status || !entry.botLogin || !nearPin(entry) || spelledTwice(entry)) return entry;
+    const appId = appOf(entry.botLogin);
+    return appId === undefined ? entry : { ...entry, appId };
+  });
 }
 
 function listOf(names: string[], limit = 8) {
@@ -125,13 +163,13 @@ function listOf(names: string[], limit = 8) {
   return unique.length > limit ? `${unique.slice(0, limit).join(", ")} and ${unique.length - limit} more` : unique.join(", ");
 }
 
-const reportedBy = (check: RequiredCheck, entry: Entry) => check.appId === undefined || (!entry.status && entry.appId === check.appId);
+const reportedBy = (check: RequiredCheck, entry: Entry) => check.appId === undefined || entry.appId === check.appId;
 
 function withheldFromDraft(check: RequiredCheck, entries: Entry[]) {
-  const split = check.context.indexOf(" / ");
-  if (split <= 0 || entries.some((entry) => entry.name === check.context)) return false;
-  const siblings = entries.filter((entry) => entry.name.startsWith(check.context.slice(0, split + 3)) && reportedBy(check, entry));
-  return siblings.length > 0 && siblings.every((entry) => entry.outcome === "pass");
+  const workflow = workflowOf(check.context);
+  if (!workflow || entries.some((entry) => entry.name === check.context)) return false;
+  const siblings = entries.filter((entry) => entry.name.startsWith(workflow) && reportedBy(check, entry));
+  return siblings.length > 0 && siblings.every((entry) => entry.outcome === "pass") && (check.appId === undefined || siblings.some((entry) => !entry.status));
 }
 
 function everyCheck(entries: Entry[], commit: string): CiResult {
@@ -154,7 +192,9 @@ function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boo
   const counted = new Set<Entry>();
   const [failing, pending, missing, withheld]: string[][] = [[], [], [], []];
   for (const check of required) {
-    const matches = entries.filter((entry) => entry.name === check.context && reportedBy(check, entry));
+    const named = entries.filter((entry) => entry.name === check.context);
+    const own = named.filter((entry) => reportedBy(check, entry));
+    const matches = own.some((entry) => entry.status) ? [...new Set([...own, ...named.filter((entry) => !entry.status)])] : own;
     matches.forEach((entry) => counted.add(entry));
     if (!matches.length) { (draft && withheldFromDraft(check, entries) ? withheld : missing).push(check.context); continue; }
     const worst = matches.reduce((a, b) => rank[b.outcome] > rank[a.outcome] ? b : a).outcome;
@@ -169,7 +209,8 @@ function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boo
   return verdict;
 }
 
-const checksOf = (entries: Entry[]) => [...new Set(entries.map((entry) => `${entry.name}${entry.status ? " (status)" : entry.appId === undefined ? "" : ` (app ${entry.appId})`}: ${entry.outcome}`))].sort();
+const sourceOf = (entry: Entry) => [entry.status ? "status" : "", entry.appId === undefined ? "" : `app ${entry.appId}`].filter(Boolean).join(", ");
+const checksOf = (entries: Entry[]) => [...new Set(entries.map((entry) => `${entry.name}${sourceOf(entry) ? ` (${sourceOf(entry)})` : ""}: ${entry.outcome}`))].sort();
 
 export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date): CiResult {
   try {
@@ -178,10 +219,10 @@ export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date)
     const stacked = !required.length && pr.defaultBranch !== undefined && pr.defaultBranch !== pr.base;
     if (stacked) required = requiredChecks(home, identity.repository, pr.defaultBranch!, run, now);
     const entries = entriesOf(identity, run);
-    const checks = checksOf(entries);
-    if (!required.length) return { ...everyCheck(entries, identity.commit), checks };
-    const verdict = requiredVerdict(entries, required, pr.draft);
-    return { ...stacked ? { ...verdict, detail: `${verdict.detail} (required by ${pr.defaultBranch}; the base ${pr.base} requires none)` } : verdict, checks };
+    if (!required.length) return { ...everyCheck(entries, identity.commit), checks: checksOf(entries) };
+    const counted = withPinnedStatuses(entries, required, pr.draft, run);
+    const verdict = requiredVerdict(counted, required, pr.draft);
+    return { ...stacked ? { ...verdict, detail: `${verdict.detail} (required by ${pr.defaultBranch}; the base ${pr.base} requires none)` } : verdict, checks: checksOf(counted) };
   } catch (error) {
     return { state: "unknown", detail: (error as Error).message };
   }
