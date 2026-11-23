@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { optionalStringSetting } from "../../base/lib/settings.ts";
@@ -118,13 +119,11 @@ ${untrusted("the diff of the pull request", diff.length > diffLimit ? `${diff.sl
 }
 
 function labelsObject(text: string) {
-  const starts = [...text.matchAll(/\{\s*"labels"\s*:/g)];
-  if (starts.length !== 1) return undefined;
-  const start = starts[0]!.index;
-  for (let end = text.lastIndexOf("}"); start >= 0 && end > start; end = text.lastIndexOf("}", end - 1)) {
-    try { return JSON.parse(text.slice(start, end + 1)) as { labels?: unknown }; } catch { continue; }
-  }
-  return undefined;
+  const reply = text.trim().replace(/^```(?:json)?\s*\n([\s\S]*)\n```$/, "$1");
+  try {
+    const parsed = JSON.parse(reply) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) && Object.keys(parsed).join() === "labels" ? parsed as { labels: unknown } : undefined;
+  } catch { return undefined; }
 }
 
 function parsedLabels(text: string) {
@@ -162,6 +161,10 @@ export async function triageFindings(findings: string, diff: string, ask: AskTri
 export async function triageRuns(directory: string) {
   const { triage } = await readTriage(directory) as { triage?: TriageMark };
   return triage?.arm === "treated" && triage.path !== "excluded";
+}
+
+export async function labelsDue(directory: string, setting: TriageSetting) {
+  return await triageRuns(directory) && (setting !== "off" || existsSync(labelsPath(directory)));
 }
 
 export async function labelRound(directory: string, setting: TriageSetting, ask: AskTriage): Promise<Triaged | undefined> {

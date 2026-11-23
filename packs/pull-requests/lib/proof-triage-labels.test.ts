@@ -122,16 +122,32 @@ test("the triage fails closed: a failed call, an unreadable reply, an unknown la
   }
 });
 
-test("the triage reads its labels from a reply that wraps them in prose with braces, and keeps the start of a reply it cannot read", async () => {
-  const pr = await treated();
-  const triage = fakeModel(pr, "TRIAGE", `Each finding about \`{ setting, arm }\` is below.\n\`\`\`json\n${adviseSecond}\n\`\`\`\nThat covers \`}\` too.`);
+test("the triage reads a reply that is one labels object, bare or in a code fence", async () => {
+  for (const reply of [adviseSecond, `\`\`\`json\n${adviseSecond}\n\`\`\``]) {
+    const pr = await treated();
+    fakeModel(pr, "TRIAGE", reply);
 
-  await pr.hedge("review", "--single");
+    await pr.hedge("review", "--single");
 
-  expect(savedLabels(pr)).toMatchObject({ ok: true, labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "advisory" }, { finding: 4 }] });
-  triage.answer("I cannot label { these } findings.");
-  const printed = await pr.hedge("triage", "--findings", join(reviewDirectory(pr), "findings.md"), "--diff", join(reviewDirectory(pr), "diff.patch"));
-  expect(JSON.parse(printed.output)).toMatchObject({ ok: false, cause: "the triage reply is not readable: I cannot label { these } findings.", labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "needs-answer", reason: "the triage reply is not readable" }, { finding: 4 }] });
+    expect(savedLabels(pr)).toMatchObject({ ok: true, labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "advisory" }, { finding: 4 }] });
+  }
+});
+
+test("the triage cannot read a reply with anything besides one labels object, and keeps the start of that reply", async () => {
+  const replies = [
+    `Each finding is below.\n${adviseSecond}`,
+    JSON.stringify({ draft: JSON.parse(adviseSecond), error: "unsure" }),
+    JSON.stringify({ ...JSON.parse(adviseSecond), status: "draft" }),
+    `${adviseSecond}\n${JSON.stringify({ status: "final", ...JSON.parse(labels([2, "needs-answer", "a requirement"])) })}`,
+  ];
+  for (const reply of replies) {
+    const pr = await treated();
+    fakeModel(pr, "TRIAGE", reply);
+
+    await pr.hedge("review", "--single");
+
+    expect(savedLabels(pr)).toMatchObject({ ok: false, cause: `the triage reply is not readable: ${reply.replace(/\s+/g, " ").slice(0, 200)}`, labels: [{ finding: 1 }, { finding: 2, label: "needs-answer", reason: "the triage reply is not readable" }, { finding: 4 }] });
+  }
 });
 
 test("a wait on a round whose triage call failed asks the triage model again and saves the new labels", async () => {
@@ -227,6 +243,7 @@ async function gatedWithAdvisory() {
 test("the gate counts an advisory finding as answered", async () => {
   const { gate } = await gatedWithAdvisory();
 
+  expect(gate.output).toContain("review: HEAD reviewed in round 1");
   expect(gate.output).not.toContain("unanswered findings");
 });
 
@@ -236,9 +253,7 @@ test("the judge reads which findings the triage made advisory", async () => {
   expect(judge.prompts().join("\n")).toContain("The triage labelled finding 2 (major) advisory: it needs no answer, and counts as answered");
 });
 
-test("the review arbiter reads which findings the triage made advisory", async () => {
-  const pr = await treated();
-  fakeModel(pr, "TRIAGE", adviseSecond);
+async function arbiterPrompt(pr: Checkout) {
   const arbiter = join(pr.home, "arbiter-prompt");
   pr.env.HEDGE_REVIEW_ARBITER = `cat > "${arbiter}"; echo CONTINUE`;
   let reviewed = await pr.git("rev-parse", "HEAD");
@@ -249,8 +264,27 @@ test("the review arbiter reads which findings the triage made advisory", async (
     await pr.hedge("review", "--single", "--scope", "fixes", "--base", reviewed);
     reviewed = await pr.git("rev-parse", "HEAD");
   }
+  return readFileSync(arbiter, "utf8");
+}
 
-  expect(readFileSync(arbiter, "utf8")).toContain("# round 1\n\n- blocker | feature.ts:1 | A name with a space throws: greet(\"a b\") crashes the signup form | anchor: export const greet\n- major | feature.ts:1 | The helper could say more about its contract | anchor: export const greet\n- feature.ts:1 | The greeting reads oddly | anchor: export const greet\n\nThe triage labelled these findings advisory: they need no answer, and buy no round.\n- major | feature.ts:1 | The helper could say more about its contract | anchor: export const greet\n\n# Responses to round 1");
+test("the review arbiter reads which findings the triage made advisory", async () => {
+  const pr = await treated();
+  fakeModel(pr, "TRIAGE", adviseSecond);
+
+  expect(await arbiterPrompt(pr)).toContain("# round 1\n\n- blocker | feature.ts:1 | A name with a space throws: greet(\"a b\") crashes the signup form | anchor: export const greet\n- major | feature.ts:1 | The helper could say more about its contract | anchor: export const greet\n- feature.ts:1 | The greeting reads oddly | anchor: export const greet\n\nThe triage labelled these findings advisory: they need no answer, and buy no round.\n- major | feature.ts:1 | The helper could say more about its contract | anchor: export const greet\n\n# Responses to round 1");
+});
+
+test("the review arbiter reads every advisory finding of a round, however many and however long", async () => {
+  const pr = await treated();
+  const topics = Array.from({ length: 15 }, (_, index) => `Topic ${index + 2}`);
+  const long = (topic: string) => `- major | feature.ts:1 | ${topic} ${"could read better. ".repeat(300)}| anchor: export const greet`;
+  fakeModel(pr, "REVIEWER", ["- blocker | feature.ts:1 | A name with a space throws | anchor: export const greet", ...topics.map(long)].join("\n"));
+  fakeModel(pr, "TRIAGE", labels([1, "needs-answer", "a trigger"], ...topics.map((_, index): [number, string, string] => [index + 2, "advisory", "taste"])));
+
+  const prompt = await arbiterPrompt(pr);
+
+  const note = prompt.slice(prompt.indexOf("buy no round."), prompt.indexOf("# Responses to round 1"));
+  for (const topic of topics) expect(note).toContain(`- major | feature.ts:1 | ${topic} could read better.`);
 });
 
 test("hedge proof triage labels a findings file against a diff and prints the labels without touching the ledger", async () => {
@@ -298,26 +332,20 @@ test("a machine whose model table has no lookup row labels every blocker and maj
   expect(savedLabels(pr)).toMatchObject({ ok: false, labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "needs-answer", reason: expect.stringContaining("the triage call failed") }, { finding: 4 }] });
 });
 
-test("a wait on a round with triage off, while another command holds it, prints no warning about triage labels", async () => {
-  const pr = await treated("off");
+test("a wait on a round labelled nothing while triage is now off, as another command holds it, prints no warning about triage labels", async () => {
+  const pr = await treated();
+  pr.env.HEDGE_PROOF_TRIAGE = "exit 3";
   await pr.hedge("review", "--single");
   finishedPanel(pr);
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": "off" });
   await pr.hedge("review", "--wait", "--round", "1");
+  rmSync(join(reviewDirectory(pr), "triage-labels.json"));
   const holder = await lockHolder(reviewDirectory(pr));
 
   const wait = await pr.hedge("review", "--wait", "--round", "1");
   await holder.release();
 
   expect(wait.output).not.toContain("triage labels");
-});
-
-test("a reply with a second labels object that changes a label fails closed", async () => {
-  const pr = await treated();
-  fakeModel(pr, "TRIAGE", `${adviseSecond}\nOn second thought:\n${labels([1, "needs-answer", "trigger"], [2, "needs-answer", "names a requirement"], [4, "advisory", "taste"])}`);
-
-  await pr.hedge("review", "--single");
-
-  expect(savedLabels(pr)).toMatchObject({ ok: false, labels: [{ finding: 1 }, { finding: 2, label: "needs-answer", reason: "the triage reply is not readable" }, { finding: 4 }] });
 });
 
 test("the proof receipt lists each advisory finding with its first severity", async () => {
@@ -354,6 +382,7 @@ function argvModel(pr: Checkout, provider: "claude" | "codex", answer: string) {
   const argv = join(pr.home, `${provider}-argv`);
   const refuseOutsideGit = `for arg in "$@"; do [ "$arg" = --skip-git-repo-check ] && skip=1; [ "$previous" = -C ] && directory="$arg"; previous="$arg"; done
 [ -n "$skip" ] || git -C "$directory" rev-parse >/dev/null 2>&1 || { echo "Not inside a trusted directory and --skip-git-repo-check was not specified." >&2; exit 1; }
+[ -f "$directory/AGENTS.md" ] && { echo "Read the agent instructions in $directory" >&2; exit 1; }
 previous=`;
   const reply = provider === "claude" ? `echo '${answer}'` : `${refuseOutsideGit}\nfor arg in "$@"; do [ "$previous" = "-o" ] && echo '${answer}' > "$arg"; previous="$arg"; done`;
   writeFileSync(join(pr.env.PATH!.split(":")[0]!, provider), `#!/bin/sh\nfor arg in "$@"; do printf '[%s]\\n' "$arg" >> "${argv}"; done\ncat > /dev/null\n${reply}\n`, { mode: 0o755 });

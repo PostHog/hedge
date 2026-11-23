@@ -215,6 +215,7 @@ In all other cases answer CONTINUE. New findings, many findings, or findings abo
 Your first line must be exactly CONTINUE, or ESCALATE: followed by one sentence that names the findings and their reviews. Write nothing else.`;
 const findingsCap = 16_000;
 const responsesCap = 4000;
+const advisoryCap = 300;
 const cut = (text: string, cap: number) => text.length > cap ? text.slice(0, cap) + "\n[truncated]" : text;
 
 async function arbiterPrompt(home: string, identity: ProofIdentity) {
@@ -230,8 +231,8 @@ async function arbiterPrompt(home: string, identity: ProofIdentity) {
 
 async function advisoryNote(directory: string, findings: string) {
   const advisory = new Set((await advisoryLabels(directory)).map(({ finding }) => finding));
-  const texts = labelCandidates(findings).filter(({ finding }) => advisory.has(finding)).map(({ text }) => text);
-  return texts.length ? `\n\nThe triage labelled these findings advisory: they need no answer, and buy no round.\n${cut(texts.join("\n"), responsesCap)}` : "";
+  const texts = labelCandidates(findings).filter(({ finding }) => advisory.has(finding)).map(({ text }) => text.replace(/\s+/g, " ").slice(0, advisoryCap));
+  return texts.length ? `\n\nThe triage labelled these findings advisory: they need no answer, and buy no round.\n${texts.join("\n")}` : "";
 }
 
 const namesEscalate = (output: string) => /escalate/i.test(output);
