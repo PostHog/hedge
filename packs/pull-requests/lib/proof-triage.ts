@@ -53,7 +53,7 @@ const pathLike = /[/.*]/;
 const listMarker = /^\s*(?:[-*+]|\d+[.)])\s+/;
 const rootless = (path: string) => path.trim().replace(/^\.?\//, "");
 const cleanEntries = (word: string) => {
-  const trimmed = word.replace(/^[\s"']+|[\s"',:;]+$/g, "");
+  const trimmed = word.replace(/^[\s"']+|[\s"',:;.]+$/g, "");
   const unwrapped = trimmed.replace(/^\((.*)\)$/, "$1");
   return [word, trimmed, unwrapped, unwrapped.replace(/^\[(.*)\]$/, "$1")].map(rootless);
 };
@@ -70,8 +70,8 @@ function criticalEntries(list: string) {
 
 function matchesEntry(file: string, entry: string) {
   const directory = entry.replace(/\/\*\*?$|\/$/, "");
-  if (!/[*{]/.test(directory)) return file === directory || file.startsWith(`${directory}/`);
-  return new Bun.Glob(directory).match(file) || new Bun.Glob(`${directory}/**`).match(file);
+  if (file === directory || file.startsWith(`${directory}/`)) return true;
+  return /[*{]/.test(directory) && (new Bun.Glob(directory).match(file) || new Bun.Glob(`${directory}/**`).match(file));
 }
 
 function onCriticalPaths(files: string[], list: string | undefined) {

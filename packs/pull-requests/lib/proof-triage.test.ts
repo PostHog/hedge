@@ -69,6 +69,7 @@ test("a critical-path list matches its entries as bullets, plain lines, quoted p
   for (const list of lists) expect(await listedPath(list)).toEqual({ list, triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: rates/plans/old plans.ts"] } });
   for (const list of ["- `[slug]/rates.ts`\n", "- [slug]/rates.ts\n", "- app routes ([slug]/)\n"]) expect(await listedPath(list, "[slug]/rates.ts")).toEqual({ list, triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: [slug]/rates.ts"] } });
   expect(await listedPath("- reports/q4,\n", "reports/q4,")).toEqual({ list: "- reports/q4,\n", triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: reports/q4,"] } });
+  for (const list of ["- `src/{tenant}.ts`\n", "Review src/{tenant}.ts.\n"]) expect(await listedPath(list, "src/{tenant}.ts")).toEqual({ list, triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: src/{tenant}.ts"] } });
   expect(await listedPath("- [[slug]/rates.ts]\n", "[slug]/rates.ts")).toEqual({ list: "- [[slug]/rates.ts]\n", triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: [slug]/rates.ts"] } });
   for (const list of ["* billing/\n", "+ billing/*\n"]) expect(await listedPath(list)).toEqual({ list, triage: { setting: "on", arm: "treated", path: "standard", why: [] } });
 });
