@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { checkout, cleanFixtures, reviewHead } from "./proof-testing.ts";
+import { checkout, cleanFixtures, reviewHead, settings } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
@@ -283,6 +283,51 @@ test("on a draft, a check from another app than the pinned one neither passes no
 
   pr.ci([{ name: "CI / lint", bucket: "pass", app: 9 }]);
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: CI / test");
+});
+
+test("on a draft, a pinned check listed as posted only once ready reads as withheld when its workflow's checks from any app finished and passed, and a ready PR still needs it", async () => {
+  const { pr } = await reviewed();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.draftSkippedChecks": "example/product=Backend / Test results" });
+  pr.pullRequestState({ draft: true });
+  pr.required("main", [{ context: "Backend / Test results", integration_id: 7 }]);
+
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }, { name: "Backend / Unit", bucket: "pending", app: 9 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results");
+
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }, { name: "Backend / Unit", bucket: "pass", app: 9 }]);
+  const withheld = await pr.hedge("gate");
+  expect(withheld.code).toBe(0);
+  expect(ciLine(withheld.output)).toBe("ci: green, 0 required check(s) pass; withheld from drafts, required once ready: Backend / Test results (its workflow finished without posting it)");
+
+  pr.pullRequestState({ draft: false });
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results");
+});
+
+test("on a draft, a pinned check posted only once ready still waits when its workflow failed, when only statuses report, or when another app posted it", async () => {
+  const { pr } = await reviewed();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.draftSkippedChecks": "example/product=Backend / Test results" });
+  pr.pullRequestState({ draft: true });
+  pr.required("main", [{ context: "Backend / Test results", integration_id: 7 }]);
+
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }, { name: "Backend / Unit", bucket: "fail", app: 9 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results; not required: failing: Backend / Unit");
+
+  pr.ci("none");
+  pr.statuses([{ context: "Backend / Gate", state: "success" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results");
+
+  pr.statuses([]);
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }, { name: "Backend / Test results", bucket: "pass", app: 9 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results");
+});
+
+test("on a draft, a pinned check is not withheld on another app's checks for another repository's listing", async () => {
+  const { pr } = await reviewed();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.draftSkippedChecks": "example/other=Backend / Test results" });
+  pr.pullRequestState({ draft: true });
+  pr.required("main", [{ context: "Backend / Test results", integration_id: 7 }]);
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results");
 });
 
 test("the newest run of a check from each app decides: a rerun clears an older failure, and another app's pass hides no failure", async () => {
