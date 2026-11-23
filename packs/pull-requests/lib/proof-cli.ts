@@ -347,7 +347,8 @@ each answer against HEAD.`,
       if (files.length !== 1) throw usageError("respond", "Pass one responses file");
       const head = identity();
       const pull = pullOf(head, context.run);
-      const { budget } = await reviewBudget(pull && isCommitSha(pull.head) ? { ...head, commit: pull.head } : head, pull?.body, numberSetting("pull-requests.reviewCeiling", context.env), context);
+      const sized = triageSetting(context.env) === "off" || !pull || !isCommitSha(pull.head) || onHistoryOf(head, context.run)(pull.head) ? head : { ...head, commit: pull.head };
+      const { budget } = await reviewBudget(sized, pull?.body, numberSetting("pull-requests.reviewCeiling", context.env), context);
       print(await respondToReview(home, head, roundId(required(options, "--round", "respond")), resolve(cwd, files[0]!), budget));
       return 0;
     },
@@ -740,18 +741,20 @@ async function reserveRound(options: Map<string, string>, head: ProofIdentity, c
 }
 
 async function reviewBudget(head: ProofIdentity, body: string | undefined, ceiling: number, context: CommandContext) {
-  const triage = await triageMark(head, triageSetting(context.env), body, context);
+  const setting = triageSetting(context.env);
+  const files = setting === "off" ? undefined : changedFiles(head, context.run);
+  const triage = await triageMark(head, setting, body, files, context);
   const tier = reviewTier(head, context.run, body);
-  const uncapped = triage && (body === undefined ? "the pull request could not be read" : changedFiles(head, context.run) === undefined ? "its changed files could not be read" : undefined);
+  const uncapped = triage && (body === undefined ? "the pull request could not be read" : files === undefined ? "its changed files could not be read" : undefined);
   const treated = uncapped ? undefined : treatedBudget(triage, ceiling);
   const budget = treated ?? tierCeiling(tier, ceiling);
   return { triage, tier, treated, budget, record: { budget, ...uncapped ? { uncapped } : {} } };
 }
 
-async function triageMark(head: ProofIdentity, setting: TriageSetting, body: string | undefined, { home, env, run }: CommandContext) {
+async function triageMark(head: ProofIdentity, setting: TriageSetting, body: string | undefined, files: string[] | undefined, { home, env }: CommandContext) {
   if (setting === "off") return undefined;
   const criticalPaths = await readCriticalPaths(home, head.repository, env).catch((error: Error) => error);
-  return { setting, arm: armOf(setting, head.repository, head.pr), ...pathOf({ body, changedFiles: changedFiles(head, run), criticalPaths }) };
+  return { setting, arm: armOf(setting, head.repository, head.pr), ...pathOf({ body, changedFiles: files, criticalPaths }) };
 }
 
 async function unrecordedRound(options: Map<string, string>, head: ProofIdentity, context: CommandContext) {

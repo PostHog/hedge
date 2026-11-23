@@ -364,3 +364,34 @@ test("a body that was read without a merge-risk grade still gets the strict budg
   expect(await firstLine(pr)).toMatchObject({ budget: 3, triage: { path: "strict", why: ["merge-risk grade none"] } });
   expect(roundRecord(pr, "1")).not.toHaveProperty("uncapped");
 });
+
+test("a failed lookup of the changed files leaves the pull request on the strict path and uncapped together, from one lookup", async () => {
+  const pr = await budgeted("on", graded("non-critical", "medium"));
+  await pr.hedge("review", "--single");
+  await answerFixed(pr, "1");
+  const base = await pr.git("rev-parse", "HEAD");
+  await pr.commit("feature.ts", "export const greet = (name: string) => `bye ${name}`;\n");
+  failPullRead(pr, 3);
+  expect(await firstLine(pr, "--scope", "final", "--base", base)).toMatchObject({ budget: 100, uncapped: "its changed files could not be read", triage: { path: "strict", why: ["changed files unknown"] } });
+});
+
+test("respond sizes the budget at a local head that builds on the pull request's head, as the review does", async () => {
+  const pr = await budgeted("on", graded("non-critical", "medium"));
+  await pr.hedge("review", "--single");
+  expect((await readAgain(pr, "1")).code).toBe(0);
+  pr.githubHead(await pr.git("rev-parse", "HEAD"));
+  await pr.commit("send-mail.ts", "export const send = () => {};\n");
+  writeFileSync(join(pr.repository, "known.md"), "1. known: listed under Known issues\n");
+  await expect(pr.hedge("respond", "--round", "final-1", "known.md")).rejects.toThrow("review budget of 3 reviews");
+});
+
+test("with triage off respond sizes today's ceiling at the commit --commit names", async () => {
+  const pr = await budgeted("off", graded("non-critical", "low"));
+  await pr.hedge("review");
+  expect((await pr.hedge("review", "--wait")).code).toBe(0);
+  expect((await readAgain(pr, "1")).code).toBe(0);
+  const reviewed = await pr.git("rev-parse", "HEAD");
+  await pr.commit("large.ts", Array.from({ length: 60 }, (_, line) => `export const value${line} = ${line};\n`).join(""));
+  writeFileSync(join(pr.repository, "known.md"), "1. known: listed under Known issues\n");
+  expect((await pr.hedge("respond", "--round", "final-1", "known.md", "--commit", reviewed)).code).toBe(0);
+});
