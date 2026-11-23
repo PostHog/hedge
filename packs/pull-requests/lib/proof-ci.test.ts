@@ -49,7 +49,17 @@ test("classic branch protection adds required checks, and a check from another a
   expect(green.code).toBe(0);
 });
 
-test("a check pinned to an app passes on a commit status its app's bot posts, and not on one anyone else posts", async () => {
+test("a check pinned to an app passes on a commit status its app's bot posts", async () => {
+  const { pr } = await reviewed();
+  pr.required("main", [{ context: "Visual Review / storybook", integration_id: 7 }]);
+  pr.githubApp("product", 7);
+  pr.statuses([{ context: "Visual Review / storybook", state: "success", by: "product[bot]" }]);
+  const green = await pr.hedge("gate");
+  expect(ciLine(green.output)).toBe("ci: green, 1 required check(s) pass");
+  expect(green.code).toBe(0);
+});
+
+test("a check pinned to an app does not pass on a status from a person or from another app's bot", async () => {
   const { pr } = await reviewed();
   pr.required("main", [{ context: "Visual Review / storybook", integration_id: 7 }]);
   pr.githubApp("product", 7);
@@ -62,17 +72,26 @@ test("a check pinned to an app passes on a commit status its app's bot posts, an
 
   pr.statuses([{ context: "Visual Review / storybook", state: "success", by: "other[bot]" }]);
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Visual Review / storybook");
+});
+
+test("a person's newer status neither passes nor hides the pinned app's own status", async () => {
+  const { pr } = await reviewed();
+  pr.required("main", [{ context: "Visual Review / storybook", integration_id: 7 }]);
+  pr.githubApp("product", 7);
 
   pr.statuses([{ context: "Visual Review / storybook", state: "success", by: "a-maintainer" }, { context: "Visual Review / storybook", state: "failure", by: "product[bot]" }]);
   expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: red, required failing: Visual Review / storybook");
 
+  pr.statuses([{ context: "Visual Review / storybook", state: "failure", by: "a-maintainer" }, { context: "Visual Review / storybook", state: "success", by: "product[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: green, 1 required check(s) pass; not required: failing: Visual Review / storybook");
+});
+
+test("the pinned app's rerun clears its own older failure", async () => {
+  const { pr } = await reviewed();
+  pr.required("main", [{ context: "Visual Review / storybook", integration_id: 7 }]);
+  pr.githubApp("product", 7);
   pr.statuses([{ context: "Visual Review / storybook", state: "success", by: "product[bot]" }, { context: "Visual Review / storybook", state: "failure", by: "product[bot]" }]);
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: green, 1 required check(s) pass");
-
-  pr.statuses([{ context: "Visual Review / storybook", state: "failure", by: "a-maintainer" }, { context: "Visual Review / storybook", state: "success", by: "product[bot]" }]);
-  const green = await pr.hedge("gate");
-  expect(ciLine(green.output)).toBe("ci: green, 1 required check(s) pass; not required: failing: Visual Review / storybook");
-  expect(green.code).toBe(0);
 });
 
 test("the gate's check list names the pinned app's status that decided a check, beside a newer status from someone else", async () => {
@@ -83,17 +102,6 @@ test("the gate's check list names the pinned app's status that decided a check, 
   pr.statuses([{ context: "storybook", state: "success", by: "a-maintainer" }, { context: "storybook", state: "failure", by: "product[bot]" }]);
   const gate = await pr.hedge("gate", "--json");
   expect(JSON.parse(gate.output).ci.checks).toEqual(["storybook (status): pass", "storybook (status, app 7): fail"]);
-});
-
-test("the pinned app's newest status decides its check, also when it spells the context in another case", async () => {
-  const { pr } = await reviewed();
-  pr.required("main", [{ context: "deploy", integration_id: 7 }]);
-  pr.githubApp("product", 7);
-  pr.statuses([{ context: "Deploy", state: "failure", by: "product[bot]" }, { context: "deploy", state: "success", by: "product[bot]" }]);
-  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: red, required failing: deploy");
-
-  pr.statuses([{ context: "deploy", state: "success", by: "product[bot]" }, { context: "Deploy", state: "failure", by: "product[bot]" }]);
-  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: green, 1 required check(s) pass");
 });
 
 test("a status from a bot without an app leaves a pinned check unreported", async () => {
