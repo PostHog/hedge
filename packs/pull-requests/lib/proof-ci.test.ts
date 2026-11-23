@@ -324,6 +324,14 @@ test("on a draft, a listed check still waits when another app posted a check of 
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results");
 });
 
+test("on a draft, a listed check still waits when a check of its name in other letter case reported", async () => {
+  const pr = await listedDraft();
+  pr.githubApp("product", 7);
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }]);
+  pr.statuses([{ context: "Backend / Test Results", state: "failure", by: "product[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: pending, required not reported yet: Backend / Test results");
+});
+
 test("a ready PR still needs a listed check", async () => {
   const pr = await listedDraft();
   pr.pullRequestState({ draft: false });

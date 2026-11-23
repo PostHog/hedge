@@ -197,7 +197,7 @@ function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boo
     const own = named.filter((entry) => reportedBy(check, entry));
     const matches = own.some((entry) => entry.status) ? [...new Set([...own, ...named.filter((entry) => !entry.status)])] : own;
     matches.forEach((entry) => counted.add(entry));
-    if (!matches.length) { (!draft ? missing : check.postedOnceReady && !named.length ? listed : withheldFromDraft(check, entries) ? withheld : missing).push(check.context); continue; }
+    if (!matches.length) { (!draft ? missing : check.postedOnceReady && !entries.some((entry) => entry.name.toLowerCase() === check.context.toLowerCase()) ? listed : withheldFromDraft(check, entries) ? withheld : missing).push(check.context); continue; }
     const worst = matches.reduce((a, b) => rank[b.outcome] > rank[a.outcome] ? b : a).outcome;
     if (worst === "fail") failing.push(check.context);
     else if (worst === "pending") pending.push(check.context);
