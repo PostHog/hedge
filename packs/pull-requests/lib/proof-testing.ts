@@ -82,10 +82,9 @@ case "$*" in
   "api "*"/statuses"*)
     all="$*"; sha=\${all#*/commits/}; sha=\${sha%%/*}; filter=; previous=
     for arg in "$@"; do [ "$previous" = "--jq" ] && filter=$arg; previous=$arg; done
-    [ "$filter" = ".[]" ] || { echo "the fake gh serves statuses only through --jq .[], not $filter" >&2; exit 1; }
     file="${github}/statuses-$sha"; [ -f "$file" ] || file="${github}/statuses-any"
     [ -f "$file" ] || exit 0
-    "${process.execPath}" -e 'for (const status of JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))) console.log(JSON.stringify(status));' "$file"; exit $?;;
+    jq -c "\${filter:-.}" "$file"; exit $?;;
   "api "*)
     all="$*"; sha=; case "$all" in */commits/*/*) sha=\${all#*/commits/}; sha=\${sha%%/*};; esac
     case "$*" in *"/check-runs"*) kind=check-runs;; *) kind=statuses;; esac
