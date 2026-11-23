@@ -42,7 +42,7 @@ test("through hedge, the hub's proxy keeps its panel off until the Proxy panel w
   const plan = async () => (await runHedge(["cli-proxy", "plan"], { HOME: home })).stdout;
   expect(await plan()).toContain("  Keep the management panel off. Turn on the Proxy panel workflow to serve it.\n");
   turn({ "own-account-balancing": true, "proxy-panel": true });
-  expect(await plan()).toContain("  Serve the management panel 1.27.3-fleet.2 at http://127.0.0.1:8317/management.html, loopback only, with 35 days of quota history from the quota-ledger plugin 0.1.0.\n");
+  expect(await plan()).toContain("  Serve the management panel 1.27.3-fleet.3 at http://127.0.0.1:8317/management.html, loopback only, with 35 days of quota history from the quota-ledger plugin 0.1.0.\n");
   turn({ "proxy-panel": true });
   expect(await plan()).not.toContain("Serve the management panel");
 });
