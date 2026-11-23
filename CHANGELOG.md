@@ -6,12 +6,14 @@
 
 - With `pull-requests.triage` on or `split`, a treated pull request gets a
   hard read budget: two reads on the standard path, on every tier, and three
-  reads on the strict path. A control or excluded pull request keeps the
-  profile's `pull-requests.reviewCeiling`. The profile's ceiling can lower a
+  reads on the strict path. As with today's ceiling, a read that finds
+  nothing to fix spends none of it. A control or excluded pull request keeps
+  the profile's `pull-requests.reviewCeiling`. The profile's ceiling can lower a
   treated budget, never raise it.
 - At the budget the usual stop holds: `--agent` cannot pass it, and only the
   user's `--override` runs another read. A finding listed under Known issues
-  takes a `known` answer once the budget is spent.
+  takes a `known` answer once the same budget is spent; `hedge proof respond`
+  works the budget out at the current head, as the review does.
 - `hedge proof review` prints the budget that applies as `budget` and stores
   it in `round.json` beside `triage`.
 - With the setting `off`, the default, nothing changes.
