@@ -691,7 +691,8 @@ const askTriage = ({ env, home, run }: CommandContext, panelCheckout?: string) =
   const checkouts = await Promise.all([topLevel(run), panelCheckout].filter((path) => path !== undefined).map((path) => realpath(path).catch(() => path)));
   if (checkouts.some((checkout) => resolved.startsWith(`${checkout}/`))) return { ok: false, cause: "the triage directory is inside the checkout under review", model: row.model };
   const answer = await askModel("triage", row, { prompt, cwd: physical }, env, triageLimit);
-  return answer.ok || answer.held ? answer : { ok: false, cause: "the model call failed; Hedge keeps none of its output", model: answer.model };
+  const model = answer.model.startsWith("command: ") ? "a replacement command" : answer.model;
+  return answer.ok || answer.held ? { ...answer, model } : { ok: false, cause: "the model call failed; Hedge keeps none of its output", model };
 };
 
 async function printLabels(directory: string, context: CommandContext) {

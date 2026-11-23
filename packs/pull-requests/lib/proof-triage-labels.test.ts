@@ -290,14 +290,13 @@ test("a failed triage call keeps none of its output, so no secret or exit status
   const pr = await treated();
   const token = ["ghp", "_", "A1b2C3d4".repeat(5)].join("");
   pr.env.HEDGE_PROOF_TRIAGE = `cat >/dev/null; echo 'exit 999: provider said: token=${token}' >&2; exit 3`;
-  pr.env.HEDGE_PROOF_TRIAGE_MODEL = "triage-model";
 
   await pr.hedge("review", "--single");
 
   const saved = readFileSync(join(reviewDirectory(pr), "triage-labels.json"), "utf8");
   expect(saved).not.toContain(token);
   expect(saved).not.toContain("provider said");
-  expect(savedLabels(pr)).toMatchObject({ ok: false, cause: "the model call failed; Hedge keeps none of its output", labels: [{ finding: 1, reason: "the triage call failed: the model call failed; Hedge keeps none of its output" }, { finding: 2 }, { finding: 4 }] });
+  expect(savedLabels(pr)).toMatchObject({ ok: false, model: "a replacement command", cause: "the model call failed; Hedge keeps none of its output", labels: [{ finding: 1, reason: "the triage call failed: the model call failed; Hedge keeps none of its output" }, { finding: 2 }, { finding: 4 }] });
 });
 
 test("a round that weighs the budget while a wait saves the labels of the round before backs out and asks to weigh again", async () => {
@@ -466,6 +465,22 @@ test("the judge reads which findings the triage made advisory", async () => {
   const { judge } = await gatedWithAdvisory();
 
   expect(judge.prompts().join("\n")).toContain("The triage labelled finding 2 (major) advisory: it needs no answer, and counts as answered");
+});
+
+test("a replacement triage command with no model name saves and prints none of the command as the model", async () => {
+  const pr = await treated();
+  const token = ["ghp", "_", "A1b2C3d4".repeat(5)].join("");
+  fakeModel(pr, "TRIAGE", adviseSecond);
+  pr.env.HEDGE_PROOF_TRIAGE = `: ${token}; ${pr.env.HEDGE_PROOF_TRIAGE}`;
+  writeFileSync(join(pr.repository, "change.diff"), "+export const greet = (name: string) => name;\n");
+  writeFileSync(join(pr.repository, "findings.md"), findings);
+
+  await pr.hedge("review", "--single");
+  const printed = await pr.hedge("triage", "--findings", "findings.md", "--diff", "change.diff");
+
+  expect(savedLabels(pr)).toMatchObject({ ok: true, model: "a replacement command" });
+  expect(readFileSync(join(reviewDirectory(pr), "triage-labels.json"), "utf8")).not.toContain(token);
+  expect(JSON.parse(printed.output)).toMatchObject({ ok: true, model: "a replacement command" });
 });
 
 test("a triage the secret guard holds says so, since the guard names only the kind of secret it matched", async () => {
