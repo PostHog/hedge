@@ -272,7 +272,7 @@ test("the triage asks the lookup row's model with no tools, and records its time
   await pr.hedge("review", "--single");
 
   expect(claude.calls()[0]).toContain("--model lookup-model");
-  expect(claude.calls()[0]).toContain("--tools  ");
+  expect(claude.calls()[0]).toContain("--output-format json --tools  --permission-mode dontAsk");
   expect(savedLabels(pr)).toMatchObject({ model: "lookup-model", ok: true, durationMs: expect.any(Number), usage: { input: 12, output: 7, costUsd: 0.25 }, labels: [{ finding: 1 }, { finding: 2, label: "advisory" }, { finding: 4 }] });
 });
 
