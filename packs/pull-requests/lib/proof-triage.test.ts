@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { armOf } from "./proof-triage.ts";
 import { checkout, cleanFixtures, fakeModel, graded, settings, type Checkout } from "./proof-testing.ts";
@@ -37,7 +37,6 @@ test("with triage on, hedge proof review prints the arm and the standard path of
 
   expect(await firstLine(pr, "--single")).toMatchObject({ round: 1, triage: { setting: "on", arm: "treated", path: "standard" } });
 
-  expect(JSON.parse(readFileSync(join(pr.pullRequest, "triage.json"), "utf8"))).toEqual({ setting: "on", arm: "treated" });
   expect(roundRecord(pr, "1")).toMatchObject({ commit: await pr.git("rev-parse", "HEAD"), triage: { setting: "on", arm: "treated", path: "standard", why: [] } });
 });
 
@@ -69,6 +68,7 @@ test("a critical-path list matches its entries as bullets, plain lines, quoted p
   const lists = ["- `rates/plans/old plans.ts`\n", "| Path | Owner |\n| --- | --- |\n| rates/plans/old plans.ts | billing |\n", "| Area | Owner |\n| --- | --- |\n| rates | billing |\n", "- rates: the charging code\n", "rates\n", "- ./rates/\n", "Everything under /rates/ needs a second read.\n", "- rates/*\n", "- */plans/**\n"];
   for (const list of lists) expect(await listedPath(list)).toEqual({ list, triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: rates/plans/old plans.ts"] } });
   for (const list of ["- `[slug]/rates.ts`\n", "- [slug]/rates.ts\n", "- app routes ([slug]/)\n"]) expect(await listedPath(list, "[slug]/rates.ts")).toEqual({ list, triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: [slug]/rates.ts"] } });
+  expect(await listedPath("- reports/q4,\n", "reports/q4,")).toEqual({ list: "- reports/q4,\n", triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: reports/q4,"] } });
   for (const list of ["* billing/\n", "+ billing/*\n"]) expect(await listedPath(list)).toEqual({ list, triage: { setting: "on", arm: "treated", path: "standard", why: [] } });
 });
 
@@ -77,58 +77,23 @@ test("a merge-risk grade quoted outside the callout counts as no grade", async (
   expect((await firstLine(pr)).triage).toEqual({ setting: "on", arm: "treated", path: "strict", why: ["merge-risk grade none"] });
 });
 
-test("a pull request keeps the arm of its first reserved review under any spelling of its repository, and a refused review assigns none", async () => {
+test("each review records the arm its setting gives the pull request, the same under any spelling of the repository, and keeps no arm of its own", async () => {
   const control = [1, 2, 3, 4, 5, 6, 7, 8].find((number) => armOf("split", "example/product", number) === "control")!;
-  const target = (repository = "example/product") => ["--repo", repository, "--pr", String(control)];
+  const target = (repository: string) => ["--repo", repository, "--pr", String(control)];
   const triage = (setting: string) => { pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": setting }); };
   const pr = await checkout();
   pr.pullRequestState({ body: graded("non-critical", "medium"), number: control });
-  const head = await pr.commit("feature.ts", "export const greet = (name: string) => name;\n");
+  const reviewed = await pr.commit("feature.ts", "export const greet = (name: string) => name;\n");
   for (const repository of ["example/product", "Example/Product"]) await pr.hedge("require", "--none", "--reason", "fixture", ...target(repository));
   fakeModel(pr, "REVIEWER", noFindings("feature.ts"));
 
-  triage("split");
-  await expect(pr.hedge("review", "--scope", "final", "--base", head, ...target())).rejects.toThrow("HEAD is already reviewed");
   triage("on");
-  expect((await firstLine(pr, "--single", ...target())).triage).toMatchObject({ arm: "treated" });
-  triage("split");
-  expect((await firstLine(pr, "--single", ...target("Example/Product"))).triage).toMatchObject({ arm: "treated" });
-  expect(JSON.parse(readFileSync(join(pr.home, ".local/state/hedge/proof/example/product", String(control), "triage.json"), "utf8"))).toEqual({ setting: "on", arm: "treated" });
-});
-
-test("a round reserved before its arm file was written still gives the pull request its arm", async () => {
-  const control = [1, 2, 3, 4, 5, 6, 7, 8].find((number) => armOf("split", "example/product", number) === "control")!;
-  const target = ["--repo", "example/product", "--pr", String(control)];
-  const pr = await checkout();
-  const ledger = join(pr.home, ".local/state/hedge/proof/example/product", String(control));
-  pr.pullRequestState({ body: graded("non-critical", "medium"), number: control });
-  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": "on" });
-  const reviewed = await pr.commit("feature.ts", "export const greet = (name: string) => name;\n");
-  await pr.hedge("require", "--none", "--reason", "fixture", ...target);
-  fakeModel(pr, "REVIEWER", noFindings("feature.ts"));
-  expect((await firstLine(pr, "--single", ...target)).triage).toMatchObject({ arm: "treated" });
-  rmSync(join(ledger, "triage.json"));
+  expect((await firstLine(pr, "--single", ...target("example/product"))).triage).toMatchObject({ setting: "on", arm: "treated" });
   await pr.commit("feature.ts", "export const greet = (name: string) => `hi ${name}`;\n");
-
-  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": "split" });
-  expect((await firstLine(pr, "--scope", "final", "--base", reviewed, ...target)).triage).toMatchObject({ setting: "on", arm: "treated" });
-  expect(JSON.parse(readFileSync(join(ledger, "triage.json"), "utf8"))).toEqual({ setting: "on", arm: "treated" });
-});
-
-test("a reservation hedge stopped before publishing gives the pull request no arm", async () => {
-  const control = [1, 2, 3, 4, 5, 6, 7, 8].find((number) => armOf("split", "example/product", number) === "control")!;
-  const target = ["--repo", "example/product", "--pr", String(control)];
-  const pr = await checkout();
-  const unpublished = join(pr.home, ".local/state/hedge/proof/example/product", String(control), "reviews", ".reservation-stopped");
-  pr.pullRequestState({ body: graded("non-critical", "medium"), number: control });
-  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": "split" });
-  await pr.commit("feature.ts", "export const greet = (name: string) => name;\n");
-  await pr.hedge("require", "--none", "--reason", "fixture", ...target);
-  mkdirSync(unpublished, { recursive: true });
-  writeFileSync(join(unpublished, "round.json"), JSON.stringify({ round: 1, startedAt: "2000-01-01T00:00:00.000Z", triage: { setting: "on", arm: "treated", path: "standard", why: [] } }));
-  fakeModel(pr, "REVIEWER", noFindings("feature.ts"));
-
-  expect((await firstLine(pr, "--single", ...target)).triage).toMatchObject({ setting: "split", arm: "control" });
+  triage("split");
+  expect((await firstLine(pr, "--scope", "final", "--base", reviewed, ...target("example/product"))).triage).toMatchObject({ setting: "split", arm: "control" });
+  expect((await firstLine(pr, "--single", ...target("Example/Product"))).triage).toMatchObject({ setting: "split", arm: "control" });
+  expect(readdirSync(join(pr.home, ".local/state/hedge/proof/example/product", String(control))).filter((name) => name.includes("triage"))).toEqual([]);
 });
 
 test("a test file in a danger area keeps the standard path, and a critical-path file hedge cannot read puts the pull request on the strict path", async () => {

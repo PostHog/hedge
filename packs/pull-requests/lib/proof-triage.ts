@@ -1,19 +1,17 @@
 import { createHash } from "node:crypto";
-import { link, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { optionalStringSetting } from "../../base/lib/settings.ts";
 import { gradeOf } from "./proof-autonomy.ts";
 import { riskCalloutOf } from "./decision-ledger.ts";
 import { isProductionFile, mergeRiskGrade } from "./proof-checkout.ts";
-import { prDirectory, readJson, type ProofIdentity } from "./proof.ts";
+import { readJson } from "./proof.ts";
 
 export const triageSettings = ["off", "split", "on"] as const;
 export type TriageSetting = (typeof triageSettings)[number];
 export type Arm = "treated" | "control";
 export type ReviewPath = "strict" | "standard" | "excluded";
 export type PathOf = { path: ReviewPath; why: string[] };
-export type Assignment = { setting: TriageSetting; arm: Arm };
-export type TriageMark = Assignment & PathOf;
+export type TriageMark = { setting: TriageSetting; arm: Arm } & PathOf;
 
 export const dangerAreas: { area: string; pattern: RegExp }[] = [
   { area: "guards", pattern: /guard/i },
@@ -57,7 +55,7 @@ const rootless = (path: string) => path.trim().replace(/^\.?\//, "");
 const cleanEntries = (word: string) => {
   const trimmed = word.replace(/^[\s"']+|[\s"',:;]+$/g, "");
   const unwrapped = trimmed.replace(/^\(+|\)+$/g, "");
-  return [trimmed, unwrapped, unwrapped.replace(/^\[+|\]+$/g, "")].map(rootless);
+  return [word, trimmed, unwrapped, unwrapped.replace(/^\[+|\]+$/g, "")].map(rootless);
 };
 
 function criticalEntries(list: string) {
@@ -83,32 +81,6 @@ function onCriticalPaths(files: string[], list: string | undefined) {
 
 const inDangerAreas = (files: string[]) =>
   files.filter(isProductionFile).flatMap((file) => dangerAreas.filter(({ pattern }) => pattern.test(file)).map(({ area }) => `${area}: ${file}`));
-
-const armDirectory = (home: string, identity: ProofIdentity) => prDirectory(home, { ...identity, repository: identity.repository.toLowerCase() });
-const prTriagePath = (home: string, identity: ProofIdentity) => join(armDirectory(home, identity), "triage.json");
-
-export async function assignmentOf(home: string, identity: ProofIdentity, setting: TriageSetting): Promise<Assignment> {
-  const saved = await readJson<Assignment | undefined>(prTriagePath(home, identity), undefined);
-  return saved ?? await firstReserved(home, identity) ?? { setting, arm: armOf(setting, identity.repository, identity.pr) };
-}
-
-async function firstReserved(home: string, identity: ProofIdentity): Promise<Assignment | undefined> {
-  const reviews = join(prDirectory(home, identity), "reviews");
-  const names = (await readdir(reviews).catch(() => [])).filter((name) => !name.startsWith("."));
-  const rounds = await Promise.all(names.map((name) => readJson<{ startedAt?: string; triage?: TriageMark } | undefined>(join(reviews, name, "round.json"), undefined).catch(() => undefined)));
-  const first = rounds.filter((round) => round?.triage).sort((a, b) => (a!.startedAt ?? "").localeCompare(b!.startedAt ?? ""))[0]?.triage;
-  return first && { setting: first.setting, arm: first.arm };
-}
-
-export async function saveAssignment(home: string, identity: ProofIdentity, { setting, arm }: Assignment) {
-  const directory = armDirectory(home, identity);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const temporary = join(directory, `.triage-${crypto.randomUUID()}`);
-  try {
-    await writeFile(temporary, JSON.stringify({ setting, arm }) + "\n", { flag: "wx", mode: 0o600 });
-    await link(temporary, prTriagePath(home, identity)).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
-  } finally { await rm(temporary, { force: true }); }
-}
 
 export async function readTriage(directory: string): Promise<{ triage: TriageMark } | Record<string, never>> {
   const triage = (await readJson<{ triage?: TriageMark } | undefined>(join(directory, "round.json"), undefined))?.triage;
