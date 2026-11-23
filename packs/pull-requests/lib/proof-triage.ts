@@ -117,13 +117,19 @@ ${untrusted("the diff of the pull request", diff.length > diffLimit ? `${diff.sl
 `;
 }
 
+function labelsObject(text: string) {
+  const start = text.search(/\{\s*"labels"\s*:/);
+  for (let end = text.lastIndexOf("}"); start >= 0 && end > start; end = text.lastIndexOf("}", end - 1)) {
+    try { return JSON.parse(text.slice(start, end + 1)) as { labels?: unknown }; } catch { continue; }
+  }
+  return undefined;
+}
+
 function parsedLabels(text: string) {
-  try {
-    const labels = (JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)) as { labels?: unknown }).labels;
-    if (!Array.isArray(labels)) return undefined;
-    return new Map(labels.filter((item): item is { finding: number; label: string; reason?: unknown } => typeof item?.finding === "number" && typeof item?.label === "string")
-      .map((item) => [item.finding, { label: item.label, reason: typeof item.reason === "string" ? oneLine(item.reason) : "" }]));
-  } catch { return undefined; }
+  const labels = labelsObject(text)?.labels;
+  if (!Array.isArray(labels)) return undefined;
+  return new Map(labels.filter((item): item is { finding: number; label: string; reason?: unknown } => typeof item?.finding === "number" && typeof item?.label === "string")
+    .map((item) => [item.finding, { label: item.label, reason: typeof item.reason === "string" ? oneLine(item.reason) : "" }]));
 }
 
 export async function triageFindings(findings: string, diff: string, ask: AskTriage): Promise<Triaged> {
@@ -143,7 +149,8 @@ export async function triageFindings(findings: string, diff: string, ask: AskTri
       : given?.label === "advisory" || given?.label === "needs-answer" ? label(candidate, given.label, given.reason || "no reason given")
       : label(candidate, "needs-answer", "the triage gave no label"));
   });
-  return { model: answer.model, ok: answer.ok && replied !== undefined, ...answer.ok ? {} : { cause: oneLine(answer.cause) }, durationMs, ...answer.ok && answer.usage ? { usage: answer.usage } : {}, labels };
+  const cause = !answer.ok ? oneLine(answer.cause) : !replied ? `the triage reply is not readable: ${oneLine(answer.text)}` : undefined;
+  return { model: answer.model, ok: answer.ok && replied !== undefined, ...cause ? { cause } : {}, durationMs, ...answer.ok && answer.usage ? { usage: answer.usage } : {}, labels };
 }
 
 export async function labelRound(directory: string, ask: AskTriage): Promise<Triaged | undefined> {

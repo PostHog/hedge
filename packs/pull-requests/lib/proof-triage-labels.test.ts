@@ -92,6 +92,18 @@ test("the triage fails closed: a failed call, an unreadable reply, an unknown la
   }
 });
 
+test("the triage reads its labels from a reply that wraps them in prose with braces, and keeps the start of a reply it cannot read", async () => {
+  const pr = await treated();
+  const triage = fakeModel(pr, "TRIAGE", `Each finding about \`{ setting, arm }\` is below.\n\`\`\`json\n${adviseSecond}\n\`\`\`\nThat covers \`}\` too.`);
+
+  await pr.hedge("review", "--single");
+
+  expect(savedLabels(pr)).toMatchObject({ ok: true, labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "advisory" }, { finding: 4 }] });
+  triage.answer("I cannot label { these } findings.");
+  const printed = await pr.hedge("triage", "--findings", join(reviewDirectory(pr), "findings.md"), "--diff", join(reviewDirectory(pr), "diff.patch"));
+  expect(JSON.parse(printed.output)).toMatchObject({ ok: false, cause: "the triage reply is not readable: I cannot label { these } findings.", labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "needs-answer", reason: "the triage reply is not readable" }, { finding: 4 }] });
+});
+
 test("a control pull request, a one-way door, and triage off run no triage and print no labels", async () => {
   const control = [1, 2, 3, 4, 5, 6, 7, 8].find((number) => armOf("split", "example/product", number) === "control")!;
   const runs: [string, number, string?][] = [["split", control], ["on", 42, "one-way"], ["off", 42]];
