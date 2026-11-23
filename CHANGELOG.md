@@ -18,7 +18,7 @@
   stays its labels. A
   failed or unreadable pass labels every finding `needs-answer`, and so does
   a lookup row that is not a Claude model, since only Claude runs with no
-  tools.
+  tools. The review then prints why the triage labelled nothing.
 - `hedge proof triage --findings <file> --diff <file>` prints the labels of a
   findings file as JSON and touches no proof ledger.
 

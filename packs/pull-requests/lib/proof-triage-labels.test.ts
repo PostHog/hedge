@@ -150,13 +150,24 @@ test("the triage cannot read a reply with anything besides one labels object, an
   }
 });
 
-test("the triage cannot read a reply that gives the labels key twice", async () => {
+test("the triage cannot read a reply that gives the labels key twice, however the second key is spelled", async () => {
+  for (const second of ['"labels"', '"lab\\u0065ls"', '"\\u006cabels"']) {
+    const pr = await treated();
+    fakeModel(pr, "TRIAGE", `{"labels":[{"finding":1,"label":"needs-answer","reason":"a trigger"},{"finding":2,"label":"needs-answer","reason":"a requirement"}],${second}:${JSON.stringify(JSON.parse(adviseSecond).labels)}}`);
+
+    await pr.hedge("review", "--single");
+
+    expect(savedLabels(pr)).toMatchObject({ ok: false, labels: [{ finding: 1 }, { finding: 2, label: "needs-answer", reason: "the triage reply is not readable" }, { finding: 4 }] });
+  }
+});
+
+test("the triage reads a reply whose one labels key is spelled with an escape", async () => {
   const pr = await treated();
-  fakeModel(pr, "TRIAGE", `{"labels":[{"finding":1,"label":"needs-answer","reason":"a trigger"},{"finding":2,"label":"needs-answer","reason":"a requirement"}],"labels":${JSON.stringify(JSON.parse(adviseSecond).labels)}}`);
+  fakeModel(pr, "TRIAGE", adviseSecond.replace('"labels"', '"lab\\u0065ls"'));
 
   await pr.hedge("review", "--single");
 
-  expect(savedLabels(pr)).toMatchObject({ ok: false, labels: [{ finding: 1 }, { finding: 2, label: "needs-answer", reason: "the triage reply is not readable" }, { finding: 4 }] });
+  expect(savedLabels(pr)).toMatchObject({ ok: true, labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "advisory" }, { finding: 4 }] });
 });
 
 test("a wait on a round whose triage call failed asks no model again, so the first pass stays the round's labels", async () => {
@@ -173,18 +184,34 @@ test("a wait on a round whose triage call failed asks no model again, so the fir
   expect(wait.output).toContain("Needs an answer: findings 1, 2, 4");
 });
 
-test("with triage switched off, a wait asks no triage model, even for a round reserved while it was on", async () => {
+test("with triage switched off, a wait asks no triage model and saves no labels, even for a round reserved while it was on", async () => {
   const pr = await treated();
   pr.env.HEDGE_PROOF_TRIAGE = "exit 3";
   await pr.hedge("review", "--single");
   finishedPanel(pr);
+  rmSync(join(reviewDirectory(pr), "triage-labels.json"));
   const triage = fakeModel(pr, "TRIAGE", adviseSecond);
   pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": "off" });
 
   await pr.hedge("review", "--wait", "--round", "1");
 
   expect(triage.prompts()).toEqual([]);
-  expect(savedLabels(pr)).toMatchObject({ ok: false });
+  expect(existsSync(join(reviewDirectory(pr), "triage-labels.json"))).toBe(false);
+});
+
+test("with triage switched off, a single read that resumes a round reserved while it was on asks no triage model", async () => {
+  const pr = await treated();
+  pr.env.HEDGE_PROOF_REVIEWER = "exit 3";
+  await pr.hedge("review", "--single").catch(() => undefined);
+  fakeModel(pr, "REVIEWER", findings);
+  const triage = fakeModel(pr, "TRIAGE", adviseSecond);
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": "off" });
+
+  const resumed = await pr.hedge("review", "--single");
+
+  expect(JSON.parse(resumed.output.split("\n")[0]!)).toMatchObject({ id: "1", triage: { arm: "treated" } });
+  expect(triage.prompts()).toEqual([]);
+  expect(existsSync(join(reviewDirectory(pr), "triage-labels.json"))).toBe(false);
 });
 
 test("a triage call that throws before the model answers labels every blocker and major finding needs-answer", async () => {
@@ -207,7 +234,7 @@ test("a wait while another command holds a round with no labels yet asks no tria
   await holder.release();
 
   expect(triage.prompts()).toEqual([]);
-  expect(wait.output).toContain("Another hedge command holds review round 1, so the triage labels are not printed. Run hedge proof review --wait again");
+  expect(wait.output).toContain("Another hedge command holds review round 1, so the triage labels are not printed. Run hedge proof review --wait --round 1 again to see them.");
 });
 
 test("a control pull request, a one-way door, and triage off run no triage and print no labels", async () => {
@@ -284,8 +311,9 @@ test("the triage asks the lookup row's model with no tools, outside the checkout
 
   expect(claude.argv()).toContain("[--model]\n[lookup-model]\n");
   expect(claude.argv()).toContain("[--tools]\n[]\n");
-  expect(claude.argv()).toContain("[cwd=");
-  expect(claude.argv()).not.toContain(`[cwd=${pr.repository}]`);
+  const cwd = claude.argv().match(/^\[cwd=(.*)\]$/m)?.[1];
+  expect(cwd).toBeString();
+  expect(`${cwd}/`.startsWith(`${pr.repository}/`)).toBe(false);
   expect(savedLabels(pr)).toMatchObject({ model: "lookup-model", ok: true, durationMs: expect.any(Number), usage: { input: 12, output: 7, costUsd: 0.25 }, labels: [{ finding: 1 }, { finding: 2, label: "advisory" }, { finding: 4 }] });
 });
 
@@ -294,9 +322,10 @@ test("on a Codex lookup row, which cannot run without tools, the triage asks no 
   pr.env.HEDGE_MODELS = JSON.stringify([{ ...lookup, provider: "codex" }, ...models.slice(1)]);
   const codex = argvModel(pr, "codex", adviseSecond);
 
-  await pr.hedge("review", "--single");
+  const review = await pr.hedge("review", "--single");
 
   expect(codex.argv()).toBe("");
+  expect(review.output).toContain("- The triage labelled none of them: the triage runs only on a Claude lookup row, which has no tools");
   expect(savedLabels(pr)).toMatchObject({ ok: false, cause: "the triage runs only on a Claude lookup row, which has no tools", labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "needs-answer" }, { finding: 4 }] });
 });
 

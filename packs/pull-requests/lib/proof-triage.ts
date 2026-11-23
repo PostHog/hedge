@@ -118,9 +118,11 @@ ${untrusted("the diff of the pull request", diff.length > diffLimit ? `${diff.sl
 `;
 }
 
+const unescaped = (text: string) => text.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+
 function labelsObject(text: string) {
   const reply = text.trim().replace(/^```(?:json)?\s*\n([\s\S]*)\n```$/, "$1");
-  if (reply.match(/"labels"\s*:/g)?.length !== 1) return undefined;
+  if (unescaped(reply).match(/"labels"\s*:/g)?.length !== 1) return undefined;
   try {
     const parsed = JSON.parse(reply) as unknown;
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) && Object.keys(parsed).join() === "labels" ? parsed as { labels: unknown } : undefined;
@@ -181,12 +183,13 @@ export async function labelRound(directory: string, setting: TriageSetting, ask:
   return triaged;
 }
 
-export function labelLines({ labels }: Triaged) {
+export function labelLines({ labels, cause }: Triaged) {
   const advisory = labels.filter(({ label }) => label === "advisory");
   const needed = labels.filter(({ label }) => label === "needs-answer").map(({ finding }) => finding);
   return [
     ...advisory.length || needed.length ? ["", "Triage of the blocker, major and unrated findings:"] : [],
     ...advisory.map(({ finding, severity, reason }) => `- Advisory, needs no answer, do not fix it in this pull request: finding ${finding} (${severity}): ${reason}`),
     ...needed.length ? [`- Needs an answer: finding${needed.length > 1 ? "s" : ""} ${needed.join(", ")}`] : [],
+    ...cause && labels.length ? [`- The triage labelled none of them: ${cause}`] : [],
   ];
 }
