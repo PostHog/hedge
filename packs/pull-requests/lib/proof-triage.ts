@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { redactSecrets } from "../../base/hooks/secret-guard.ts";
 import { optionalStringSetting } from "../../base/lib/settings.ts";
 import { gradeOf } from "./proof-autonomy.ts";
 import { riskCalloutOf } from "./decision-ledger.ts";
@@ -154,9 +153,9 @@ const isGivenLabel = (item: unknown): item is GivenLabel => {
   return Number.isInteger(finding) && (label === "advisory" || label === "needs-answer") && typeof reason === "string" && reason.trim() !== "";
 };
 
-function parsedLabels(text: string) {
+function parsedLabels(text: string, asked: Set<number>) {
   const labels = labelsObject(text)?.labels;
-  if (!Array.isArray(labels) || !labels.every(isGivenLabel)) return undefined;
+  if (!Array.isArray(labels) || !labels.every((item) => isGivenLabel(item) && asked.has(item.finding))) return undefined;
   const given = new Map<number, { label: FindingLabel["label"]; reason: string }>();
   for (const item of labels) {
     const earlier = given.get(item.finding);
@@ -174,8 +173,8 @@ export async function triageFindings(findings: string, diff: string, ask: AskTri
   const started = performance.now();
   const answer = await Promise.resolve().then(() => ask(triagePrompt(rated, diff))).catch((): ModelAnswer => ({ ok: false, cause: "the call threw before the model answered", model: "" }));
   const durationMs = Math.round(performance.now() - started);
-  const replied = answer.ok ? parsedLabels(answer.text) : undefined;
-  const cause = !answer.ok ? oneLine(redactSecrets(answer.cause)) : !replied ? `the triage reply is not readable, ${answer.text.length} characters` : undefined;
+  const replied = answer.ok ? parsedLabels(answer.text, new Set(rated.map(({ finding }) => finding))) : undefined;
+  const cause = !answer.ok ? oneLine(answer.cause) : !replied ? `the triage reply is not readable, ${answer.text.length} characters` : undefined;
   const failed = !answer.ok ? `the triage call failed: ${cause}` : !replied ? "the triage reply is not readable" : undefined;
   const labels = candidates.map((candidate) => {
     const given = replied?.get(candidate.finding);

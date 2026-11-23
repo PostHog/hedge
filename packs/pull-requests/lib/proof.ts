@@ -160,7 +160,7 @@ function finalReadPhase(value: string): FinalReadPhase {
 }
 
 type Spending = "unfinished spends" | "finished only";
-type Spent = { spent: number; names: string[]; reservations: string[]; finished: string[]; round?: number; counted?: string[] };
+type Spent = { spent: number; names: string[]; reservations: string[]; finished: string[]; labelled: string[]; round?: number; counted?: string[] };
 type ReservedAs = { reservationId?: string; startedAt?: string; commit?: string; scope?: string; phase?: FinalReadPhase };
 const reservationOf = ({ reservationId, startedAt, commit, scope, phase }: ReservedAs) => JSON.stringify([reservationId, startedAt, commit, scope, phase]);
 
@@ -175,13 +175,13 @@ async function reviewsSpent(reviews: string, phase: FinalReadPhase, spending: Sp
     if (!round) return undefined;
     const findings = await savedFindings(join(reviews, name));
     const leadsToFixes = findings === undefined ? spending === "unfinished spends" : unanswered(findings, "", await advisoryIn(join(reviews, name))).length > 0;
-    return { name, reservation: reservationOf(round), finished: findings !== undefined, spends: (round.phase ?? "review") === phase && leadsToFixes };
+    return { name, reservation: reservationOf(round), finished: findings !== undefined, labelled: await access(labelsPath(join(reviews, name))).then(() => true, () => false), spends: (round.phase ?? "review") === phase && leadsToFixes };
   }));
   const present = rounds.filter((round) => round !== undefined).sort((a, b) => a.name.localeCompare(b.name));
-  return { spent: present.filter(({ spends }) => spends).length, names: present.map(({ name }) => name), reservations: present.map(({ reservation }) => reservation), finished: present.filter(({ finished }) => finished).map(({ name }) => name) };
+  return { spent: present.filter(({ spends }) => spends).length, names: present.map(({ name }) => name), reservations: present.map(({ reservation }) => reservation), finished: present.filter(({ finished }) => finished).map(({ name }) => name), labelled: present.filter(({ labelled }) => labelled).map(({ name }) => name) };
 }
 
-const budgetState = ({ spent, names, reservations, finished, round, counted }: Spent) => JSON.stringify([spent, names, reservations, finished, round, counted]);
+const budgetState = ({ spent, names, reservations, finished, labelled, round, counted }: Spent) => JSON.stringify([spent, names, reservations, finished, labelled, round, counted]);
 
 async function reserveWeighed<T extends Spent>(reviews: string, lockBudget: LockBudget, snapshot: () => Promise<T>, permit: (weighed: T) => Promise<ArbiterVerdict | undefined>, reserveIt: (weighed: T, verdict: ArbiterVerdict | undefined) => Promise<Reserved>) {
   const before = await lockBudget(reviews, snapshot);

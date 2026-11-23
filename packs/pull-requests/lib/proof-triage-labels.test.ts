@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { armOf, triageFindings } from "./proof-triage.ts";
 import { checkout, cleanFixtures, fakeModel, graded, lockHolder, lookup, models, settings, verdict, type Checkout } from "./proof-testing.ts";
@@ -19,7 +20,7 @@ const findings = [
 ].join("\n");
 
 const labels = (...items: [number, string, string][]) => JSON.stringify({ labels: items.map(([finding, label, reason]) => ({ finding, label, reason })) });
-const adviseSecond = labels([1, "needs-answer", "names a trigger"], [2, "advisory", "names no trigger and no requirement"], [4, "advisory", "a matter of taste"]);
+const adviseSecond = labels([1, "needs-answer", "names a trigger"], [2, "advisory", "names no trigger and no requirement"]);
 
 async function treated(triage = "on", number = 42) {
   const pr = await checkout();
@@ -111,9 +112,9 @@ test("the triage fails closed: a failed call, an unreadable reply, an unknown la
   const replies: [string, string][] = [
     ["exit 3", "the triage call failed"],
     ["cat >/dev/null; echo 'advisory for all'", "the triage reply is not readable"],
-    [`cat >/dev/null; echo '${labels([1, "needs-answer", "trigger"], [2, "unsure", "cannot tell"], [4, "advisory", "taste"])}'`, "the triage reply is not readable"],
+    [`cat >/dev/null; echo '${labels([1, "needs-answer", "trigger"], [2, "unsure", "cannot tell"])}'`, "the triage reply is not readable"],
     [`cat >/dev/null; echo '${labels([1, "needs-answer", "trigger"])}'`, "the triage gave no label"],
-    [`cat >/dev/null; echo '${labels([1, "needs-answer", "trigger"], [2, "needs-answer", "a trigger"], [2, "advisory", "taste"], [4, "advisory", "taste"])}'`, "the triage gave conflicting labels"],
+    [`cat >/dev/null; echo '${labels([1, "needs-answer", "trigger"], [2, "needs-answer", "a trigger"], [2, "advisory", "taste"])}'`, "the triage gave conflicting labels"],
   ];
   for (const [command, reason] of replies) {
     const pr = await treated();
@@ -146,6 +147,8 @@ test("the triage cannot read a reply with anything besides one labels object, an
     JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, { finding: "2", label: "needs-answer", reason: "a trigger" }] }),
     JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, { finding: 2.5, label: "needs-answer", reason: "a trigger" }] }),
     adviseSecond.replace('{"finding":1,"label":"needs-answer"', '{"finding":1.00000000000000001,"label":"advisory"'),
+    labels([0, "needs-answer", "names a trigger"], [1, "advisory", "names no trigger and no requirement"]),
+    labels([1, "needs-answer", "names a trigger"], [2, "advisory", "names no trigger"], [4, "advisory", "a matter of taste"]),
     adviseSecond.replace('{"finding":1,"label":"needs-answer"', '{"finding":1e0,"label":"advisory"'),
     JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, { finding: 2, label: "needs-answer", reason: ["a trigger"] }] }),
     JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, null] }),
@@ -164,7 +167,7 @@ test("the triage cannot read a reply with anything besides one labels object, an
 
 test("the triage reads a reply whose reason repeats a value of its entry", async () => {
   const pr = await treated();
-  fakeModel(pr, "TRIAGE", labels([1, "needs-answer", "needs-answer"], [2, "advisory", "advisory"], [4, "advisory", "taste"]));
+  fakeModel(pr, "TRIAGE", labels([1, "needs-answer", "needs-answer"], [2, "advisory", "advisory"]));
 
   await pr.hedge("review", "--single");
 
@@ -270,7 +273,7 @@ test("a failed triage call prints none of the model's own output", async () => {
 
   const review = await pr.hedge("review", "--single");
 
-  expect(savedLabels(pr).cause).toContain("private-detail");
+  expect(savedLabels(pr).cause).toBe("the model call failed with exit 3; Hedge keeps none of its output");
   expect(review.output).not.toContain("private-detail");
   expect(review.output).toContain("- The triage labelled none of them; triage-labels.json in the round's folder says why.");
 });
@@ -282,7 +285,7 @@ test("a triage call that throws at once, before it returns a promise, labels eve
   expect(JSON.stringify(triaged)).not.toContain("private-detail");
 });
 
-test("a failed triage call keeps its cause with secrets redacted, in the cause and in each reason", async () => {
+test("a failed triage call keeps its exit status and none of its output, so no secret in it is saved", async () => {
   const pr = await treated();
   const token = ["ghp", "_", "A1b2C3d4".repeat(5)].join("");
   pr.env.HEDGE_PROOF_TRIAGE = `cat >/dev/null; echo 'provider said: token=${token}' >&2; exit 3`;
@@ -292,82 +295,32 @@ test("a failed triage call keeps its cause with secrets redacted, in the cause a
 
   const saved = readFileSync(join(reviewDirectory(pr), "triage-labels.json"), "utf8");
   expect(saved).not.toContain(token);
-  expect(savedLabels(pr)).toMatchObject({ ok: false, cause: expect.stringContaining("token=[redacted GitHub token]"), labels: [{ finding: 1, reason: expect.stringContaining("token=[redacted GitHub token]") }, { finding: 2 }, { finding: 4 }] });
+  expect(saved).not.toContain("provider said");
+  expect(savedLabels(pr)).toMatchObject({ ok: false, cause: "the model call failed with exit 3; Hedge keeps none of its output", labels: [{ finding: 1, reason: "the triage call failed: the model call failed with exit 3; Hedge keeps none of its output" }, { finding: 2 }, { finding: 4 }] });
 });
 
-test("a single read stopped after its findings are saved and before its labels labels them when it runs again", async () => {
+test("a round that weighs the budget while a triage saves the labels of the round before backs out and asks to weigh again", async () => {
   const pr = await treated();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": "on", "pull-requests.freeReviews": 1, "pull-requests.reviewCeiling": 20 });
   fakeModel(pr, "TRIAGE", adviseSecond);
   await pr.hedge("review", "--single");
-  rmSync(join(reviewDirectory(pr), "triage-labels.json"));
-
-  const again = await pr.hedge("review", "--single");
-
-  expect(JSON.parse(again.output.split("\n")[0]!)).toMatchObject({ id: "1" });
-  expect(again.output).toContain("- Advisory, needs no answer, do not fix it in this pull request: finding 2 (major)");
-  expect(savedLabels(pr)).toMatchObject({ ok: true, labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "advisory" }, { finding: 4 }] });
-  expect(existsSync(reviewDirectory(pr, "2"))).toBe(false);
-});
-
-test("a final read stopped before its labels labels them when it runs again", async () => {
-  const pr = await treated();
-  fakeModel(pr, "TRIAGE", adviseSecond);
-  await pr.hedge("review", "--single");
+  const labelsFile = join(reviewDirectory(pr), "triage-labels.json");
+  const triaged = readFileSync(labelsFile, "utf8");
+  rmSync(labelsFile);
+  await respond(pr, "1. fixed in abc1234: greets\n2. fixed in abc1234: says more\n4. rejected: fine\n6. fixed in abc1234: test\n");
   const base = JSON.parse(readFileSync(join(reviewDirectory(pr), "round.json"), "utf8")).commit;
   await pr.commit("feature.ts", "export const greet = (name: string) => name.trim();\n");
-  await pr.hedge("review", "--scope", "final", "--base", base);
-  rmSync(join(reviewDirectory(pr, "final-1"), "triage-labels.json"));
+  const started = join(pr.home, "started");
+  const go = join(pr.home, "go");
+  Bun.spawnSync(["mkfifo", started, go]);
+  pr.env.HEDGE_REVIEW_ARBITER = `cat >/dev/null; echo > "${started}"; read line < "${go}"; echo CONTINUE`;
 
-  const again = await pr.hedge("review", "--scope", "final", "--base", base);
+  const slow = pr.hedge("review-start", "--scope", "fixes", "--base", base);
+  await readFile(started, "utf8");
+  writeFileSync(labelsFile, triaged);
+  await writeFile(go, "go\n");
 
-  expect(JSON.parse(again.output.split("\n")[0]!)).toMatchObject({ id: "final-1" });
-  expect(savedLabels(pr, "final-1")).toMatchObject({ ok: true, labels: [{ finding: 1 }, { finding: 2, label: "advisory" }, { finding: 4 }] });
-});
-
-test("a review of a new HEAD leaves an older read without labels alone and reads the new HEAD", async () => {
-  const pr = await treated();
-  fakeModel(pr, "TRIAGE", adviseSecond);
-  await pr.hedge("review", "--single");
-  rmSync(join(reviewDirectory(pr), "triage-labels.json"));
-  const base = JSON.parse(readFileSync(join(reviewDirectory(pr), "round.json"), "utf8")).commit;
-  await pr.commit("feature.ts", "export const greet = (name: string) => name.trim();\n");
-
-  await expect(pr.hedge("review", "--single")).rejects.toThrow("Round 2 needs --scope fixes");
-  const next = await pr.hedge("review", "--scope", "fixes", "--base", base);
-
-  expect(JSON.parse(next.output.split("\n")[0]!)).toMatchObject({ id: "2" });
-  expect(existsSync(join(reviewDirectory(pr), "triage-labels.json"))).toBe(false);
-});
-
-test("a review that asks for another read than the stopped one at its HEAD runs as today and asks no triage model", async () => {
-  const pr = await treated();
-  const triage = fakeModel(pr, "TRIAGE", adviseSecond);
-  await pr.hedge("review", "--single");
-  rmSync(join(reviewDirectory(pr), "triage-labels.json"));
-  const base = JSON.parse(readFileSync(join(reviewDirectory(pr), "round.json"), "utf8")).commit;
-
-  await expect(pr.hedge("review", "--scope", "final", "--base", base)).rejects.toThrow("HEAD is already reviewed");
-  expect(triage.prompts()).toHaveLength(1);
-});
-
-test("a review at a HEAD read before runs as today when its read needs no labels: triage off, labels saved, a panel left to its wait, or a round the author recorded", async () => {
-  const off = await treated("off");
-  await off.hedge("review", "--single");
-  const labelled = await treated();
-  fakeModel(labelled, "TRIAGE", adviseSecond);
-  await labelled.hedge("review", "--single");
-  const panel = await treated();
-  const triage = fakeModel(panel, "TRIAGE", adviseSecond);
-  await panelRound(panel);
-
-  const authored = await treated();
-  const authorTriage = fakeModel(authored, "TRIAGE", adviseSecond);
-  await authored.hedge("review-start");
-  writeFileSync(join(authored.repository, "authored.md"), findings);
-  await authored.hedge("review-finish", "--round", "1", "--reviewer", "gpt-6.2-sol", "authored.md");
-
-  for (const pr of [off, labelled, panel, authored]) await expect(pr.hedge("review", "--single")).rejects.toThrow("Round 2 needs --scope fixes");
-  expect([...triage.prompts(), ...authorTriage.prompts()]).toEqual([]);
+  await expect(slow).rejects.toThrow("The reviews changed while this one weighed the budget");
 });
 
 test("a triage call that throws before the model answers labels every blocker and major finding needs-answer, and keeps none of the error's text", async () => {
@@ -463,14 +416,16 @@ test("hedge proof triage labels a findings file against a diff and prints the la
 
 const claudeReply = JSON.stringify({ type: "result", is_error: false, result: adviseSecond, usage: { input_tokens: 12, output_tokens: 7 }, total_cost_usd: 0.25 });
 
-test("the triage asks the lookup row's model with no tools", async () => {
+test("the triage asks the lookup row's model with exactly the arguments of a call with no tools, settings, servers or session, and saves its labels", async () => {
   const pr = await treated();
   const claude = argvModel(pr, "claude", claudeReply);
 
   await pr.hedge("review", "--single");
 
-  expect(claude.argv()).toContain("[--model]\n[lookup-model]\n");
-  expect(claude.argv()).toContain("[--tools]\n[]\n");
+  const argv = claude.argv().split("\n").filter(Boolean).slice(1);
+  const options = argv[0] === "[--settings]" ? argv.slice(2) : argv;
+  expect(options).toEqual(["-p", "--model", "lookup-model", "--effort", "medium", "--setting-sources", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--disable-slash-commands", "--no-session-persistence", "--output-format", "json", "--tools", "", "--permission-mode", "dontAsk"].map((arg) => `[${arg}]`));
+  expect(savedLabels(pr)).toMatchObject({ ok: true, model: "lookup-model", labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "advisory" }, { finding: 4, label: "needs-answer" }] });
 });
 
 test("the triage runs in Hedge's state in the home folder, outside the checkout", async () => {
