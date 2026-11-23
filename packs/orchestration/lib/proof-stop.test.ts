@@ -206,6 +206,23 @@ describe("the Stop proof check blocks a lane that owns an open PR", () => {
     expect(await check([thread(), fork])).toBeDefined();
   });
 
+  test("a conductor is not blocked for a PR owned by an open subagent in a separate worktree, while still blocked for its own PRs", async () => {
+    const { head, git, commit, push, thread, check } = await lane();
+    await git("checkout", "-q", "-b", "own");
+    const ownHead = await commit("own\n");
+    await push("own");
+    const subWorktree = temp.make("sub-worktree-");
+    const conductor = thread({ id: "mcp:lane", pullRequests: [pr(7, "feat", { watch: { headSha: head, passed: true } })] });
+    const sub = thread({ id: "mcp:sub", worktreePath: subWorktree, lineage: { parentThreadId: "mcp:lane", rootThreadId: "mcp:lane", relationshipToParent: "subagent" }, pullRequests: [pr(7, "feat")] });
+    expect(await check([conductor, sub])).toBeUndefined();
+    const withOwn = thread({ id: "mcp:lane", pullRequests: [pr(7, "feat"), pr(8, "own")] });
+    const reason = await reasonOf(check([withOwn, sub]));
+    expect(reason).toContain(`${repository}#8 has no gate run at its pushed head ${ownHead.slice(0, 7)}`);
+    expect(reason).not.toContain("#7");
+    const closedSub = { ...sub, archivedAt: "2026-11-20T00:00:00Z" };
+    expect(await reasonOf(check([conductor, closedSub]))).toContain(`${repository}#7`);
+  });
+
   test("a fork owns the PRs of its own subagents, and the thread it forked from does not", async () => {
     const { thread, check } = await lane();
     const threads = [

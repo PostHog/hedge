@@ -1,6 +1,6 @@
 import { realpath } from "node:fs/promises";
 import { matchThread, type PullRequestWatch, type ShellThread } from "../../base/lib/t3/index.ts";
-import { ownedPullRequests, subagentParent } from "../../pull-requests/lib/pr-owners.ts";
+import { linkedPullRequests, ownedPullRequests, subagentParent } from "../../pull-requests/lib/pr-owners.ts";
 import { ciRunningCode, lastGateRun } from "../../pull-requests/lib/proof.ts";
 import { needsHuman } from "./lanes.ts";
 import { personName } from "./prose-question.ts";
@@ -68,11 +68,40 @@ const awaitsCi = ({ watch, head }: Layer) => Boolean(watch)
 const trackedChanges = async (git: GitIn) => Boolean((await git(["status", "--porcelain", "--untracked-files=no"])).stdout);
 const isAncestor = async (git: GitIn, commit: string, of: string) => (await git(["merge-base", "--is-ancestor", commit, of], [0, 1])).code === 0;
 
+const normalizeUrl = (url: string) => url.toLowerCase().replace(/\/+$/, "");
+
+async function delegatedWorktreePullRequests(threads: ShellThread[], ownerId: string, git: GitIn): Promise<Set<string>> {
+  const candidates: ShellThread[] = [];
+  const collect = (parentId: string, depth: number) => {
+    if (depth >= maxChildDepth) return;
+    for (const child of threads) {
+      if (subagentParent(child) !== parentId || child.settledAt || child.archivedAt || child.deletedAt) continue;
+      if (child.worktreePath) candidates.push(child);
+      collect(child.id, depth + 1);
+    }
+  };
+  collect(ownerId, 0);
+  if (!candidates.length) return new Set();
+  const top = (await git(["rev-parse", "--show-toplevel"])).stdout;
+  const sameCheckout = await realpath(top).catch(() => top);
+  const delegated = new Set<string>();
+  for (const child of candidates) {
+    const childPath = await realpath(child.worktreePath!).catch(() => child.worktreePath!);
+    if (childPath === sameCheckout) continue;
+    for (const pr of linkedPullRequests(child)) delegated.add(normalizeUrl(pr.url));
+  }
+  return delegated;
+}
+
 async function layersOf(threads: ShellThread[], threadId: string, git: GitIn): Promise<Layer[]> {
   const origin = /github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?\/?$/i.exec((await git(["config", "--get", "remote.origin.url"], [0, 1])).stdout)?.[1]?.toLowerCase();
   if (!origin) return [];
+  const owned = ownedPullRequests(threads, threadId);
+  if (!owned.length) return [];
+  const delegated = await delegatedWorktreePullRequests(threads, threadId, git);
   const layers: Layer[] = [];
-  for (const pr of ownedPullRequests(threads, threadId)) {
+  for (const pr of owned) {
+    if (delegated.has(normalizeUrl(pr.url))) continue;
     const [, repository, number] = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/i.exec(pr.url) ?? [];
     const branch = pr.snapshot?.headBranch;
     if (!repository || !number || !branch || repository.toLowerCase() !== origin) continue;

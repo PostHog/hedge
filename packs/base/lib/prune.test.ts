@@ -90,7 +90,7 @@ async function repository(): Promise<{ base: string; repo: string; root: string 
 }
 
 type StateThread = {
-  id?: string; createdAt?: string; archivedAt?: string; deletedAt?: string; worktreePath: string; settledAt?: string;
+  id?: string; createdAt?: string; archivedAt?: string; deletedAt?: string; worktreePath?: string | null; settledAt?: string;
   lineage?: { parentThreadId: string; relationshipToParent: string }; pullRequests?: object[]; running?: boolean; asking?: boolean;
 };
 type Schedule = { threadId: string; enabled: boolean; nextRunAt: string | null };
@@ -116,7 +116,7 @@ function t3State(path: string, threads: StateThread[], schedules: Schedule[] = [
   const db = new Database(path);
   for (const table of realSchema) db.run(table);
   for (const thread of threads) {
-    const id = thread.id ?? thread.worktreePath;
+    const id = thread.id ?? thread.worktreePath ?? crypto.randomUUID();
     const created = thread.createdAt ?? "2026-09-20T00:00:00Z";
     db.run(`insert into orchestration_v2_projection_threads (thread_id, project_id, title, default_provider, runtime_mode, interaction_mode, created_at, updated_at, archived_at, deleted_at, payload_json)
       values (?, 'project', 'title', 'claude', 'full-access', 'default', ?, ?, ?, ?, ?)`, [id, created, created, thread.archivedAt ?? null, thread.deletedAt ?? null, JSON.stringify(thread)]);
@@ -284,6 +284,42 @@ onLinux("a prune pass keeps the landed worktree of a subagent thread while a sch
 
   expect(verdicts.find((verdict) => verdict.path === woken)).toMatchObject({ remove: false, reason: "its T3 thread has a scheduled run at 2026-11-16T08:15:00.000Z" });
   expect(await readdir(join(root, "repo"))).toEqual(["woken"]);
+});
+
+onLinux("a prune pass keeps a subagent worktree while its open parent watches a PR it links, even without a parent worktree, and removes it once the watch ends", async () => {
+  const { base, root, paths: [watched, dismissed, endedParent, closedParent] } = await landedWorktrees("watched", "dismissed", "ended-parent", "closed-parent");
+  const linked = (number: number, source?: string) => ({ host: "github.com", repository: "acme/app", number, ...(source ? { source } : {}) });
+  const sub = (parentThreadId: string) => ({ parentThreadId, relationshipToParent: "subagent" });
+  const statePath = t3State(join(base, "statev2.sqlite"), [
+    { id: "conductor", worktreePath: null, pullRequests: [watching(42), watching(43)] },
+    { id: "ended-conductor", worktreePath: null, pullRequests: [ended(44)] },
+    { id: "archived-conductor", worktreePath: null, archivedAt: settledAt, pullRequests: [watching(45)] },
+    { id: "watched", worktreePath: watched, lineage: sub("conductor"), pullRequests: [linked(42)] },
+    { id: "dismissed", worktreePath: dismissed, lineage: sub("conductor"), pullRequests: [linked(43, "stack-dismissed")] },
+    { id: "ended-parent", worktreePath: endedParent, lineage: sub("ended-conductor"), pullRequests: [linked(44)] },
+    { id: "closed-parent", worktreePath: closedParent, lineage: sub("archived-conductor"), pullRequests: [linked(45)] },
+  ]);
+
+  const verdicts = pass(base, root, statePath);
+
+  expect(verdicts.find((verdict) => verdict.path === watched)).toMatchObject({ remove: false, reason: "its T3 thread watches acme/app#42 via its parent" });
+  expect(await readdir(join(root, "repo"))).toEqual(["watched"]);
+});
+
+onLinux("under disk pressure, a subagent worktree whose PR its parent watches is evicted after plain open worktrees", async () => {
+  const { base, root, paths: [subWatched, open] } = await landedWorktrees("sub-watched", "open");
+  const later = Date.now() + 48 * 3600_000;
+  recordSightings(join(base, "sightings.json"), [open], later - 2 * 3600_000);
+  const lines: string[] = [];
+  const statePath = t3State(join(base, "statev2.sqlite"), [
+    { id: "conductor", worktreePath: null, pullRequests: [watching(9)] },
+    { id: "sub-watched", worktreePath: subWatched, lineage: { parentThreadId: "conductor", relationshipToParent: "subagent" }, pullRequests: [{ host: "github.com", repository: "acme/app", number: 9 }] },
+    { id: "open", worktreePath: open },
+  ]);
+
+  pass(base, root, statePath, pressured(later, lines));
+
+  expect(evicted(lines)).toEqual([open, subWatched]);
 });
 
 onLinux("a prune pass reads the T3 state again for each worktree, so a run scheduled during the pass keeps its worktree", async () => {

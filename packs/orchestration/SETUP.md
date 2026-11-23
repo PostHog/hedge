@@ -3,7 +3,8 @@
 Read this when the person picks the Orchestration pack.
 
 **Maps** and **side threads** work with defaults. A map is one issue that
-lists tickets; a conductor thread starts one worker thread per ticket. Maps
+lists tickets; a conductor thread starts one subthread per ticket under its
+lineage, and a sidebar thread only for live grilling and prototypes. Maps
 live in the issues of their profile repo unless they name another
 repo with `--set orchestration.tracker=<owner/name>`.
 
@@ -103,7 +104,8 @@ one step still owed, with the command for that PR:
 
 It checks each open PR the thread owns whose repository is the `origin` of the
 thread's checkout. A subagent thread owns nothing while the thread it belongs
-to is open. A fork owns its own PRs and those of its subagents. Each run of
+to is open, and a conductor is not blocked for PRs linked by an open subagent
+in its own separate worktree. A fork owns its own PRs and those of its shared-checkout subagents. Each run of
 `hedge proof gate` records its exit code and first failure line for the commit
 it judges, as its own numbered file under
 `~/.local/state/hedge/proof/<owner>/<name>/<pr>/gate-record/<commit>/`, with

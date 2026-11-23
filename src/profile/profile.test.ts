@@ -55,17 +55,22 @@ describe("profile", () => {
 });
 
 describe("a source pinned by an older engine default", () => {
-  const retired = { name: "agent-skills", repo: "Silthus/agent-skills", ref: "997eb88e03cb322941f387ab577207335d77c414" };
+  const retired = [
+    { name: "agent-skills", repo: "Silthus/agent-skills", ref: "997eb88e03cb322941f387ab577207335d77c414" },
+    { name: "agent-skills", repo: "Silthus/agent-skills", ref: "6595e9ffecd03afdede25947d8d09361026cda92" },
+  ];
   const current = defaultSources.find((source) => source.name === "agent-skills")!;
 
   test("follows the current default pin", async () => {
-    const dir = await profileRepo({ ...profile, sources: [retired] });
-    expect((await loadProfile(dir)).sources).toEqual([current]);
+    for (const source of retired) {
+      const dir = await profileRepo({ ...profile, sources: [source] });
+      expect((await loadProfile(dir)).sources).toEqual([current]);
+    }
   });
 
   test("keeps a pin the person chose, and a source of the same name from another repo", async () => {
-    const chosen = { ...retired, ref: "main" };
-    const fork = { ...retired, repo: "someone/agent-skills" };
+    const chosen = { ...retired[0]!, ref: "main" };
+    const fork = { ...retired[0]!, repo: "someone/agent-skills" };
     expect((await loadProfile(await profileRepo({ ...profile, sources: [chosen] }))).sources).toEqual([chosen]);
     expect((await loadProfile(await profileRepo({ ...profile, sources: [fork] }))).sources).toEqual([fork]);
   });

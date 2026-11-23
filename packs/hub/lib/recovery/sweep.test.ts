@@ -99,6 +99,25 @@ describe("the limit sweep", () => {
     expect(delivered).toEqual([{ threadId: "f", text: "Continue where you left off.", continuesRunId: "run-f" }]);
   });
 
+  test("resumes a T3 delegated subthread whose owning ancestor is open, even when that ancestor is snoozed, and skips provider-native or orphaned subagents", async () => {
+    const conductor = limitedThread("conductor", { status: "completed", latestRunId: "run-done", snoozedUntil: "2026-11-11T08:00:00.000Z" });
+    const settledParent = limitedThread("settled-parent", { status: "completed", settledAt: "2026-11-10T19:30:00.000Z" });
+    const lane = limitedThread("lane", { creationSource: "mcp", lineage: { parentThreadId: "conductor", rootThreadId: "conductor", relationshipToParent: "subagent" } });
+    const nested = limitedThread("nested", {
+      creationSource: "mcp", lastErrorClass: "provider_error", lastError: "api_error_503 Service unavailable",
+      lineage: { parentThreadId: "lane", rootThreadId: "conductor", relationshipToParent: "subagent" },
+    });
+    const providerChild = limitedThread("provider-child", { creationSource: "provider", lineage: { parentThreadId: "conductor", rootThreadId: "conductor", relationshipToParent: "subagent" } });
+    const settledChild = limitedThread("settled-child", { creationSource: "mcp", lineage: { parentThreadId: "settled-parent", rootThreadId: "settled-parent", relationshipToParent: "subagent" } });
+    const orphanChild = limitedThread("orphan-child", { creationSource: "mcp", lineage: { parentThreadId: "archived-parent", rootThreadId: "archived-parent", relationshipToParent: "subagent" } });
+    const { codes, delivered } = await sweep([conductor, settledParent, lane, nested, providerChild, settledChild, orphanChild], { "claude-test-1": 200 });
+    expect(codes).toEqual([0]);
+    expect(delivered).toEqual([
+      { threadId: "lane", text: "Continue where you left off.", continuesRunId: "run-lane" },
+      { threadId: "nested", text: "Continue where you left off." },
+    ]);
+  });
+
   test("probes no provider while no thread waits on a limit", async () => {
     const { lines, proxy } = await sweep([limitedThread("g", { status: "completed" })], { "claude-test-1": 200 });
     expect(proxy.calls).toEqual([]);
