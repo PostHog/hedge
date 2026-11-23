@@ -285,31 +285,40 @@ test("on a draft, a check from another app than the pinned one neither passes no
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: CI / test");
 });
 
-test("on a draft, a pinned check listed as posted only once ready reads as withheld when its workflow's checks from any app finished and passed, and a ready PR still needs it", async () => {
+async function listedDraft(listing = "example/product=Backend / Test results") {
   const { pr } = await reviewed();
-  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.draftSkippedChecks": "example/product=Backend / Test results" });
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.draftSkippedChecks": listing });
   pr.pullRequestState({ draft: true });
-  pr.required("main", [{ context: "Backend / Test results", integration_id: 7 }]);
+  pr.required("main", [{ context: "Backend / Test results", integration_id: 7 }, { context: "Backend / Gate" }]);
+  return pr;
+}
 
+test("on a draft, a pinned check listed as posted only once ready reads as withheld when its workflow's checks from any app finished and passed, and a ready PR still needs it", async () => {
+  const pr = await listedDraft();
   pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }, { name: "Backend / Unit", bucket: "pending", app: 9 }]);
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results");
 
   pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }, { name: "Backend / Unit", bucket: "pass", app: 9 }]);
   const withheld = await pr.hedge("gate");
   expect(withheld.code).toBe(0);
-  expect(ciLine(withheld.output)).toBe("ci: green, 0 required check(s) pass; withheld from drafts, required once ready: Backend / Test results (its workflow finished without posting it)");
+  expect(ciLine(withheld.output)).toBe("ci: green, 1 required check(s) pass; withheld from drafts, required once ready: Backend / Test results (its workflow finished without posting it)");
 
   pr.pullRequestState({ draft: false });
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results");
 });
 
-async function listedDraft() {
-  const { pr } = await reviewed();
-  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.draftSkippedChecks": "example/product=Backend / Test results" });
-  pr.pullRequestState({ draft: true });
+test("on a draft, a pinned check posted only once ready still waits while another required check of its workflow has not reported", async () => {
+  const pr = await listedDraft();
+  pr.ci([{ name: "Backend / Setup", bucket: "pass", app: 9 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results; withheld from drafts, required once ready: Backend / Gate (its workflow finished without posting it)");
+});
+
+test("on a draft, a pinned check posted only once ready waits when its workflow has no other required check", async () => {
+  const pr = await listedDraft();
   pr.required("main", [{ context: "Backend / Test results", integration_id: 7 }]);
-  return pr;
-}
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }, { name: "Backend / Unit", bucket: "pass", app: 9 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results");
+});
 
 test("on a draft, a pinned check posted only once ready still waits when a check of its workflow failed", async () => {
   const pr = await listedDraft();
@@ -331,10 +340,7 @@ test("on a draft, a pinned check posted only once ready still waits when another
 });
 
 test("on a draft, a pinned check is not withheld on another app's checks for another repository's listing", async () => {
-  const { pr } = await reviewed();
-  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.draftSkippedChecks": "example/other=Backend / Test results" });
-  pr.pullRequestState({ draft: true });
-  pr.required("main", [{ context: "Backend / Test results", integration_id: 7 }]);
+  const pr = await listedDraft("example/other=Backend / Test results");
   pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }]);
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results");
 });

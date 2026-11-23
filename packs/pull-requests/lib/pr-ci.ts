@@ -166,9 +166,11 @@ function listOf(names: string[], limit = 8) {
 
 const reportedBy = (check: RequiredCheck, entry: Entry) => check.appId === undefined || entry.appId === check.appId;
 
-function withheldFromDraft(check: RequiredCheck, entries: Entry[]) {
+function withheldFromDraft(check: RequiredCheck, entries: Entry[], required: RequiredCheck[]) {
   const workflow = workflowOf(check.context);
   if (!workflow || entries.some((entry) => entry.name === check.context)) return false;
+  const partners = required.filter((other) => other.context !== check.context && other.context.startsWith(workflow));
+  if (check.postedOnceReady && !(partners.length > 0 && partners.every((other) => entries.some((entry) => entry.name === other.context)))) return false;
   const siblings = entries.filter((entry) => entry.name.startsWith(workflow) && (check.postedOnceReady || reportedBy(check, entry)));
   return siblings.length > 0 && siblings.every((entry) => entry.outcome === "pass") && (check.appId === undefined || siblings.some((entry) => !entry.status));
 }
@@ -197,7 +199,7 @@ function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boo
     const own = named.filter((entry) => reportedBy(check, entry));
     const matches = own.some((entry) => entry.status) ? [...new Set([...own, ...named.filter((entry) => !entry.status)])] : own;
     matches.forEach((entry) => counted.add(entry));
-    if (!matches.length) { (draft && withheldFromDraft(check, entries) ? withheld : missing).push(check.context); continue; }
+    if (!matches.length) { (draft && withheldFromDraft(check, entries, required) ? withheld : missing).push(check.context); continue; }
     const worst = matches.reduce((a, b) => rank[b.outcome] > rank[a.outcome] ? b : a).outcome;
     if (worst === "fail") failing.push(check.context);
     else if (worst === "pending") pending.push(check.context);

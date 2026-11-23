@@ -111,7 +111,7 @@
     },
     {
       "key": "pull-requests.draftSkippedChecks",
-      "question": "Which required checks does a repository's CI post only once a pull request is ready, as owner/name=check pairs separated by commas? On a draft, the gate then reads such a check as withheld once every check of its workflow, from any app, has finished and passed. List a check only when the job that posts it also reports a required check.",
+      "question": "Which required checks does a repository's CI post only once a pull request is ready, as owner/name=check pairs separated by commas? On a draft, the gate then reads such a check as withheld once every check of its workflow, from any app, has finished and passed, and every other required check of that workflow, at least one, has reported.",
       "type": "string",
       "optional": true,
       "ask": "never"
