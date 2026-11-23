@@ -680,10 +680,10 @@ async function printSavedReview({ round, id, directory }: SingleRound, context: 
 }
 
 const triageLimit = 180_000;
-const askTriage = ({ env }: CommandContext) => (prompt: string) => askModel("triage", modelFor("lookup", env), { prompt, cwd: tmpdir() }, env, triageLimit);
+const askTriage = ({ env, cwd }: CommandContext) => (prompt: string) => askModel("triage", modelFor("lookup", env), { prompt, cwd }, env, triageLimit);
 
 async function printLabels(directory: string, context: CommandContext) {
-  const triaged = await labelRound(directory, askTriage(context));
+  const triaged = await labelRound(directory, triageSetting(context.env), askTriage(context));
   for (const line of triaged ? labelLines(triaged) : []) context.print(line);
 }
 
@@ -990,7 +990,10 @@ async function waitForReview(options: Map<string, string>, head: ProofIdentity, 
   const code = await waitForPanel(directory, panelIO(context), restart, waitPolls);
   for (const line of await roundLines(directory, context)) context.print(line);
   if (code === 0) context.print(await readFile(join(directory, "findings.md"), "utf8"));
-  if (code === 0) await printLabels(directory, context);
+  if (code === 0) await roundStep(directory, context, () => printLabels(directory, context)).catch((error: unknown) => {
+    if (!(error instanceof RoundBusy)) throw error;
+    context.print(`Another hedge command holds review round ${basename(directory)}, so the triage labels are not printed. Run hedge proof review --wait again to see them.`);
+  });
   if (code === 1) context.print("A lens failed, and the round stays unfinished. Run the same hedge proof review --lens command to rerun the failed lenses.");
   if (code === 2) context.print("Lenses still run. Run hedge proof review --wait again.");
   if (code === quotaExitCode) context.print("A lens stopped on spent quota, and the round stays unfinished. Run the same hedge proof review --lens command once the quota is back, or move the lens to the family that is up with :same or :other.");

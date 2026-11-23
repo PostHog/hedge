@@ -128,8 +128,12 @@ function labelsObject(text: string) {
 function parsedLabels(text: string) {
   const labels = labelsObject(text)?.labels;
   if (!Array.isArray(labels)) return undefined;
-  return new Map(labels.filter((item): item is { finding: number; label: string; reason?: unknown } => typeof item?.finding === "number" && typeof item?.label === "string")
-    .map((item) => [item.finding, { label: item.label, reason: typeof item.reason === "string" ? oneLine(item.reason) : "" }]));
+  const given = new Map<number, { label: string; reason: string }>();
+  for (const item of labels.filter((item): item is { finding: number; label: string; reason?: unknown } => typeof item?.finding === "number" && typeof item?.label === "string")) {
+    const earlier = given.get(item.finding);
+    given.set(item.finding, earlier && earlier.label !== item.label ? { label: "needs-answer", reason: "the triage gave conflicting labels" } : earlier ?? { label: item.label, reason: typeof item.reason === "string" ? oneLine(item.reason) : "" });
+  }
+  return given;
 }
 
 export async function triageFindings(findings: string, diff: string, ask: AskTriage): Promise<Triaged> {
@@ -139,7 +143,7 @@ export async function triageFindings(findings: string, diff: string, ask: AskTri
   const unrated = (candidate: LabelCandidate) => candidate.severity === "none" ? label(candidate, "needs-answer", "the finding states no severity") : undefined;
   if (!rated.length) return { ok: true, durationMs: 0, labels: candidates.map((candidate) => unrated(candidate)!) };
   const started = performance.now();
-  const answer = await ask(triagePrompt(rated, diff));
+  const answer = await ask(triagePrompt(rated, diff)).catch((error: Error): ModelAnswer => ({ ok: false, cause: error.message, model: "" }));
   const durationMs = Math.round(performance.now() - started);
   const replied = answer.ok ? parsedLabels(answer.text) : undefined;
   const failed = !answer.ok ? `the triage call failed: ${oneLine(answer.cause)}` : !replied ? "the triage reply is not readable" : undefined;
@@ -150,14 +154,14 @@ export async function triageFindings(findings: string, diff: string, ask: AskTri
       : label(candidate, "needs-answer", "the triage gave no label"));
   });
   const cause = !answer.ok ? oneLine(answer.cause) : !replied ? `the triage reply is not readable: ${oneLine(answer.text)}` : undefined;
-  return { model: answer.model, ok: answer.ok && replied !== undefined, ...cause ? { cause } : {}, durationMs, ...answer.ok && answer.usage ? { usage: answer.usage } : {}, labels };
+  return { ...answer.model ? { model: answer.model } : {}, ok: answer.ok && replied !== undefined, ...cause ? { cause } : {}, durationMs, ...answer.ok && answer.usage ? { usage: answer.usage } : {}, labels };
 }
 
-export async function labelRound(directory: string, ask: AskTriage): Promise<Triaged | undefined> {
+export async function labelRound(directory: string, setting: TriageSetting, ask: AskTriage): Promise<Triaged | undefined> {
   const { triage } = await readTriage(directory) as { triage?: TriageMark };
   if (triage?.arm !== "treated" || triage.path === "excluded") return undefined;
   const saved = await readJson<Triaged | undefined>(labelsPath(directory), undefined).catch(() => undefined);
-  if (saved) return saved;
+  if (saved?.ok || setting === "off") return saved;
   const findings = await readFile(join(directory, "findings.md"), "utf8");
   const diff = await readFile(join(directory, "diff.patch"), "utf8").catch(() => "");
   const triaged = await triageFindings(findings, diff, ask);
