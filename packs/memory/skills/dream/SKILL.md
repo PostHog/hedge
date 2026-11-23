@@ -77,7 +77,7 @@ the person reviews change by change and merges.
    - it comes from two or more sessions, or
    - the person stated it as a rule for how they work everywhere ("always",
      "never", "from now on"), or
-   - a `stale-memory` finding shows a memory is wrong.
+   - a `stale-memory` or `memory-misled` finding shows a memory is wrong.
 
    A one-off finding is a decision for one PR, ticket, or task. It becomes
    memory only once it comes back in another session. An agent's own choice

@@ -165,12 +165,13 @@ export async function dreamCommand(args: string[], io: DreamIo): Promise<number>
   if (command === "publish") return publishWorktree(rest, io);
   const checkout = positional(rest) ?? memoryCheckout(io.home, io.env);
   if (command === "scorecard") {
+    const memory = memoryRootIn(checkout, settingsOf(io.env)["memory.subtree"]);
     const git = async (gitArgs: string[]) => {
-      const answer = await io.git(["-C", checkout, ...gitArgs]);
-      if (answer.code !== 0) throw new Error(`git ${gitArgs[0]} failed in ${checkout}: ${answer.stderr.trim()}`);
+      const answer = await io.git(["-C", memory, ...gitArgs]);
+      if (answer.code !== 0) throw new Error(`git ${gitArgs[0]} failed in ${memory}: ${answer.stderr.trim()}`);
       return answer.stdout;
     };
-    io.print(await scorecardText(state, checkout, git, io.now()));
+    io.print(await scorecardText(state, memory, git, io.now()));
     return 0;
   }
   const root = positional(rest) ? memoryRootIn(checkout, settingsOf(io.env)["memory.subtree"]) : checkout;

@@ -11,7 +11,7 @@ export type SessionRecord = {
   parts: Record<string, Hit[]>;
 };
 type Ledger = Record<string, SessionRecord>;
-export type Memory = { path: string; name: string; addedAt: string; topics: Set<string> };
+export type Memory = { path: string; name: string; aliases: Set<string>; addedAt?: string; firstCommitAt: string; topics: Set<string> };
 export type Git = (args: string[]) => Promise<string>;
 
 const mistakes = new Set(["repeated-failure", "correction", "missing-knowledge"]);
@@ -19,6 +19,10 @@ const keepWeeks = 26;
 const day = 86_400_000;
 const slug = (value: string) => basename(value.trim(), ".md").toLowerCase();
 const isMemory = (path: string) => path.endsWith(".md") && !isIndex(path) && path !== "README.md" && !notMemory.has(path.split("/")[0]!);
+
+const utc = (at: string) => new Date(at).toISOString();
+const existedAt = (memory: Memory, at: string) => !memory.addedAt || memory.addedAt < at;
+const pathsOf = (memory: Memory) => [memory.path, ...memory.aliases];
 
 const readLedger = (state: string): Ledger => existsSync(join(state, "ledger.json")) ? JSON.parse(readFileSync(join(state, "ledger.json"), "utf8")) : {};
 
@@ -61,33 +65,60 @@ export function recordRuns(state: string, now = Date.now()): number {
   return Object.keys(ledger).length;
 }
 
+type Change = { status: string; from: string; to: string };
+
+function memoryChanges(lines: string): Change[] {
+  const changes = lines.trim().split("\n").filter(Boolean).map((line) => {
+    const [status = "", from = "", to = from] = line.split("\t");
+    return { status: status.charAt(0), from, to };
+  }).filter((change) => isMemory(change.to));
+  const removed = changes.filter((change) => change.status === "D");
+  const moves = changes.filter((change) => change.status === "A").flatMap((added) => {
+    const gone = removed.find((change) => basename(change.from) === basename(added.to));
+    return gone ? [{ status: "R", from: gone.from, to: added.to }] : [];
+  });
+  const moved = new Set(moves.flatMap((move) => [move.from, move.to]));
+  return [...changes.filter((change) => !moved.has(change.to)), ...moves];
+}
+
+function topicTarget(subject: string, paths: string[]): string | undefined {
+  const named = slug(/^\w+:\s*(.+)$/.exec(subject)?.[1] ?? "");
+  return paths.find((path) => slug(path) === named) ?? (paths.length === 1 ? paths[0] : undefined);
+}
+
 export async function readMemories(checkout: string, git: Git): Promise<Memory[]> {
   const memories = new Map<string, Memory>();
-  const chunks = (await git(["log", "--relative", "--reverse", "--find-renames", "--name-status", "--format=%x1e%cI%x1f%B%x1f"])).split("\x1e").slice(1);
-  for (const chunk of chunks) {
-    const [date = "", body = "", changes = ""] = chunk.split("\x1f");
-    const topics = [...body.matchAll(/^Topics?:\s*(.+)$/gim)].flatMap((match) => match[1]!.split(/[,\s]+/)).map(slug).filter(Boolean);
-    for (const line of changes.trim().split("\n").filter(Boolean)) {
-      const [status = "", from = "", to] = line.split("\t");
-      if (!isMemory(to ?? from)) continue;
-      if (status.startsWith("D")) { memories.delete(from); continue; }
-      const path = status.startsWith("R") ? to! : from;
-      const memory = memories.get(from) ?? { path, name: slug(path), addedAt: date, topics: new Set<string>() };
-      if (status.startsWith("R")) memories.delete(from);
-      memory.path = path;
-      memory.name = slug(path);
+  const commits = (await git(["log", "--relative", "--reverse", "--find-renames", "--name-status", "--format=%x1e%cI%x1f%B%x1f", "--", "."])).split("\x1e").slice(1).map((chunk) => {
+    const [at = "", body = "", lines = ""] = chunk.split("\x1f");
+    return { date: utc(at), body, changes: memoryChanges(lines) };
+  });
+  for (const { date, body, changes } of commits) {
+    for (const change of changes) {
+      if (change.status === "D") { memories.delete(change.from); continue; }
+      const memory = memories.get(change.from) ?? { path: change.to, name: "", aliases: new Set<string>(), firstCommitAt: date, topics: new Set<string>() };
+      memories.delete(change.from);
+      if (change.from !== change.to) memory.aliases.add(change.from);
+      memory.path = change.to;
+      memory.name = slug(change.to);
       memory.topics.add(memory.name);
-      for (const topic of topics) memory.topics.add(topic);
-      memories.set(path, memory);
+      memories.set(memory.path, memory);
     }
+    const kept = changes.filter((change) => change.status !== "D").map((change) => change.to);
+    const target = memories.get(topicTarget(body.split("\n")[0] ?? "", kept) ?? "");
+    const topics = [...body.matchAll(/^Topics?:\s*(.+)$/gim)].flatMap((match) => match[1]!.split(/[,\s]+/)).map(slug).filter(Boolean);
+    for (const topic of topics.filter((topic) => !kept.some((path) => slug(path) === topic))) target?.topics.add(topic);
   }
-  const merged = (await git(["log", "--relative", "--first-parent", "-m", "--diff-filter=A", "--name-only", "--format=%x1e%cI"])).split("\x1e").slice(1);
+  const importedAt = commits[0]?.date ?? "";
+  const reachedMain = new Map<string, string>();
+  const merged = (await git(["log", "--relative", "--first-parent", "-m", "--diff-filter=A", "--name-only", "--format=%x1e%cI", "--", "."])).split("\x1e").slice(1);
   for (const chunk of merged) {
-    const [date = "", ...paths] = chunk.trim().split("\n");
-    for (const path of paths.filter(Boolean)) {
-      const memory = memories.get(path);
-      if (memory && memory.addedAt < date) memory.addedAt = date;
-    }
+    const [at = "", ...paths] = chunk.trim().split("\n");
+    for (const path of paths.filter(Boolean)) if (!reachedMain.has(path)) reachedMain.set(path, utc(at));
+  }
+  for (const memory of memories.values()) {
+    const mainDate = pathsOf(memory).flatMap((path) => reachedMain.get(path) ?? []).sort()[0] ?? "";
+    const added = mainDate > memory.firstCommitAt ? mainDate : memory.firstCommitAt;
+    memory.addedAt = added > importedAt ? added : undefined;
   }
   return [...memories.values()].filter((memory) => existsSync(join(checkout, memory.path)));
 }
@@ -131,9 +162,10 @@ export function scorecard(ledger: Ledger, memories: Memory[], usage: Record<stri
     ...record, key, week: weekOf(record.startedAt), hits: Object.values(record.parts).flat(),
   }));
   const reads = (session: Session) => new Set([...session.memoryReads, ...(session.memoryShown ?? [])].filter((path) => !isIndex(path)));
+  const readIt = (session: Session, memory: Memory) => pathsOf(memory).some((path) => reads(session).has(path));
   const repeats = (session: Session) => new Set(session.hits.filter((hit) => mistakes.has(hit.kind))
-    .flatMap(covering).filter((memory) => memory.addedAt < session.startedAt));
-  const misses = (session: Session) => [...repeats(session)].filter((memory) => !reads(session).has(memory.path));
+    .flatMap(covering).filter((memory) => existedAt(memory, session.startedAt)));
+  const misses = (session: Session) => [...repeats(session)].filter((memory) => !readIt(session, memory));
 
   const strata = new Map<string, Session[]>();
   for (const session of sessions.filter((item) => item.effort && item.taskType)) {
@@ -160,21 +192,20 @@ export function scorecard(ledger: Ledger, memories: Memory[], usage: Record<stri
   const weeks = [...new Set(sessions.map((session) => session.week))].filter((week) => week < thisWeek).sort().reverse().slice(0, 4);
   const weekly = weeks.map((week) => ({ week, ...measure(sessions.filter((session) => session.week === week)) }));
 
-  const ledgerStart = sessions.map((session) => session.startedAt).sort()[0] ?? "";
   const perMemory = memories.map((memory) => {
-    const before = sessions.filter((session) => session.startedAt < memory.addedAt);
-    const after = sessions.filter((session) => session.startedAt > memory.addedAt);
+    const before = sessions.filter((session) => !existedAt(memory, session.startedAt));
+    const after = sessions.filter((session) => existedAt(memory, session.startedAt));
     const hitBy = (session: Session) => session.hits.some((hit) => mistakes.has(hit.kind) && covering(hit).includes(memory));
     const recurring = after.filter(hitBy);
-    const opened = after.filter((session) => reads(session).has(memory.path));
+    const opened = after.filter((session) => readIt(session, memory));
     return {
       memory,
       hitsBefore: before.filter(hitBy).length, sessionsBefore: before.length,
       hitsAfter: recurring.length, sessionsAfter: after.length,
-      recurringWhileRead: recurring.filter((session) => reads(session).has(memory.path)).length,
-      opened: opened.length || ((usage[memory.path] ?? "") > memory.addedAt ? 1 : 0),
+      recurringWhileRead: recurring.filter((session) => readIt(session, memory)).length,
+      opened: opened.length || (pathsOf(memory).some((path) => (usage[path] ?? "") > (memory.addedAt ?? "")) ? 1 : 0),
       helped: sessions.flatMap((session) => session.hits).filter((hit) => hit.kind === "memory-helped" && covering(hit).includes(memory)).length,
-      ageDays: Math.floor((now - Date.parse(memory.addedAt)) / day),
+      ageDays: Math.floor((now - Date.parse(memory.addedAt ?? memory.firstCommitAt)) / day),
     };
   });
   const payoff = (item: typeof perMemory[number]) => item.helped
@@ -186,7 +217,7 @@ export function scorecard(ledger: Ledger, memories: Memory[], usage: Record<stri
         : !item.opened && !item.helped && item.ageDays >= 14 ? `not read in ${item.ageDays} days: prune it` : undefined;
   const worst = perMemory.filter((item) => item.ageDays >= 7 && verdict(item) && !best.includes(item))
     .sort((a, b) => b.recurringWhileRead - a.recurringWhileRead || b.hitsAfter - a.hitsAfter || b.ageDays - a.ageDays).slice(0, 3);
-  const compared = perMemory.filter((item) => item.sessionsBefore && item.sessionsAfter && item.memory.addedAt > ledgerStart);
+  const compared = perMemory.filter((item) => item.sessionsBefore && item.sessionsAfter);
   const beforeAfter = {
     memories: compared.filter((item) => item.hitsBefore || item.hitsAfter).length,
     before: rate(compared.reduce((sum, item) => sum + item.hitsBefore, 0), compared.reduce((sum, item) => sum + item.sessionsBefore, 0)) * 100,
