@@ -9,14 +9,31 @@ import { exitMaskRewrite, exitMaskRisk } from "./lib/exit-mask.ts";
 const temp = tempDirs();
 const stubs = tempDirs();
 let bin = "";
+let gitBin = "";
+let template = "";
+const stubCall = '#!/bin/sh\n[ "$1" = heavy ] && [ "$2" = -- ] && shift 2 && exec "$@"\necho "${0##*/} $*" >> "$STUB_CALLS.trace"\ncalls=$(($(cat "$STUB_CALLS" 2>/dev/null || echo 0) + 1))\necho "$calls" > "$STUB_CALLS"\n[ "$calls" = "$STUB_FAILS" ] && exit 3\n';
+const gitEnv = { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "Robin", GIT_AUTHOR_EMAIL: "robin@example.invalid", GIT_COMMITTER_NAME: "Robin", GIT_COMMITTER_EMAIL: "robin@example.invalid", GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z" };
 
 beforeAll(() => {
   bin = join(stubs.make("exit-mask-bin-"), "bin");
   mkdirSync(bin);
+  gitBin = join(stubs.make("exit-mask-git-bin-"), "bin");
+  mkdirSync(gitBin);
   for (const name of ["git", "gh", "hedge", "fleet"]) {
-    writeFileSync(join(bin, name), '#!/bin/sh\n[ "$1" = heavy ] && [ "$2" = -- ] && shift 2 && exec "$@"\necho "${0##*/} $*" >> "$STUB_CALLS.trace"\ncalls=$(($(cat "$STUB_CALLS" 2>/dev/null || echo 0) + 1))\necho "$calls" > "$STUB_CALLS"\n[ "$calls" = "$STUB_FAILS" ] && exit 3\nexit 0\n');
+    writeFileSync(join(bin, name), `${stubCall}exit 0\n`);
+    writeFileSync(join(gitBin, name), name === "git" ? `${stubCall}exec /usr/bin/git "$@"\n` : `${stubCall}exit 0\n`);
     chmodSync(join(bin, name), 0o755);
+    chmodSync(join(gitBin, name), 0o755);
   }
+  template = stubs.make("exit-mask-repo-");
+  const git = (...args: string[]) => expect(spawnSync("/usr/bin/git", args, { cwd: template, env: { PATH: "/usr/bin:/bin", HOME: template, ...gitEnv } }).status).toBe(0);
+  git("init", "-q", "--bare", "-b", "main", "remote.git");
+  git("init", "-q", "-b", "main", "work");
+  git("-C", "work", "commit", "-q", "--allow-empty", "-m", "first");
+  git("-C", "work", "remote", "add", "origin", "../remote.git");
+  git("-C", "work", "push", "-q", "-u", "origin", "main");
+  writeFileSync(join(template, "work/notes.txt"), "staged\n");
+  git("-C", "work", "add", "notes.txt");
 });
 afterEach(() => temp.cleanup());
 afterAll(() => stubs.cleanup());
@@ -35,6 +52,19 @@ function runFailing(command: string, failing: number, harness: Harness = "codex"
   const made = Number(spawnSync("cat", [calls], { encoding: "utf8" }).stdout || 0);
   const trace = spawnSync("cat", [`${calls}.trace`], { encoding: "utf8" }).stdout;
   return { seen: { status: run.status, output: `${run.stdout}${run.stderr}` }, made, trace, stdout: run.stdout, stderr: run.stderr };
+}
+
+function runInRepo(command: string, failing: number, harness: Harness) {
+  const root = temp.make("exit-mask-repo-run-");
+  expect(spawnSync("cp", ["-a", `${template}/.`, root]).status).toBe(0);
+  const calls = join(root, "calls");
+  const [flag, program] = harnesses[harness](command);
+  const env = { PATH: `${gitBin}:/usr/bin:/bin`, HOME: root, ...gitEnv, STUB_CALLS: calls, STUB_FAILS: String(failing), AGENT_COMMAND: command };
+  const run = spawnSync("bash", [flag, program], { cwd: join(root, "work"), env, encoding: "utf8" });
+  const made = Number(spawnSync("cat", [calls], { encoding: "utf8" }).stdout || 0);
+  const trace = spawnSync("cat", [`${calls}.trace`], { encoding: "utf8" }).stdout;
+  const remote = spawnSync("/usr/bin/git", ["-C", join(root, "remote.git"), "log", "--format=%s", "main"], { env: { PATH: "/usr/bin:/bin", ...gitEnv }, encoding: "utf8" }).stdout;
+  return { seen: { status: run.status, output: `${run.stdout}${run.stderr}`, remote }, made, trace, stdout: run.stdout, stderr: run.stderr };
 }
 
 function showsEveryFailureIn(command: string, harness: Harness) {
@@ -408,11 +438,12 @@ describe("the exit-status mask guard", () => {
     expect(exitMaskRewrite(command)).toBe(rewrite);
     expect(exitMaskRisk(rewrite, "Robin")).toBeUndefined();
     for (const harness of ["codex", "claude"] as const) {
-      const passing = runFailing(command, 0, harness);
-      expect(runFailing(rewrite, 0, harness)).toEqual(passing);
+      const passing = runInRepo(command, 0, harness);
+      expect(passing.seen.status).toBe(0);
+      expect(runInRepo(rewrite, 0, harness)).toEqual(passing);
       for (let call = 1; call <= passing.made; call++) {
-        const before = runFailing(command, call, harness);
-        const after = runFailing(rewrite, call, harness);
+        const before = runInRepo(command, call, harness);
+        const after = runInRepo(rewrite, call, harness);
         if (!guardedCall(before.trace.split("\n")[call - 1])) {
           expect(after).toEqual(before);
           continue;
