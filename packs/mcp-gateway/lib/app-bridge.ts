@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { backendArguments, describe, parseUpstream, slack, toolAllowed, type CodexApp } from "./apps.ts";
+import { markSignInLost, reAuthLine, signInLost } from "./sign-in-lost.ts";
 import { withUnicodeSkinTones } from "./skin-tones.ts";
 
 type Id = number | string;
@@ -29,6 +30,8 @@ let queue: Promise<unknown> = Promise.resolve();
 let catalog = new Map<string, Tool>();
 let thread: Promise<string> | undefined;
 
+const lost = async (text: string) => signInLost(text) && (await markSignInLost(home).catch(() => {}), true);
+const reAuth = reAuthLine([app]);
 const reply = (message: Record<string, unknown>) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 const tell = (message: Record<string, unknown>) => backend.stdin.write(`${JSON.stringify(message)}\n`);
 const stop = (error: Error, code = 1) => {
@@ -79,7 +82,7 @@ backend.on("exit", () => stop(new Error("The Codex app backend exited.")));
 async function discover() {
   const found = new Map<string, Tool>();
   for (const server of (await call("mcpServerStatus/list", { serverName: "codex_apps", limit: 100 })).data as Array<{ tools: Record<string, Tool>; toolsError?: unknown }>) {
-    if (server.toolsError) throw new Error(`The Codex app backend could not list the ${app.title} tools.`);
+    if (server.toolsError) throw new Error(`The Codex app backend could not list the ${app.title} tools: ${JSON.stringify(server.toolsError).slice(0, 500)}`);
     for (const tool of Object.values(server.tools)) {
       const name = tool.name.slice(app.prefix.length);
       if (!tool.name.startsWith(app.prefix) || !toolAllowed(app, name)) continue;
@@ -98,7 +101,8 @@ async function invoke(id: Id, params: { name: string; arguments?: Record<string,
   try {
     thread ??= call("thread/start", { cwd: "/app/data", ephemeral: true }).then((started) => started.thread.id as string, (error) => { thread = undefined; throw error; });
     const args = params.arguments ?? {};
-    const { structuredContent, ...result } = await call("mcpServer/tool/call", { threadId: await thread, server: "codex_apps", tool: `${app.prefix}${params.name}`, arguments: app.skinTones ? withUnicodeSkinTones(args) : args });
+    const { structuredContent, ...answered } = await call("mcpServer/tool/call", { threadId: await thread, server: "codex_apps", tool: `${app.prefix}${params.name}`, arguments: app.skinTones ? withUnicodeSkinTones(args) : args });
+    const result = answered.isError && (await lost(JSON.stringify(answered.content ?? ""))) ? { ...answered, content: [{ type: "text", text: reAuth }, ...(answered.content ?? [])] } : answered;
     return structuredContent == null ? result : { ...result, structuredContent };
   } finally { active = undefined; }
 }
@@ -134,6 +138,6 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   if (message.id === undefined) return;
   handle(message).then(
     (result) => reply({ id: message.id, result }),
-    (error: Error & { code?: number }) => reply({ id: message.id, error: { code: error.code ?? -32603, message: error.message } }),
+    async (error: Error & { code?: number }) => reply({ id: message.id, error: { code: error.code ?? -32603, message: (await lost(error.message)) ? `${reAuth} Cause: ${error.message}` : error.message } }),
   );
 }).on("close", () => stop(new Error("The gateway closed the app bridge."), 0));

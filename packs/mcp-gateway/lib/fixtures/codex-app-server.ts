@@ -25,6 +25,9 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
   if (message.method === "mcpServerStatus/list") return reply({ data: [{ name: "codex_apps", tools }] });
   if (message.method === "thread/start") return reply({ thread: { id: "thread-1" } });
   if (message.method !== "mcpServer/tool/call") return send({ id: message.id, error: { code: -32601, message: "unknown" } });
+  if (process.env.FAKE_CODEX_REVOKED) return send({ id: message.id, error: { code: -32603, message: 'MCP startup failed: HTTP 401: {"error":{"code":"token_revoked"}}' } });
+  if (process.env.FAKE_CODEX_SLACK_AUTH) return reply({ isError: true, content: [{ type: "text", text: '{"ok":false,"error":"invalid_auth"}' }] });
+  if (process.env.FAKE_CODEX_FAILS) return reply({ isError: true, content: [{ type: "text", text: "channel_not_found" }] });
   const args = message.params!.arguments as { ask?: boolean };
   if (args.ask) {
     const answer = await new Promise((resolve) => {

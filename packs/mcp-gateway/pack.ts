@@ -70,7 +70,7 @@ export default {
       os: "linux",
       when: slack,
       id: "slack-bridge-sign-in",
-      say: "The Slack bridge has no ChatGPT sign-in, or the gateway finds no Slack tools for it. Connect Slack in ChatGPT, Settings, Apps, then sign in with that ChatGPT account.",
+      say: "Slack needs re-auth: the Slack bridge has no ChatGPT sign-in, ChatGPT revoked it, or the gateway finds no Slack tools for it. Connect Slack in ChatGPT, Settings, Apps, then sign in with that ChatGPT account.",
       test: async (ctx) => (await upstreams()).appReady(await host(ctx), slackApp),
       repair: { ask: "Sign the Slack bridge in to ChatGPT.", command: "hedge mcp-gateway slack-bridge sign-in", interactive: true },
     });
@@ -103,12 +103,22 @@ export default {
         os: "linux",
         when: workflow,
         id: `${app.name}-sign-in`,
-        say: `${app.title} has no ChatGPT sign-in. Sign in with the account whose workspace has ${app.title} connected.`,
+        say: `${app.title} needs re-auth: it has no ChatGPT sign-in, or ChatGPT revoked it. Sign in with the account whose workspace has ${app.title} connected.`,
         test: async (ctx) => (await upstreams()).appSignedIn(await host(ctx), app),
         repair: { ask: `Sign ${app.title} in to ChatGPT.`, command: `hedge mcp-gateway sign-in ${app.name}`, interactive: true },
       });
       hedge.config({ provider: "codex", plans: ["codex", "both"], when: workflow, key: `apps.${app.app}.enabled`, value: false });
     }
+    hedge.service({
+      on: "hub",
+      os: "linux",
+      when: flow,
+      id: "sign-in-watch",
+      run: async (ctx) => {
+        const [{ watchSignIns }, apps, hub] = await Promise.all([import("./lib/sign-in-lost.ts"), upstreams(), host(ctx)]);
+        return watchSignIns({ lost: () => apps.lostSignIns(hub), threads: ctx.threads, statePath: join(ctx.stateDir, "sign-in-watch.json"), log: ctx.log }, ctx.sleep);
+      },
+    });
     const query = hedge.setting({
       key: "mcp-gateway.mailQuery",
       type: "string",
@@ -242,7 +252,13 @@ async function admin(args: string[], ctx: Context) {
     return apps.signInApp(hub, app);
   }
   const gateway = await import("./lib/hub.ts");
-  if (mode === "doctor") return (await gateway.doctor(hub)) ? 0 : 1;
+  if (mode === "doctor") {
+    const healthy = await gateway.doctor(hub);
+    const lost = await apps.lostSignIns(hub);
+    const { reAuthLine } = await import("./lib/sign-in-lost.ts");
+    for (const { apps: signedOut } of lost) ctx.print(reAuthLine(signedOut));
+    return healthy && !lost.length ? 0 : 1;
+  }
   if (mode === "sign-in") await gateway.signIn(hub);
   if (mode === "restart") await gateway.restart(hub);
   if (mode === "reconnect") await gateway.reconnect(name!, hub);

@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, describe, expect, mock, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { providerConfigAdapter } from "../../src/adapters/provider-config/adapter.ts";
 import { main, type CliOptions } from "../../src/cli.ts";
@@ -249,11 +249,11 @@ describe("on the hub", () => {
     expect((await hedge(["mcp-gateway", "sign", "in"])).code).toBe(2);
   });
 
-  test("doctor asks for the Slack sign-in while the bridge has none or the gateway lists it with no tools, and not while it lists them or does not answer", async () => {
+  test("doctor asks for the Slack sign-in while the bridge has none, the gateway lists it with no tools, or the bridge found it revoked, and not while it lists them or does not answer", async () => {
     const { home, hedge } = machine(hubMachine, { workflows: { "slack-bridge": true } });
     writeMcpHubSettings(home);
     const { state } = gatewayServer({ home, servers: ["tickets", "calendar", "slack"], toolCounts: { slack: 21 } });
-    const finding = "To do: The Slack bridge has no ChatGPT sign-in, or the gateway finds no Slack tools for it. Connect Slack in ChatGPT, Settings, Apps, then sign in with that ChatGPT account. Run: hedge mcp-gateway slack-bridge sign-in";
+    const finding = "To do: Slack needs re-auth: the Slack bridge has no ChatGPT sign-in, ChatGPT revoked it, or the gateway finds no Slack tools for it. Connect Slack in ChatGPT, Settings, Apps, then sign in with that ChatGPT account. Run: hedge mcp-gateway slack-bridge sign-in";
     expect((await hedge(["doctor"])).output).toContain(finding);
     mkdirSync(join(home, ".local/share/hedge-mcphub/data/slack-codex"), { recursive: true });
     writeFileSync(join(home, ".local/share/hedge-mcphub/data/slack-codex/auth.json"), "{}");
@@ -264,6 +264,12 @@ describe("on the hub", () => {
     state.toolCounts.slack = 0;
     state.notReadyFor = 1000;
     expect((await hedge(["doctor"])).output).not.toContain(finding);
+    state.toolCounts.slack = 21;
+    state.notReadyFor = 0;
+    const lost = join(home, ".local/share/hedge-mcphub/data/slack-codex/sign-in-lost");
+    writeFileSync(lost, "");
+    utimesSync(lost, new Date(Date.now() + 60_000), new Date(Date.now() + 60_000));
+    expect((await hedge(["doctor"])).output).toContain(finding);
   });
 
   test("a solo machine, with no hub in the profile, is its own hub and issues its own key", async () => {

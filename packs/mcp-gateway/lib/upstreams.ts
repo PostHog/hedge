@@ -6,6 +6,7 @@ import { browserGatewayUrl } from "./client.ts";
 import { dataDir, managementApi, syncGatewayGroup, type Api, type Hub } from "./hub.ts";
 import { bridgeFile, codexMount, codexPackage, gatewayCurrent, install, legacyBridgeFile, localEntry, missingMount, waitingNote } from "./install.ts";
 import { handCallback, loopbackClientOf, registerLoopbackClient } from "./loopback.ts";
+import { signInLostSince, type LostSignIn } from "./sign-in-lost.ts";
 
 const account = (app: CodexApp) => `${app.account ?? app.name}-codex`;
 export const appHome = (home: string, app: CodexApp) => join(dataDir(home), "data", account(app));
@@ -64,7 +65,17 @@ const refuseTheirs = (config: Config | undefined, upstream: Upstream) => {
   if (config && !ours(config)) throw new Error(`Keep the MCP gateway's ${upstream.name} server: Hedge did not add it. Remove it in the gateway's dashboard to use ${upstream.title}.`);
 };
 
-export const appSignedIn = (hub: Pick<Hub, "home">, app: CodexApp) => exists(join(appHome(hub.home, app), "auth.json"));
+export const appSignedIn = async (hub: Pick<Hub, "home">, app: CodexApp) =>
+  (await exists(join(appHome(hub.home, app), "auth.json"))) && (await signInLostSince(appHome(hub.home, app))) === undefined;
+
+export async function lostSignIns(hub: Pick<Hub, "home">): Promise<LostSignIn[]> {
+  const lost: LostSignIn[] = [];
+  for (const [home, apps] of Map.groupBy(await codexApps(hub.home), (app) => appHome(hub.home, app))) {
+    const since = await signInLostSince(home);
+    if (since !== undefined) lost.push({ apps, since });
+  }
+  return lost;
+}
 
 export async function registerUpstream(hub: Hub, upstream: Upstream) {
   const codexMissing = `${upstream.title} runs through Codex, and this hub has no Codex from Hedge. Run: hedge install-codex`;

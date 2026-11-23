@@ -1,12 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tempDirs } from "../../../src/testing/git.ts";
 import { gmail, googleApps, googleCalendar, slack } from "./apps.ts";
 import { issueKey } from "./hub.ts";
 import { declaredUpstreams } from "./declared.ts";
-import { appSignedIn, registerUpstream, registerUpstreams, signInApp, upstreamsRegistered } from "./upstreams.ts";
+import { appSignedIn, lostSignIns, registerUpstream, registerUpstreams, signInApp, upstreamsRegistered } from "./upstreams.ts";
 import { dockerHost, fakeHub, fakeMcpHub, fakeRun, mcphubFetch, writeMcpHubSettings, type FakeContainer, type FakeMcpHub } from "./testing.ts";
 
 const temp = tempDirs();
@@ -216,6 +216,22 @@ test("one ChatGPT sign-in serves every Google route and the gateway reloads all 
   expect(readFileSync(join(home, ".local/share/hedge-mcphub/data/google-codex/auth.json"), "utf8")).toBe("{}\n");
   for (const app of googleApps) expect(await appSignedIn(hub, app)).toBe(true);
   expect(writes(api)).toEqual(["POST servers/gmail/reload", "POST servers/google-calendar/reload", "POST servers/google-drive/reload"]);
+});
+
+test("a sign-in that the bridge found revoked counts as signed out for every app of its account until the next sign-in", async () => {
+  const { home, hub } = hubWith({});
+  const google = join(home, ".local/share/hedge-mcphub/data/google-codex");
+  mkdirSync(google, { recursive: true });
+  writeFileSync(join(google, "auth.json"), "{}");
+  utimesSync(join(google, "auth.json"), 1000, 1000);
+  expect(await lostSignIns(hub)).toEqual([]);
+  writeFileSync(join(google, "sign-in-lost"), "");
+  utimesSync(join(google, "sign-in-lost"), 2000, 2000);
+  for (const app of googleApps) expect(await appSignedIn(hub, app)).toBe(false);
+  expect(await lostSignIns(hub)).toEqual([{ apps: googleApps, since: 2_000_000 }]);
+  utimesSync(join(google, "auth.json"), 3000, 3000);
+  for (const app of googleApps) expect(await appSignedIn(hub, app)).toBe(true);
+  expect(await lostSignIns(hub)).toEqual([]);
 });
 
 test("a sign-in reloads every Google route even when the gateway fails to list one route's tools", async () => {
