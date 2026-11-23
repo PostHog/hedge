@@ -105,6 +105,22 @@ test("publish rebases once more when signing times out, and stops with a clear l
   expect(isSigned(worktree, "origin/main")).toBe(true);
 });
 
+test("publish names a signing failure that is not a timeout, and leaves the worktree on its branch", async () => {
+  const { home, laptop, worktree, io } = await dreamWorktree();
+  commit(worktree, "Condense: rule", { "memory/tech/rule.md": note("rule", {}, "Shorter.") });
+  commit(laptop, "memory: laptop", { "memory/tech/new.md": note("new") });
+  git(laptop, "push", "-q", "origin", "HEAD:main");
+  signCommits(worktree, home);
+  git(worktree, "config", "user.signingkey", join(home, "missing-key"));
+  const { io: dream, said } = io();
+
+  expect(await dreamCommand(["publish", worktree], dream)).toBe(1);
+
+  expect(said[0]).toStartWith("Hedge dream: rebasing onto main failed: ");
+  expect(said[0]).toEndWith(". Publish again.");
+  expect(git(worktree, "rev-parse", "--abbrev-ref", "HEAD")).toBe("dream/2026-11-05");
+});
+
 test("publish refuses commits outside the memory folder and dreams/, a conflict marker, a binary file, or a secret, even one a later commit removes or one in a commit message, and pushes nothing", async () => {
   const cases: Array<[string, Record<string, string>, string]> = [
     ["outside", { "README.md": "# Changed\n" }, "Hedge dream: the commits change files outside memory/ and dreams/: README.md."],

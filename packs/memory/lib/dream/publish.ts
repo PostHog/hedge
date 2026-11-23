@@ -82,7 +82,8 @@ export async function publish(worktree: string, subtree: string, memory: string,
       const conflicts = (await g("diff", "--name-only", "--diff-filter=U")).stdout.trim().split("\n").filter(Boolean).join(", ");
       await abort();
       if (!conflicts && signingTimedOut(settled)) return { code: 1, message: "signing the rebased commits timed out twice. Publish again." };
-      return { code: 1, message: `rebasing onto main conflicts in ${conflicts || "the worktree"}. Merge origin/main, keep both sides, and publish again.` };
+      if (!conflicts) return { code: 1, message: `rebasing onto main failed: ${settled.stderr.trim().split("\n").at(-1) || `git ${operation} exited ${settled.code}`}. Publish again.` };
+      return { code: 1, message: `rebasing onto main conflicts in ${conflicts}. Merge origin/main, keep both sides, and publish again.` };
     }
     let refused: string | undefined;
     let head = "";
