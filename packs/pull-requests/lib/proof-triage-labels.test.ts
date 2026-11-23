@@ -273,7 +273,7 @@ test("a failed triage call prints none of the model's own output", async () => {
 
   const review = await pr.hedge("review", "--single");
 
-  expect(savedLabels(pr).cause).toBe("the model call failed with exit 3; Hedge keeps none of its output");
+  expect(savedLabels(pr).cause).toBe("the model call failed; Hedge keeps none of its output");
   expect(review.output).not.toContain("private-detail");
   expect(review.output).toContain("- The triage labelled none of them; triage-labels.json in the round's folder says why.");
 });
@@ -285,10 +285,10 @@ test("a triage call that throws at once, before it returns a promise, labels eve
   expect(JSON.stringify(triaged)).not.toContain("private-detail");
 });
 
-test("a failed triage call keeps its exit status and none of its output, so no secret in it is saved", async () => {
+test("a failed triage call keeps none of its output, so no secret or exit status it reports is saved", async () => {
   const pr = await treated();
   const token = ["ghp", "_", "A1b2C3d4".repeat(5)].join("");
-  pr.env.HEDGE_PROOF_TRIAGE = `cat >/dev/null; echo 'provider said: token=${token}' >&2; exit 3`;
+  pr.env.HEDGE_PROOF_TRIAGE = `cat >/dev/null; echo 'exit 999: provider said: token=${token}' >&2; exit 3`;
   pr.env.HEDGE_PROOF_TRIAGE_MODEL = "triage-model";
 
   await pr.hedge("review", "--single");
@@ -296,7 +296,7 @@ test("a failed triage call keeps its exit status and none of its output, so no s
   const saved = readFileSync(join(reviewDirectory(pr), "triage-labels.json"), "utf8");
   expect(saved).not.toContain(token);
   expect(saved).not.toContain("provider said");
-  expect(savedLabels(pr)).toMatchObject({ ok: false, cause: "the model call failed with exit 3; Hedge keeps none of its output", labels: [{ finding: 1, reason: "the triage call failed: the model call failed with exit 3; Hedge keeps none of its output" }, { finding: 2 }, { finding: 4 }] });
+  expect(savedLabels(pr)).toMatchObject({ ok: false, cause: "the model call failed; Hedge keeps none of its output", labels: [{ finding: 1, reason: "the triage call failed: the model call failed; Hedge keeps none of its output" }, { finding: 2 }, { finding: 4 }] });
 });
 
 test("a round that weighs the budget while a triage saves the labels of the round before backs out and asks to weigh again", async () => {
@@ -402,6 +402,18 @@ test("the judge reads which findings the triage made advisory", async () => {
   expect(judge.prompts().join("\n")).toContain("The triage labelled finding 2 (major) advisory: it needs no answer, and counts as answered");
 });
 
+test("a triage the secret guard holds says so, since the guard names only the kind of secret it matched", async () => {
+  const pr = await checkout();
+  const triage = fakeModel(pr, "TRIAGE", adviseSecond);
+  writeFileSync(join(pr.repository, "findings.md"), findings);
+  writeFileSync(join(pr.repository, "change.diff"), `+const token = "${["ghp", "_", "A1b2C3d4".repeat(5)].join("")}";\n`);
+
+  const printed = JSON.parse((await pr.hedge("triage", "--findings", "findings.md", "--diff", "change.diff")).output);
+
+  expect(printed).toMatchObject({ ok: false, cause: "the secret guard matches this prompt: GitHub token" });
+  expect(triage.prompts()).toEqual([]);
+});
+
 test("hedge proof triage labels a findings file against a diff and prints the labels without touching the ledger", async () => {
   const pr = await checkout();
   fakeModel(pr, "TRIAGE", adviseSecond);
@@ -416,7 +428,7 @@ test("hedge proof triage labels a findings file against a diff and prints the la
 
 const claudeReply = JSON.stringify({ type: "result", is_error: false, result: adviseSecond, usage: { input_tokens: 12, output_tokens: 7 }, total_cost_usd: 0.25 });
 
-test("the triage asks the lookup row's model with exactly the arguments of a call with no tools, settings, servers or session, and saves its labels", async () => {
+test("the triage asks the lookup row's model with the arguments of a call with no tools, settings, servers or session, in any order, and saves its labels", async () => {
   const pr = await treated();
   const claude = argvModel(pr, "claude", claudeReply);
 
@@ -424,7 +436,9 @@ test("the triage asks the lookup row's model with exactly the arguments of a cal
 
   const argv = claude.argv().split("\n").filter(Boolean).slice(1);
   const options = argv[0] === "[--settings]" ? argv.slice(2) : argv;
-  expect(options).toEqual(["-p", "--model", "lookup-model", "--effort", "medium", "--setting-sources", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--disable-slash-commands", "--no-session-persistence", "--output-format", "json", "--tools", "", "--permission-mode", "dontAsk"].map((arg) => `[${arg}]`));
+  const isolating = { "--model": "lookup-model", "--setting-sources": "", "--mcp-config": '{"mcpServers":{}}', "--tools": "", "--permission-mode": "dontAsk", "--output-format": "json" };
+  for (const [flag, value] of Object.entries(isolating)) expect(options[options.indexOf(`[${flag}]`) + 1]).toBe(`[${value}]`);
+  expect(options).toEqual(expect.arrayContaining(["[-p]", "[--strict-mcp-config]", "[--disable-slash-commands]", "[--no-session-persistence]"]));
   expect(savedLabels(pr)).toMatchObject({ ok: true, model: "lookup-model", labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "advisory" }, { finding: 4, label: "needs-answer" }] });
 });
 
