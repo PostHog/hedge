@@ -23,6 +23,7 @@ export type Command = {
   inLoop: boolean;
   tested: boolean;
   after?: string;
+  afterAt?: number;
   scope: Scope;
   chdir?: string;
 };
@@ -30,7 +31,7 @@ export type Command = {
 type Context = { env: ReadonlyMap<string, string>; inLoop: boolean; scope?: Scope };
 type Word = { text: string; raw: string; bare: string; substitutions: string[]; processes: string[] };
 type Heredoc = { delimiter: string; literal: boolean; stripTabs: boolean; body: string; substitutions: string[] };
-type Token = { word: Word } | { operator: string } | { heredoc: Heredoc } | { herestring: true };
+type Token = { word: Word } | { operator: string; at: number } | { heredoc: Heredoc } | { herestring: true };
 
 export const shellTools = new Set(["Bash", "exec_command", "shell", "shell_command", "local_shell"]);
 
@@ -238,14 +239,27 @@ function readDelimiter(text: string, start: number) {
   return { delimiter, literal, end: index };
 }
 
+function continues(line: string): boolean {
+  let backslashes = 0;
+  while (backslashes < line.length && line[line.length - 1 - backslashes] === "\\") backslashes++;
+  return backslashes % 2 === 1;
+}
+
 function readBodies(text: string, start: number, pending: Heredoc[], mustClose = false): number {
   let index = start;
   for (const heredoc of pending) {
     let closed = false;
     while (index < text.length && !closed) {
-      const lineEnd = text.indexOf("\n", index) < 0 ? text.length : text.indexOf("\n", index);
-      const line = text.slice(index, lineEnd);
-      index = lineEnd + 1;
+      const parts: string[] = [];
+      let part = "";
+      do {
+        const lineEnd = text.indexOf("\n", index) < 0 ? text.length : text.indexOf("\n", index);
+        if (parts.length > 0) parts[parts.length - 1] = parts[parts.length - 1].slice(0, -1);
+        part = text.slice(index, lineEnd);
+        parts.push(part);
+        index = lineEnd + 1;
+      } while (!heredoc.literal && continues(part) && index < text.length);
+      const line = parts.join("");
       closed = (heredoc.stripTabs ? line.replace(/^\t+/, "") : line) === heredoc.delimiter;
       if (!closed) heredoc.body += `${line}\n`;
     }
@@ -260,6 +274,7 @@ function tokenize(text: string): Token[] {
   const tokens: Token[] = [];
   const pending: Heredoc[] = [];
   let word: Word | undefined;
+  let commentAt: number | undefined;
   const append = (value: string, raw: string, substitutions: string[] = [], bare = "_", processes: string[] = []) => {
     word ??= { text: "", raw: "", bare: "", substitutions: [], processes: [] };
     word.text += value;
@@ -283,6 +298,7 @@ function tokenize(text: string): Token[] {
       if (next !== "\n") append(next ?? "", text.slice(index, index + 2));
       index += 2;
     } else if (char === "#" && !word) {
+      commentAt = index;
       while (index < text.length && text[index] !== "\n") index++;
     } else if (char === "'") {
       const end = quoteEnd(text, index + 1, "'");
@@ -315,7 +331,8 @@ function tokenize(text: string): Token[] {
       index = end;
     } else if (char === "\n") {
       endWord();
-      tokens.push({ operator: "\n" });
+      tokens.push({ operator: "\n", at: commentAt ?? index });
+      commentAt = undefined;
       index = readBodies(text, index + 1, pending);
     } else if ((char === "&" && (next === ">" || /[<>]$/.test(word?.raw ?? ""))) || (char === "|" && /\d*>$/.test(word?.raw ?? ""))) {
       if (char === "&" && next === ">" && !/[<>]$/.test(word?.raw ?? "")) endWord();
@@ -328,7 +345,7 @@ function tokenize(text: string): Token[] {
     } else if (/[;&|()]/.test(char)) {
       endWord();
       const operator = operators.find((candidate) => text.startsWith(candidate, index))!;
-      tokens.push({ operator });
+      tokens.push({ operator, at: index });
       index += operator.length;
     } else {
       if ((char === "<" || char === ">") && word && !/^\d+$|[<>&]$/.test(word.raw)) endWord();
@@ -415,10 +432,10 @@ export function parse(program: string, context: Context = { env: new Map(), inLo
   let scope: Scope = context.scope ?? {};
   let closedGroup = false;
 
-  const finishCommand = (after?: string) => {
+  const finishCommand = (after?: string, afterAt?: number) => {
     if (words.length === 0 && !stdin) {
       const group = closedGroup ? pipelines.at(-1)?.at(-1) : undefined;
-      if (group && after) group.after = after;
+      if (group && after) Object.assign(group, { after, afterAt });
       return;
     }
     const { kept, outputs, writes, redirects } = withoutRedirects(words);
@@ -463,12 +480,12 @@ export function parse(program: string, context: Context = { env: new Map(), inLo
     const rawArgs = kept.slice(index + 1).map((word) => word.raw);
     const rawPrefix = kept.slice(0, index).map((word) => word.raw);
     const prefix = kept.slice(0, index).map((word) => basename(word.text));
-    pipeline.push({ name, args, env: commandEnv, substitutions, leadingSubstitutions, argSubstitutions, stdin, outputs, writes, redirects, bare, rawArgs, rawPrefix, prefix, keywords: stripped, processSubstitutions: words.flatMap((word) => word.processes), inLoop, tested, ...(after && { after }), scope, chdir });
+    pipeline.push({ name, args, env: commandEnv, substitutions, leadingSubstitutions, argSubstitutions, stdin, outputs, writes, redirects, bare, rawArgs, rawPrefix, prefix, keywords: stripped, processSubstitutions: words.flatMap((word) => word.processes), inLoop, tested, ...(after && { after, afterAt }), scope, chdir });
     words = [];
     stdin = undefined;
   };
-  const finishPipeline = (after?: string) => {
-    finishCommand(after);
+  const finishPipeline = (after?: string, afterAt?: number) => {
+    finishCommand(after, afterAt);
     if (pipeline.length > 0) pipelines.push(pipeline);
     pipeline = [];
   };
@@ -486,7 +503,7 @@ export function parse(program: string, context: Context = { env: new Map(), inLo
     else if ("heredoc" in token) stdin = { body: token.heredoc.body, substitutions: [...(stdin?.substitutions ?? []), ...token.heredoc.substitutions] };
     else if (token.operator === "|" || token.operator === "|&") finishCommand("|");
     else {
-      finishPipeline(token.operator === "(" || token.operator === ")" ? undefined : token.operator);
+      finishPipeline(token.operator === "(" || token.operator === ")" ? undefined : token.operator, token.at);
       if (token.operator === "(") scope = { parent: scope };
       if (token.operator === ")") scope = scope.parent ?? scope;
       const named = definition ? pipelines.at(-1)?.at(-1) : undefined;
@@ -496,7 +513,10 @@ export function parse(program: string, context: Context = { env: new Map(), inLo
   }
   finishPipeline();
   const last = pipelines.at(-1)?.at(-1);
-  if (last?.after === ";" || last?.after === "\n") delete last.after;
+  if (last?.after === ";" || last?.after === "\n") {
+    delete last.after;
+    delete last.afterAt;
+  }
   return pipelines;
 }
 

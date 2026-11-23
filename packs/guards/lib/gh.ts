@@ -9,7 +9,8 @@ const exposureReason = (person: string) => `Hedge blocked this command: it delet
 const ownerReason = (owner: string, person: string) => `Hedge blocked this command: \`${owner}\` is not one of the GitHub owners agents may use on this machine. `
   + `Use a repository of an allowed owner, or stop and ask ${person} to add \`${owner}\` to guards.owners.`;
 const spellOutReason = (owner: string) => `Hedge blocked this command: the repository owner \`${owner}\` is not spelled out, so the owner check cannot read it. `
-  + "A shell variable, substitution, or pattern can name any owner. Write the owner as plain text, such as `gh api repos/<owner>/<repo>/...` or `--repo <owner>/<repo>`.";
+  + "A shell variable, substitution, or pattern can name any owner. Write the owner as plain text, such as `gh api repos/<owner>/<repo>/...` or `--repo <owner>/<repo>`. "
+  + "In place of a loop or a function over repositories, write one command per repository, joined with `&&`.";
 
 const commandReason = (word: string) => `Hedge blocked this command: the gh command word \`${word}\` is not spelled out, so the guard cannot tell what it runs. `
   + "A shell variable, substitution, or pattern can stand for any command. Write gh, its command group, and its action as plain text.";

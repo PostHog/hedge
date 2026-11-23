@@ -90,3 +90,105 @@ export function repeatsTaskStatus(call: StatusCall): boolean {
   }
   return false;
 }
+
+type Finished = { status: string; outputFile?: string };
+type Seen = { subagents: Set<string>; finished: Map<string, Finished> };
+
+const subagentShape = /^a[0-9a-f]{16}$/;
+const delegatedShape = /^(?:node|thread|run):/;
+const notificationStart = "<task-notification>";
+const stoppedStart = "Successfully stopped task: ";
+
+export const isBackgroundWait = (name = "") => /^mcp__t3[-_]code__t3_background_wait$/.test(name);
+
+const fieldReason = 'Hedge blocked this call: `t3_background_wait` takes `taskIds`, a list of IDs, as in `{"taskIds": ["<id>"]}`. '
+  + "Pass the ID of a background command or Monitor that this thread started and that still runs.";
+
+type Entry = TranscriptEntry & { origin?: { kind?: unknown }; attachment?: { prompt?: unknown; origin?: { kind?: unknown } }; toolUseResult?: { agentId?: unknown } };
+type Result = Block & { tool_use_id?: unknown; content?: unknown };
+
+const endedStatuses = new Set(["completed", "failed", "killed", "stopped"]);
+
+function notificationOf(entry: Entry): string | undefined {
+  const content = entry.message?.content;
+  if (entry.type === "user" && entry.origin?.kind === "task-notification" && typeof content === "string") return content;
+  const { attachment } = entry;
+  if (entry.type === "attachment" && attachment?.origin?.kind === "task-notification" && typeof attachment.prompt === "string") return attachment.prompt;
+  return undefined;
+}
+
+function stoppedTaskOf(block: Result): string | undefined {
+  if (typeof block.content !== "string") return undefined;
+  try {
+    const result = JSON.parse(block.content);
+    return typeof result?.task_id === "string" ? result.task_id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+type Calls = { stops: Set<string>; agents: Set<string>; stopped: Map<string, string>; launched: Map<string, string> };
+
+function callsIn(entry: Entry, calls: Calls) {
+  const content = entry.message?.content;
+  if (!Array.isArray(content)) return;
+  const results = (content as Result[]).filter((block) => block?.type === "tool_result");
+  const agentId = entry.toolUseResult?.agentId;
+  for (const block of content as Result[]) {
+    if (block?.type === "tool_use" && block.id && block.name === "TaskStop") calls.stops.add(block.id);
+    if (block?.type === "tool_use" && block.id && block.name === "Agent") calls.agents.add(block.id);
+    if (block?.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
+    const stopped = stoppedTaskOf(block);
+    if (stopped) calls.stopped.set(block.tool_use_id, stopped);
+    if (typeof agentId === "string" && results.length === 1) calls.launched.set(block.tool_use_id, agentId);
+  }
+}
+
+function seenIn(path: string | undefined): Seen {
+  const seen: Seen = { subagents: new Set(), finished: new Map() };
+  if (!path) return seen;
+  const calls: Calls = { stops: new Set(), agents: new Set(), stopped: new Map(), launched: new Map() };
+  try {
+    for (const line of linesFromEnd(path)) {
+      if (![notificationStart, '"agentId":"', stoppedStart, '"TaskStop"', '"Agent"'].some((mark) => line.includes(mark))) continue;
+      const entry = parse(line) as Entry | undefined;
+      if (!entry) continue;
+      callsIn(entry, calls);
+      const text = notificationOf(entry);
+      if (!text?.trimStart().startsWith(notificationStart)) continue;
+      const id = text.match(/<task-id>([^<]+)<\/task-id>/)?.[1];
+      const status = text.match(/<status>([^<]+)<\/status>/)?.[1];
+      if (id && status && endedStatuses.has(status)) seen.finished.set(id, { status, outputFile: text.match(/<output-file>([^<]+)<\/output-file>/)?.[1] });
+    }
+  } catch {
+    return seen;
+  }
+  for (const [callId, id] of calls.launched) if (calls.agents.has(callId)) seen.subagents.add(id);
+  for (const [callId, id] of calls.stopped) if (calls.stops.has(callId) && !seen.finished.has(id)) seen.finished.set(id, { status: "stopped" });
+  return seen;
+}
+
+function problemWith(id: string, seen: Seen): string | undefined {
+  if (delegatedShape.test(id)) {
+    return `\`${id}\` is a delegated task. T3 wakes this thread when it ends: follow the \`next\` step its \`delegate_task\` answer gave and end the turn, `
+      + "or call `t3_thread_wait` on its child thread when this turn needs the result.";
+  }
+  if (seen.subagents.has(id) || subagentShape.test(id)) {
+    return `\`${id}\` is a subagent. Claude Code tells this thread when it ends, so keep working or end the turn; `
+      + "start a subagent with `run_in_background: false` when this turn needs its result.";
+  }
+  const done = seen.finished.get(id);
+  if (!done) return undefined;
+  return `\`${id}\` already finished (${done.status}). Read its output now${done.outputFile ? ` in ${done.outputFile}` : ""}; there is nothing to wait for.`;
+}
+
+export function backgroundWaitRisk(call: StatusCall): string | undefined {
+  const input = call.tool_input ?? {};
+  const { taskIds } = input;
+  if (!Array.isArray(taskIds) || taskIds.length === 0 || taskIds.some((id) => typeof id !== "string")) return fieldReason;
+  if (input.waiting === false) return undefined;
+  const seen = seenIn(call.transcript_path);
+  const problems = (taskIds as string[]).map((id) => problemWith(id, seen));
+  if (problems.some((problem) => problem === undefined)) return undefined;
+  return `Hedge blocked this call: ${problems.join(" ")}`;
+}
