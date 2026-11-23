@@ -118,13 +118,28 @@ ${untrusted("the diff of the pull request", diff.length > diffLimit ? `${diff.sl
 `;
 }
 
-const unescaped = (text: string) => text.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+function repeatsAKey(json: string) {
+  const objects: Set<string>[] = [];
+  const colon = /\s*:/y;
+  for (const { 0: token, index } of json.matchAll(/"(?:[^"\\]|\\.)*"|[{}]/g)) {
+    if (token === "{") objects.push(new Set());
+    else if (token === "}") objects.pop();
+    else {
+      colon.lastIndex = index + token.length;
+      if (!colon.test(json)) continue;
+      const key = JSON.parse(token) as string;
+      if (objects.at(-1)?.has(key)) return true;
+      objects.at(-1)?.add(key);
+    }
+  }
+  return false;
+}
 
 function labelsObject(text: string) {
   const reply = text.trim().replace(/^```(?:json)?\s*\n([\s\S]*)\n```$/, "$1");
-  if (unescaped(reply).match(/"labels"\s*:/g)?.length !== 1) return undefined;
   try {
     const parsed = JSON.parse(reply) as unknown;
+    if (repeatsAKey(reply)) return undefined;
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) && Object.keys(parsed).join() === "labels" ? parsed as { labels: unknown } : undefined;
   } catch { return undefined; }
 }

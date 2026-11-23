@@ -994,15 +994,17 @@ async function waitForReview(options: Map<string, string>, head: ProofIdentity, 
   const code = await waitForPanel(directory, panelIO(context), restart, waitPolls);
   for (const line of await roundLines(directory, context)) context.print(line);
   if (code === 0) context.print(await readFile(join(directory, "findings.md"), "utf8"));
-  if (code === 0 && await labelsDue(directory, triageSetting(context.env))) await roundStep(directory, context, () => printLabels(directory, context)).catch((error: unknown) => {
+  const labelled = code === 0 && await labelsDue(directory, triageSetting(context.env)) ? await roundStep(directory, context, () => printLabels(directory, context)).then(() => true, async (error: unknown) => {
     if (!(error instanceof RoundBusy)) throw error;
-    return savedLabels(directory).then((saved) => saved ? labelLines(saved).forEach((line) => context.print(line))
-      : context.print(`Another hedge command holds review round ${basename(directory)}, so the triage labels are not printed. Run hedge proof review --wait --round ${basename(directory)} again to see them.`));
-  });
+    const saved = await savedLabels(directory);
+    if (saved) labelLines(saved).forEach((line) => context.print(line));
+    else context.print(`Another hedge command holds review round ${basename(directory)}, so the triage labels are not printed. Run hedge proof review --wait --round ${basename(directory)} again to see them.`);
+    return saved !== undefined;
+  }) : true;
   if (code === 1) context.print("A lens failed, and the round stays unfinished. Run the same hedge proof review --lens command to rerun the failed lenses.");
   if (code === 2) context.print("Lenses still run. Run hedge proof review --wait again.");
   if (code === quotaExitCode) context.print("A lens stopped on spent quota, and the round stays unfinished. Run the same hedge proof review --lens command once the quota is back, or move the lens to the family that is up with :same or :other.");
-  return code;
+  return labelled ? code : 2;
 }
 
 async function startStaged(directory: string, context: CommandContext) {
