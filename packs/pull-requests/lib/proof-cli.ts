@@ -25,7 +25,7 @@ import { quietCommitIn } from "./proof-delta.ts";
 import { baseRefs, baseTip, changedFiles, cleanBaseMerge, mergeBase, pullRequestDetails, remotesOf, reviewTier, tierCeiling, tierLenses, topLevel, type ReviewTier } from "./proof-checkout.ts";
 import { arbiterOf, finalGate, reviewLimit, type FinalGate } from "./proof-gate.ts";
 import { anchorCheck } from "./finding-anchors.ts";
-import { armOf, pathOf, readTriage, triageSetting, type TriageSetting } from "./proof-triage.ts";
+import { armOf, labelLines, labelRound, pathOf, readTriage, triageFindings, triageSetting, type TriageSetting } from "./proof-triage.ts";
 import { readCriticalPaths } from "./proof-judge.ts";
 import { reviewRules } from "./review-rules.ts";
 import { recordSanity, requireSanity } from "./proof-sanity.ts";
@@ -351,6 +351,20 @@ each answer against HEAD.`,
       return 0;
     },
   },
+  triage: {
+    usage: "triage --findings <file> --diff <file>",
+    summary: `Label each blocker, major and unrated finding of a findings file needs-answer or advisory with the model of the
+lookup row, and print the labels as JSON. It reads and writes no proof ledger. hedge proof review runs the same pass
+after each round and final read of a pull request that pull-requests.triage treats; an advisory finding needs no
+answer there.`,
+    examples: ["hedge proof triage --findings findings.md --diff change.diff"],
+    options: ["--findings", "--diff"],
+    run: async ({ options }, _, context) => {
+      const read = (flag: string) => readFile(resolve(context.cwd, required(options, flag, "triage")), "utf8");
+      context.print(JSON.stringify(await triageFindings(await read("--findings"), await read("--diff"), askTriage(context))));
+      return 0;
+    },
+  },
   standing: {
     usage: "standing [--kind <kind,kind> --until <date> [--repositories <owner/name,owner/name>] --rule <rule>]",
     summary: `Record a standing rule: the user's rule in ~/.agents/guides/standing-rules.md that decides for them until a
@@ -654,13 +668,23 @@ async function runReview(options: Map<string, string>, head: ProofIdentity, cont
   });
 }
 
-async function printSavedReview({ round, id, directory }: SingleRound, { print }: CommandContext) {
+async function printSavedReview({ round, id, directory }: SingleRound, context: CommandContext) {
+  const { print } = context;
   const reservation = await readReservation(directory);
   print(JSON.stringify({ round, id, directory, reviewer: reservation?.reviewer, ...await readTriage(directory) }));
   print((await readFile(join(directory, "findings.md"), "utf8")).trim());
   const anchors = await readFile(join(directory, "anchors.md"), "utf8").catch(() => "");
   if (anchors) print(`\n${anchors.trim()}`);
+  await printLabels(directory, context);
   return 0;
+}
+
+const triageLimit = 180_000;
+const askTriage = ({ env }: CommandContext) => (prompt: string) => askModel("triage", modelFor("lookup", env), { prompt, cwd: tmpdir() }, env, triageLimit);
+
+async function printLabels(directory: string, context: CommandContext) {
+  const triaged = await labelRound(directory, askTriage(context));
+  for (const line of triaged ? labelLines(triaged) : []) context.print(line);
 }
 
 async function askReviewer(reserved: SingleRound, head: ProofIdentity, author: Family, context: CommandContext) {
@@ -693,6 +717,7 @@ async function askReviewer(reserved: SingleRound, head: ProofIdentity, author: F
   print(JSON.stringify({ round: reserved.round, id: reserved.id, directory: reserved.directory, reviewer: answer.model, ...await readTriage(reserved.directory) }));
   print(answer.text.trim());
   if (anchors) print(`\n${anchors}`);
+  await printLabels(reserved.directory, context);
   return 0;
 }
 
@@ -965,6 +990,7 @@ async function waitForReview(options: Map<string, string>, head: ProofIdentity, 
   const code = await waitForPanel(directory, panelIO(context), restart, waitPolls);
   for (const line of await roundLines(directory, context)) context.print(line);
   if (code === 0) context.print(await readFile(join(directory, "findings.md"), "utf8"));
+  if (code === 0) await printLabels(directory, context);
   if (code === 1) context.print("A lens failed, and the round stays unfinished. Run the same hedge proof review --lens command to rerun the failed lenses.");
   if (code === 2) context.print("Lenses still run. Run hedge proof review --wait again.");
   if (code === quotaExitCode) context.print("A lens stopped on spent quota, and the round stays unfinished. Run the same hedge proof review --lens command once the quota is back, or move the lens to the family that is up with :same or :other.");

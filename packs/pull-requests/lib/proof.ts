@@ -174,7 +174,7 @@ async function reviewsSpent(reviews: string, phase: FinalReadPhase, spending: Sp
     const round = await readJson<ReservedAs | undefined>(join(reviews, name, "round.json"), undefined);
     if (!round) return undefined;
     const findings = await savedFindings(join(reviews, name));
-    const leadsToFixes = findings === undefined ? spending === "unfinished spends" : unanswered(findings, "").length > 0;
+    const leadsToFixes = findings === undefined ? spending === "unfinished spends" : unanswered(findings, "", await advisoryIn(join(reviews, name))).length > 0;
     return { name, reservation: reservationOf(round), finished: findings !== undefined, spends: (round.phase ?? "review") === phase && leadsToFixes };
   }));
   const present = rounds.filter((round) => round !== undefined).sort((a, b) => a.name.localeCompare(b.name));
@@ -398,7 +398,7 @@ async function requireBoughtRound(home: string, identity: ProofIdentity) {
   const directory = join(pullRequestDirectory(home, identity), "reviews", last.name);
   const findings = await readFile(join(directory, "findings.md"), "utf8");
   const responses = await readFile(join(directory, "responses.md"), "utf8").catch(() => "");
-  if (answeredFindings(findings, responses).findings.some(buysRound)) return;
+  if (answeredFindings(findings, responses, await advisoryIn(directory)).findings.some(buysRound)) return;
   const label = reviewLabel(last.name);
   const stop = `${label[0]!.toUpperCase()}${label.slice(1)} found no bug in production code that the PR introduced, so the review loop stops.`;
   throw new Error(`${stop} Reject a finding the base has too with its base lines, and list it under Known issues. When fixes since ${label} changed production code, give them a final read with --scope final. Do not ask the user for another round. Only the user's --override runs one: when the user asks for it, confirm it with your question tool. Question: "${roundQuestion} ${identity.repository}#${identity.pr}: ${stop}" Options: "${runOption}", "${stopOption}". When they choose "${runOption}", run this command again with --override '<date> "${runOption}"'`);
@@ -421,8 +421,8 @@ function locationOf(field: string) {
 }
 const tailField = /^(?:anchor|sites):/i;
 
-function buysRound({ text, note, test, answer }: AnsweredFinding) {
-  if (note || test || answer?.verdict === "rejected" || answer?.verdict === "known") return false;
+function buysRound({ text, note, test, advisory, answer }: AnsweredFinding) {
+  if (note || test || advisory || answer?.verdict === "rejected" || answer?.verdict === "known") return false;
   const fields = fieldsOutsideCode(text);
   const severity = fields && statedSeverity(fields);
   if (!fields || (severity !== "blocker" && severity !== "major")) return false;
@@ -622,7 +622,7 @@ export async function respondToReview(home: string, identity: ProofIdentity, rou
   const directory = await roundDirectory(home, identity, round);
   const findings = await savedFindings(directory);
   if (findings === undefined) throw new Error(`Review round ${round} has no findings yet`);
-  const missing = unanswered(findings, bytes.toString());
+  const missing = unanswered(findings, bytes.toString(), await advisoryIn(directory));
   if (missing.length) throw new Error(`Answer findings ${missing.join(", ")} too: one line each, numbered in the order of findings.md, such as "${missing[0]}. fixed in 1a2b3c4: <how>", "${missing[0]}. rejected: <why>", or, at the review budget, "${missing[0]}. known: <why>" for a finding listed under Known issues. Minor and nit findings need no answer; a TESTS item gets a test-only rewrite or delete`);
   if (answeredFindings(findings, bytes.toString()).findings.some(({ answer }) => answer?.verdict === "known")) {
     const reviews = join(pullRequestDirectory(home, identity), "reviews");
@@ -773,7 +773,7 @@ function listedItems(reviewed: ReviewedLine[]): { items: ReviewedItem[]; recover
 
 export type Answer = { verdict: "fixed" | "rejected" | "known"; text: string };
 
-export function answeredFindings(findings: string, responses: string) {
+export function answeredFindings(findings: string, responses: string, advisory: ReadonlySet<number> = new Set()) {
   const items = reviewedItems(findings);
   const answers = new Map<number, Answer>();
   const other: string[] = [];
@@ -785,13 +785,38 @@ export function answeredFindings(findings: string, responses: string) {
     else if (!match && last && continued.test(line)) last.text += `\n${line.trim()}`;
     else if (line.trim()) { last = undefined; other.push(line.trim()); }
   }
-  return { findings: items.map(({ text, note, test }, index) => ({ text, ...note ? { note } : {}, ...test ? { test } : {}, ...answers.has(index + 1) ? { answer: answers.get(index + 1)! } : {} })), other: other.join("\n") };
+  return { findings: items.map(({ text, note, test }, index) => ({ text, ...note ? { note } : {}, ...test ? { test } : {}, ...advisory.has(index + 1) && !test && !note ? { advisory: true } : {}, ...answers.has(index + 1) ? { answer: answers.get(index + 1)! } : {} })), other: other.join("\n") };
 }
+
+export type LabelCandidate = { finding: number; severity: "blocker" | "major" | "none"; text: string };
+
+export function labelCandidates(findings: string): LabelCandidate[] {
+  return reviewedItems(findings).flatMap(({ text, note, test }, index) => {
+    if (note || test || flooredItem(text)) return [];
+    const severity = statedSeverity(fieldsOutsideCode(text) ?? []);
+    return severity === "minor" || severity === "nit" ? [] : [{ finding: index + 1, severity: (severity ?? "none") as LabelCandidate["severity"], text }];
+  });
+}
+
+export type FindingLabel = { finding: number; severity: LabelCandidate["severity"]; label: "needs-answer" | "advisory"; reason: string };
+export const labelsPath = (directory: string) => join(directory, "triage-labels.json");
+
+export async function advisoryLabels(directory: string) {
+  const saved = await readJson<{ labels?: FindingLabel[] } | undefined>(labelsPath(directory), undefined).catch(() => undefined);
+  return (saved?.labels ?? []).filter(({ label, severity }) => label === "advisory" && severity !== "none");
+}
+
+async function advisoryOf(directory: string) {
+  const advisory = (await advisoryLabels(directory)).map(({ finding, severity }) => ({ finding, severity }));
+  return advisory.length ? { advisory } : {};
+}
+
+const advisoryIn = async (directory: string) => new Set((await advisoryLabels(directory)).map(({ finding }) => finding));
 
 const majorItem = /^\s*(?:[-*]|\d+[.)])\s+(?:[^|\n]*\|)?\s*\**major\**\s*\|/i;
 
-const knownBlockers = (findings: string, responses: string) =>
-  answeredFindings(findings, responses).findings.flatMap((finding, index) => finding.answer?.verdict === "known" && !majorItem.test(finding.text) && !needsNoAnswer(finding) ? [index + 1] : []);
+const knownBlockers = (findings: string, responses: string, advisory: ReadonlySet<number>) =>
+  answeredFindings(findings, responses, advisory).findings.flatMap((finding, index) => finding.answer?.verdict === "known" && !majorItem.test(finding.text) && !needsNoAnswer(finding) ? [index + 1] : []);
 
 const locations = (text: string) => [...text.matchAll(/(?<![\w./-])([\w./-]+:\d+)(?![\w:])/g)].map((match) => match[1]!);
 
@@ -801,10 +826,10 @@ const unlistedKnown = (findings: string, responses: string, listed: string[]) =>
     return answer?.verdict === "known" && !(location && listed.some((item) => locations(item).includes(location))) ? [index + 1] : [];
   });
 
-const needsNoAnswer = ({ text, note, test }: { text: string; note?: boolean; test?: boolean }) => note || (!test && flooredItem(text));
+const needsNoAnswer = ({ text, note, test, advisory }: { text: string; note?: boolean; test?: boolean; advisory?: boolean }) => note || advisory || (!test && flooredItem(text));
 
-const unanswered = (findings: string, responses: string) =>
-  answeredFindings(findings, responses).findings.flatMap((finding, index) => finding.answer || needsNoAnswer(finding) ? [] : [index + 1]);
+const unanswered = (findings: string, responses: string, advisory: ReadonlySet<number> = new Set()) =>
+  answeredFindings(findings, responses, advisory).findings.flatMap((finding, index) => finding.answer || needsNoAnswer(finding) ? [] : [index + 1]);
 
 export const proofKinds = ["live-run", "ui-walk", "prod-shape", "cross-version", "shadow-diff", "post-deploy-watch", "dev-observed"] as const;
 export type ProofKind = (typeof proofKinds)[number];
@@ -1324,11 +1349,12 @@ async function responseStatuses(home: string, identity: ProofIdentity, body: str
   const statuses = await Promise.all((await finishedReviews(home, identity)).map(async ({ name }): Promise<Status | undefined> => {
     const findings = await readFile(join(reviews, name, "findings.md"), "utf8");
     const responses = await readFile(join(reviews, name, "responses.md"), "utf8").catch(() => "");
-    const missing = unanswered(findings, responses);
+    const advisory = await advisoryIn(join(reviews, name));
+    const missing = unanswered(findings, responses, advisory);
     if (missing.length) return { problem: "missing", line: `review: ${reviewLabel(name)} has unanswered findings ${missing.join(", ")}; answer each with hedge proof respond --round ${name} <responses.md>` };
     const unlisted = body === undefined ? [] : unlistedKnown(findings, responses, knownIssues(body));
     if (unlisted.length) return { problem: "missing", line: `known issues: ${reviewLabel(name)} answers findings ${unlisted.join(", ")} known, but the "## Known issues" section of the PR body does not list their file:line` };
-    const blockers = knownBlockers(findings, responses);
+    const blockers = knownBlockers(findings, responses, advisory);
     return blockers.length ? { problem: "missing", line: `known issues: ${reviewLabel(name)} answers findings ${blockers.join(", ")} known, and an open blocker holds the merge` } : undefined;
   }));
   return statuses.filter((status) => status !== undefined);
@@ -1467,6 +1493,7 @@ export async function reviewRecords(home: string, identity: ProofIdentity) {
       label: reviewLabel(name), directory: join(reviews, name), commit, reviewer, capturedBy: reservation?.capturedBy ?? "author",
       findings: await readFile(join(reviews, name, "findings.md"), "utf8"),
       responses: await readFile(join(reviews, name, "responses.md"), "utf8").catch(() => undefined),
+      ...await advisoryOf(join(reviews, name)),
     };
   }));
 }

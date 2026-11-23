@@ -42,11 +42,11 @@ export function securityRow(env: Record<string, string | undefined>): ModelRow |
 export type Usage = { input?: number; cacheRead?: number; cacheWrite?: number; output?: number; total?: number; costUsd?: number };
 export type ModelAnswer = { ok: true; text: string; model: string; usage?: Usage } | { ok: false; cause: string; model: string; held?: true };
 export type ModelRequest = { prompt: string; cwd: string; readable?: string[]; images?: string[]; schema?: object; started?: (pid: number) => Promise<void> };
-export type Role = "arbiter" | "reviewer" | "judge" | "bloat-judge" | "eval-judge";
+export type Role = "arbiter" | "triage" | "reviewer" | "judge" | "bloat-judge" | "eval-judge";
 
-const prefixes: Record<Role, string> = { arbiter: "HEDGE_REVIEW_ARBITER", reviewer: "HEDGE_PROOF_REVIEWER", judge: "HEDGE_PROOF_JUDGE", "bloat-judge": "HEDGE_PROOF_BLOAT_JUDGE", "eval-judge": "HEDGE_PROOF_EVAL_JUDGE" };
+const prefixes: Record<Role, string> = { arbiter: "HEDGE_REVIEW_ARBITER", triage: "HEDGE_PROOF_TRIAGE", reviewer: "HEDGE_PROOF_REVIEWER", judge: "HEDGE_PROOF_JUDGE", "bloat-judge": "HEDGE_PROOF_BLOAT_JUDGE", "eval-judge": "HEDGE_PROOF_EVAL_JUDGE" };
 const prefixOf = (role: Role) => prefixes[role];
-const codexSandboxes: Record<Role, "read-only" | "danger-full-access"> = { arbiter: "read-only", "eval-judge": "read-only", reviewer: "danger-full-access", judge: "danger-full-access", "bloat-judge": "danger-full-access" };
+const codexSandboxes: Record<Role, "read-only" | "danger-full-access"> = { arbiter: "read-only", triage: "read-only", "eval-judge": "read-only", reviewer: "danger-full-access", judge: "danger-full-access", "bloat-judge": "danger-full-access" };
 
 export function modelLabel(role: Role, row: ModelRow, env: Record<string, string | undefined>, pinned = false) {
   const replacement = env[prefixOf(role)];
@@ -99,7 +99,7 @@ function graceOf(value: string | undefined) {
 async function modelCommand(role: Role, row: ModelRow, request: ModelRequest, scratch: string, output: string) {
   if (row.provider === "claude") {
     return ["claude", "-p", "--model", row.model, "--effort", row.effort, "--setting-sources", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-      "--disable-slash-commands", "--no-session-persistence", "--output-format", "json", "--tools", role === "arbiter" ? "" : "Read,Grep,Glob",
+      "--disable-slash-commands", "--no-session-persistence", "--output-format", "json", "--tools", role === "arbiter" || role === "triage" ? "" : "Read,Grep,Glob",
       "--permission-mode", "dontAsk", ...(request.readable ?? []).flatMap((directory) => ["--add-dir", directory])];
   }
   const schema = request.schema ? join(scratch, "schema.json") : undefined;

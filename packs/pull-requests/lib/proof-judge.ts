@@ -11,7 +11,7 @@ import { runRecordOf } from "./proof-run.ts";
 export type JudgeInput = {
   cwd: string; from: string; commit: string; diff: string; crossFamily: boolean; ci: CiResult; owed: Owed; ledger: string[];
   evidence: { kind: string; line: string; directory?: string }[];
-  reviews: { label: string; commit: string; reviewer?: string; capturedBy: string; findings: string; responses?: string }[];
+  reviews: { label: string; commit: string; reviewer?: string; capturedBy: string; findings: string; responses?: string; advisory?: { finding: number; severity: string }[] }[];
   rubric: string; references: string[]; risk?: RiskCheck;
   conditions?: { id: string; kind: string; condition: string }[]; criticalPaths?: string;
 };
@@ -100,7 +100,8 @@ function reviewSection(reviews: JudgeInput["reviews"]) {
   return reviews.map((review) => {
     const by = `${review.label}${review.reviewer ? ` by ${review.reviewer}` : ""}, ${review.capturedBy === "hedge" ? "captured by hedge" : "saved by the author"}`;
     return [`### ${by}, of ${review.commit}`, untrusted(`findings of ${by}`, review.findings),
-      review.responses ? untrusted(`the author's responses to ${review.label}`, review.responses) : "The author recorded no responses."].join("\n\n");
+      review.responses ? untrusted(`the author's responses to ${review.label}`, review.responses) : "The author recorded no responses.",
+      ...(review.advisory ?? []).map(({ finding, severity }) => `The triage labelled finding ${finding} (${severity}) advisory: it needs no answer, and counts as answered.`)].join("\n\n");
   }).join("\n\n") || "No review is recorded.";
 }
 

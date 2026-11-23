@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Opt-in triage of review findings, off by default
+
+- The new `pull-requests.triage` setting takes `off` (the default), `split`
+  or `on`. With `split` or `on`, `hedge proof review` records in each round's
+  `round.json` the setting, the pull request's arm (`treated` or `control`)
+  and the review path (`strict`, `standard` or `excluded`), and prints them.
+- In a treated pull request that is not a one-way door, each round and final
+  read then runs one pass of the lookup model. It labels each blocker, major
+  and unrated finding `needs-answer` or `advisory`, saves the labels, the
+  first severity, a reason, the time and the tokens in
+  `triage-labels.json`, and prints them. An advisory finding needs no answer
+  and buys no further round; the gate and the judge count it as answered, and
+  the proof receipt lists it. A failed or unreadable pass labels every finding
+  `needs-answer`.
+- `hedge proof triage --findings <file> --diff <file>` prints the labels of a
+  findings file as JSON and touches no proof ledger.
+
 ### Conductor-managed lanes default to T3 subthreads
 
 - The `base` T3 guide, `orchestration` pack rules and docs, and the pinned
