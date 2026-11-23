@@ -154,7 +154,7 @@ export async function triageFindings(findings: string, diff: string, ask: AskTri
       : given?.label === "advisory" || given?.label === "needs-answer" ? label(candidate, given.label, given.reason || "no reason given")
       : label(candidate, "needs-answer", "the triage gave no label"));
   });
-  const cause = !answer.ok ? oneLine(answer.cause) : !replied ? `the triage reply is not readable: ${oneLine(answer.text)}` : undefined;
+  const cause = !answer.ok ? oneLine(answer.cause) : !replied ? `the triage reply is not readable, ${answer.text.length} characters` : undefined;
   return { ...answer.model ? { model: answer.model } : {}, ok: answer.ok && replied !== undefined, ...cause ? { cause } : {}, durationMs, ...answer.ok && answer.usage ? { usage: answer.usage } : {}, labels };
 }
 
@@ -167,13 +167,16 @@ export async function labelsDue(directory: string, setting: TriageSetting) {
   return await triageRuns(directory) && (setting !== "off" || existsSync(labelsPath(directory)));
 }
 
+export const savedLabels = (directory: string) => readJson<Triaged | undefined>(labelsPath(directory), undefined).catch(() => undefined);
+
 export async function labelRound(directory: string, setting: TriageSetting, ask: AskTriage): Promise<Triaged | undefined> {
   if (!await triageRuns(directory)) return undefined;
-  const saved = await readJson<Triaged | undefined>(labelsPath(directory), undefined).catch(() => undefined);
+  const saved = await savedLabels(directory);
   if (saved?.ok || setting === "off") return saved;
   const findings = await readFile(join(directory, "findings.md"), "utf8");
   const diff = await readFile(join(directory, "diff.patch"), "utf8").catch(() => "");
   const triaged = await triageFindings(findings, diff, ask);
+  if (saved && !triaged.ok) return saved;
   await writeJson(labelsPath(directory), triaged);
   return triaged;
 }

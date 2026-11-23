@@ -13,8 +13,9 @@
   checkout. It labels each blocker, major and unrated finding `needs-answer`
   or `advisory`, saves the labels, the first severity, a reason, the time and
   the tokens in `triage-labels.json`, and prints them. An advisory finding
-  needs no answer and buys no further round; the gate, the judge and the
-  review arbiter count it as answered, and the proof receipt lists it. A
+  needs no answer and buys no further round; the gate and the judge count it
+  as answered, the review arbiter leaves it out, and the proof receipt lists
+  it. A
   failed or unreadable pass labels every finding `needs-answer`, and so does
   a lookup row that is not a Claude model, since only Claude runs with no
   tools.
