@@ -21,7 +21,7 @@ const slug = (value: string) => basename(value.trim(), ".md").toLowerCase();
 const isMemory = (path: string) => path.endsWith(".md") && !isIndex(path) && path !== "README.md" && !notMemory.has(path.split("/")[0]!);
 
 const utc = (at: string) => new Date(at).toISOString();
-const existedAt = (memory: Memory, at: string) => !memory.addedAt || memory.addedAt < at;
+const existedAt = (memory: Memory, at: string) => !memory.addedAt || Date.parse(memory.addedAt) < Date.parse(at);
 const pathsOf = (memory: Memory) => [memory.path, ...memory.aliases];
 
 const readLedger = (state: string): Ledger => existsSync(join(state, "ledger.json")) ? JSON.parse(readFileSync(join(state, "ledger.json"), "utf8")) : {};
@@ -73,17 +73,21 @@ function memoryChanges(lines: string): Change[] {
     return { status: status.charAt(0), from, to };
   }).filter((change) => isMemory(change.to));
   const removed = changes.filter((change) => change.status === "D");
-  const moves = changes.filter((change) => change.status === "A").flatMap((added) => {
-    const gone = removed.find((change) => basename(change.from) === basename(added.to));
-    return gone ? [{ status: "R", from: gone.from, to: added.to }] : [];
+  const added = changes.filter((change) => change.status === "A");
+  const sameName = <T extends Change>(items: T[], path: string) => items.filter((change) => basename(change.to) === basename(path));
+  const moves = added.flatMap((change) => {
+    const gone = sameName(removed, change.to);
+    return gone.length === 1 && sameName(added, change.to).length === 1 ? [{ status: "R", from: gone[0]!.from, to: change.to }] : [];
   });
   const moved = new Set(moves.flatMap((move) => [move.from, move.to]));
   return [...changes.filter((change) => !moved.has(change.to)), ...moves];
 }
 
-function topicTarget(subject: string, paths: string[]): string | undefined {
+function topicTarget(subject: string, changes: Change[]): string | undefined {
   const named = slug(/^\w+:\s*(.+)$/.exec(subject)?.[1] ?? "");
-  return paths.find((path) => slug(path) === named) ?? (paths.length === 1 ? paths[0] : undefined);
+  const kept = changes.filter((change) => change.status !== "D");
+  if (changes.some((change) => change.status === "D" && slug(change.from) === named)) return undefined;
+  return kept.find((change) => slug(change.to) === named)?.to ?? (kept.length === 1 ? kept[0]!.to : undefined);
 }
 
 export async function readMemories(checkout: string, git: Git): Promise<Memory[]> {
@@ -96,6 +100,7 @@ export async function readMemories(checkout: string, git: Git): Promise<Memory[]
     for (const change of changes) {
       if (change.status === "D") { memories.delete(change.from); continue; }
       const memory = memories.get(change.from) ?? { path: change.to, name: "", aliases: new Set<string>(), firstCommitAt: date, topics: new Set<string>() };
+      for (const other of memories.values()) other.aliases.delete(change.to);
       memories.delete(change.from);
       if (change.from !== change.to) memory.aliases.add(change.from);
       memory.path = change.to;
@@ -104,17 +109,17 @@ export async function readMemories(checkout: string, git: Git): Promise<Memory[]
       memories.set(memory.path, memory);
     }
     const kept = changes.filter((change) => change.status !== "D").map((change) => change.to);
-    const target = memories.get(topicTarget(body.split("\n")[0] ?? "", kept) ?? "");
+    const target = memories.get(topicTarget(body.split("\n")[0] ?? "", changes) ?? "");
     const topics = [...body.matchAll(/^Topics?:\s*(.+)$/gim)].flatMap((match) => match[1]!.split(/[,\s]+/)).map(slug).filter(Boolean);
     for (const topic of topics.filter((topic) => !kept.some((path) => slug(path) === topic))) target?.topics.add(topic);
   }
-  const importedAt = commits[0]?.date ?? "";
   const reachedMain = new Map<string, string>();
   const merged = (await git(["log", "--relative", "--first-parent", "-m", "--diff-filter=A", "--name-only", "--format=%x1e%cI", "--", "."])).split("\x1e").slice(1);
   for (const chunk of merged) {
     const [at = "", ...paths] = chunk.trim().split("\n");
     for (const path of paths.filter(Boolean)) if (!reachedMain.has(path)) reachedMain.set(path, utc(at));
   }
+  const importedAt = [...reachedMain.values()].sort()[0] ?? "";
   for (const memory of memories.values()) {
     const mainDate = pathsOf(memory).flatMap((path) => reachedMain.get(path) ?? []).sort()[0] ?? "";
     const added = mainDate > memory.firstCommitAt ? mainDate : memory.firstCommitAt;
