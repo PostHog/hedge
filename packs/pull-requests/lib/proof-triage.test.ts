@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { armOf } from "./proof-triage.ts";
-import { checkout, cleanFixtures, fakeModel, graded, settings, type Checkout } from "./proof-testing.ts";
+import { answerFixed, checkout, cleanFixtures, fakeModel, graded, settings, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
@@ -157,4 +157,85 @@ test("a final read that changes only a plain file keeps the strict path of a dan
   fakeModel(pr, "REVIEWER", noFindings("feature.ts"));
 
   expect((await firstLine(pr, "--scope", "final", "--base", reviewed)).triage).toEqual({ setting: "on", arm: "treated", path: "strict", why: ["sends: send-mail.ts"] });
+});
+
+const major = "FINDINGS:\n- major | feature.ts:1 | the greeting drops the name\nCOVERED: feature.ts\n";
+
+async function budgeted(triage: string | undefined, body: string, ceiling = 100) {
+  const pr = await triaged(triage, body);
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...JSON.parse(pr.env.HEDGE_SETTINGS!), "pull-requests.freeReviews": 100, "pull-requests.reviewCeiling": ceiling });
+  fakeModel(pr, "REVIEWER", major);
+  return pr;
+}
+
+const latestReviewed = async (pr: Checkout) => (await pr.git("log", "-1", "--format=%H", "HEAD~1"));
+
+async function readAgain(pr: Checkout, answered: string, ...args: string[]) {
+  await answerFixed(pr, answered);
+  const base = await pr.git("rev-parse", "HEAD");
+  await pr.commit("feature.ts", `export const greet = (name: string) => \`${base.slice(0, 7)} \${name}\`;\n`);
+  return pr.hedge("review", "--scope", "final", "--base", base, ...args);
+}
+
+test("with triage on, a treated pull request on the standard path gets a hard budget of two reads, which --agent cannot pass and the user's --override can", async () => {
+  const pr = await budgeted("on", graded("non-critical", "medium"));
+
+  expect(await firstLine(pr, "--single")).toMatchObject({ round: 1, budget: 2, triage: { arm: "treated", path: "standard" } });
+  expect(roundRecord(pr, "1")).toMatchObject({ budget: 2, triage: { path: "standard" } });
+  expect((await readAgain(pr, "1")).code).toBe(0);
+  expect(roundRecord(pr, "final-1")).toMatchObject({ budget: 2 });
+
+  await expect(readAgain(pr, "final-1")).rejects.toThrow("The review budget of 2 reviews is spent");
+  const third = ["review", "--scope", "final", "--base", await latestReviewed(pr)];
+  await expect(pr.hedge(...third, "--agent", "One more read checks the last fix.")).rejects.toThrow("The review budget of 2 reviews is spent");
+  pr.choose("Run one more round");
+  expect((await pr.hedge(...third, "--override", `2026-10-25 "Run one more round"`)).code).toBe(0);
+});
+
+test("a treated pull request on the strict path gets three reads, and a lower profile ceiling lowers a treated budget", async () => {
+  const strict = await budgeted("on", graded("critical (b)", "high"));
+  expect(await firstLine(strict, "--single")).toMatchObject({ budget: 3, triage: { path: "strict" } });
+  expect((await readAgain(strict, "1")).code).toBe(0);
+  expect((await readAgain(strict, "final-1")).code).toBe(0);
+  await expect(readAgain(strict, "final-2")).rejects.toThrow("The review budget of 3 reviews is spent");
+
+  const lowered = await budgeted("on", graded("non-critical", "medium"), 1);
+  expect(await firstLine(lowered, "--single")).toMatchObject({ budget: 1 });
+  await expect(readAgain(lowered, "1")).rejects.toThrow("The review budget of 1 reviews is spent");
+});
+
+test("an excluded or control pull request keeps the profile's ceiling, and with triage off a review records no budget and keeps today's ceiling", async () => {
+  const excluded = await budgeted("on", oneWay, 6);
+  expect(await firstLine(excluded, "--single")).toMatchObject({ budget: 6, triage: { path: "excluded" } });
+  expect((await readAgain(excluded, "1")).code).toBe(0);
+  expect((await readAgain(excluded, "final-1")).code).toBe(0);
+
+  const control = [1, 2, 3, 4, 5, 6, 7, 8].find((number) => armOf("split", "example/product", number) === "control")!;
+  const split = await checkout();
+  split.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": "split" });
+  split.pullRequestState({ body: graded("non-critical", "medium"), number: control });
+  await split.commit("feature.ts", "export const greet = (name: string) => name;\n");
+  const target = ["--repo", "example/product", "--pr", String(control)];
+  await split.hedge("require", "--none", "--reason", "fixture", ...target);
+  fakeModel(split, "REVIEWER", major);
+  expect(await firstLine(split, "--single", ...target)).toMatchObject({ budget: 6, triage: { arm: "control", path: "standard" } });
+
+  const off = await budgeted("off", graded("non-critical", "medium"), 6);
+  expect(await firstLine(off, "--single")).not.toHaveProperty("budget");
+  expect(roundRecord(off, "1")).not.toHaveProperty("budget");
+  expect((await readAgain(off, "1")).code).toBe(0);
+  expect((await readAgain(off, "final-1")).code).toBe(0);
+  expect(roundRecord(off, "final-2")).not.toHaveProperty("budget");
+});
+
+test("at a treated budget a finding listed under Known issues takes a known answer, and with triage switched off the profile's ceiling applies again", async () => {
+  const pr = await budgeted("on", graded("non-critical", "medium"));
+  await pr.hedge("review", "--single");
+  expect((await readAgain(pr, "1")).code).toBe(0);
+  writeFileSync(join(pr.repository, "responses.md"), "1. known: listed under Known issues\n");
+  const on = pr.env.HEDGE_SETTINGS!;
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...JSON.parse(on), "pull-requests.triage": "off" });
+  await expect(pr.hedge("respond", "--round", "final-1", "responses.md")).rejects.toThrow("review budget of 100 reviews");
+  pr.env.HEDGE_SETTINGS = on;
+  expect((await pr.hedge("respond", "--round", "final-1", "responses.md")).code).toBe(0);
 });

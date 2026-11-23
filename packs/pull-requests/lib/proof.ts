@@ -10,7 +10,7 @@ import { panelOutcome, unansweredPanelCause } from "./proof-panel.ts";
 import { redactSecrets } from "../../base/hooks/secret-guard.ts";
 import { anchorHeading } from "./finding-anchors.ts";
 import type { Growth } from "./proof-end-table.ts";
-import type { TriageMark } from "./proof-triage.ts";
+import type { TriageMark, TriageSetting } from "./proof-triage.ts";
 import { endTableNote, gradeOf, shellQuoted, type Autonomy } from "./proof-autonomy.ts";
 
 export type ProofIdentity = { repository: string; pr: number; commit: string };
@@ -319,7 +319,7 @@ async function startFinalRead(home: string, identity: ProofIdentity, base: strin
     let read = 1;
     while (taken.has(finalReadPrefix + read)) read++;
     const name = finalReadPrefix + read;
-    await reserveDecided(reviews, name, { ...identity, round: "final", read, scope: "final", base, from, phase, arbiter: verdict, capturedBy, ...triage ? { triage } : {} }, decision, stamping);
+    await reserveDecided(reviews, name, { ...identity, round: "final", read, scope: "final", base, from, phase, arbiter: verdict, capturedBy, ...triage ? { budget: permit.limits.ceiling, triage } : {} }, decision, stamping);
     return { round: "final", id: name, directory: join(reviews, name) };
   });
 }
@@ -361,7 +361,7 @@ async function startRound(home: string, identity: ProofIdentity, reviews: string
     return permitReview(home, identity, spent >= free, spent >= ceiling ? budgetSpent(permit.limits) : undefined, decision, permit);
   };
   return reserveWeighed(reviews, lockBudget, snapshot, permitRound, async ({ round }, verdict) => {
-    await reserveDecided(reviews, String(round), { ...identity, round, scope, base, from, ...forkBase ? { forkBase } : {}, arbiter: verdict, capturedBy, ...triage ? { triage } : {} }, decision, stamping);
+    await reserveDecided(reviews, String(round), { ...identity, round, scope, base, from, ...forkBase ? { forkBase } : {}, arbiter: verdict, capturedBy, ...triage ? { budget: permit.limits.ceiling, triage } : {} }, decision, stamping);
     return { round, id: String(round), directory: join(reviews, String(round)) };
   });
 }
@@ -616,7 +616,7 @@ async function storeFindings(directory: string, identity: ProofIdentity, round: 
   await writeJson(join(directory, "round.json"), { ...await readReservation(directory) ?? reservation, reviewer, capturedBy, ...usage ? { usage } : {} });
 }
 
-export async function respondToReview(home: string, identity: ProofIdentity, round: RoundId, responses: string, ceiling: number) {
+export async function respondToReview(home: string, identity: ProofIdentity, round: RoundId, responses: string, profileCeiling: number, triage: TriageSetting) {
   const bytes = await readFile(responses);
   if (!bytes.toString().trim()) throw new Error(`${responses} is empty. Answer each finding: fixed in which commit, or rejected and why`);
   const directory = await roundDirectory(home, identity, round);
@@ -626,7 +626,8 @@ export async function respondToReview(home: string, identity: ProofIdentity, rou
   if (missing.length) throw new Error(`Answer findings ${missing.join(", ")} too: one line each, numbered in the order of findings.md, such as "${missing[0]}. fixed in 1a2b3c4: <how>", "${missing[0]}. rejected: <why>", or, at the review budget, "${missing[0]}. known: <why>" for a finding listed under Known issues. Minor and nit findings need no answer; a TESTS item gets a test-only rewrite or delete`);
   if (answeredFindings(findings, bytes.toString()).findings.some(({ answer }) => answer?.verdict === "known")) {
     const reviews = join(pullRequestDirectory(home, identity), "reviews");
-    const phase = (await readJson<{ phase?: FinalReadPhase }>(join(directory, "round.json"), {})).phase ?? "review";
+    const { phase = "review", budget } = await readJson<{ phase?: FinalReadPhase; budget?: number }>(join(directory, "round.json"), {});
+    const ceiling = triage === "off" ? profileCeiling : budget ?? profileCeiling;
     const { spent } = await reviewsSpent(reviews, phase, "finished only");
     if (spent < ceiling) throw new Error(`Answer a finding "known" only once the review budget of ${ceiling} reviews is spent; ${spent} ran. Fix or reject it now`);
   }

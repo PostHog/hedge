@@ -82,7 +82,9 @@ function onCriticalPaths(files: string[], list: string | undefined) {
 const inDangerAreas = (files: string[]) =>
   files.filter(isProductionFile).flatMap((file) => dangerAreas.filter(({ pattern }) => pattern.test(file)).map(({ area }) => `${area}: ${file}`));
 
-export async function readTriage(directory: string): Promise<{ triage: TriageMark } | Record<string, never>> {
-  const triage = (await readJson<{ triage?: TriageMark } | undefined>(join(directory, "round.json"), undefined))?.triage;
-  return triage ? { triage } : {};
+export const treatedBudget = (triage: TriageMark | undefined, ceiling: number) => triage?.arm === "treated" && triage.path !== "excluded" ? Math.min(triage.path === "strict" ? 3 : 2, ceiling) : undefined;
+
+export async function readTriage(directory: string): Promise<{ budget?: number; triage: TriageMark } | Record<string, never>> {
+  const round = await readJson<{ budget?: number; triage?: TriageMark } | undefined>(join(directory, "round.json"), undefined);
+  return round?.triage ? { ...round.budget === undefined ? {} : { budget: round.budget }, triage: round.triage } : {};
 }

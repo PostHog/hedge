@@ -25,7 +25,7 @@ import { quietCommitIn } from "./proof-delta.ts";
 import { baseRefs, baseTip, changedFiles, cleanBaseMerge, mergeBase, pullRequestDetails, remotesOf, reviewTier, tierCeiling, tierLenses, topLevel, type ReviewTier } from "./proof-checkout.ts";
 import { arbiterOf, finalGate, reviewLimit, type FinalGate } from "./proof-gate.ts";
 import { anchorCheck } from "./finding-anchors.ts";
-import { armOf, pathOf, readTriage, triageSetting, type TriageSetting } from "./proof-triage.ts";
+import { armOf, pathOf, readTriage, treatedBudget, triageSetting, type TriageSetting } from "./proof-triage.ts";
 import { readCriticalPaths } from "./proof-judge.ts";
 import { reviewRules } from "./review-rules.ts";
 import { recordSanity, requireSanity } from "./proof-sanity.ts";
@@ -347,7 +347,7 @@ each answer against HEAD.`,
       if (files.length !== 1) throw usageError("respond", "Pass one responses file");
       const head = identity();
       const ceiling = tierCeiling(tierOf(head, context), numberSetting("pull-requests.reviewCeiling", context.env));
-      print(await respondToReview(home, head, roundId(required(options, "--round", "respond")), resolve(cwd, files[0]!), ceiling));
+      print(await respondToReview(home, head, roundId(required(options, "--round", "respond")), resolve(cwd, files[0]!), ceiling, triageSetting(context.env)));
       return 0;
     },
   },
@@ -731,7 +731,8 @@ async function reserveRound(options: Map<string, string>, head: ProofIdentity, c
   const tier = reviewTier(head, context.run, pull?.body);
   if (tier.name === "read" && capturedBy === "hedge" && !panel && !decision && !await panelCommit(context.home, head)) throw new Error("A PR of the Read tier gets one read, and it is the panel: run hedge proof review, which runs its combined lens");
   const firstPanel = panel && !await panelCommit(context.home, head);
-  const limits = firstPanel ? permit.limits : { ...permit.limits, ceiling: tierCeiling(tier, permit.limits.ceiling) };
+  const budget = treatedBudget(triage, permit.limits.ceiling);
+  const limits = budget !== undefined ? { ...permit.limits, ceiling: budget } : firstPanel ? permit.limits : { ...permit.limits, ceiling: tierCeiling(tier, permit.limits.ceiling) };
   const now = context.now ?? (() => new Date());
   const dropUnanswered = (directory: string) => roundStep(directory, context, () => dropFinalRead(directory, head, now()));
   const emptyRange = () => from !== undefined && rangeIsEmpty(context.run, from, head.commit, mergeBase(head, context.run));
