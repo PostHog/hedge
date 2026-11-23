@@ -196,7 +196,7 @@ async function reconcile(plan: Plan, options: ApplyOptions): Promise<{ report: R
       await held(step);
       continue;
     }
-    options.progress?.(`  … ${step.pack}: ${step.id}`);
+    options.progress?.("  … Applying setup");
     const ran = (await run(step.run)) === 0;
     const holds = await passes(step);
     if (holds) await held(step);

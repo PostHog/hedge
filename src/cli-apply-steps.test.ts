@@ -53,22 +53,21 @@ describe("hedge apply --skip", () => {
 });
 
 describe("hedge apply progress", () => {
-  test("names each step before its work is done, and stays quiet for a step that already holds", async () => {
+  test("shows generic progress before work is done, and stays quiet for a step that already holds", async () => {
     const home = temp.make("home-");
     const engine = engineWithTools();
     const profile = profileDir(["tools"]);
     const progress: string[] = [];
-    const doneWhenNamed: Record<string, boolean> = {};
+    const doneWhenShown: boolean[] = [];
     const print = (line: string) => {
-      const step = line.match(/^  … tools: (\w+)$/)?.[1];
-      if (!step) return;
-      progress.push(step);
-      doneWhenNamed[step] = existsSync(join(home, `${step}.txt`));
+      if (line !== "  … Applying setup") return;
+      progress.push(line);
+      doneWhenShown.push(existsSync(join(home, "box.txt")));
     };
     const apply = (args: string[]) => main(args, { home, engineRoot: engine, platform: "linux", env: {}, print });
     expect(await apply(["apply", "--profile", profile])).toBe(0);
-    expect(progress).toEqual(["box", "codex"]);
-    expect(doneWhenNamed).toEqual({ box: false, codex: false });
+    expect(progress).toEqual(["  … Applying setup", "  … Applying setup"]);
+    expect(doneWhenShown).toEqual([false, true]);
     expect([existsSync(join(home, "box.txt")), existsSync(join(home, "codex.txt"))]).toEqual([true, true]);
     progress.length = 0;
     expect(await apply(["apply"])).toBe(0);
