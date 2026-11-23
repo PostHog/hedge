@@ -437,7 +437,10 @@ test("the triage asks the lookup row's model with the arguments of a call with n
   const argv = claude.argv().split("\n").filter(Boolean).slice(1);
   const options = argv[0] === "[--settings]" ? argv.slice(2) : argv;
   const isolating = { "--model": "lookup-model", "--setting-sources": "", "--mcp-config": '{"mcpServers":{}}', "--tools": "", "--permission-mode": "dontAsk", "--output-format": "json" };
-  for (const [flag, value] of Object.entries(isolating)) expect(options[options.indexOf(`[${flag}]`) + 1]).toBe(`[${value}]`);
+  for (const [flag, value] of Object.entries(isolating)) {
+    expect(options.filter((option) => option === `[${flag}]`)).toHaveLength(1);
+    expect(options[options.indexOf(`[${flag}]`) + 1]).toBe(`[${value}]`);
+  }
   expect(options).toEqual(expect.arrayContaining(["[-p]", "[--strict-mcp-config]", "[--disable-slash-commands]", "[--no-session-persistence]"]));
   expect(savedLabels(pr)).toMatchObject({ ok: true, model: "lookup-model", labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "advisory" }, { finding: 4, label: "needs-answer" }] });
 });
