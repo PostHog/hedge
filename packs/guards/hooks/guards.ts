@@ -3,15 +3,17 @@ import { join } from "node:path";
 import { type Hook, printing, runHook } from "../../base/lib/hook.ts";
 import { installedOwners } from "../lib/allowlist.ts";
 import { downloadRisk } from "../lib/download.ts";
-import { exitMaskRisk } from "../lib/exit-mask.ts";
+import { exitMaskRewrite, exitMaskRisk } from "../lib/exit-mask.ts";
 import { allowRuleList, ghRisk, ownerList } from "../lib/gh.ts";
 import { gitRisk, repoList } from "../lib/git.ts";
 import { killRisk } from "../lib/kill.ts";
 import { shellTools } from "../lib/shell-words.ts";
-import { isSleepPoll, isTaskStatus, repeatedStatusReason, repeatsTaskStatus, sleepPollReason } from "../lib/wait.ts";
+import { backgroundWaitRisk, isBackgroundWait, isSleepPoll, isTaskStatus, repeatedStatusReason, repeatsTaskStatus, sleepPollReason } from "../lib/wait.ts";
 
 export type ToolCall = { tool_name?: string; tool_input?: Record<string, unknown>; cwd?: string; tool_use_id?: string; transcript_path?: string };
-export type Denial = { hookSpecificOutput: { hookEventName: "PreToolUse"; permissionDecision: "deny"; permissionDecisionReason: string } };
+export type Answer = {
+  hookSpecificOutput: { hookEventName: "PreToolUse"; permissionDecision?: "deny"; permissionDecisionReason?: string; updatedInput?: Record<string, unknown>; additionalContext?: string };
+};
 
 const fallbackPerson = "the person who runs this machine";
 
@@ -38,7 +40,7 @@ function shellCommand(input: Record<string, unknown> = {}) {
   return typeof command === "string" ? command : "";
 }
 
-const deny = (reason: string): Denial => ({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } });
+const deny = (reason: string): Answer => ({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } });
 
 const unreadableReason = (problem: string, person: string) => `Hedge blocked this call: the shell guards could not read their settings in ${problem}, `
   + `so they cannot tell which GitHub owners and repositories agents may use. Fix that file, or stop and ask ${person}.`;
@@ -48,6 +50,7 @@ const uncheckedReason = (error: unknown, person: string) => `Hedge blocked this 
 
 function check(call: ToolCall, { person, owners, mainPushRepos, allowRules, unreadable }: Settings): string | undefined {
   if (isTaskStatus(call.tool_name)) return repeatsTaskStatus(call) ? repeatedStatusReason(person) : undefined;
+  if (isBackgroundWait(call.tool_name)) return backgroundWaitRisk(call);
   if (!shellTools.has(call.tool_name ?? "")) return undefined;
   if (unreadable) return unreadableReason(unreadable, person);
   const command = shellCommand(call.tool_input);
@@ -56,28 +59,46 @@ function check(call: ToolCall, { person, owners, mainPushRepos, allowRules, unre
     ?? gitRisk(command, cwd, person, mainPushRepos) ?? exitMaskRisk(command, person) ?? (isSleepPoll(command) ? sleepPollReason(person) : undefined);
 }
 
-/** The refusal for a tool call that a shell guard stops, naming the person the settings give. A call the guards cannot
- * check is refused too. An installed signed allowlist under the system root wins over guards.owners. */
-export function guard(call: ToolCall, home: string, root = "/"): Denial | undefined {
+const rewriteNote = (command: string) => `Hedge ran this command as \`${command}\`, so the exit status of each push, commit, merge, `
+  + "gate or watch in it shows, and no command runs after one that fails. Write it this way next time.";
+
+const restrictsPersonalHooks = () => !/^(?:|0|false|no|off)$/i.test((process.env.CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG ?? "").trim());
+
+function rewritten(call: ToolCall, settings: Settings, provider: string): Answer | undefined {
+  const input = call.tool_input;
+  if (provider !== "claude" || call.tool_name !== "Bash" || typeof input?.command !== "string" || restrictsPersonalHooks()) return undefined;
+  const command = exitMaskRewrite(input.command);
+  if (command === undefined) return undefined;
+  const updatedInput = { ...input, command };
+  if (check({ ...call, tool_input: updatedInput }, settings)) return undefined;
+  return { hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput, additionalContext: rewriteNote(command) } };
+}
+
+/** The answer for a tool call that a shell guard stops, naming the person the settings give. On Claude, a call whose only
+ * fault is a hidden exit status runs rewritten into a form that shows it; Claude still asks for its permission as usual.
+ * Any other such call is refused, and so is a call the guards cannot check. An installed signed allowlist under the
+ * system root wins over guards.owners. */
+export function guard(call: ToolCall, home: string, root = "/", provider = ""): Answer | undefined {
   const settings = guardSettings(home);
   try {
-    const risk = check(call, { ...settings, owners: installedOwners(root) ?? settings.owners });
-    return risk ? deny(risk) : undefined;
+    const checked = { ...settings, owners: installedOwners(root) ?? settings.owners };
+    const risk = check(call, checked);
+    return risk ? (rewritten(call, checked, provider) ?? deny(risk)) : undefined;
   } catch (error) {
     return deny(uncheckedReason(error, settings.person));
   }
 }
 
-function answer(input: string, home: string): Denial | undefined {
+function answer(input: string, home: string, provider: string): Answer | undefined {
   let call: ToolCall;
   try {
     call = JSON.parse(input);
   } catch {
     return deny(uncheckedReason(new Error("the hook input is not JSON"), guardSettings(home).person));
   }
-  return guard(call, home);
+  return guard(call, home, "/", provider);
 }
 
-export const hook: Hook = async (_provider, readInput, home) => printing(answer(await readInput(), home));
+export const hook: Hook = async (provider, readInput, home) => printing(answer(await readInput(), home, provider));
 
 if (import.meta.main) await runHook(hook);

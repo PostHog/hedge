@@ -90,3 +90,80 @@ export function repeatsTaskStatus(call: StatusCall): boolean {
   }
   return false;
 }
+
+type Finished = { status: string; outputFile?: string };
+type Seen = { subagents: Set<string>; finished: Map<string, Finished> };
+
+const subagentShape = /^a[0-9a-f]{16}$/;
+const delegatedShape = /^(?:node|thread|run):/;
+const notificationStart = "<task-notification>";
+
+export const isBackgroundWait = (name = "") => /^mcp__t3[-_]code__t3_background_wait$/.test(name);
+
+const fieldReason = 'Hedge blocked this call: `t3_background_wait` takes `taskIds`, a list of IDs, as in `{"taskIds": ["<id>"]}`. '
+  + "Pass the ID of a background command or Monitor that this thread started and that still runs.";
+
+const textsOf = (content: unknown): string[] => {
+  if (typeof content === "string") return [content];
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((block: { type?: string; text?: unknown; content?: unknown }) =>
+    block?.type === "text" && typeof block.text === "string" ? [block.text] : block?.type === "tool_result" ? textsOf(block.content) : []);
+};
+
+function notificationsOf(entry: TranscriptEntry & { content?: unknown }): string[] {
+  if (entry.type === "queue-operation") return typeof entry.content === "string" ? [entry.content] : [];
+  const content = entry.message?.content;
+  if (entry.type !== "user") return [];
+  if (typeof content === "string") return [content];
+  return Array.isArray(content) ? content.flatMap((block: Block & { text?: unknown }) => (block?.type === "text" && typeof block.text === "string" ? [block.text] : [])) : [];
+}
+
+function seenIn(path: string | undefined): Seen {
+  const seen: Seen = { subagents: new Set(), finished: new Map() };
+  if (!path) return seen;
+  try {
+    for (const line of linesFromEnd(path)) {
+      if (!line.includes(notificationStart) && !line.includes("agentId: ")) continue;
+      const entry = parse(line);
+      if (!entry) continue;
+      if (entry.type === "user") for (const text of textsOf(entry.message?.content)) for (const [, id] of text.matchAll(/^agentId: (\S+)/gm)) seen.subagents.add(id);
+      for (const text of notificationsOf(entry).filter((each) => each.trimStart().startsWith(notificationStart))) {
+        const id = text.match(/<task-id>([^<]+)<\/task-id>/)?.[1];
+        const status = text.match(/<status>([^<]+)<\/status>/)?.[1];
+        if (id && status) seen.finished.set(id, { status, outputFile: text.match(/<output-file>([^<]+)<\/output-file>/)?.[1] });
+      }
+    }
+  } catch {
+    return seen;
+  }
+  return seen;
+}
+
+function problemWith(id: string, seen: Seen): string | undefined {
+  if (delegatedShape.test(id)) {
+    return `\`${id}\` is a delegated task. T3 wakes this thread when it ends: follow the \`next\` step its \`delegate_task\` answer gave and end the turn, `
+      + "or call `t3_thread_wait` on its child thread when this turn needs the result.";
+  }
+  if (seen.subagents.has(id) || subagentShape.test(id)) {
+    return `\`${id}\` is a subagent. Claude Code tells this thread when it ends, so keep working or end the turn; `
+      + "start a subagent with `run_in_background: false` when this turn needs its result.";
+  }
+  const done = seen.finished.get(id);
+  if (!done) return undefined;
+  return `\`${id}\` already finished (${done.status}). Read its output now${done.outputFile ? ` in ${done.outputFile}` : ""}; there is nothing to wait for.`;
+}
+
+/** Why a `t3_background_wait` call cannot keep this thread waiting: a wrong field, or an ID of a subagent, a delegated
+ * task, or a background command that the transcript shows has finished. Undefined for a call T3 should judge itself. */
+export function backgroundWaitRisk(call: StatusCall): string | undefined {
+  const input = call.tool_input ?? {};
+  const { taskIds } = input;
+  if (!Array.isArray(taskIds) || taskIds.length === 0 || taskIds.some((id) => typeof id !== "string")) return fieldReason;
+  if (input.waiting === false) return undefined;
+  const seen = seenIn(call.transcript_path);
+  const problems = (taskIds as string[]).flatMap((id) => problemWith(id, seen) ?? []);
+  if (problems.length === 0) return undefined;
+  const left = (taskIds as string[]).filter((id) => !problemWith(id, seen));
+  const rest = left.length > 0 ? ` Pass only the IDs that still run: ${left.map((id) => `\`${id}\``).join(", ")}.` : "";
+  return `Hedge blocked this call: ${problems.join(" ")}${rest}`;
+}

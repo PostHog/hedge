@@ -724,6 +724,10 @@ describe("the gh guard", () => {
     expect(refusal(command)).toContain("is not spelled out");
   });
 
+  test("tells an agent with a loop over repositories how to write it instead", () => {
+    expect(refusal("for repo in a b; do gh api repos/$repo/x; done")).toContain("write one command per repository, joined with `&&`");
+  });
+
   test.each([
     ["gh api repos//other/app", "other"],
     ["gh api --method GET Repos/other/app", "other"],

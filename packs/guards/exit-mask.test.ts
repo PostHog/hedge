@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../../src/testing/git.ts";
 import { guard } from "./hooks/guards.ts";
-import { exitMaskRisk } from "./lib/exit-mask.ts";
+import { exitMaskRewrite, exitMaskRisk } from "./lib/exit-mask.ts";
 
 const temp = tempDirs();
 const stubs = tempDirs();
@@ -21,18 +21,28 @@ beforeAll(() => {
 afterEach(() => temp.cleanup());
 afterAll(() => stubs.cleanup());
 
-function runFailing(command: string, failing: number) {
+const harnesses = {
+  codex: (command: string) => ["-c", command],
+  claude: (command: string) => ["-c", ': && eval "$AGENT_COMMAND" < /dev/null && pwd -P > /dev/null', command],
+};
+type Harness = keyof typeof harnesses;
+
+function runFailing(command: string, failing: number, harness: Harness = "codex") {
   const calls = join(temp.make("exit-mask-calls-"), "calls");
-  const run = spawnSync("bash", ["-c", command], { cwd: temp.make("exit-mask-run-"), env: { PATH: `${bin}:/usr/bin:/bin`, STUB_CALLS: calls, STUB_FAILS: String(failing) }, encoding: "utf8" });
+  const [flag, program] = harnesses[harness](command);
+  const env = { PATH: `${bin}:/usr/bin:/bin`, STUB_CALLS: calls, STUB_FAILS: String(failing), AGENT_COMMAND: command };
+  const run = spawnSync("bash", [flag, program], { cwd: temp.make("exit-mask-run-"), env, encoding: "utf8" });
   const made = Number(spawnSync("cat", [calls], { encoding: "utf8" }).stdout || 0);
   return { seen: { status: run.status, output: `${run.stdout}${run.stderr}` }, made };
 }
 
-function shellShowsEveryFailure(command: string) {
-  const { seen, made } = runFailing(command, 0);
+function showsEveryFailureIn(command: string, harness: Harness) {
+  const { seen, made } = runFailing(command, 0, harness);
   expect(made).toBeGreaterThan(0);
-  return Array.from({ length: made }, (_, call) => runFailing(command, call + 1).seen).every((failed) => !Bun.deepEquals(failed, seen));
+  return Array.from({ length: made }, (_, call) => runFailing(command, call + 1, harness).seen).every((failed) => !Bun.deepEquals(failed, seen));
 }
+
+const shellShowsEveryFailure = (command: string) => showsEveryFailureIn(command, "codex") && showsEveryFailureIn(command, "claude");
 
 const refused = (command: string) => exitMaskRisk(command, "Robin") !== undefined;
 
@@ -44,7 +54,6 @@ describe("the exit-status mask guard", () => {
     "set -euo pipefail\ngit push | tail -3",
     "set +o pipefail; set -o pipefail; git push | tail -3",
     "set -o pipefail; git push 2>&1 | tail -3; echo \"exit $?\"",
-    "set -e; git commit -m x; git push",
     "if git push; then echo pushed; fi",
     "git push > push.log 2>&1 && tail push.log",
     "git push;",
@@ -101,6 +110,10 @@ describe("the exit-status mask guard", () => {
     "hedge heavy -- git push | tail -3",
     "fleet heavy -- git push | tail -3",
     "git commit -m x; git push",
+    "set -e; git commit -m x; git push",
+    "set -e\ngit push\necho done",
+    "set -o errexit; git push; true",
+    "set -eo pipefail; true | git push > /dev/null 2>&1; echo done",
     "git push || true",
     "git push || :",
     "git push || exit 0",
@@ -321,7 +334,7 @@ describe("the exit-status mask guard", () => {
     expect(refused(command)).toBe(true);
   });
 
-  test.each(["( true ); git push > push.log 2>&1; echo \"exit=$?\"", "git commit -m 'Fix parse()' > commit.log 2>&1; echo \"exit=$?\"", "true | git push; echo \"exit=$?\"", "set -eo pipefail; true | git push > /dev/null 2>&1; echo done", "set -o pipefail; { echo main; } | xargs git push origin | cat; echo \"exit=$?\"", "git push > push.log 2>&1; echo \"exit=$?\"; exec cat push.log", "set -o pipefail; ( trap ':' EXIT ); git push | cat", "( exec > /dev/null ); git push > push.log 2>&1; echo \"exit=$?\"", "IFS= read -r branch <<< main; set -o pipefail; git push origin \"$branch\" | tee push.log", "git push origin fix-CIFS > push.log 2>&1; echo \"exit=$?\"; cat push.log", "read -r IFS <<< 013; git push > push.log 2>&1; echo \"exit=$?\"", "printf 'x=1\\n' > env.sh; source ./env.sh; set -o pipefail; git push | cat", "args=(); set -o pipefail; git push | cat", "files=(); git push > push.log 2>&1; echo \"exit=$?\"", "declare -a list=(); set -o pipefail; git push | cat"])("allows the last stage's status or a pipefail pipe: %s", (command) => {
+  test.each(["( true ); git push > push.log 2>&1; echo \"exit=$?\"", "git commit -m 'Fix parse()' > commit.log 2>&1; echo \"exit=$?\"", "true | git push; echo \"exit=$?\"", "set -o pipefail; { echo main; } | xargs git push origin | cat; echo \"exit=$?\"", "git push > push.log 2>&1; echo \"exit=$?\"; exec cat push.log", "set -o pipefail; ( trap ':' EXIT ); git push | cat", "( exec > /dev/null ); git push > push.log 2>&1; echo \"exit=$?\"", "IFS= read -r branch <<< main; set -o pipefail; git push origin \"$branch\" | tee push.log", "git push origin fix-CIFS > push.log 2>&1; echo \"exit=$?\"; cat push.log", "read -r IFS <<< 013; git push > push.log 2>&1; echo \"exit=$?\"", "printf 'x=1\\n' > env.sh; source ./env.sh; set -o pipefail; git push | cat", "args=(); set -o pipefail; git push | cat", "files=(); git push > push.log 2>&1; echo \"exit=$?\"", "declare -a list=(); set -o pipefail; git push | cat"])("allows the last stage's status or a pipefail pipe: %s", (command) => {
     expect(exitMaskRisk(command, "Robin")).toBeUndefined();
     expect(shellShowsEveryFailure(command)).toBe(true);
   });
@@ -354,9 +367,101 @@ describe("the exit-status mask guard", () => {
     expect(reason).toContain("--help");
   });
 
-  test("the shell hook refuses with the fix", () => {
-    const call = { tool_name: "Bash", tool_input: { command: "gh run watch 123 --exit-status | tail -3" }, cwd: "/" };
-    expect(guard(call, temp.make("home-"), temp.make("root-"))?.hookSpecificOutput.permissionDecisionReason).toContain("set -o pipefail");
+  test.each([
+    ["git push | tail -3", "set -o pipefail; git push | tail -3"],
+    ["hedge proof gate --pr 1 2>&1 | tail -20", "set -o pipefail; hedge proof gate --pr 1 2>&1 | tail -20"],
+    ["gh pr ready 12 && gh pr merge 12 --squash 2>&1 | tail -5", "set -o pipefail; gh pr ready 12 && gh pr merge 12 --squash 2>&1 | tail -5"],
+    ["git commit -m x; git push", "git commit -m x && git push"],
+    ["git push; echo done", "git push && echo done"],
+    ["git push ; echo done", "git push && echo done"],
+    ["git push\necho done", "git push &&\necho done"],
+    ["git push # pushes the branch\necho done", "git push && # pushes the branch\necho done"],
+    ["git push\n\n# then\necho done", "git push &&\n\n# then\necho done"],
+    ["git commit -F - <<'EOF'\nFix; the | gate\nEOF\ngit push", "git commit -F - <<'EOF' &&\nFix; the | gate\nEOF\ngit push"],
+    ["set -e; git commit -m 'a; b' ; git push; echo done", "set -e; git commit -m 'a; b' && git push && echo done"],
+    ["cd . && git push 2>&1 | tail -3; echo done", "set -o pipefail; cd . && git push 2>&1 | tail -3 && echo done"],
+    ["git push; if true; then echo pushed; fi", "git push && if true; then echo pushed; fi"],
+    ["git push; true || exit 1", "git push && true || exit 1"],
+  ])("rewrites a hidden status into a form that shows it: %s", (command, rewrite) => {
+    expect(exitMaskRewrite(command)).toBe(rewrite);
+    expect(exitMaskRisk(rewrite, "Robin")).toBeUndefined();
+    expect(shellShowsEveryFailure(rewrite)).toBe(true);
+    for (const harness of ["codex", "claude"] as const) expect(runFailing(rewrite, 0, harness)).toEqual(runFailing(command, 0, harness));
+  });
+
+  test.each([
+    "git push || true",
+    "git push || echo failed",
+    "git push &",
+    "git push; sleep 1 &",
+    "git push; true || echo extra",
+    "for branch in a b; do git push origin $branch; done",
+    "{ git push; } | cat",
+    "bash -c 'git push | cat'",
+    "x=$(git push; true)",
+    "false | true || echo extra; git push | cat",
+    "if false | true; then echo extra; fi; git push | cat",
+    "while false | true; do break; done; git push | cat",
+    "! false | true; git push | cat",
+    "git push | cat; echo \"exit $?\"",
+    "git push | cat; echo \"${PIPESTATUS[0]}\"",
+    "f() { false | true || echo extra; }; git push | cat; f",
+    "eval 'false | true || echo extra'; git push | cat",
+    "set +o pipefail; git push | cat",
+    "set -o pipefail; set +o pipefail; git push | cat",
+    "trap 'echo extra' ERR; git push | cat",
+    "git push | cat; trap 'echo extra' ERR; false | true",
+    "git push | cat; . ./next.sh",
+    "git push | cat; source ./next.sh",
+    'git push | cat; eval "$next"',
+    "git push; function f { echo f; }; f",
+  ])("refuses instead of rewriting when no rewrite keeps every other command as it was: %s", (command) => {
+    expect(exitMaskRewrite(command)).toBeUndefined();
+    expect(refused(command)).toBe(true);
+  });
+
+  test("leaves a command alone that already shows the status", () => {
+    expect(exitMaskRewrite("git push")).toBeUndefined();
+    expect(exitMaskRewrite("git log | head -3")).toBeUndefined();
+  });
+
+  const bash = (command: string) => ({ tool_name: "Bash", tool_input: { command, description: "Push" }, cwd: "/" });
+  const runHookProcess = (provider: string, call: object, env: Record<string, string> = {}) => {
+    const home = temp.make("home-");
+    const run = spawnSync(process.execPath, [join(import.meta.dir, "hooks/guards.ts"), provider], { input: JSON.stringify(call), env: { PATH: process.env.PATH, HOME: home, ...env }, encoding: "utf8" });
+    expect(run.status).toBe(0);
+    return JSON.parse(run.stdout).hookSpecificOutput;
+  };
+
+  test("the hook on Claude runs the rewrite in place of the call and tells the agent, leaving the permission check to Claude", () => {
+    const answer = runHookProcess("claude", bash("git push 2>&1 | tail -3; echo done"));
+    expect(answer).toEqual({
+      hookEventName: "PreToolUse",
+      updatedInput: { command: "set -o pipefail; git push 2>&1 | tail -3 && echo done", description: "Push" },
+      additionalContext: expect.stringContaining("`set -o pipefail; git push 2>&1 | tail -3 && echo done`"),
+    });
+  });
+
+  test("the hook refuses on Codex, which takes a rewrite only with an allow that skips its approval", () => {
+    expect(runHookProcess("codex", bash("git push | tail -3")).permissionDecision).toBe("deny");
+  });
+
+  test("the hook refuses when Claude Code forbids personal hooks to change a call", () => {
+    expect(runHookProcess("claude", bash("git push | tail -3"), { CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG: "1" }).permissionDecision).toBe("deny");
+  });
+
+  test("the hook refuses a rewrite that another shell guard refuses", () => {
+    const home = temp.make("home-");
+    mkdirSync(join(home, ".local/state/hedge"), { recursive: true });
+    writeFileSync(join(home, ".local/state/hedge/settings.json"), JSON.stringify({ "guards.owners": "acme" }));
+    const answer = guard(bash("gh pr merge 1 --repo evil/app | tail -3"), home, temp.make("root-"), "claude");
+    expect(answer?.hookSpecificOutput).toMatchObject({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("`evil`") });
+  });
+
+  test("the hook refuses a form it cannot rewrite, with the fix", () => {
+    const reason = runHookProcess("claude", bash("for b in a c; do git push origin $b; done")).permissionDecisionReason;
+    expect(reason).toContain("one command per item");
+    expect(reason).toContain("set -o pipefail");
   });
 
   test("the shell hook lets a help call through", () => {
