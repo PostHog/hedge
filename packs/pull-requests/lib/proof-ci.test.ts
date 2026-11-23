@@ -210,7 +210,7 @@ test("on a draft, a status from the pinned app's bot passes its own check but wi
   expect(ciLine(gate.output)).toBe("ci: pending, required not reported yet: CI / scan");
 });
 
-test("on a draft, a pinned check's workflow withholds a missing check only while every sibling status passes", async () => {
+test("on a draft, a pinned check's workflow withholds a missing check only while every sibling status from its app passes", async () => {
   const { pr } = await reviewed();
   pr.pullRequestState({ draft: true });
   pr.required("main", [{ context: "CI / lint", integration_id: 7 }, { context: "CI / scan", integration_id: 7 }]);
@@ -221,6 +221,8 @@ test("on a draft, a pinned check's workflow withholds a missing check only while
 
   pr.statuses([{ context: "CI / lint", state: "success", by: "product[bot]" }, { context: "CI / setup", state: "failure", by: "product[bot]" }]);
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: CI / scan; not required: failing: CI / setup");
+  pr.statuses([{ context: "CI / lint", state: "success", by: "product[bot]" }, { context: "CI / setup", state: "pending", by: "product[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: pending, required not reported yet: CI / scan");
 });
 
 test("on a draft, a failing status from someone else beside a pinned check's workflow does not hold it, as on main", async () => {
