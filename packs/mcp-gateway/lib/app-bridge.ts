@@ -35,12 +35,12 @@ type Failure = Error & { code?: number; data?: unknown };
 let worked = 0;
 let markers: Promise<unknown> = Promise.resolve();
 const settle = (change: () => Promise<unknown>) => (markers = markers.then(change).catch(() => {}));
-const lost = async (text: string, seen = worked) => {
-  if (!signInLost(text)) return false;
+const lost = async (said: unknown, seen = worked) => {
+  if (!signInLost(said)) return false;
   await settle(async () => { if (worked === seen) await markSignInLost(home!, app.name); });
   return true;
 };
-const detail = (error: Failure) => `${error.message} ${JSON.stringify(error.data ?? "")}`;
+const detail = (error: Failure) => [error.message, error.data];
 const explained = (error: Failure) => {
   const code = lostCode(detail(error))!;
   return Object.assign(new Error(`${reAuth} Cause: ${error.message}${error.message.includes(code) ? "" : ` (${code})`}`), { code: error.code });
@@ -117,7 +117,7 @@ async function invoke(id: Id, params: { name: string; arguments?: Record<string,
     const args = params.arguments ?? {};
     const { structuredContent, ...answered } = await call("mcpServer/tool/call", { threadId: await thread, server: "codex_apps", tool: `${app.prefix}${params.name}`, arguments: app.skinTones ? withUnicodeSkinTones(args) : args });
     if (!answered.isError) worked++, await settle(() => clearSignInLost(home!, app.name));
-    const result = answered.isError && (await lost(JSON.stringify([answered.content, structuredContent]))) ? { ...answered, content: [{ type: "text", text: reAuth }, ...(answered.content ?? [])] } : answered;
+    const result = answered.isError && (await lost([answered.content, structuredContent])) ? { ...answered, content: [{ type: "text", text: reAuth }, ...(answered.content ?? [])] } : answered;
     return structuredContent == null ? result : { ...result, structuredContent };
   } finally { active = undefined; }
 }

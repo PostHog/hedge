@@ -170,6 +170,15 @@ for (const [runtime, command] of Object.entries(runtimes)) describe.skipIf(!node
     expect(await bridge.signedOut()).toBe(true);
   });
 
+  test("a tool list that fails after a call worked explains the re-auth step but leaves the sign-in counted as working", async () => {
+    const bridge = upstream("", { FAKE_CODEX_LIST_AFTER_CALL: "1" });
+    await bridge.initialize();
+    const list = bridge.request("tools/list");
+    await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } });
+    expect((await list).error!.message).toStartWith("Slack needs re-auth");
+    expect(await bridge.signedOut()).toBe(false);
+  });
+
   test("a tool list whose only auth code is in the app's tools error names that code as the cause", async () => {
     const bridge = upstream("", { FAKE_CODEX_LIST_TOOLS_ERROR: "1" });
     await bridge.initialize();
