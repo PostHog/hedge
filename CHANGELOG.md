@@ -19,7 +19,9 @@
   stays its labels. A failed or unreadable pass labels every finding
   `needs-answer`, and so does a lookup row that is not a Claude model, since
   only Claude runs with no tools. The review then says the triage labelled
-  nothing, and `triage-labels.json` says why, with secrets redacted. A wait
+  nothing, and `triage-labels.json` says why; a failed call keeps none of its
+  output. Saved labels count only when they label each finding of
+  `findings.md` that the pass labels, once and with its own severity. A wait
   that finds the round held before its labels are saved exits 2, as while
   lenses still run.
 - `hedge proof triage --findings <file> --diff <file>` prints the labels of a
