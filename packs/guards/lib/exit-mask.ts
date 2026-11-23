@@ -204,9 +204,11 @@ function hiddenIn(text: string, nesting: number): { found?: Finding; carries?: s
   if (nesting > maxNesting) throw new Error(`it nests more than ${maxNesting} shell programs`);
   const pipelines = parse(text);
   const guarded: (string | undefined)[] = [];
+  const carried: boolean[] = [];
   for (const pipeline of pipelines) {
     for (const [index, command] of pipeline.entries()) {
-      let what = guardedName(command);
+      const own = guardedName(command);
+      let what = own;
       for (const inner of nestedProgramsAt(pipeline, index)) {
         const { found, carries } = hiddenIn(inner.program, nesting + 1);
         if (found) return { found };
@@ -215,6 +217,7 @@ function hiddenIn(text: string, nesting: number): { found?: Finding; carries?: s
         if (!passesOn) return { found: { what: carries, how: "the `$(…)` substitution it runs in" } };
         what ??= carries;
       }
+      carried.push(own === undefined);
       guarded.push(what);
     }
   }
@@ -226,7 +229,7 @@ function hiddenIn(text: string, nesting: number): { found?: Finding; carries?: s
     if (!what || command.tested) continue;
     if (inThisShell(commands.slice(0, index)).some((each) => named(each, traps))) return { found: { what, how: "a `trap` earlier in the call" } };
     const reach = reachOf(program, index);
-    if (reach !== "exit" && "how" in reach) return { found: { what, how: reach.how, fix: nesting === 0 ? reach.fix : undefined } };
+    if (reach !== "exit" && "how" in reach) return { found: { what, how: reach.how, fix: nesting === 0 && !carried[index] ? reach.fix : undefined } };
     if (reach !== "exit" && nesting > 0) return { found: { what, how: "the nested shell or `$(…)` that prints it" } };
     if (reach !== "exit" && changesHowItPrints(commands.slice(0, reach.printedBy), commands[reach.printedBy])) return { found: { what, how: changedPrinting } };
     carries ??= what;
