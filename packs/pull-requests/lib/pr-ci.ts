@@ -18,7 +18,7 @@ type CheckRun = { id: number; name: string; status: string; conclusion: string |
 type CommitStatus = { context: string; state: string; creator?: { login?: string; type?: string } | null };
 type RequiredCheck = { context: string; appId?: number };
 type Outcome = "pass" | "fail" | "pending";
-type Entry = { name: string; outcome: Outcome; appId?: number; status?: true; botLogin?: string; superseded?: true };
+type Entry = { name: string; outcome: Outcome; appId?: number; status?: true; botLogin?: string };
 
 const passing = new Set(["success", "neutral", "skipped"]);
 const rank: Record<Outcome, number> = { pass: 0, pending: 1, fail: 2 };
@@ -113,10 +113,10 @@ function entriesOf(identity: ProofIdentity, run: Run): Entry[] {
     return newest;
   }, new Map<string, CheckRun>()).values()];
   const statuses = commitRecords<CommitStatus>(identity, run, "statuses", ".[]");
-  const newest = statuses.filter((status, index) => statuses.findIndex((other) => other.context === status.context && other.creator?.login === status.creator?.login) === index);
+  const newest = statuses.filter((status, index) => statuses.findIndex((other) => other.context === status.context) === index);
   return [
     ...newestRuns.map((check): Entry => ({ name: check.name, appId: check.app ?? undefined, outcome: check.status !== "completed" ? "pending" : passing.has(check.conclusion ?? "") ? "pass" : "fail" })),
-    ...newest.map((status): Entry => ({ name: status.context, status: true, ...botOf(status), ...newest.find((other) => other.context === status.context) === status ? {} : { superseded: true as const }, outcome: status.state === "success" ? "pass" : status.state === "pending" ? "pending" : "fail" })),
+    ...newest.map((status): Entry => ({ name: status.context, status: true, ...botOf(status), outcome: status.state === "success" ? "pass" : status.state === "pending" ? "pending" : "fail" })),
   ];
 }
 
@@ -130,22 +130,24 @@ function appOfBot(bot: string, run: Run): number | undefined {
   throw new Error(`cannot read the app behind ${bot} over REST (${firstLine(result.stderr)})`);
 }
 
-const current = (entries: Entry[]) => entries.filter((entry) => !entry.superseded);
+const workflowOf = (context: string) => {
+  const split = context.indexOf(" / ");
+  return split > 0 ? context.slice(0, split + 3) : undefined;
+};
 
 function withPinnedStatuses(entries: Entry[], required: RequiredCheck[], run: Run): Entry[] {
   const pins = required.filter((check) => check.appId !== undefined);
   const apps = new Map<string, number | undefined>();
   const appOf = (bot: string) => apps.has(bot) ? apps.get(bot) : apps.set(bot, appOfBot(bot, run)).get(bot);
-  const spelledTwice = (entry: Entry) => entries.some((other) => other.status && other.botLogin === entry.botLogin && other.name !== entry.name && other.name.toLowerCase() === entry.name.toLowerCase());
-  const pinOf = (entry: Entry) => {
-    const named = pins.filter((check) => entry.status && check.context === entry.name);
-    if (!entry.botLogin || !named.length || spelledTwice(entry)) return undefined;
+  const spelledTwice = (entry: Entry) => entries.some((other) => other.status && other.name !== entry.name && other.name.toLowerCase() === entry.name.toLowerCase());
+  const nearPin = (entry: Entry) => pins.some((check) => {
+    const workflow = workflowOf(check.context);
+    return check.context === entry.name || (workflow !== undefined && entry.name.startsWith(workflow));
+  });
+  return entries.map((entry) => {
+    if (!entry.status || !entry.botLogin || !nearPin(entry) || spelledTwice(entry)) return entry;
     const appId = appOf(entry.botLogin);
-    return named.find((check) => check.appId === appId);
-  };
-  return entries.flatMap((entry) => {
-    const pin = pinOf(entry);
-    return pin ? [{ ...entry, appId: pin.appId }] : entry.superseded ? [] : [entry];
+    return appId === undefined ? entry : { ...entry, appId };
   });
 }
 
@@ -155,15 +157,12 @@ function listOf(names: string[], limit = 8) {
 }
 
 const reportedBy = (check: RequiredCheck, entry: Entry) => check.appId === undefined || entry.appId === check.appId;
-const ranBy = (check: RequiredCheck, entry: Entry) => !entry.status && entry.appId === check.appId;
 
 function withheldFromDraft(check: RequiredCheck, entries: Entry[]) {
-  const split = check.context.indexOf(" / ");
-  if (split <= 0 || entries.some((entry) => entry.name === check.context)) return false;
-  const siblings = entries.filter((entry) => entry.name.startsWith(check.context.slice(0, split + 3)));
-  if (check.appId === undefined) return siblings.length > 0 && siblings.every((entry) => entry.outcome === "pass");
-  const workflow = siblings.filter((entry) => entry.status || ranBy(check, entry));
-  return workflow.some((entry) => ranBy(check, entry)) && workflow.every((entry) => entry.outcome === "pass");
+  const workflow = workflowOf(check.context);
+  if (!workflow || entries.some((entry) => entry.name === check.context)) return false;
+  const siblings = entries.filter((entry) => entry.name.startsWith(workflow) && reportedBy(check, entry));
+  return siblings.length > 0 && siblings.every((entry) => entry.outcome === "pass") && (check.appId === undefined || siblings.some((entry) => !entry.status));
 }
 
 function everyCheck(entries: Entry[], commit: string): CiResult {
@@ -213,7 +212,7 @@ export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date)
     const stacked = !required.length && pr.defaultBranch !== undefined && pr.defaultBranch !== pr.base;
     if (stacked) required = requiredChecks(home, identity.repository, pr.defaultBranch!, run, now);
     const entries = entriesOf(identity, run);
-    if (!required.length) return { ...everyCheck(current(entries), identity.commit), checks: checksOf(current(entries)) };
+    if (!required.length) return { ...everyCheck(entries, identity.commit), checks: checksOf(entries) };
     const counted = withPinnedStatuses(entries, required, run);
     const verdict = requiredVerdict(counted, required, pr.draft);
     return { ...stacked ? { ...verdict, detail: `${verdict.detail} (required by ${pr.defaultBranch}; the base ${pr.base} requires none)` } : verdict, checks: checksOf(counted) };
