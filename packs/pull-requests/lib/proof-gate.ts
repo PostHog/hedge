@@ -16,6 +16,7 @@ import { readSanity } from "./proof-sanity.ts";
 import { inputsDigest, readBloat } from "./proof-bloat.ts";
 import { judge, readCriticalPaths, type JudgeInput } from "./proof-judge.ts";
 import { withRoundLock, type RoundLock } from "./proof-panel.ts";
+import { triageSetting } from "./proof-triage.ts";
 import { askModel, modelLabel, otherFamily, readRiskRubric, readRubric, reviewerRow, skillReferences } from "./proof-models.ts";
 
 export type GateContext = { home: string; cwd: string; env: Env; run: Run; now?: () => Date; ssh?: Ssh };
@@ -64,7 +65,7 @@ export async function finalGate(head: ProofIdentity, context: JudgingContext, { 
   const pushedHead = pushedHeadOf(head, run, (read) => { pull ??= read; });
   const files = await proofFiles(home, head);
   const checked = await proofGate(home, head, {
-    landed, cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)), ci: () => ciOf(home, head, run, now?.() ?? new Date()),
+    triage: triageSetting(env), landed, cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)), ci: () => ciOf(home, head, run, now?.() ?? new Date()),
     pushedHead, ledger: hubLedger(home, env, ssh), now: now?.(), devPull: devPullOf(run),
   });
   const judged: Judged = checked.code === 0 ? await judgeHead(head, checked, context) : { code: checked.code, lines: [], covered: "", judge: { state: "skipped", lines: [] }, reason: checked.failure };
@@ -115,7 +116,7 @@ export async function currentSummary(ref: PrRef, pull: PullRequest, ledger: Ledg
   const head = { ...ref, commit: pull.head };
   let readAsSaved = true;
   const live = await proofGate(home, head, {
-    landed: pull.state === "merged", cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)),
+    triage: triageSetting(context.env), landed: pull.state === "merged", cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)),
     ci: () => ciOf(home, head, run, now?.() ?? new Date()),
     pushedHead: pushedHeadOf(head, run, (read) => { readAsSaved &&= JSON.stringify(keyOf(read, saved.key.landed, saved.key.fingerprint)) === JSON.stringify(saved.key); }),
     ledger, now: now?.(), devPull: devPullOf(run),
@@ -130,7 +131,7 @@ export async function receiptSummary(head: ProofIdentity, pull: PullRequest, led
   if (current) return { summary: current, gated: true };
   const { home, run, now } = context;
   const live = await proofGate(home, head, {
-    landed: pull.state === "merged", cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)),
+    triage: triageSetting(context.env), landed: pull.state === "merged", cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)),
     ci: () => ciOf(home, head, run, now?.() ?? new Date()), pushedHead: pushedHeadOf(head, run), ledger, now: now?.(), devPull: devPullOf(run),
   });
   return { summary: { ...live.proofSummary, code: live.code, judge: { state: "skipped", lines: [] } }, gated: false };
@@ -153,7 +154,7 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
   const known = {
     risk: riskRubric === undefined ? undefined : { rubric: riskRubric, body: pullRequestDetails(head, run).body },
     commit: head.commit, crossFamily: otherFamily(row, author), ci: checked.ci, owed: checked.owed!, ledger: checked.lines,
-    evidence: checked.evidence, reviews: await reviewRecords(home, head), rubric: await readRubric(home), references: skillReferences(home),
+    evidence: checked.evidence, reviews: await reviewRecords(home, head, triageSetting(env)), rubric: await readRubric(home), references: skillReferences(home),
     conditions: [...checked.conditions, ...weighedGap?.condition ? [weighedGap.condition] : []], criticalPaths: await readCriticalPaths(home, head.repository, env),
   };
   const outcome = await judgeDiff(head, known, row, context);

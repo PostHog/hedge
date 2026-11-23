@@ -174,9 +174,15 @@ export function renderSection(input: ReceiptInput) {
       ? endTable([{ ref: input.summary, summary: input.summary, reason: (kind, reason) => guardedReason(kind, reason) }])
       : [`**End table:** no gate at HEAD yet. Run hedge proof gate${input.landed ? " --landed" : ""}, then hedge proof receipt.`],
     "",
+    ...advisoryLine(input.reviews),
     `**Not checked:** ${notChecked.join("; ") || "none recorded"}`,
   ].join("\n");
   return { section, warnings };
+}
+
+function advisoryLine(reviews: ReceiptReview[]) {
+  const items = reviews.flatMap((review) => (review.advisory ?? []).map(({ finding, severity }) => `${guardField("review label", review.label)} finding ${finding} (${severity})`));
+  return items.length ? [`**Advisory findings, no answer needed:** ${items.join("; ")}`, ""] : [];
 }
 
 export const receiptHash = (section: string, page: string) => createHash("sha256").update(`${section}\n${page}`).digest("hex").slice(0, 16);

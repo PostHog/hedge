@@ -1,14 +1,14 @@
 import { closeSync, existsSync, openSync } from "node:fs";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { askGap, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity } from "./proof.ts";
 import { AnswerTaken, appendOnce, decideAlone, hearUser, ledgerHolds, ledgerOf } from "./decision-cli.ts";
 import { HubUnreachable, keptOwed, refText, usersAcceptance, thisMachine, type Decision, type Ssh } from "./decision-ledger.ts";
 import { autonomyOf, gradeOf, type Autonomy, type Grade } from "./proof-autonomy.ts";
 import { ciOf, readComment, readPullRequest, runIn } from "./pr-ci.ts";
 import { isCommitSha } from "./proof-end-table.ts";
-import { askModel, family, isQuotaExhausted, otherFamily, modelLabel, quotaExitCode, readRubric, reviewerRow, sessionFamily, skillReferences, type Family } from "./proof-models.ts";
+import { askModel, family, isQuotaExhausted, otherFamily, modelLabel, quotaExitCode, readRubric, reviewerRow, sessionFamily, skillReferences, type Family, type ModelAnswer } from "./proof-models.ts";
 import { runProof, type RunIO } from "./proof-run.ts";
 import { combinedLens, parseGuide, lensBrief, lensIdle, lensLog, panelGuideText, panelLines, publishPanel, readPanelGuide, readPlan, recordWorker, requeueFailed, resolveLens, runLens, stagedPlan, stagePanel, waitForPanel, withRoundLock, withSlot, lockNewRound, processStart, roundLock, RoundBusy, RoundGone, type Lens, type LockOwner, type PanelGuide, type PanelIO, type Plan, type RoundLock, type StartTime } from "./proof-panel.ts";
 import { evalsPath, promptTemplateHash, readRuns, reportLines, saveRun, scoreCases, type EvalIO } from "./proof-eval.ts";
@@ -25,7 +25,7 @@ import { quietCommitIn } from "./proof-delta.ts";
 import { baseRefs, baseTip, changedFiles, cleanBaseMerge, mergeBase, pullRequestDetails, remotesOf, reviewTier, tierCeiling, tierLenses, topLevel, type ReviewTier } from "./proof-checkout.ts";
 import { arbiterOf, finalGate, reviewLimit, type FinalGate } from "./proof-gate.ts";
 import { anchorCheck } from "./finding-anchors.ts";
-import { armOf, pathOf, readTriage, triageSetting, type TriageSetting } from "./proof-triage.ts";
+import { armOf, labelLines, labelRound, pathOf, labelsDue, readTriage, savedLabels, triageFindings, triageSetting, type TriageSetting } from "./proof-triage.ts";
 import { readCriticalPaths } from "./proof-judge.ts";
 import { reviewRules } from "./review-rules.ts";
 import { recordSanity, requireSanity } from "./proof-sanity.ts";
@@ -297,8 +297,9 @@ hedge keeps its token use as usage in lenses/<name>.json, or in round.json for o
 A final read, --scope final, reads every fix from the commit of the first panel round to HEAD with the Correctness
 lens of PANEL.md.
 --wait waits up to 9 minutes for the panel of the unfinished round, the latest round, or --round, and prints each
-lens. Exit 0 when the round is finished, with its findings; 1 when a lens failed; 2 when lenses still run, so run
---wait again; 4 when a lens stopped on spent quota. It restarts a lens whose worker died, and waits while another
+lens. Exit 0 when the round is finished, with its findings; 1 when a lens failed; 2 when lenses still run, or when
+another hedge command holds the round before its triage labels are saved, so run --wait again; 4 when a lens stopped
+on spent quota. It restarts a lens whose worker died, and waits while another
 hedge proof command works on the round.
 ${overrideHelp}`,
     examples: ["hedge proof review", "hedge proof review --lens security", "hedge proof review --scope final --base 1a2b3c4", "hedge proof review --lens team-billing --knowledge team-billing=perspective.md", "hedge proof review --wait"],
@@ -347,7 +348,21 @@ each answer against HEAD.`,
       if (files.length !== 1) throw usageError("respond", "Pass one responses file");
       const head = identity();
       const ceiling = tierCeiling(tierOf(head, context), numberSetting("pull-requests.reviewCeiling", context.env));
-      print(await respondToReview(home, head, roundId(required(options, "--round", "respond")), resolve(cwd, files[0]!), ceiling));
+      print(await respondToReview(home, head, roundId(required(options, "--round", "respond")), resolve(cwd, files[0]!), ceiling, triageSetting(context.env)));
+      return 0;
+    },
+  },
+  triage: {
+    usage: "triage --findings <file> --diff <file>",
+    summary: `Label each blocker, major and unrated finding of a findings file needs-answer or advisory with the model of the
+lookup row, and print the labels as JSON. It reads and writes no proof ledger. hedge proof review runs the same pass
+after each round and final read of a pull request that pull-requests.triage treats; an advisory finding needs no
+answer there.`,
+    examples: ["hedge proof triage --findings findings.md --diff change.diff"],
+    options: ["--findings", "--diff"],
+    run: async ({ options }, _, context) => {
+      const read = (flag: string) => readFile(resolve(context.cwd, required(options, flag, "triage")), "utf8");
+      context.print(JSON.stringify(await triageFindings(await read("--findings"), await read("--diff"), askTriage(context))));
       return 0;
     },
   },
@@ -654,13 +669,47 @@ async function runReview(options: Map<string, string>, head: ProofIdentity, cont
   });
 }
 
-async function printSavedReview({ round, id, directory }: SingleRound, { print }: CommandContext) {
+async function printSavedReview({ round, id, directory }: SingleRound, context: CommandContext) {
+  const { print } = context;
   const reservation = await readReservation(directory);
   print(JSON.stringify({ round, id, directory, reviewer: reservation?.reviewer, ...await readTriage(directory) }));
   print((await readFile(join(directory, "findings.md"), "utf8")).trim());
   const anchors = await readFile(join(directory, "anchors.md"), "utf8").catch(() => "");
   if (anchors) print(`\n${anchors.trim()}`);
+  await printLabels(directory, context);
   return 0;
+}
+
+const triageLimit = 180_000;
+const askTriage = ({ env, home, run }: CommandContext, panelCheckout?: string) => async (prompt: string): Promise<ModelAnswer> => {
+  const row = modelFor("lookup", env);
+  if (row.provider !== "claude") return { ok: false, cause: "the triage runs only on a Claude lookup row, which has no tools", model: row.model };
+  const cwd = join(home, ".local/state/hedge/triage");
+  await mkdir(cwd, { recursive: true });
+  const physical = await realpath(cwd);
+  const resolved = `${physical}/`;
+  const checkouts = await Promise.all([topLevel(run), panelCheckout].filter((path) => path !== undefined).map((path) => realpath(path).catch(() => path)));
+  if (checkouts.some((checkout) => resolved.startsWith(`${checkout}/`))) return { ok: false, cause: "the triage directory is inside the checkout under review", model: row.model };
+  const answer = await askModel("triage", row, { prompt, cwd: physical }, env, triageLimit);
+  const model = answer.model.startsWith("command: ") ? "a replacement command" : answer.model;
+  return answer.ok || answer.held ? { ...answer, model } : { ok: false, cause: "the model call failed; Hedge keeps none of its output", model };
+};
+
+async function printLabels(directory: string, context: CommandContext) {
+  const triaged = await labelRound(directory, triageSetting(context.env), askTriage(context, (await readPlan(directory))?.cwd), (write) => onceFree(dirname(directory), context, write)).catch((error: unknown) => {
+    if (!(error instanceof RoundBusy)) throw error;
+    context.print(`Another hedge command held the review budget for the whole wait, so the triage saved no labels: every finding of round ${basename(directory)} needs an answer.`);
+    return undefined;
+  });
+  for (const line of triaged ? labelLines(triaged) : []) context.print(line);
+}
+
+async function onceFree<T>(directory: string, context: CommandContext, step: () => Promise<T>) {
+  for (let poll = 0; ; poll++) {
+    try { return await withRoundLock(directory, await context.lock(), step); }
+    catch (error) { if (!(error instanceof RoundBusy) || poll >= waitPolls) throw error; }
+    await pausing(context)();
+  }
 }
 
 async function askReviewer(reserved: SingleRound, head: ProofIdentity, author: Family, context: CommandContext) {
@@ -687,12 +736,13 @@ async function askReviewer(reserved: SingleRound, head: ProofIdentity, author: F
     }
     throw new Error(`The reviewer ${answer.model} gave no findings (${answer.cause}). ${label} stays reserved; run hedge proof review again to retry it.${unsaved}`);
   }
-  const anchors = anchorCheck(answer.text, diff, await reviewRecords(home, head));
+  const anchors = anchorCheck(answer.text, diff, await reviewRecords(home, head, triageSetting(context.env)));
   await storeCapturedFindings(reserved.directory, head, roundId(reserved.id), answer.text, answer.model, answer.usage);
   if (anchors) await writeFile(join(reserved.directory, "anchors.md"), anchors + "\n", { mode: 0o600 });
   print(JSON.stringify({ round: reserved.round, id: reserved.id, directory: reserved.directory, reviewer: answer.model, ...await readTriage(reserved.directory) }));
   print(answer.text.trim());
   if (anchors) print(`\n${anchors}`);
+  await printLabels(reserved.directory, context);
   return 0;
 }
 
@@ -910,7 +960,7 @@ async function panelBriefs(reserved: { directory: string; from?: string }, head:
   const from = reserved.from!;
   const pr = pullRequestDetails(head, run);
   const owed = await readOwed(home, head);
-  const settled = (await reviewRecords(home, head)).filter((review) => review.responses).map((review) => `${review.label}:\n${review.responses!.trim()}`).join("\n\n");
+  const settled = (await reviewRecords(home, head, triageSetting(context.env))).filter((review) => review.responses).map((review) => `${review.label}:\n${review.responses!.trim()}`).join("\n\n");
   const { files: changedFiles, leftOut, diff } = reviewRange(run, from, head.commit, mergeBase(head, run));
   const diffFile = join(reserved.directory, "diff.patch");
   await writeFile(diffFile, diff, { mode: 0o600 });
@@ -965,10 +1015,17 @@ async function waitForReview(options: Map<string, string>, head: ProofIdentity, 
   const code = await waitForPanel(directory, panelIO(context), restart, waitPolls);
   for (const line of await roundLines(directory, context)) context.print(line);
   if (code === 0) context.print(await readFile(join(directory, "findings.md"), "utf8"));
+  const labelled = code === 0 && await labelsDue(directory, triageSetting(context.env)) ? await roundStep(directory, context, () => printLabels(directory, context)).then(() => true, async (error: unknown) => {
+    if (!(error instanceof RoundBusy)) throw error;
+    const saved = await savedLabels(directory);
+    if (saved) labelLines(saved).forEach((line) => context.print(line));
+    else context.print(`Another hedge command holds review round ${basename(directory)}, so the triage labels are not printed. Run hedge proof review --wait --round ${basename(directory)} again to see them.`);
+    return saved !== undefined;
+  }) : true;
   if (code === 1) context.print("A lens failed, and the round stays unfinished. Run the same hedge proof review --lens command to rerun the failed lenses.");
   if (code === 2) context.print("Lenses still run. Run hedge proof review --wait again.");
   if (code === quotaExitCode) context.print("A lens stopped on spent quota, and the round stays unfinished. Run the same hedge proof review --lens command once the quota is back, or move the lens to the family that is up with :same or :other.");
-  return code;
+  return labelled ? code : 2;
 }
 
 async function startStaged(directory: string, context: CommandContext) {

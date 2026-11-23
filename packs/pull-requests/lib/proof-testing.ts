@@ -343,7 +343,7 @@ export function verdict(changes: { proof?: Question; owed?: Question; review?: Q
   });
 }
 
-export function fakeModel(pr: Checkout, role: "REVIEWER" | "JUDGE" | "BLOAT_JUDGE", answer: string) {
+export function fakeModel(pr: Checkout, role: "REVIEWER" | "JUDGE" | "BLOAT_JUDGE" | "TRIAGE", answer: string) {
   const prompts = join(pr.home, `${role.toLowerCase()}-prompts`);
   mkdirSync(prompts, { recursive: true });
   const reply = join(pr.home, `${role.toLowerCase()}-answer`);
