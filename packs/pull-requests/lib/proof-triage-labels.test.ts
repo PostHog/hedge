@@ -324,7 +324,21 @@ test("a final read stopped before its labels labels them when it runs again", as
   expect(savedLabels(pr, "final-1")).toMatchObject({ ok: true, labels: [{ finding: 1 }, { finding: 2, label: "advisory" }, { finding: 4 }] });
 });
 
-test("a review at a HEAD read before runs as today when its read needs no labels: triage off, labels saved, or a panel left to its wait", async () => {
+test("a review of a new HEAD leaves an older read without labels alone and reads the new HEAD", async () => {
+  const pr = await treated();
+  fakeModel(pr, "TRIAGE", adviseSecond);
+  await pr.hedge("review", "--single");
+  rmSync(join(reviewDirectory(pr), "triage-labels.json"));
+  const base = JSON.parse(readFileSync(join(reviewDirectory(pr), "round.json"), "utf8")).commit;
+  await pr.commit("feature.ts", "export const greet = (name: string) => name.trim();\n");
+
+  const next = await pr.hedge("review", "--scope", "fixes", "--base", base);
+
+  expect(JSON.parse(next.output.split("\n")[0]!)).toMatchObject({ id: "2" });
+  expect(existsSync(join(reviewDirectory(pr), "triage-labels.json"))).toBe(false);
+});
+
+test("a review at a HEAD read before runs as today when its read needs no labels: triage off, labels saved, a panel left to its wait, or a round the author recorded", async () => {
   const off = await treated("off");
   await off.hedge("review", "--single");
   const labelled = await treated();
@@ -334,8 +348,14 @@ test("a review at a HEAD read before runs as today when its read needs no labels
   const triage = fakeModel(panel, "TRIAGE", adviseSecond);
   await panelRound(panel);
 
-  for (const pr of [off, labelled, panel]) await expect(pr.hedge("review", "--single")).rejects.toThrow("Round 2 needs --scope fixes");
-  expect(triage.prompts()).toEqual([]);
+  const authored = await treated();
+  const authorTriage = fakeModel(authored, "TRIAGE", adviseSecond);
+  await authored.hedge("review-start");
+  writeFileSync(join(authored.repository, "authored.md"), findings);
+  await authored.hedge("review-finish", "--round", "1", "--reviewer", "gpt-6.2-sol", "authored.md");
+
+  for (const pr of [off, labelled, panel, authored]) await expect(pr.hedge("review", "--single")).rejects.toThrow("Round 2 needs --scope fixes");
+  expect([...triage.prompts(), ...authorTriage.prompts()]).toEqual([]);
 });
 
 test("a triage call that throws before the model answers labels every blocker and major finding needs-answer, and keeps none of the error's text", async () => {
