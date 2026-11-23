@@ -803,7 +803,7 @@ export const labelsPath = (directory: string) => join(directory, "triage-labels.
 
 const isFindingLabel = (item: unknown): item is FindingLabel => {
   const { finding, severity, label, reason } = (item ?? {}) as Record<string, unknown>;
-  return Number.isInteger(finding) && (severity === "blocker" || severity === "major" || severity === "none") && (label === "advisory" || label === "needs-answer") && typeof reason === "string";
+  return Number.isInteger(finding) && (severity === "blocker" || severity === "major" || severity === "none") && (label === "advisory" || label === "needs-answer") && typeof reason === "string" && reason.trim() !== "";
 };
 
 export async function readLabels<T extends { ok?: boolean; labels: FindingLabel[] }>(directory: string) {

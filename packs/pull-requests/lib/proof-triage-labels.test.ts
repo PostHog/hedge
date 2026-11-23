@@ -289,9 +289,9 @@ test("a triage call that throws at once, before it returns a promise, labels eve
 test("a reply whose fence opener holds a long run of blanks is refused at once", async () => {
   const started = performance.now();
 
-  const triaged = await triageFindings(findings, "", async () => ({ ok: true, text: `\`\`\`${" ".repeat(80_000)}x`, model: "triage-model" }));
+  const triaged = await triageFindings(findings, "", async () => ({ ok: true, text: `\`\`\`${" ".repeat(200_000)}x`, model: "triage-model" }));
 
-  expect(performance.now() - started).toBeLessThan(500);
+  expect(performance.now() - started).toBeLessThan(2_000);
   expect(triaged).toMatchObject({ ok: false, labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "needs-answer" }, { finding: 4 }] });
 });
 
@@ -402,6 +402,7 @@ test.each([
   ["a failed pass", { ok: false, labels: [advisoryTwo] }],
   ["an unknown severity", { ok: true, labels: [{ ...advisoryTwo, severity: "typo" }] }],
   ["no reason", { ok: true, labels: [{ finding: 2, severity: "major", label: "advisory" }] }],
+  ["a blank reason", { ok: true, labels: [{ ...advisoryTwo, reason: " " }] }],
   ["a finding labelled both ways", { ok: true, labels: [{ ...advisoryTwo, label: "needs-answer" }, advisoryTwo] }],
 ])("a saved advisory label from %s waives no answer in respond", async (_case, saved) => {
   const pr = await treated();
@@ -460,6 +461,31 @@ test("an advisory finding answered as fixed buys no further round, where the sam
 
     const next = await pr.hedge("review", "--single", "--scope", "fixes", "--base", reviewed).then((result) => result, (error: Error) => ({ code: 1, output: error.message }));
     expect(next.output.includes("found no bug in production code that the PR introduced")).toBe(!buys);
+  }
+});
+
+test("a final read whose findings are all advisory spends no review budget, so the next one needs no arbiter, where without triage it does", async () => {
+  const runs: [string, boolean][] = [["on", false], ["off", true]];
+  for (const [setting, arbitrated] of runs) {
+    const pr = await treated(setting);
+    const arbiter = join(pr.home, "arbiter-asked");
+    pr.env.HEDGE_REVIEW_ARBITER = `cat >/dev/null; touch '${arbiter}'; echo CONTINUE`;
+    const reviewer = fakeModel(pr, "REVIEWER", "- major | feature.ts:1 | A name with a space throws: greet(\"a b\") crashes the form | anchor: export const greet");
+    const triage = fakeModel(pr, "TRIAGE", labels([1, "needs-answer", "names a trigger"]));
+    await pr.hedge("review", "--single");
+    await respond(pr, "1. fixed in abc1234: trims\n");
+    const finalRead = async (round: string) => {
+      const base = await pr.git("rev-parse", "HEAD");
+      await pr.commit("feature.ts", `export const greet = (name: string) => name.trim() + ${JSON.stringify(round)};\n`);
+      return pr.hedge("review", "--single", "--scope", "final", "--base", base);
+    };
+    reviewer.answer("- major | feature.ts:1 | The helper could say more about its contract | anchor: export const greet");
+    triage.answer(labels([1, "advisory", "names no trigger"]));
+    await finalRead("a");
+    expect(existsSync(arbiter)).toBe(false);
+
+    expect((await finalRead("b")).code).toBe(0);
+    expect(existsSync(arbiter)).toBe(arbitrated);
   }
 });
 
