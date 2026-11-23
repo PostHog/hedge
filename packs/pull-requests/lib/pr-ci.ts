@@ -186,7 +186,9 @@ function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boo
   const counted = new Set<Entry>();
   const [failing, pending, missing, withheld]: string[][] = [[], [], [], []];
   for (const check of required) {
-    const matches = entries.filter((entry) => entry.name === check.context && reportedBy(check, entry));
+    const named = entries.filter((entry) => entry.name === check.context);
+    const own = named.filter((entry) => reportedBy(check, entry));
+    const matches = own.some((entry) => entry.status) ? [...new Set([...own, ...named.filter((entry) => !entry.status)])] : own;
     matches.forEach((entry) => counted.add(entry));
     if (!matches.length) { (draft && withheldFromDraft(check, entries) ? withheld : missing).push(check.context); continue; }
     const worst = matches.reduce((a, b) => rank[b.outcome] > rank[a.outcome] ? b : a).outcome;

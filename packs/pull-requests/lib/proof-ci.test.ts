@@ -94,6 +94,15 @@ test("the pinned app's rerun clears its own older failure", async () => {
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: green, 1 required check(s) pass");
 });
 
+test("a pinned check its app passed by status still fails on a failing check run of the same name", async () => {
+  const { pr } = await reviewed();
+  pr.required("main", [{ context: "build", integration_id: 7 }]);
+  pr.githubApp("product", 7);
+  pr.ci([{ name: "build", bucket: "fail", app: 9 }]);
+  pr.statuses([{ context: "build", state: "success", by: "product[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: red, required failing: build");
+});
+
 test("a pinned check waits when its app posted the check's context in another spelling too", async () => {
   const { pr } = await reviewed();
   pr.required("main", [{ context: "Visual Review / storybook", integration_id: 7 }]);
@@ -155,12 +164,15 @@ test("on a draft, a status from the pinned app's bot passes its own check but wi
   expect(ciLine(gate.output)).toBe("ci: pending, required not reported yet: CI / scan");
 });
 
-test("on a draft, a failing status beside a pinned check's workflow keeps a missing check required", async () => {
+test("on a draft, a pinned check's workflow withholds a missing check only while every sibling status passes", async () => {
   const { pr } = await reviewed();
   pr.pullRequestState({ draft: true });
   pr.required("main", [{ context: "CI / lint", integration_id: 7 }, { context: "CI / scan", integration_id: 7 }]);
   pr.githubApp("product", 7);
   pr.ci([{ name: "CI / build", bucket: "pass", app: 7 }]);
+  pr.statuses([{ context: "CI / lint", state: "success", by: "product[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: green, 1 required check(s) pass; withheld from drafts, required once ready: CI / scan (its workflow finished without posting it)");
+
   pr.statuses([{ context: "CI / lint", state: "success", by: "product[bot]" }, { context: "CI / setup", state: "failure", by: "product[bot]" }]);
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: CI / scan; not required: failing: CI / setup");
 });
