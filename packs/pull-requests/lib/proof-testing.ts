@@ -113,7 +113,7 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
     if (baseSha !== undefined) writeFileSync(join(github, "base-sha"), JSON.stringify(baseSha));
   };
   const statuses = (list: { context: string; state: string; by?: string }[], commit = "any") => writeFileSync(join(github, `statuses-${commit}`), JSON.stringify(list.map(({ context, state, by = "the-user" }) => ({ context, state, creator: { login: by, type: by.endsWith("[bot]") ? "Bot" : "User" } }))));
-  const githubApp = (slug: string, app: number | { error: string }) => typeof app === "number" ? writeFileSync(join(github, `app-${slug}`), JSON.stringify({ id: app, slug, name: slug })) : writeFileSync(join(github, `app-error-${slug}`), app.error);
+  const githubApp = (slug: string, app: number | { error: string } | { answer: string }) => typeof app === "number" ? writeFileSync(join(github, `app-${slug}`), JSON.stringify({ id: app, slug, name: slug })) : "answer" in app ? writeFileSync(join(github, `app-${slug}`), app.answer) : writeFileSync(join(github, `app-error-${slug}`), app.error);
   const githubHead = (commit: string | undefined, next?: string) => {
     if (commit) writeFileSync(join(github, "head"), commit); else rmSync(join(github, "head"), { force: true });
     if (next) writeFileSync(join(github, "next-head"), next);

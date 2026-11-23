@@ -125,7 +125,10 @@ const botOf = ({ creator }: CommitStatus) => creator?.type === "Bot" && creator.
 
 function appOfBot(bot: string, run: Run): number | undefined {
   const result = run(["gh", "api", `apps/${bot.slice(0, -botSuffix.length)}`]);
-  if (result.code === 0) return (JSON.parse(result.stdout) as { id?: number }).id;
+  if (result.code === 0) {
+    const { id } = JSON.parse(result.stdout) as { id?: unknown };
+    return typeof id === "number" ? id : undefined;
+  }
   if (/HTTP 404/.test(result.stderr)) return undefined;
   throw new Error(`cannot read the app behind ${bot} over REST (${firstLine(result.stderr)})`);
 }
@@ -140,9 +143,10 @@ function withPinnedStatuses(entries: Entry[], required: RequiredCheck[], draft: 
   const apps = new Map<string, number | undefined>();
   const appOf = (bot: string) => apps.has(bot) ? apps.get(bot) : apps.set(bot, appOfBot(bot, run)).get(bot);
   const spelledTwice = (entry: Entry) => entries.some((other) => other.status && other.name !== entry.name && other.name.toLowerCase() === entry.name.toLowerCase());
+  const canWaive = (check: RequiredCheck, workflow: string) => draft && !entries.some((other) => other.name === check.context) && entries.some((other) => !other.status && other.appId === check.appId && other.name.startsWith(workflow));
   const nearPin = (entry: Entry) => pins.some((check) => {
     const workflow = workflowOf(check.context);
-    return check.context === entry.name || (draft && workflow !== undefined && entry.name.startsWith(workflow) && !entries.some((other) => other.name === check.context));
+    return check.context === entry.name || (entry.outcome !== "pass" && workflow !== undefined && entry.name.startsWith(workflow) && canWaive(check, workflow));
   });
   return entries.map((entry) => {
     if (!entry.status || !entry.botLogin || !nearPin(entry) || spelledTwice(entry)) return entry;
