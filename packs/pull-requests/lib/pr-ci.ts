@@ -15,10 +15,10 @@ export const runIn = (cwd: string, env: Record<string, string | undefined>): Run
 export type PullRequest = { title: string; body: string; draft: boolean; state: "open" | "closed" | "merged"; head: string; base: string; baseSha: string; defaultBranch?: string; mergedAt?: string; mergeCommit?: string };
 
 type CheckRun = { id: number; name: string; status: string; conclusion: string | null; app?: number | null };
-type CommitStatus = { context: string; state: string };
+type CommitStatus = { context: string; state: string; creator?: string; bot?: boolean };
 type RequiredCheck = { context: string; appId?: number };
 type Outcome = "pass" | "fail" | "pending";
-type Entry = { name: string; outcome: Outcome; appId?: number; status?: true };
+type Entry = { name: string; outcome: Outcome; appId?: number; status?: true; bot?: string };
 
 const passing = new Set(["success", "neutral", "skipped"]);
 const rank: Record<Outcome, number> = { pass: 0, pending: 1, fail: 2 };
@@ -112,12 +112,29 @@ function entriesOf(identity: ProofIdentity, run: Run): Entry[] {
     if ((newest.get(key)?.id ?? -1) < check.id) newest.set(key, check);
     return newest;
   }, new Map<string, CheckRun>()).values()];
-  const statuses = commitRecords<CommitStatus>(identity, run, "statuses", ".[] | {context, state}");
-  const newest = statuses.filter((status, index) => statuses.findIndex((other) => other.context === status.context) === index);
+  const statuses = commitRecords<CommitStatus>(identity, run, "statuses", '.[] | {context, state, creator: .creator.login, bot: (.creator.type == "Bot")}');
+  const newest = statuses.filter((status, index) => statuses.findIndex((other) => other.context === status.context && other.creator === status.creator) === index);
   return [
     ...newestRuns.map((check): Entry => ({ name: check.name, appId: check.app ?? undefined, outcome: check.status !== "completed" ? "pending" : passing.has(check.conclusion ?? "") ? "pass" : "fail" })),
-    ...newest.map((status): Entry => ({ name: status.context, status: true, outcome: status.state === "success" ? "pass" : status.state === "pending" ? "pending" : "fail" })),
+    ...newest.map((status): Entry => ({ name: status.context, status: true, ...botOf(status), outcome: status.state === "success" ? "pass" : status.state === "pending" ? "pending" : "fail" })),
   ];
+}
+
+const botSuffix = "[bot]";
+const botOf = ({ creator, bot }: CommitStatus) => bot && creator?.endsWith(botSuffix) ? { bot: creator } : {};
+
+function appOfBot(bot: string, run: Run): number | undefined {
+  const result = run(["gh", "api", `apps/${bot.slice(0, -botSuffix.length)}`]);
+  if (result.code === 0) return (JSON.parse(result.stdout) as { id?: number }).id;
+  if (/HTTP 404/.test(result.stderr)) return undefined;
+  throw new Error(`cannot read the app behind ${bot} over REST (${firstLine(result.stderr)})`);
+}
+
+function withStatusApps(entries: Entry[], required: RequiredCheck[], run: Run): Entry[] {
+  const pinned = new Set(required.filter((check) => check.appId !== undefined).map((check) => check.context));
+  const apps = new Map<string, number | undefined>();
+  const appOf = (bot: string) => apps.has(bot) ? apps.get(bot) : apps.set(bot, appOfBot(bot, run)).get(bot);
+  return entries.map((entry) => entry.bot && pinned.has(entry.name) ? { ...entry, appId: appOf(entry.bot) } : entry);
 }
 
 function listOf(names: string[], limit = 8) {
@@ -125,7 +142,7 @@ function listOf(names: string[], limit = 8) {
   return unique.length > limit ? `${unique.slice(0, limit).join(", ")} and ${unique.length - limit} more` : unique.join(", ");
 }
 
-const reportedBy = (check: RequiredCheck, entry: Entry) => check.appId === undefined || (!entry.status && entry.appId === check.appId);
+const reportedBy = (check: RequiredCheck, entry: Entry) => check.appId === undefined || entry.appId === check.appId;
 
 function withheldFromDraft(check: RequiredCheck, entries: Entry[]) {
   const split = check.context.indexOf(" / ");
@@ -180,7 +197,7 @@ export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date)
     const entries = entriesOf(identity, run);
     const checks = checksOf(entries);
     if (!required.length) return { ...everyCheck(entries, identity.commit), checks };
-    const verdict = requiredVerdict(entries, required, pr.draft);
+    const verdict = requiredVerdict(withStatusApps(entries, required, run), required, pr.draft);
     return { ...stacked ? { ...verdict, detail: `${verdict.detail} (required by ${pr.defaultBranch}; the base ${pr.base} requires none)` } : verdict, checks };
   } catch (error) {
     return { state: "unknown", detail: (error as Error).message };

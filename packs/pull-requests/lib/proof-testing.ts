@@ -75,6 +75,9 @@ case "$*" in
   "api "*"/branches/"*)
     all="$*"; branch=\${all##*/branches/}; branch=\${branch%% *}
     cat "${github}/branch-$branch" 2>/dev/null || echo '{"protected":false}'; exit 0;;
+  "api apps/"*)
+    all="$*"; slug=\${all#api apps/}; slug=\${slug%% *}
+    cat "${github}/app-$slug" 2>/dev/null || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }; exit 0;;
   "api "*)
     all="$*"; sha=; case "$all" in */commits/*/*) sha=\${all#*/commits/}; sha=\${sha%%/*};; esac
     case "$*" in *"/check-runs"*) kind=check-runs;; *) kind=statuses;; esac
@@ -102,7 +105,8 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
     if (base !== undefined) writeFileSync(join(github, "base"), base);
     if (baseSha !== undefined) writeFileSync(join(github, "base-sha"), JSON.stringify(baseSha));
   };
-  const statuses = (list: { context: string; state: string }[], commit = "any") => writeFileSync(join(github, `statuses-${commit}`), lines(list));
+  const statuses = (list: { context: string; state: string; by?: string }[], commit = "any") => writeFileSync(join(github, `statuses-${commit}`), lines(list.map(({ context, state, by = "the-user" }) => ({ context, state, creator: by, bot: by.endsWith("[bot]") }))));
+  const githubApp = (slug: string, id: number) => writeFileSync(join(github, `app-${slug}`), JSON.stringify({ id, slug, name: slug }));
   const githubHead = (commit: string | undefined, next?: string) => {
     if (commit) writeFileSync(join(github, "head"), commit); else rmSync(join(github, "head"), { force: true });
     if (next) writeFileSync(join(github, "next-head"), next);
@@ -184,7 +188,7 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
   const decide = (...args: string[]) => decideIn(repository, ...args);
   const pullRequest = join(home, ".local/state/hedge/proof/example/product/42");
   await seedRepository(repository);
-  return { home, repository, pullRequest, env, git, commit, advanceBase, hedge, hedgeIn, hedgeAs, ci, statuses, required, pullRequestState, githubHead, githubCalls, githubBody, githubFault, githubComment, whileGithubReadsPull, clock, say, choose, chooseGap, reader, panel, hub, pendingCards, decide, decideIn, startTimes };
+  return { home, repository, pullRequest, env, git, commit, advanceBase, hedge, hedgeIn, hedgeAs, ci, statuses, githubApp, required, pullRequestState, githubHead, githubCalls, githubBody, githubFault, githubComment, whileGithubReadsPull, clock, say, choose, chooseGap, reader, panel, hub, pendingCards, decide, decideIn, startTimes };
 }
 
 export type Checkout = Awaited<ReturnType<typeof checkout>>;

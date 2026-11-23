@@ -49,6 +49,29 @@ test("classic branch protection adds required checks, and a check from another a
   expect(green.code).toBe(0);
 });
 
+test("a check pinned to an app passes on a commit status its app's bot posts, and not on one anyone else posts", async () => {
+  const { pr } = await reviewed();
+  pr.required("main", [{ context: "Visual Review / storybook", integration_id: 7 }]);
+  pr.githubApp("product", 7);
+  pr.githubApp("other", 9);
+
+  pr.statuses([{ context: "Visual Review / storybook", state: "success", by: "a-maintainer" }]);
+  const byPerson = await pr.hedge("gate");
+  expect(byPerson.code).toBe(75);
+  expect(ciLine(byPerson.output)).toBe("ci: pending, required not reported yet: Visual Review / storybook");
+
+  pr.statuses([{ context: "Visual Review / storybook", state: "success", by: "other[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Visual Review / storybook");
+
+  pr.statuses([{ context: "Visual Review / storybook", state: "success", by: "a-maintainer" }, { context: "Visual Review / storybook", state: "failure", by: "product[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: red, required failing: Visual Review / storybook");
+
+  pr.statuses([{ context: "Visual Review / storybook", state: "failure", by: "a-maintainer" }, { context: "Visual Review / storybook", state: "success", by: "product[bot]" }]);
+  const green = await pr.hedge("gate");
+  expect(ciLine(green.output)).toBe("ci: green, 1 required check(s) pass; not required: failing: Visual Review / storybook");
+  expect(green.code).toBe(0);
+});
+
 test("a draft passes without a required check its workflow withholds from drafts, and a ready PR still needs it", async () => {
   const { pr } = await reviewed();
   pr.required("main", [{ context: "Backend / Test results" }]);
