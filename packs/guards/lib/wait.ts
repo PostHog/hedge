@@ -188,8 +188,6 @@ function problemWith(id: string, seen: Seen): string | undefined {
   return `\`${id}\` already finished (${done.status}). Read its output now${done.outputFile ? ` in ${done.outputFile}` : ""}; there is nothing to wait for.`;
 }
 
-/** Why a `t3_background_wait` call cannot keep this thread waiting: a wrong field, or an ID of a subagent, a delegated
- * task, or a background command that the transcript shows has finished. Undefined for a call T3 should judge itself. */
 export function backgroundWaitRisk(call: StatusCall): string | undefined {
   const input = call.tool_input ?? {};
   const { taskIds } = input;

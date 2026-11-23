@@ -371,7 +371,8 @@ describe("the exit-status mask guard", () => {
   test.each([
     ["git push | tail -3", "set -o pipefail; git push | tail -3"],
     ["hedge proof gate --pr 1 2>&1 | tail -20", "set -o pipefail; hedge proof gate --pr 1 2>&1 | tail -20"],
-    ["gh pr ready 12 && gh pr merge 12 --squash 2>&1 | tail -5", "set -o pipefail; gh pr ready 12 && gh pr merge 12 --squash 2>&1 | tail -5"],
+    ["cd . && git push 2>&1 | tail -3", "set -o pipefail; cd . && git push 2>&1 | tail -3"],
+    ["cd \"$(pwd)\" && git push 2>&1 | tail -3", "set -o pipefail; cd \"$(pwd)\" && git push 2>&1 | tail -3"],
     ["git commit -m x; git push", "git commit -m x || exit; git push"],
     ["git push; echo done", "git push || exit; echo done"],
     ["git push ; echo done", "git push || exit; echo done"],
@@ -381,8 +382,6 @@ describe("the exit-status mask guard", () => {
     ["git commit -F - <<'EOF'\nFix; the | gate\nEOF\ngit push", "git commit -F - <<'EOF' || exit\nFix; the | gate\nEOF\ngit push"],
     ["git commit -F - <<EOF\nline one \\\nEOF\ngit push\nEOF\necho done", "git commit -F - <<EOF || exit\nline one \\\nEOF\ngit push\nEOF\necho done"],
     ["set -e; git commit -m 'a; b' ; git push; echo done", "set -e; git commit -m 'a; b' || exit; git push || exit; echo done"],
-    ["cd . && git push 2>&1 | tail -3; echo done", "set -o pipefail; cd . && git push 2>&1 | tail -3 || exit; echo done"],
-    ["git push 2>&1 | tail -3\necho done", "set -o pipefail; git push 2>&1 | tail -3 || exit\necho done"],
     ["git commit -m x; git push | tail -3", "set -o pipefail; git commit -m x || exit; git push | tail -3"],
     ["git push; if true; then echo pushed; fi", "git push || exit; if true; then echo pushed; fi"],
     ["git push; true || exit 1", "git push || exit; true || exit 1"],
@@ -398,7 +397,6 @@ describe("the exit-status mask guard", () => {
     ["git push; sleep 0 &", "git push || exit; sleep 0 &"],
     ["git commit -F - <<'EOF'\nline one \\\nEOF\ngit push", "git commit -F - <<'EOF' || exit\nline one \\\nEOF\ngit push"],
     ["( git push | tail -3 )", "set -o pipefail; ( git push | tail -3 )"],
-    ["git push | tail -3 && echo ok; echo done", "set -o pipefail; git push | tail -3 || exit && echo ok; echo done"],
     ["git push; true || echo extra", "git push || exit; true || echo extra"],
   ])("rewrites a hidden status into a form that shows it: %s", (command, rewrite) => {
     expect(exitMaskRewrite(command)).toBe(rewrite);
@@ -473,6 +471,25 @@ describe("the exit-status mask guard", () => {
     "test -d . && cd . || /usr/bin/exit && git push; echo cleanup",
     "test -d . && cd . || ./exit && git push; echo cleanup",
     "test -d . && cd . || exit 1 2 && git push; echo cleanup",
+    "gh pr ready 12 && gh pr merge 12 --squash 2>&1 | tail -5",
+    "cd . && git push 2>&1 | tail -3; echo done",
+    "git push 2>&1 | tail -3\necho done",
+    "git push | tail -3 && echo ok; echo done",
+    "echo start; git push 2>&1 | tail -3",
+    "ls && git push 2>&1 | tail -3",
+    "git push | ( false | true || echo hidden )",
+    "git push | while read l; do echo \"$l\" | grep -q x || echo no; done",
+    "git push | if true; then false | true; fi",
+    "git push | bash -c 'false | true || echo hidden'",
+    "git push | eval 'false | true || echo hidden'",
+    "git push | source ./steps.sh",
+    "git push | tail -3 $(false | true)",
+    "git push | tail -n \"$?\"",
+    "cd \"$_\" && git push | tail -3",
+    "git push | ( false | true && echo visible )",
+    "git push | { false | true && echo visible; }",
+    "git push | bash -c 'false | true && echo visible'",
+    "git add -A | git commit -q -F -; git push | tail -3",
     "git clone -q ../remote.git copy && git commit --allow-empty -m first; echo done",
     "git commit -F - <<EOF | tail -1\n$(git log | head -1)\nEOF",
     "git push | tail -3; shopt -o > options.txt",
@@ -518,7 +535,6 @@ describe("the exit-status mask guard", () => {
 
     test.each([
       ["git push -q origin HEAD:main && false; echo cleanup", "git push -q origin HEAD:main || exit && false; echo cleanup", "cleanup"],
-      ["cd . && git push -q origin HEAD:main 2>&1 | tail -3; echo cleanup", "set -o pipefail; cd . && git push -q origin HEAD:main 2>&1 | tail -3 || exit; echo cleanup", "cleanup"],
       ["git push -q origin HEAD:main; git log -1 --format=%s", "git push -q origin HEAD:main || exit; git log -1 --format=%s", "first"],
       ["test -d . && cd . || exit && git push -q origin HEAD:main; echo cleanup", "test -d . && cd . || exit && git push -q origin HEAD:main || exit; echo cleanup", "cleanup"],
       ["git add -A && git commit -q -m staged; git push -q origin HEAD:main; git show --format=%s --name-only HEAD", "git add -A && git commit -q -m staged || exit; git push -q origin HEAD:main || exit; git show --format=%s --name-only HEAD", "staged\n\nnotes.txt"],
@@ -531,6 +547,16 @@ describe("the exit-status mask guard", () => {
       const rejected = pushRepo(false)(rewrite);
       expect(rejected.status).not.toBe(0);
       expect(rejected.stdout).not.toContain(printed);
+      expect(pushRepo(false)(command).status).toBe(0);
+    });
+
+    test("fails a piped push that the remote rejects, where the original succeeds", () => {
+      const command = "cd . && git push -q origin HEAD:main 2>&1 | tail -3";
+      const rewrite = "set -o pipefail; cd . && git push -q origin HEAD:main 2>&1 | tail -3";
+      expect(exitMaskRewrite(command)).toBe(rewrite);
+      expect(pushRepo(true)(rewrite)).toEqual(pushRepo(true)(command));
+      expect(pushRepo(true)(rewrite).remote).toBe("first\n");
+      expect(pushRepo(false)(rewrite).status).not.toBe(0);
       expect(pushRepo(false)(command).status).toBe(0);
     });
 
@@ -567,11 +593,11 @@ describe("the exit-status mask guard", () => {
   };
 
   test("the hook on Claude runs the rewrite in place of the call and tells the agent, leaving the permission check to Claude", () => {
-    const answer = runHookProcess("claude", bash("git push 2>&1 | tail -3; echo done"));
+    const answer = runHookProcess("claude", bash("git push; echo done"));
     expect(answer).toEqual({
       hookEventName: "PreToolUse",
-      updatedInput: { command: "set -o pipefail; git push 2>&1 | tail -3 || exit; echo done", description: "Push" },
-      additionalContext: expect.stringContaining("`set -o pipefail; git push 2>&1 | tail -3 || exit; echo done`"),
+      updatedInput: { command: "git push || exit; echo done", description: "Push" },
+      additionalContext: expect.stringContaining("`git push || exit; echo done`"),
     });
   });
 

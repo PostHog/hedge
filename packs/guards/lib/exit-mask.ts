@@ -182,18 +182,18 @@ function failsOnlyOnError(commands: Command[], start: number): boolean {
     if (exitsOnFailure) break;
     steps.push(commands[index]);
   }
-  return steps.every((step) => step.after !== "||" && (step.name === "cd" || (step.name === "git" && gitSteps.has(step.args[gitSubcommandAt(step.args)]))));
+  return steps.every((step) => step.after !== "||" && writeStep(step));
 }
+const writeStep = (step: Command) => step.name === "cd" || (step.name === "git" && gitSteps.has(step.args[gitSubcommandAt(step.args)]));
 
 const exitFix = ({ after, afterAt }: Command): Fix | undefined =>
   (after !== undefined && afterAt !== undefined && (separators.has(after) || after === "&&") ? { exitAt: afterAt } : undefined);
 
 function pipefailFix({ commands }: Program, start: number, pipeEnd: number): Fix | undefined {
-  const otherPipe = commands.some((command, index) => command.after === "|" && (index < start || index >= pipeEnd));
-  if (otherPipe || commands.some((command) => command.substitutions.length > 0)) return undefined;
-  if (commands[pipeEnd].after === undefined) return { pipefail: true };
-  const after = failsOnlyOnError(commands, start) ? exitFix(commands[pipeEnd]) : undefined;
-  return after && { pipefail: true, ...after };
+  const otherPipe = commands.some((command, index) => command.after === "|" && index < start);
+  const plainChain = commands.slice(start, pipeEnd).every((command) => command.after === "|");
+  if (otherPipe || !plainChain || commands[pipeEnd].after !== undefined) return undefined;
+  return commands.slice(0, start).every((command) => writeStep(command) || stopsShell(command)) ? { pipefail: true } : undefined;
 }
 
 const named = (command: Command, names: Set<string>) => [command.name, ...command.prefix].some((word) => names.has(word));
@@ -260,7 +260,7 @@ const hidesCode = new Set(["trap", "eval", "source", "."]);
 
 function pipefailKeepsEveryCommand(text: string): boolean {
   if (readsStatus.test(text)) return false;
-  return !commandsIn(text).some((command) => command.after === "||" || command.tested || named(command, hidesCode));
+  return !commandsIn(text).some((command) => named(command, hidesCode));
 }
 
 const pipesIn = (commands: Command[]) => commands.filter((command) => command.after === "|").length;
@@ -271,10 +271,6 @@ function exitingAt(text: string, at: number): string {
   return `${text.slice(0, at)}${spaced}|| exit${after}${text.slice(at)}`;
 }
 
-/** The command in a form whose every push, commit, merge, gate and watch shows its exit status: `|| exit` right after
- * such a command where a `;`, `&&` or line break follows it, and `set -o pipefail` first when it runs in the only pipe
- * of the call. The other commands run as before while it succeeds, and none runs after it fails. Undefined when the command needs no rewrite or has no
- * such form, such as when `!` negates a pipeline or a `function` keyword hides a body. */
 export function exitMaskRewrite(command: string): string | undefined {
   let text = command;
   try {
