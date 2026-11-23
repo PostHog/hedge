@@ -477,9 +477,9 @@ test("a labels file in a round of a control pull request or of a one-way door wa
   }
 });
 
-test("an advisory finding answered as fixed buys no further round, where the same answer without triage does", async () => {
-  const runs: [string, boolean][] = [["on", false], ["off", true]];
-  for (const [setting, buys] of runs) {
+test("an advisory finding answered as fixed buys no further round, where the same answer without triage, or with triage switched off since, does", async () => {
+  const runs: [string, string, boolean][] = [["on", "on", false], ["off", "off", true], ["on", "off", true]];
+  for (const [setting, later, buys] of runs) {
     const pr = await treated(setting);
     fakeModel(pr, "REVIEWER", "- major | feature.ts:1 | The helper could say more about its contract | anchor: export const greet");
     fakeModel(pr, "TRIAGE", labels([1, "advisory", "names no trigger"]));
@@ -487,6 +487,7 @@ test("an advisory finding answered as fixed buys no further round, where the sam
     await pr.hedge("review", "--single");
     await respond(pr, "1. fixed in abc1234: says more\n");
     await pr.commit("feature.ts", "export const greet = (person: string) => person;\n");
+    pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": later });
 
     const next = await pr.hedge("review", "--single", "--scope", "fixes", "--base", reviewed).then((result) => result, (error: Error) => ({ code: 1, output: error.message }));
     expect(next.output.includes("found no bug in production code that the PR introduced")).toBe(!buys);
