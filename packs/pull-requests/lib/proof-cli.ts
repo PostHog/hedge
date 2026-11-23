@@ -8,7 +8,7 @@ import { HubUnreachable, keptOwed, refText, usersAcceptance, thisMachine, type D
 import { autonomyOf, gradeOf, type Autonomy, type Grade } from "./proof-autonomy.ts";
 import { ciOf, readComment, readPullRequest, runIn } from "./pr-ci.ts";
 import { isCommitSha } from "./proof-end-table.ts";
-import { askModel, family, isQuotaExhausted, otherFamily, modelLabel, quotaExitCode, readRubric, reviewerRow, sessionFamily, skillReferences, type Family } from "./proof-models.ts";
+import { askModel, family, isQuotaExhausted, otherFamily, modelLabel, quotaExitCode, readRubric, reviewerRow, sessionFamily, skillReferences, type Family, type ModelAnswer } from "./proof-models.ts";
 import { runProof, type RunIO } from "./proof-run.ts";
 import { combinedLens, parseGuide, lensBrief, lensIdle, lensLog, panelGuideText, panelLines, publishPanel, readPanelGuide, readPlan, recordWorker, requeueFailed, resolveLens, runLens, stagedPlan, stagePanel, waitForPanel, withRoundLock, withSlot, lockNewRound, processStart, roundLock, RoundBusy, RoundGone, type Lens, type LockOwner, type PanelGuide, type PanelIO, type Plan, type RoundLock, type StartTime } from "./proof-panel.ts";
 import { evalsPath, promptTemplateHash, readRuns, reportLines, saveRun, scoreCases, type EvalIO } from "./proof-eval.ts";
@@ -680,7 +680,11 @@ async function printSavedReview({ round, id, directory }: SingleRound, context: 
 }
 
 const triageLimit = 180_000;
-const askTriage = ({ env }: CommandContext) => async (prompt: string) => askModel("triage", modelFor("lookup", env), { prompt, cwd: tmpdir() }, env, triageLimit);
+const askTriage = ({ env }: CommandContext) => async (prompt: string): Promise<ModelAnswer> => {
+  const row = modelFor("lookup", env);
+  if (row.provider !== "claude") return { ok: false, cause: "the triage runs only on a Claude lookup row, which has no tools", model: row.model };
+  return askModel("triage", row, { prompt, cwd: tmpdir() }, env, triageLimit);
+};
 
 async function printLabels(directory: string, context: CommandContext) {
   const triaged = await labelRound(directory, triageSetting(context.env), askTriage(context));

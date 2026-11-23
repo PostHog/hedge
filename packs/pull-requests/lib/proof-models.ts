@@ -104,7 +104,7 @@ async function modelCommand(role: Role, row: ModelRow, request: ModelRequest, sc
   }
   const schema = request.schema ? join(scratch, "schema.json") : undefined;
   if (schema) await writeFile(schema, JSON.stringify(request.schema));
-  return ["codex", "exec", "--json", "-m", row.model, "-c", `model_reasoning_effort="${row.effort}"`, "-s", codexSandboxes[role], ...role === "triage" ? ["--skip-git-repo-check"] : [], "--ephemeral", "-C", request.cwd, "-o", output,
+  return ["codex", "exec", "--json", "-m", row.model, "-c", `model_reasoning_effort="${row.effort}"`, "-s", codexSandboxes[role], "--ephemeral", "-C", request.cwd, "-o", output,
     ...(schema ? ["--output-schema", schema] : []), ...(request.images ?? []).flatMap((image) => ["-i", image]), "-"];
 }
 
