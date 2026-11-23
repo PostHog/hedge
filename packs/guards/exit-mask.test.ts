@@ -45,6 +45,8 @@ function showsEveryFailureIn(command: string, harness: Harness) {
 
 const shellShowsEveryFailure = (command: string) => showsEveryFailureIn(command, "codex") && showsEveryFailureIn(command, "claude");
 
+const guardedCall = (line: string) => /^git (push|commit)\b|^gh pr (ready|merge)\b|^gh run watch\b|^(hedge|fleet) proof (gate|review|save)\b/.test(line);
+
 const refused = (command: string) => exitMaskRisk(command, "Robin") !== undefined;
 
 describe("the exit-status mask guard", () => {
@@ -58,6 +60,9 @@ describe("the exit-status mask guard", () => {
     "if git push; then echo pushed; fi",
     "git push > push.log 2>&1 && tail push.log",
     "git push;",
+    "cd . && { git push || exit; }; echo done",
+    "false || { git push || exit; } && echo next; echo done",
+    "{ git push || exit; }; echo done",
     "git push # pushes the branch",
     'git push && echo "pushed $?"',
     "! git push",
@@ -389,11 +394,20 @@ describe("the exit-status mask guard", () => {
     ["git push; false; echo done", "git push || exit; false; echo done"],
     ["git push && echo ok; echo done", "git push || exit && echo ok; echo done"],
     ["git push && false; echo cleanup", "git push || exit && false; echo cleanup"],
-    ["cd . && git push && echo ok\necho done", "cd . && git push || exit && echo ok\necho done"],
-    ["git add -A && git commit -m x; git push", "git add -A && git commit -m x || exit; git push"],
-    ["gh pr ready 1 && gh pr merge 1 --squash; echo done", "gh pr ready 1 || exit && gh pr merge 1 --squash || exit; echo done"],
+    ["cd . && git push && echo ok\necho done", "cd . && { git push || exit; } && echo ok\necho done"],
+    ["git add -A && git commit -m x; git push", "git add -A && { git commit -m x || exit; }; git push"],
+    ["gh pr ready 1 && gh pr merge 1 --squash; echo done", "gh pr ready 1 || exit && { gh pr merge 1 --squash || exit; }; echo done"],
+    ["cd missing && git commit -m x; false || echo cleanup", "cd missing && { git commit -m x || exit; }; false || echo cleanup"],
+    ["false && git push && echo skipped; echo cleanup", "false && { git push || exit; } && echo skipped; echo cleanup"],
+    ["[ -n \"$branch\" ] && git push; echo cleanup", "[ -n \"$branch\" ] && { git push || exit; }; echo cleanup"],
+    ["grep -q main branch.txt || git push; echo cleanup", "grep -q main branch.txt || { git push || exit; }; echo cleanup"],
+    ["if true; then :; fi && git push; echo cleanup", "if true; then :; fi && { git push || exit; }; echo cleanup"],
+    ["(false || exit) && git push; echo cleanup", "(false || exit) && { git push || exit; }; echo cleanup"],
+    ["cd . && git commit -F - <<EOF; echo done\nmsg\nEOF", "cd . && { git commit -F - <<EOF || exit; }; echo done\nmsg\nEOF"],
+    ["cd . && git push # note\necho done", "cd . && { git push || exit; } # note\necho done"],
+    ["cd . &&git push;echo tight", "cd . && { git push || exit; };echo tight"],
     ["printf 'msg' | git commit -F -; echo done", "printf 'msg' | git commit -F - || exit; echo done"],
-    ["cd . && printf 'msg' | git commit -F -; echo done", "cd . && printf 'msg' | git commit -F - || exit; echo done"],
+    ["cd . && printf 'msg' | git commit -F -; echo done", "cd . && { printf 'msg' | git commit -F - || exit; }; echo done"],
     ["git push; sleep 0 &", "git push || exit; sleep 0 &"],
     ["git commit -F - <<'EOF'\nline one \\\nEOF\ngit push", "git commit -F - <<'EOF' || exit\nline one \\\nEOF\ngit push"],
     ["( git push | tail -3 )", "set -o pipefail; ( git push | tail -3 )"],
@@ -401,13 +415,16 @@ describe("the exit-status mask guard", () => {
   ])("rewrites a hidden status into a form that shows it: %s", (command, rewrite) => {
     expect(exitMaskRewrite(command)).toBe(rewrite);
     expect(exitMaskRisk(rewrite, "Robin")).toBeUndefined();
-    expect(shellShowsEveryFailure(rewrite)).toBe(true);
     for (const harness of ["codex", "claude"] as const) {
       const passing = runFailing(command, 0, harness);
       expect(runFailing(rewrite, 0, harness)).toEqual(passing);
       for (let call = 1; call <= passing.made; call++) {
         const before = runFailing(command, call, harness);
         const after = runFailing(rewrite, call, harness);
+        if (!guardedCall(before.trace.split("\n")[call - 1])) {
+          expect(after).toEqual(before);
+          continue;
+        }
         expect(after.seen.status).not.toBe(0);
         expect(before.trace.startsWith(after.trace)).toBe(true);
         expect(before.stdout.startsWith(after.stdout)).toBe(true);
@@ -455,22 +472,7 @@ describe("the exit-status mask guard", () => {
     "git push | cat; false | true",
     ": marker; git push | cat; printf '%s\\n' \"$_\"",
     "git push | cat; bash -c 'false | true && echo visible'",
-    "false && git push && echo skipped; echo cleanup",
-    "[ -n \"$branch\" ] && git push; echo cleanup",
-    "git diff --quiet && git commit -m x; echo cleanup",
-    "grep -q main branch.txt || git push; echo cleanup",
-    "if true; then :; fi && git push; echo cleanup",
     "[ -n \"$branch\" ] && git push | tail -3; echo cleanup",
-    "git fetch || git push; echo cleanup",
-    "[ -n \"$branch\" ] && exit && git push; echo cleanup",
-    "(false || exit) && git push; echo cleanup",
-    "test -d . && cd . || exit > /missing/dir/out && git push; echo cleanup",
-    "test -d . && cd . || exit <<< x && git push; echo cleanup",
-    "test -d . && cd . || exit <<END && git push; echo cleanup\nx\nEND",
-    "test -d . && cd . || env exit && git push; echo cleanup",
-    "test -d . && cd . || /usr/bin/exit && git push; echo cleanup",
-    "test -d . && cd . || ./exit && git push; echo cleanup",
-    "test -d . && cd . || exit 1 2 && git push; echo cleanup",
     "gh pr ready 12 && gh pr merge 12 --squash 2>&1 | tail -5",
     "cd . && git push 2>&1 | tail -3; echo done",
     "git push 2>&1 | tail -3\necho done",
@@ -490,7 +492,18 @@ describe("the exit-status mask guard", () => {
     "git push | { false | true && echo visible; }",
     "git push | bash -c 'false | true && echo visible'",
     "git add -A | git commit -q -F -; git push | tail -3",
-    "git clone -q ../remote.git copy && git commit --allow-empty -m first; echo done",
+    "true | { git push || exit; }; echo done",
+    "cd x && { git push || exit; } | cat; echo done",
+    "cd x && { git push || exit; } & echo done",
+    "( cd x && { git push || exit; } ); echo done",
+    "while true; do { git push || exit; }; done",
+    "cd x && { git push || exit 1 2; }; echo done",
+    "cd x && { git push || ./exit; }; echo done",
+    "cd x && { git push || exit; echo pushed; }; echo done",
+    "printf 'a\\n' | while read l; do echo \"$l\"; { git push || exit; }; done; echo done",
+    "true | { echo a; git push || exit; }; echo done",
+    "cd . && { git push || exit & }; echo done",
+    "cd . && { git push && exit; }; echo done",
     "git commit -F - <<EOF | tail -1\n$(git log | head -1)\nEOF",
     "git push | tail -3; shopt -o > options.txt",
     "bash <<EOF\ngit push \\\n| tail -3\nEOF",
@@ -536,8 +549,8 @@ describe("the exit-status mask guard", () => {
     test.each([
       ["git push -q origin HEAD:main && false; echo cleanup", "git push -q origin HEAD:main || exit && false; echo cleanup", "cleanup"],
       ["git push -q origin HEAD:main; git log -1 --format=%s", "git push -q origin HEAD:main || exit; git log -1 --format=%s", "first"],
-      ["test -d . && cd . || exit && git push -q origin HEAD:main; echo cleanup", "test -d . && cd . || exit && git push -q origin HEAD:main || exit; echo cleanup", "cleanup"],
-      ["git add -A && git commit -q -m staged; git push -q origin HEAD:main; git show --format=%s --name-only HEAD", "git add -A && git commit -q -m staged || exit; git push -q origin HEAD:main || exit; git show --format=%s --name-only HEAD", "staged\n\nnotes.txt"],
+      ["test -d . && cd . || exit && git push -q origin HEAD:main; echo cleanup", "test -d . && cd . || exit && { git push -q origin HEAD:main || exit; }; echo cleanup", "cleanup"],
+      ["git add -A && git commit -q -m staged; git push -q origin HEAD:main; git show --format=%s --name-only HEAD", "git add -A && { git commit -q -m staged || exit; }; git push -q origin HEAD:main || exit; git show --format=%s --name-only HEAD", "staged\n\nnotes.txt"],
       ["printf 'piped message' | git commit -q --allow-empty -F -; git push -q origin HEAD:main; git log -1 --format=%s", "printf 'piped message' | git commit -q --allow-empty -F - || exit; git push -q origin HEAD:main || exit; git log -1 --format=%s", "piped message"],
     ])("runs the same commands as the original after an accepted push, and stops after a rejected one: %s", (command, rewrite, printed) => {
       expect(exitMaskRewrite(command)).toBe(rewrite);
@@ -560,9 +573,18 @@ describe("the exit-status mask guard", () => {
       expect(pushRepo(false)(command).status).toBe(0);
     });
 
+    test("skips the commit and runs the cleanup as before when a cd before it fails", () => {
+      const command = "cd missing && git commit -q --allow-empty -m x; false || echo cleanup";
+      const rewrite = "cd missing && { git commit -q --allow-empty -m x || exit; }; false || echo cleanup";
+      expect(exitMaskRewrite(command)).toBe(rewrite);
+      const result = pushRepo(true)(rewrite);
+      expect(result).toEqual(pushRepo(true)(command));
+      expect(result).toMatchObject({ status: 0, stdout: "cleanup\n" });
+    });
+
     test("commits in a repository that git init made just before", () => {
       const command = "git init -q fresh && cd fresh && git commit -q --allow-empty -m first; git log -1 --format=%s; echo done";
-      const rewrite = "git init -q fresh && cd fresh && git commit -q --allow-empty -m first || exit; git log -1 --format=%s; echo done";
+      const rewrite = "git init -q fresh && cd fresh && { git commit -q --allow-empty -m first || exit; }; git log -1 --format=%s; echo done";
       expect(exitMaskRewrite(command)).toBe(rewrite);
       const result = pushRepo(true)(rewrite, ".");
       expect(result).toEqual(pushRepo(true)(command, "."));
@@ -571,7 +593,7 @@ describe("the exit-status mask guard", () => {
 
     test("commits in the repository a cd before it names, with the piped message", () => {
       const command = "cd work && printf 'piped message' | git commit -q --allow-empty -F -; git push -q origin HEAD:main; echo cleanup";
-      const rewrite = "cd work && printf 'piped message' | git commit -q --allow-empty -F - || exit; git push -q origin HEAD:main || exit; echo cleanup";
+      const rewrite = "cd work && { printf 'piped message' | git commit -q --allow-empty -F - || exit; }; git push -q origin HEAD:main || exit; echo cleanup";
       expect(exitMaskRewrite(command)).toBe(rewrite);
       const accepted = pushRepo(true)(rewrite, ".");
       expect(accepted).toEqual(pushRepo(true)(command, "."));

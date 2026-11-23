@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 import { commandsIn, nestedProgramsAt, parse, type Command, type Scope } from "./shell-words.ts";
 
-type Fix = { pipefail?: true; exitAt?: number };
+type Fix = { pipefail?: true; exitAt?: number; groupAt?: number };
 type Finding = { what: string; how: string; fix?: Fix };
 type Reach = "exit" | { printedBy: number } | { how: string; fix?: Fix };
 type Program = { commands: Command[]; depths: number[] };
@@ -160,34 +160,37 @@ function reachOf(program: Program, start: number): Reach {
   let end = pipelineEnd(program, start, depth);
   const pipeEnd = end;
   if (end !== start && !setting(program, start, setsOption("pipefail"))) return { how: "a pipe", fix: pipefailFix(program, start, end) };
-  if (depth > 0) return closesOnly(program, end, depth) ? "exit" : { how: "the group or loop it runs in" };
+  if (depth > 0) return closesOnly(program, end, depth) || exitGroup(program, start, end) ? "exit" : { how: "the group or loop it runs in" };
   while (commands[end].after === "&&" && end + 1 < commands.length) end = pipelineEnd(program, end + 1, depth);
   const after = commands[end].after;
   const next = end + 1;
   if (after === undefined) return "exit";
   if (after === "&") return { how: "running it in the background with `&`" };
   if (after === "||") return reportedBy(next, true) ?? { how: "the `||` after it" };
-  return reportedBy(next, false) ?? { how: separatorName(after), fix: failsOnlyOnError(commands, start) ? exitFix(commands[pipeEnd]) : undefined };
+  return reportedBy(next, false) ?? { how: separatorName(after), fix: exitFix(commands, start, pipeEnd) };
 }
 
 const stopsShell = ({ bare, rawPrefix, stdin, redirects, scope }: Command) => bare.join(" ") === "exit" && rawPrefix.length === 0 && stdin === undefined && redirects.length === 0 && parens(scope) === 0;
 const gitSteps = new Set(["init", "add", "commit", "push", "pull", "fetch", "checkout", "switch", "rebase", "merge", "reset", "restore", "rm", "mv", "tag", "cherry-pick", "revert"]);
 
-function failsOnlyOnError(commands: Command[], start: number): boolean {
-  let first = start;
-  while (first > 0 && commands[first - 1].after === "|") first--;
-  const steps: Command[] = [];
-  for (let index = first - 1; index >= 0 && ["&&", "||"].includes(commands[index].after ?? ""); index--) {
-    const exitsOnFailure = stopsShell(commands[index]) && commands[index - 1]?.after === "||";
-    if (exitsOnFailure) break;
-    steps.push(commands[index]);
-  }
-  return steps.every((step) => step.after !== "||" && writeStep(step));
-}
 const writeStep = (step: Command) => step.name === "cd" || (step.name === "git" && gitSteps.has(step.args[gitSubcommandAt(step.args)]));
 
-const exitFix = ({ after, afterAt }: Command): Fix | undefined =>
-  (after !== undefined && afterAt !== undefined && (separators.has(after) || after === "&&") ? { exitAt: afterAt } : undefined);
+const pipelineStart = (commands: Command[], index: number): number => (index > 0 && commands[index - 1].after === "|" ? pipelineStart(commands, index - 1) : index);
+function exitFix(commands: Command[], start: number, pipeEnd: number): Fix | undefined {
+  const { after, afterAt } = commands[pipeEnd];
+  if (after === undefined || afterAt === undefined || !(separators.has(after) || after === "&&")) return undefined;
+  const before = commands[pipelineStart(commands, start) - 1];
+  if (!["&&", "||"].includes(before?.after ?? "")) return { exitAt: afterAt };
+  return before.afterAt === undefined ? undefined : { exitAt: afterAt, groupAt: before.afterAt + 2 };
+}
+function exitGroup(program: Program, start: number, end: number): boolean {
+  const { commands, depths } = program;
+  const first = pipelineStart(commands, start);
+  const [exit, closer] = [commands[end + 1], commands[end + 2]];
+  const opensHere = depths[first] === 1 && commands[first].keywords.join(" ") === "{";
+  const closesAfterExit = exit !== undefined && stopsShell(exit) && exit.after === ";" && closer?.bare.join(" ") === "}";
+  return opensHere && commands[end].after === "||" && closesAfterExit && closer.after !== "|" && commands[listEnd(program, end + 2, 0)].after !== "&";
+}
 
 function pipefailFix({ commands }: Program, start: number, pipeEnd: number): Fix | undefined {
   const otherPipe = commands.some((command, index) => command.after === "|" && index < start);
@@ -265,10 +268,12 @@ function pipefailKeepsEveryCommand(text: string): boolean {
 
 const pipesIn = (commands: Command[]) => commands.filter((command) => command.after === "|").length;
 
-function exitingAt(text: string, at: number): string {
+function exitingAt(text: string, at: number, groupAt: number | undefined): string {
   const spaced = /\s/.test(text[at - 1] ?? " ") ? "" : " ";
   const after = text[at] === "#" || text[at] === "&" ? " " : "";
-  return `${text.slice(0, at)}${spaced}|| exit${after}${text.slice(at)}`;
+  const exited = `${text.slice(0, at)}${spaced}|| exit${groupAt === undefined ? "" : "; }"}${after}${text.slice(at)}`;
+  if (groupAt === undefined) return exited;
+  return `${exited.slice(0, groupAt)} {${/\s/.test(exited[groupAt] ?? "") ? "" : " "}${exited.slice(groupAt)}`;
 }
 
 export function exitMaskRewrite(command: string): string | undefined {
@@ -279,11 +284,11 @@ export function exitMaskRewrite(command: string): string | undefined {
       const { found } = hiddenIn(text, 0);
       if (!found) return step === 0 ? undefined : text;
       if (!found.fix) return undefined;
-      const { pipefail: needsPipefail, exitAt } = found.fix;
+      const { pipefail: needsPipefail, exitAt, groupAt } = found.fix;
       if (needsPipefail && !(pipefailKeepsEveryCommand(command) && pipesIn(commandsIn(command)) === pipesIn(parse(command).flat()))) return undefined;
       const shift = needsPipefail ? pipefail.length : 0;
       if (needsPipefail) text = pipefail + text;
-      if (exitAt !== undefined) text = exitingAt(text, exitAt + shift);
+      if (exitAt !== undefined) text = exitingAt(text, exitAt + shift, groupAt === undefined ? undefined : groupAt + shift);
     }
   } catch {
     return undefined;
