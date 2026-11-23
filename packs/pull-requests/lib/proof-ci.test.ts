@@ -293,17 +293,24 @@ async function listedDraft(listing = "example/product=Backend / Test results") {
   return pr;
 }
 
-test("on a draft, a pinned check listed as posted only once ready reads as withheld when its workflow's checks from any app finished and passed, and a ready PR still needs it", async () => {
+test("on a draft, a pinned check listed as posted only once ready waits while a check of its workflow runs", async () => {
   const pr = await listedDraft();
   pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }, { name: "Backend / Unit", bucket: "pending", app: 9 }]);
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results");
+});
 
+test("on a draft, a pinned check listed as posted only once ready reads as withheld when its workflow's checks from any app finished and passed", async () => {
+  const pr = await listedDraft();
   pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }, { name: "Backend / Unit", bucket: "pass", app: 9 }]);
   const withheld = await pr.hedge("gate");
   expect(withheld.code).toBe(0);
   expect(ciLine(withheld.output)).toBe("ci: green, 1 required check(s) pass; withheld from drafts, required once ready: Backend / Test results (its workflow finished without posting it)");
+});
 
+test("a ready PR still needs a pinned check listed as posted only once ready", async () => {
+  const pr = await listedDraft();
   pr.pullRequestState({ draft: false });
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }, { name: "Backend / Unit", bucket: "pass", app: 9 }]);
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results");
 });
 
