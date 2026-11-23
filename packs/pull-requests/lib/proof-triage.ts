@@ -144,11 +144,18 @@ function labelsObject(text: string) {
   } catch { return undefined; }
 }
 
+type GivenLabel = { finding: number; label: FindingLabel["label"]; reason?: string };
+
+const isGivenLabel = (item: unknown): item is GivenLabel => {
+  const { finding, label, reason } = (item ?? {}) as Record<string, unknown>;
+  return Number.isInteger(finding) && (label === "advisory" || label === "needs-answer") && (reason === undefined || typeof reason === "string");
+};
+
 function parsedLabels(text: string) {
   const labels = labelsObject(text)?.labels;
-  if (!Array.isArray(labels)) return undefined;
-  const given = new Map<number, { label: string; reason: string }>();
-  for (const item of labels.filter((item): item is { finding: number; label: string; reason?: unknown } => typeof item?.finding === "number" && typeof item?.label === "string")) {
+  if (!Array.isArray(labels) || !labels.every(isGivenLabel)) return undefined;
+  const given = new Map<number, { label: FindingLabel["label"]; reason: string }>();
+  for (const item of labels) {
     const earlier = given.get(item.finding);
     given.set(item.finding, earlier && earlier.label !== item.label ? { label: "needs-answer", reason: "the triage gave conflicting labels" } : earlier ?? { label: item.label, reason: typeof item.reason === "string" ? oneLine(item.reason) : "" });
   }
@@ -169,7 +176,7 @@ export async function triageFindings(findings: string, diff: string, ask: AskTri
   const labels = candidates.map((candidate) => {
     const given = replied?.get(candidate.finding);
     return unrated(candidate) ?? (failed ? label(candidate, "needs-answer", failed)
-      : given?.label === "advisory" || given?.label === "needs-answer" ? label(candidate, given.label, given.reason || "no reason given")
+      : given ? label(candidate, given.label, given.reason || "no reason given")
       : label(candidate, "needs-answer", "the triage gave no label"));
   });
   const cause = !answer.ok ? oneLine(answer.cause) : !replied ? `the triage reply is not readable, ${answer.text.length} characters` : undefined;

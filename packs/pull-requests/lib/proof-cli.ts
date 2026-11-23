@@ -1,5 +1,5 @@
 import { closeSync, existsSync, openSync } from "node:fs";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { askGap, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity } from "./proof.ts";
@@ -680,10 +680,12 @@ async function printSavedReview({ round, id, directory }: SingleRound, context: 
 }
 
 const triageLimit = 180_000;
-const askTriage = ({ env }: CommandContext) => async (prompt: string): Promise<ModelAnswer> => {
+const askTriage = ({ env, home }: CommandContext) => async (prompt: string): Promise<ModelAnswer> => {
   const row = modelFor("lookup", env);
   if (row.provider !== "claude") return { ok: false, cause: "the triage runs only on a Claude lookup row, which has no tools", model: row.model };
-  return askModel("triage", row, { prompt, cwd: tmpdir() }, env, triageLimit);
+  const cwd = join(home, ".local/state/hedge/triage");
+  await mkdir(cwd, { recursive: true });
+  return askModel("triage", row, { prompt, cwd }, env, triageLimit);
 };
 
 async function printLabels(directory: string, context: CommandContext) {

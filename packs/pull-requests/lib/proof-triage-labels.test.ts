@@ -108,7 +108,7 @@ test("the triage fails closed: a failed call, an unreadable reply, an unknown la
   const replies: [string, string][] = [
     ["exit 3", "the triage call failed"],
     ["cat >/dev/null; echo 'advisory for all'", "the triage reply is not readable"],
-    [`cat >/dev/null; echo '${labels([1, "needs-answer", "trigger"], [2, "unsure", "cannot tell"], [4, "advisory", "taste"])}'`, "the triage gave no label"],
+    [`cat >/dev/null; echo '${labels([1, "needs-answer", "trigger"], [2, "unsure", "cannot tell"], [4, "advisory", "taste"])}'`, "the triage reply is not readable"],
     [`cat >/dev/null; echo '${labels([1, "needs-answer", "trigger"])}'`, "the triage gave no label"],
     [`cat >/dev/null; echo '${labels([1, "needs-answer", "trigger"], [2, "needs-answer", "a trigger"], [2, "advisory", "taste"], [4, "advisory", "taste"])}'`, "the triage gave conflicting labels"],
   ];
@@ -139,6 +139,11 @@ test("the triage cannot read a reply with anything besides one labels object, an
     JSON.stringify({ draft: JSON.parse(adviseSecond), error: "unsure" }),
     JSON.stringify({ ...JSON.parse(adviseSecond), status: "draft" }),
     `${adviseSecond}\n${JSON.stringify({ status: "final", ...JSON.parse(labels([2, "needs-answer", "a requirement"])) })}`,
+    JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, { finding: 2, label: null, reason: "unsure" }] }),
+    JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, { finding: "2", label: "needs-answer", reason: "a trigger" }] }),
+    JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, { finding: 2.5, label: "needs-answer", reason: "a trigger" }] }),
+    JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, { finding: 2, label: "needs-answer", reason: ["a trigger"] }] }),
+    JSON.stringify({ labels: [...JSON.parse(adviseSecond).labels, null] }),
   ];
   for (const reply of replies) {
     const pr = await treated();
@@ -356,7 +361,7 @@ test("the triage asks the lookup row's model with no tools, outside the checkout
   expect(claude.argv()).toContain("[--model]\n[lookup-model]\n");
   expect(claude.argv()).toContain("[--tools]\n[]\n");
   const cwd = claude.argv().match(/^\[cwd=(.*)\]$/m)?.[1];
-  expect(cwd).toBeString();
+  expect(`${cwd}/`.startsWith(`${pr.home}/`)).toBe(true);
   expect(`${cwd}/`.startsWith(`${pr.repository}/`)).toBe(false);
   expect(savedLabels(pr)).toMatchObject({ model: "lookup-model", ok: true, durationMs: expect.any(Number), usage: { input: 12, output: 7, costUsd: 0.25 }, labels: [{ finding: 1 }, { finding: 2, label: "advisory" }, { finding: 4 }] });
 });
