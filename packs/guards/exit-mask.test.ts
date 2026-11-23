@@ -472,6 +472,7 @@ describe("the exit-status mask guard", () => {
     "test -d . && cd . || env exit && git push; echo cleanup",
     "test -d . && cd . || /usr/bin/exit && git push; echo cleanup",
     "test -d . && cd . || ./exit && git push; echo cleanup",
+    "test -d . && cd . || exit 1 2 && git push; echo cleanup",
     "git clone -q ../remote.git copy && git commit --allow-empty -m first; echo done",
     "git commit -F - <<EOF | tail -1\n$(git log | head -1)\nEOF",
     "git push | tail -3; shopt -o > options.txt",

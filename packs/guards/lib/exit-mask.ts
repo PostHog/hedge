@@ -170,7 +170,7 @@ function reachOf(program: Program, start: number): Reach {
   return reportedBy(next, false) ?? { how: separatorName(after), fix: failsOnlyOnError(commands, start) ? exitFix(commands[pipeEnd]) : undefined };
 }
 
-const stopsShell = ({ bare, rawPrefix, stdin, redirects, scope }: Command) => bare[0] === "exit" && rawPrefix.length === 0 && stdin === undefined && redirects.length === 0 && parens(scope) === 0;
+const stopsShell = ({ bare, rawPrefix, stdin, redirects, scope }: Command) => bare.join(" ") === "exit" && rawPrefix.length === 0 && stdin === undefined && redirects.length === 0 && parens(scope) === 0;
 const gitSteps = new Set(["init", "add", "commit", "push", "pull", "fetch", "checkout", "switch", "rebase", "merge", "reset", "restore", "rm", "mv", "tag", "cherry-pick", "revert"]);
 
 function failsOnlyOnError(commands: Command[], start: number): boolean {
