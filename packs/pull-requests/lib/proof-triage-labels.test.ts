@@ -375,6 +375,21 @@ test("a labels file of another shape counts every finding as needing an answer i
   expect((await respond(pr, "1. fixed in abc1234: greets\n4. rejected: fine\n6. fixed in abc1234: test\n")).output).toContain("Answer findings 2 too");
 });
 
+const advisoryTwo = { finding: 2, severity: "major", label: "advisory", reason: "no trigger" };
+
+test.each([
+  ["a failed pass", { ok: false, labels: [advisoryTwo] }],
+  ["an unknown severity", { ok: true, labels: [{ ...advisoryTwo, severity: "typo" }] }],
+  ["no reason", { ok: true, labels: [{ finding: 2, severity: "major", label: "advisory" }] }],
+])("a saved advisory label from %s waives no answer in respond", async (_case, saved) => {
+  const pr = await treated();
+  fakeModel(pr, "TRIAGE", adviseSecond);
+  await pr.hedge("review", "--single");
+  writeFileSync(join(reviewDirectory(pr), "triage-labels.json"), JSON.stringify(saved));
+
+  expect((await respond(pr, "1. fixed in abc1234: greets\n4. rejected: fine\n6. fixed in abc1234: test\n")).output).toContain("Answer findings 2 too");
+});
+
 test("a triage call that throws before the model answers labels every blocker and major finding needs-answer, and keeps none of the error's text", async () => {
   const triaged = await triageFindings(findings, "", async () => { throw new Error("settings.json is not readable near private-detail"); });
 

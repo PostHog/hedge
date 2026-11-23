@@ -802,18 +802,19 @@ export type FindingLabel = { finding: number; severity: LabelCandidate["severity
 export const labelsPath = (directory: string) => join(directory, "triage-labels.json");
 
 const isFindingLabel = (item: unknown): item is FindingLabel => {
-  const { finding, severity, label } = (item ?? {}) as Record<string, unknown>;
-  return Number.isInteger(finding) && typeof severity === "string" && (label === "advisory" || label === "needs-answer");
+  const { finding, severity, label, reason } = (item ?? {}) as Record<string, unknown>;
+  return Number.isInteger(finding) && (severity === "blocker" || severity === "major" || severity === "none") && (label === "advisory" || label === "needs-answer") && typeof reason === "string";
 };
 
-export async function readLabels<T extends { labels: FindingLabel[] }>(directory: string) {
+export async function readLabels<T extends { ok?: boolean; labels: FindingLabel[] }>(directory: string) {
   const saved = await readJson<unknown>(labelsPath(directory), undefined).catch(() => undefined);
   const labels = (saved as { labels?: unknown } | undefined)?.labels;
   return Array.isArray(labels) && labels.every(isFindingLabel) ? saved as T : undefined;
 }
 
 export async function advisoryLabels(directory: string) {
-  return ((await readLabels(directory))?.labels ?? []).filter(({ label, severity }) => label === "advisory" && severity !== "none");
+  const saved = await readLabels(directory);
+  return (saved?.ok === true ? saved.labels : []).filter(({ label, severity }) => label === "advisory" && severity !== "none");
 }
 
 async function advisoryOf(directory: string) {
