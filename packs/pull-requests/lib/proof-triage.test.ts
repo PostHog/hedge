@@ -239,3 +239,29 @@ test("at a treated budget a finding listed under Known issues takes a known answ
   pr.env.HEDGE_SETTINGS = on;
   expect((await pr.hedge("respond", "--round", "final-1", "responses.md")).code).toBe(0);
 });
+
+test("a known answer waits for the budget that stops the next read, also after triage is switched on midway", async () => {
+  const pr = await budgeted("off", graded("non-critical", "medium"));
+  await pr.hedge("review", "--single");
+  expect((await readAgain(pr, "1")).code).toBe(0);
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...JSON.parse(pr.env.HEDGE_SETTINGS!), "pull-requests.triage": "on" });
+
+  await expect(readAgain(pr, "final-1")).rejects.toThrow("The review budget of 2 reviews is spent");
+  writeFileSync(join(pr.repository, "responses.md"), "1. known: listed under Known issues\n");
+  expect((await pr.hedge("respond", "--round", "final-1", "responses.md")).code).toBe(0);
+});
+
+test("the panel of an excluded pull request on the Read tier prints and stores the Read tier's budget that stops its later reads", async () => {
+  const pr = await budgeted("on", oneWay.replace("medium", "low"), 6);
+  expect(await firstLine(pr)).toMatchObject({ round: 1, budget: 2, tier: { name: "read" }, triage: { path: "excluded" } });
+  expect(roundRecord(pr, "1")).toMatchObject({ budget: 2 });
+});
+
+test("a first panel after two reads of a treated pull request is refused at the budget", async () => {
+  const pr = await budgeted("on", graded("non-critical", "medium"));
+  await pr.hedge("review", "--single");
+  expect((await readAgain(pr, "1")).code).toBe(0);
+  await answerFixed(pr, "final-1");
+  await pr.commit("feature.ts", "export const greet = (name: string) => `hello ${name}`;\n");
+  await expect(pr.hedge("review")).rejects.toThrow("The review budget of 2 reviews is spent");
+});

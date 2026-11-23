@@ -346,8 +346,8 @@ each answer against HEAD.`,
       const { print, home, cwd } = context;
       if (files.length !== 1) throw usageError("respond", "Pass one responses file");
       const head = identity();
-      const ceiling = tierCeiling(tierOf(head, context), numberSetting("pull-requests.reviewCeiling", context.env));
-      print(await respondToReview(home, head, roundId(required(options, "--round", "respond")), resolve(cwd, files[0]!), ceiling, triageSetting(context.env)));
+      const { budget } = await reviewBudget(head, pullOf(head, context.run)?.body, numberSetting("pull-requests.reviewCeiling", context.env), context);
+      print(await respondToReview(home, head, roundId(required(options, "--round", "respond")), resolve(cwd, files[0]!), budget));
       return 0;
     },
   },
@@ -727,17 +727,22 @@ async function reserveRound(options: Map<string, string>, head: ProofIdentity, c
   const lastRead = scope === "final" && (options.get("--phase") ?? "review") === "review";
   const from = lastRead ? await panelCommit(context.home, head) ?? base : rangeStart(scope, base, head, context.run);
   const { decision, ...permit } = await decisionOf(options, head, context);
-  const triage = await triageMark(head, triageSetting(context.env), pull?.body, context);
-  const tier = reviewTier(head, context.run, pull?.body);
+  const { triage, tier, treated, budget } = await reviewBudget(head, pull?.body, permit.limits.ceiling, context);
   if (tier.name === "read" && capturedBy === "hedge" && !panel && !decision && !await panelCommit(context.home, head)) throw new Error("A PR of the Read tier gets one read, and it is the panel: run hedge proof review, which runs its combined lens");
   const firstPanel = panel && !await panelCommit(context.home, head);
-  const budget = treatedBudget(triage, permit.limits.ceiling);
-  const limits = budget !== undefined ? { ...permit.limits, ceiling: budget } : firstPanel ? permit.limits : { ...permit.limits, ceiling: tierCeiling(tier, permit.limits.ceiling) };
+  const limits = firstPanel && treated === undefined ? permit.limits : { ...permit.limits, ceiling: budget };
   const now = context.now ?? (() => new Date());
   const dropUnanswered = (directory: string) => roundStep(directory, context, () => dropFinalRead(directory, head, now()));
   const emptyRange = () => from !== undefined && rangeIsEmpty(context.run, from, head.commit, mergeBase(head, context.run));
-  const reserved = await startReview(context.home, head, { dropUnanswered, emptyRange, triage, onHistory: onHistoryOf(head, context.run), opening: async () => panel && !await panelCommit(context.home, head), sanity: () => requireSanity(context.home, head, context.run, () => bloatJudge(head, context)), scope, base, from, ...isCommitSha(pull?.baseSha) ? { forkBase: pull.baseSha } : {}, ...permit, limits, decision, phase: options.get("--phase"), cleanBaseMerge: cleanBaseMerge(head, context.run), quietCommit: quietCommitIn(context.run, () => baseRefs(head, context.run)), capturedBy, lock: async (directory) => lockNewRound(directory, await context.lock()), lockBudget: async (reviews, step) => withRoundLock(reviews, await context.lock(), step), now });
+  const reserved = await startReview(context.home, head, { dropUnanswered, emptyRange, triage, budget, onHistory: onHistoryOf(head, context.run), opening: async () => panel && !await panelCommit(context.home, head), sanity: () => requireSanity(context.home, head, context.run, () => bloatJudge(head, context)), scope, base, from, ...isCommitSha(pull?.baseSha) ? { forkBase: pull.baseSha } : {}, ...permit, limits, decision, phase: options.get("--phase"), cleanBaseMerge: cleanBaseMerge(head, context.run), quietCommit: quietCommitIn(context.run, () => baseRefs(head, context.run)), capturedBy, lock: async (directory) => lockNewRound(directory, await context.lock()), lockBudget: async (reviews, step) => withRoundLock(reviews, await context.lock(), step), now });
   return { ...reserved, scope, base, from, phase: options.get("--phase") };
+}
+
+async function reviewBudget(head: ProofIdentity, body: string | undefined, ceiling: number, context: CommandContext) {
+  const triage = await triageMark(head, triageSetting(context.env), body, context);
+  const tier = reviewTier(head, context.run, body);
+  const treated = treatedBudget(triage, ceiling);
+  return { triage, tier, treated, budget: treated ?? tierCeiling(tier, ceiling) };
 }
 
 async function triageMark(head: ProofIdentity, setting: TriageSetting, body: string | undefined, { home, env, run }: CommandContext) {
