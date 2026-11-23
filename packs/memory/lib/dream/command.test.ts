@@ -135,6 +135,26 @@ test("analyze asks one analyst per session, the busiest first up to hub.dreamSes
   expect(report).toContain("## correction (1)\n\n- (3) [app] {run-tests-first} Run the tests first.");
 });
 
+test("analyze takes a memory-misled finding from the model and lists it first in findings.md", async () => {
+  const home = hubHome();
+  const run = join(home, ".local/state/hedge/dream/2026-11-05");
+  mkdirSync(join(run, "digests"), { recursive: true });
+  writeFileSync(join(run, "digests", "a.json"), JSON.stringify(digest()));
+  const misled = { kind: "memory-misled", topic: "demo-video-flow", scope: "global", reach: "general", claim: "Use a still frame, not zooms.", evidence: "It goes in, out, in, out.", memory: "demo-video-flow.md", importance: 3 };
+  const correction = { ...misled, kind: "correction", topic: "run-tests-first", claim: "Run the tests first.", memory: "" };
+  const claudeWithSchema: Spawn = async (argv) => {
+    const schema = JSON.parse(argv[argv.indexOf("--json-schema") + 1]!);
+    const kinds: string[] = schema.properties.findings.items.properties.kind.enum;
+    const findings = [correction, misled];
+    return { code: 0, stdout: JSON.stringify(findings.every((finding) => kinds.includes(finding.kind)) ? { structured_output: { taskType: "fix", findings } } : { is_error: true }) };
+  };
+  const { io: dream } = io(home, { analyst: () => modelAnalyst(lookup("claude"), home, {}, claudeWithSchema) });
+  expect(await dreamCommand(["analyze", run], dream)).toBe(0);
+  const report = readFileSync(join(run, "findings.md"), "utf8");
+  expect(report).toContain("## memory-misled (1)\n\n- (3) [global] {demo-video-flow} Use a still frame, not zooms. Memory: `demo-video-flow.md`.");
+  expect(report.indexOf("## memory-misled")).toBeLessThan(report.indexOf("## correction"));
+});
+
 test("analyze lists an analyst that failed and does not mark its session as seen", async () => {
   const home = hubHome();
   const run = join(home, ".local/state/hedge/dream/2026-11-05");

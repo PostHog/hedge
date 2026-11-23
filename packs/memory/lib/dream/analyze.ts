@@ -30,6 +30,8 @@ The agents share a memory of Markdown files. Its index is below. Report what fut
 - missing-knowledge: the agent spent many steps finding a fact that one memory line would have given it.
 - tool-problem: a tool, script, config, or environment misbehaved; this needs a fix, not a memory.
 - stale-memory: the session shows a memory in the index is wrong or outdated. Name the memory file.
+- memory-misled: the agent read or was shown a memory and went wrong because the memory is wrong, outdated, or
+  unclear. Name the memory file. This is worse than stale-memory: the memory caused harm.
 - memory-helped: a memory in the index saved the agent work. Name the memory file.
 
 Write each claim as one sentence a future agent can act on, in plain English. Quote short evidence from the session.
@@ -58,7 +60,7 @@ const analystSchema = {
         type: "object", required: ["kind", "topic", "scope", "reach", "claim", "evidence", "memory", "importance"], additionalProperties: false,
         properties: {
           topic: { type: "string" },
-          kind: { enum: ["correction", "preference", "repeated-failure", "missing-knowledge", "tool-problem", "stale-memory", "memory-helped"] },
+          kind: { enum: ["correction", "preference", "repeated-failure", "missing-knowledge", "tool-problem", "stale-memory", "memory-misled", "memory-helped"] },
           scope: { type: "string" }, reach: { enum: ["one-off", "general"] }, claim: { type: "string" }, evidence: { type: "string" },
           memory: { type: "string", description: "The memory file this confirms or contradicts, or an empty string" },
           importance: { type: "integer", minimum: 1, maximum: 3 },
@@ -228,7 +230,7 @@ function report(run: string, all: Array<{ file: string; item: Digest }>, cut: nu
       byKind.set(kind, lines);
     }
   }
-  const order = ["correction", "preference", "repeated-failure", "missing-knowledge", "stale-memory", "memory-helped", "tool-problem", "one-off"];
+  const order = ["memory-misled", "correction", "preference", "repeated-failure", "missing-knowledge", "stale-memory", "memory-helped", "tool-problem", "one-off"];
   return [
     `# Dream findings ${basename(run)}`, "",
     `${analyzed} sessions analyzed from ${machines.size} machines (${[...machines].sort().join(", ")}).`,
