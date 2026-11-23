@@ -90,6 +90,15 @@ test("a pinned app's newer status decides its check when it names the context in
   expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: red, required failing: deploy");
 });
 
+test("a required check reads a newer status that names its context in another case, also on a draft", async () => {
+  const { pr } = await reviewed();
+  pr.pullRequestState({ draft: true });
+  pr.required("main", [{ context: "CI / scan" }]);
+  pr.ci([{ name: "CI / lint", bucket: "pass" }]);
+  pr.statuses([{ context: "CI / Scan", state: "failure", by: "ci[bot]" }, { context: "CI / scan", state: "success", by: "ci[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: red, required failing: CI / scan");
+});
+
 test("a status from a bot without an app leaves a pinned check unreported, and an unreadable app makes CI unknown", async () => {
   const { pr } = await reviewed();
   pr.required("main", [{ context: "deploy", integration_id: 7 }]);

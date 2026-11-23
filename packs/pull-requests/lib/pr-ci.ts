@@ -145,7 +145,7 @@ function withPinnedStatuses(entries: Entry[], required: RequiredCheck[], run: Ru
   };
   return entries.flatMap((entry) => {
     const pin = pinOf(entry);
-    return pin ? [{ ...entry, name: pin.context, appId: pin.appId }] : entry.superseded ? [] : [entry];
+    return pin ? [{ ...entry, appId: pin.appId }] : entry.superseded ? [] : [entry];
   });
 }
 
@@ -154,12 +154,13 @@ function listOf(names: string[], limit = 8) {
   return unique.length > limit ? `${unique.slice(0, limit).join(", ")} and ${unique.length - limit} more` : unique.join(", ");
 }
 
+const names = (check: RequiredCheck, entry: Entry) => entry.status ? sameContext(entry.name, check.context) : entry.name === check.context;
 const reportedBy = (check: RequiredCheck, entry: Entry) => check.appId === undefined || entry.appId === check.appId;
 const ranBy = (check: RequiredCheck, entry: Entry) => !entry.status && reportedBy(check, entry);
 
 function withheldFromDraft(check: RequiredCheck, entries: Entry[]) {
   const split = check.context.indexOf(" / ");
-  if (split <= 0 || entries.some((entry) => entry.name === check.context)) return false;
+  if (split <= 0 || entries.some((entry) => names(check, entry))) return false;
   const siblings = entries.filter((entry) => entry.name.startsWith(check.context.slice(0, split + 3)) && ranBy(check, entry));
   return siblings.length > 0 && siblings.every((entry) => entry.outcome === "pass");
 }
@@ -184,7 +185,7 @@ function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boo
   const counted = new Set<Entry>();
   const [failing, pending, missing, withheld]: string[][] = [[], [], [], []];
   for (const check of required) {
-    const matches = entries.filter((entry) => entry.name === check.context && reportedBy(check, entry));
+    const matches = entries.filter((entry) => names(check, entry) && reportedBy(check, entry));
     matches.forEach((entry) => counted.add(entry));
     if (!matches.length) { (draft && withheldFromDraft(check, entries) ? withheld : missing).push(check.context); continue; }
     const worst = matches.reduce((a, b) => rank[b.outcome] > rank[a.outcome] ? b : a).outcome;
