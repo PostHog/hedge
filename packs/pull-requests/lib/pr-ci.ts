@@ -166,12 +166,10 @@ function listOf(names: string[], limit = 8) {
 
 const reportedBy = (check: RequiredCheck, entry: Entry) => check.appId === undefined || entry.appId === check.appId;
 
-function withheldFromDraft(check: RequiredCheck, entries: Entry[], required: RequiredCheck[]) {
+function withheldFromDraft(check: RequiredCheck, entries: Entry[]) {
   const workflow = workflowOf(check.context);
   if (!workflow || entries.some((entry) => entry.name === check.context)) return false;
-  const partners = required.filter((other) => !other.postedOnceReady && other.context.startsWith(workflow));
-  if (check.postedOnceReady && !(partners.length > 0 && partners.every((other) => entries.some((entry) => entry.name === other.context)))) return false;
-  const siblings = entries.filter((entry) => entry.name.startsWith(workflow) && (check.postedOnceReady || reportedBy(check, entry)));
+  const siblings = entries.filter((entry) => entry.name.startsWith(workflow) && reportedBy(check, entry));
   return siblings.length > 0 && siblings.every((entry) => entry.outcome === "pass") && (check.appId === undefined || siblings.some((entry) => !entry.status));
 }
 
@@ -193,21 +191,22 @@ function notRequired(entries: Entry[], { countRunning = true } = {}) {
 
 function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boolean): CiResult {
   const counted = new Set<Entry>();
-  const [failing, pending, missing, withheld]: string[][] = [[], [], [], []];
+  const [failing, pending, missing, withheld, listed]: string[][] = [[], [], [], [], []];
   for (const check of required) {
     const named = entries.filter((entry) => entry.name === check.context);
     const own = named.filter((entry) => reportedBy(check, entry));
     const matches = own.some((entry) => entry.status) ? [...new Set([...own, ...named.filter((entry) => !entry.status)])] : own;
     matches.forEach((entry) => counted.add(entry));
-    if (!matches.length) { (draft && withheldFromDraft(check, entries, required) ? withheld : missing).push(check.context); continue; }
+    if (!matches.length) { (!draft ? missing : check.postedOnceReady && !named.length ? listed : withheldFromDraft(check, entries) ? withheld : missing).push(check.context); continue; }
     const worst = matches.reduce((a, b) => rank[b.outcome] > rank[a.outcome] ? b : a).outcome;
     if (worst === "fail") failing.push(check.context);
     else if (worst === "pending") pending.push(check.context);
   }
   const verdict: CiResult = failing.length ? { state: "red", detail: `required failing: ${listOf(failing)}` }
     : pending.length || missing.length ? { state: "pending", detail: [pending.length ? `required waiting on: ${listOf(pending)}` : "", missing.length ? `required not reported yet: ${listOf(missing)}` : ""].filter(Boolean).join("; ") }
-    : { state: "green", detail: `${required.length - withheld.length} required check(s) pass` };
+    : { state: "green", detail: `${required.length - withheld.length - listed.length} required check(s) pass` };
   if (withheld.length) verdict.detail += `; withheld from drafts, required once ready: ${listOf(withheld)} (its workflow finished without posting it)`;
+  if (listed.length) verdict.detail += `; withheld from drafts, required once ready: ${listOf(listed)} (pull-requests.draftSkippedChecks lists it)`;
   verdict.detail += notRequired(entries.filter((entry) => !counted.has(entry)), { countRunning: verdict.state === "green" });
   return verdict;
 }
@@ -231,7 +230,7 @@ export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date,
     if (stacked) required = requiredChecks(home, identity.repository, pr.defaultBranch!, run, now);
     const entries = entriesOf(identity, run);
     if (!required.length) return { ...everyCheck(entries, identity.commit), checks: checksOf(entries) };
-    const readyOnly = postedOnceReady(identity.repository, env);
+    const readyOnly = pr.draft ? postedOnceReady(identity.repository, env) : new Set<string>();
     required = required.map((check) => readyOnly.has(check.context) ? { ...check, postedOnceReady: true as const } : check);
     const counted = withPinnedStatuses(entries, required, pr.draft, run);
     const verdict = requiredVerdict(counted, required, pr.draft);
