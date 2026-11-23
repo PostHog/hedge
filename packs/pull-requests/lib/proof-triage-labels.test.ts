@@ -126,7 +126,7 @@ test("the triage fails closed: a failed call, an unreadable reply, an unknown la
 });
 
 test("the triage reads a reply that is one labels object, bare or in a code fence", async () => {
-  for (const reply of [adviseSecond, `\`\`\`json\n${adviseSecond}\n\`\`\``]) {
+  for (const reply of [adviseSecond, `\`\`\`json\n${adviseSecond}\n\`\`\``, `\`\`\`JSON\n${adviseSecond}\n\`\`\``, `~~~json\n${adviseSecond}\n~~~`, `~~~\n${adviseSecond}\n~~~`]) {
     const pr = await treated();
     fakeModel(pr, "TRIAGE", reply);
 
@@ -398,6 +398,20 @@ test("the triage asks no model when its directory resolves inside the checkout u
 
   expect(claude.argv()).toBe("");
   expect(savedLabels(pr)).toMatchObject({ ok: false, cause: "the triage directory is inside the checkout under review", labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "needs-answer" }, { finding: 4 }] });
+});
+
+test("a wait run outside any checkout asks no model when the triage directory resolves inside the panel's checkout", async () => {
+  const pr = await treated();
+  const triage = fakeModel(pr, "TRIAGE", adviseSecond);
+  await panelRound(pr);
+  mkdirSync(join(pr.repository, "inside"));
+  symlinkSync(join(pr.repository, "inside"), join(pr.home, ".local/state/hedge/triage"));
+  const head = await pr.git("rev-parse", "HEAD");
+
+  await pr.hedgeIn(pr.home, "review", "--wait", "--round", "1", "--repo", "example/product", "--pr", "42", "--commit", head);
+
+  expect(triage.prompts()).toEqual([]);
+  expect(savedLabels(pr)).toMatchObject({ ok: false, cause: "the triage directory is inside the checkout under review" });
 });
 
 test("the triage records the model's time and tokens beside the labels", async () => {

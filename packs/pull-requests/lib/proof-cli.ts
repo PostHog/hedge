@@ -681,19 +681,19 @@ async function printSavedReview({ round, id, directory }: SingleRound, context: 
 }
 
 const triageLimit = 180_000;
-const askTriage = ({ env, home, run }: CommandContext) => async (prompt: string): Promise<ModelAnswer> => {
+const askTriage = ({ env, home, run }: CommandContext, panelCheckout?: string) => async (prompt: string): Promise<ModelAnswer> => {
   const row = modelFor("lookup", env);
   if (row.provider !== "claude") return { ok: false, cause: "the triage runs only on a Claude lookup row, which has no tools", model: row.model };
   const cwd = join(home, ".local/state/hedge/triage");
   await mkdir(cwd, { recursive: true });
-  const root = topLevel(run);
-  const inside = (directory: string, parent: string) => `${directory}/`.startsWith(`${parent}/`);
-  if (root && inside(await realpath(cwd), await realpath(root))) return { ok: false, cause: "the triage directory is inside the checkout under review", model: row.model };
+  const resolved = `${await realpath(cwd)}/`;
+  const checkouts = await Promise.all([topLevel(run), panelCheckout].filter((path) => path !== undefined).map((path) => realpath(path).catch(() => path)));
+  if (checkouts.some((checkout) => resolved.startsWith(`${checkout}/`))) return { ok: false, cause: "the triage directory is inside the checkout under review", model: row.model };
   return askModel("triage", row, { prompt, cwd }, env, triageLimit);
 };
 
 async function printLabels(directory: string, context: CommandContext) {
-  const triaged = await labelRound(directory, triageSetting(context.env), askTriage(context));
+  const triaged = await labelRound(directory, triageSetting(context.env), askTriage(context, (await readPlan(directory))?.cwd));
   for (const line of triaged ? labelLines(triaged) : []) context.print(line);
 }
 

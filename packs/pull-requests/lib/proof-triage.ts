@@ -136,7 +136,7 @@ function repeatsAKey(json: string) {
 }
 
 function labelsObject(text: string) {
-  const reply = text.trim().replace(/^```(?:json)?\s*\n([\s\S]*)\n```$/, "$1");
+  const reply = text.trim().replace(/^(```|~~~)(?:json)?\s*\n([\s\S]*)\n\1$/i, "$2");
   try {
     const parsed = JSON.parse(reply) as unknown;
     if (repeatsAKey(reply)) return undefined;
