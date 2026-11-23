@@ -70,7 +70,7 @@ function criticalEntries(list: string) {
 
 function matchesEntry(file: string, entry: string) {
   const directory = entry.replace(/\/\*\*?$|\/$/, "");
-  if (!directory.includes("*")) return file === directory || file.startsWith(`${directory}/`);
+  if (!/[*{]/.test(directory)) return file === directory || file.startsWith(`${directory}/`);
   return new Bun.Glob(directory).match(file) || new Bun.Glob(`${directory}/**`).match(file);
 }
 

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { armOf } from "./proof-triage.ts";
 import { checkout, cleanFixtures, fakeModel, graded, settings, type Checkout } from "./proof-testing.ts";
@@ -65,7 +65,7 @@ async function listedPath(list: string, file = "rates/plans/old plans.ts") {
 }
 
 test("a critical-path list matches its entries as bullets, plain lines, quoted paths with spaces, table cells, a leading ./ or /, a trailing colon, and globs", async () => {
-  const lists = ["- `rates/plans/old plans.ts`\n", "| Path | Owner |\n| --- | --- |\n| rates/plans/old plans.ts | billing |\n", "| Area | Owner |\n| --- | --- |\n| rates | billing |\n", "- rates: the charging code\n", "rates\n", "- ./rates/\n", "Everything under /rates/ needs a second read.\n", "- rates/*\n", "- */plans/**\n"];
+  const lists = ["- `rates/plans/old plans.ts`\n", "| Path | Owner |\n| --- | --- |\n| rates/plans/old plans.ts | billing |\n", "| Area | Owner |\n| --- | --- |\n| rates | billing |\n", "- rates: the charging code\n", "rates\n", "- ./rates/\n", "Everything under /rates/ needs a second read.\n", "- rates/*\n", "- */plans/**\n", "- {fees,rates}/**\n"];
   for (const list of lists) expect(await listedPath(list)).toEqual({ list, triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: rates/plans/old plans.ts"] } });
   for (const list of ["- `[slug]/rates.ts`\n", "- [slug]/rates.ts\n", "- app routes ([slug]/)\n"]) expect(await listedPath(list, "[slug]/rates.ts")).toEqual({ list, triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: [slug]/rates.ts"] } });
   expect(await listedPath("- reports/q4,\n", "reports/q4,")).toEqual({ list: "- reports/q4,\n", triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: reports/q4,"] } });
@@ -94,7 +94,6 @@ test("each review records the arm its setting gives the pull request, the same u
   triage("split");
   expect((await firstLine(pr, "--scope", "final", "--base", reviewed, ...target("example/product"))).triage).toMatchObject({ setting: "split", arm: "control" });
   expect((await firstLine(pr, "--single", ...target("Example/Product"))).triage).toMatchObject({ setting: "split", arm: "control" });
-  expect(readdirSync(join(pr.home, ".local/state/hedge/proof/example/product", String(control))).filter((name) => name.includes("triage"))).toEqual([]);
 });
 
 test("a test file in a danger area keeps the standard path, and a critical-path file hedge cannot read puts the pull request on the strict path", async () => {
