@@ -1,10 +1,11 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { tempDirs } from "../../../src/testing/git.ts";
 import { bridgeBundle } from "./install.ts";
+import { signInLostSince } from "./sign-in-lost.ts";
 
 const temp = tempDirs();
 const running: Array<{ kill(): void }> = [];
@@ -28,6 +29,8 @@ let launch = runtimes["the source under Bun"];
 function upstream(config = "", backendEnv: Record<string, string> = {}) {
   const home = temp.make("slack-codex-");
   writeFileSync(join(home, "config.toml"), config);
+  writeFileSync(join(home, "auth.json"), "{}");
+  utimesSync(join(home, "auth.json"), 1000, 1000);
   const codex = join(home, "codex");
   writeFileSync(codex, `#!/bin/sh\nexec "${process.execPath}" "${join(import.meta.dir, "fixtures/codex-app-server.ts")}" "$@"\n`);
   chmodSync(codex, 0o755);
@@ -60,7 +63,7 @@ function upstream(config = "", backendEnv: Record<string, string> = {}) {
   });
   const backend = () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { argv?: string[]; method?: string; params?: any; approval?: unknown }) : []);
   const called = () => backend().filter((entry) => entry.method === "mcpServer/tool/call").map((entry) => entry.params.tool as string);
-  return { request, backend, called, asked, lostMarked: () => existsSync(join(home, "sign-in-lost")), close: () => child.stdin.end(), exited: child.exited, answer: (fn: typeof answer) => { answer = fn; }, initialize: () => request("initialize", { protocolVersion: "2025-06-18", capabilities: { elicitation: {} }, clientInfo: { name: "test", version: "1" } }) };
+  return { request, backend, called, asked, signedOut: async () => (await signInLostSince(home, "slack")) !== undefined, close: () => child.stdin.end(), exited: child.exited, answer: (fn: typeof answer) => { answer = fn; }, initialize: () => request("initialize", { protocolVersion: "2025-06-18", capabilities: { elicitation: {} }, clientInfo: { name: "test", version: "1" } }) };
 }
 
 for (const [runtime, command] of Object.entries(runtimes)) describe.skipIf(!node && command === runtimes["the image's bundle under Node"])(runtime, () => {
@@ -150,34 +153,43 @@ for (const [runtime, command] of Object.entries(runtimes)) describe.skipIf(!node
     expect(await bridge.exited).toBe(0);
   });
 
-  test("a revoked ChatGPT sign-in reaches the agent as one re-auth step, and marks the sign-in lost for the hub until a call works again", async () => {
-    const bridge = upstream();
+  test("a revoked ChatGPT sign-in reaches the agent as one re-auth step, and the hub counts it signed out until a call works again", async () => {
+    const bridge = upstream("", { FAKE_CODEX_REPLIES: "revoked,ok" });
     await bridge.initialize();
-    const read = await bridge.request("tools/call", { name: "slack_read_thread", arguments: { fail: "revoked" } });
+    const read = await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } });
     expect(read.error!.message).toStartWith("Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps. Cause: MCP startup failed: HTTP 401");
-    expect(bridge.lostMarked()).toBe(true);
-    await bridge.request("tools/call", { name: "slack_read_thread", arguments: {} });
-    expect(bridge.lostMarked()).toBe(false);
+    expect(await bridge.signedOut()).toBe(true);
+    await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } });
+    expect(await bridge.signedOut()).toBe(false);
+  });
+
+  test("a call queued behind a revoked one that works leaves the sign-in counted as working", async () => {
+    const bridge = upstream("", { FAKE_CODEX_REPLIES: "revoked,ok" });
+    await bridge.initialize();
+    const read = { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } };
+    await Promise.all([bridge.request("tools/call", read), bridge.request("tools/call", read)]);
+    expect(await bridge.signedOut()).toBe(false);
   });
 
   test("Slack refusing the app's own grant leads the failed result with the re-auth step", async () => {
-    const bridge = upstream();
+    const bridge = upstream("", { FAKE_CODEX_REPLIES: "slack-auth" });
     await bridge.initialize();
-    expect((await bridge.request("tools/call", { name: "slack_read_thread", arguments: { fail: "slack-auth" } })).result).toEqual({ isError: true, content: [
+    expect((await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } })).result).toEqual({ isError: true, content: [
       { type: "text", text: "Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps." },
       { type: "text", text: '{"ok":false,"error":"invalid_auth"}' },
     ] });
-    expect(bridge.lostMarked()).toBe(true);
+    expect(await bridge.signedOut()).toBe(true);
   });
 
   test("a failure that is not about the sign-in stays as Slack wrote it, and keeps a lost sign-in lost", async () => {
-    const bridge = upstream();
+    const bridge = upstream("", { FAKE_CODEX_REPLIES: "plain,revoked,plain" });
     await bridge.initialize();
-    expect((await bridge.request("tools/call", { name: "slack_read_thread", arguments: { fail: "plain" } })).result).toEqual({ isError: true, content: [{ type: "text", text: "channel_not_found" }] });
-    expect(bridge.lostMarked()).toBe(false);
-    await bridge.request("tools/call", { name: "slack_read_thread", arguments: { fail: "revoked" } });
-    await bridge.request("tools/call", { name: "slack_read_thread", arguments: { fail: "plain" } });
-    expect(bridge.lostMarked()).toBe(true);
+    const read = { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } };
+    expect((await bridge.request("tools/call", read)).result).toEqual({ isError: true, content: [{ type: "text", text: "channel_not_found" }] });
+    expect(await bridge.signedOut()).toBe(false);
+    await bridge.request("tools/call", read);
+    await bridge.request("tools/call", read);
+    expect(await bridge.signedOut()).toBe(true);
   });
 
   test("an approval the Slack app asks for goes to the calling agent, and its answer goes back", async () => {

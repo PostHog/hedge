@@ -232,6 +232,27 @@ describe("on the hub", () => {
     expect(spawned[0]).toEqual(["docker", "image", "inspect", expect.stringMatching(/^hedge-mcphub:1\.1\.0-/)]);
   });
 
+  test("the gateway doctor prints the re-auth line of a revoked app sign-in, and fails while a declared upstream cannot be read", async () => {
+    const { home, hedge } = machine(hubMachine);
+    writeMcpHubSettings(home);
+    gatewayServer({ home });
+    expect((await hedge(["mcp-gateway", "doctor"])).code).toBe(0);
+    const slackHome = join(home, ".local/share/hedge-mcphub/data/slack-codex");
+    mkdirSync(slackHome, { recursive: true });
+    writeFileSync(join(slackHome, "auth.json"), "{}");
+    utimesSync(join(slackHome, "auth.json"), 1000, 1000);
+    writeFileSync(join(slackHome, "sign-in-lost-slack"), "");
+    const revoked = await hedge(["mcp-gateway", "doctor"]);
+    expect(revoked.code).toBe(1);
+    expect(revoked.output).toEndWith("Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps.");
+    mkdirSync(join(home, ".config/hedge/mcp-gateway/upstreams"), { recursive: true });
+    writeFileSync(join(home, ".config/hedge/mcp-gateway/upstreams/broken.json"), "{");
+    const unread = await hedge(["mcp-gateway", "doctor"]);
+    expect(unread.code).toBe(1);
+    expect(unread.output).toContain("Hedge cannot read the declared upstreams, so it checks only the built-in apps' sign-ins:");
+    expect(unread.output).toContain("Slack needs re-auth");
+  });
+
   test("a failure before the bridge starts goes to standard error, never onto the MCP stream", async () => {
     const { home, hedge, errors } = machine(hubMachine);
     mkdirSync(join(home, ".local/state/hedge"), { recursive: true });
@@ -266,7 +287,7 @@ describe("on the hub", () => {
     expect((await hedge(["doctor"])).output).not.toContain(finding);
     state.toolCounts.slack = 21;
     state.notReadyFor = 0;
-    const lost = join(home, ".local/share/hedge-mcphub/data/slack-codex/sign-in-lost");
+    const lost = join(home, ".local/share/hedge-mcphub/data/slack-codex/sign-in-lost-slack");
     writeFileSync(lost, "");
     utimesSync(lost, new Date(Date.now() + 60_000), new Date(Date.now() + 60_000));
     expect((await hedge(["doctor"])).output).toContain(finding);

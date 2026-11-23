@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, utim
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tempDirs } from "../../../src/testing/git.ts";
-import { gmail, googleApps, googleCalendar, slack } from "./apps.ts";
+import { gmail, googleApps, googleCalendar, googleDrive, slack } from "./apps.ts";
 import { issueKey } from "./hub.ts";
 import { declaredUpstreams } from "./declared.ts";
 import { appSignedIn, lostSignIns, registerUpstream, registerUpstreams, signInApp, upstreamsRegistered } from "./upstreams.ts";
@@ -218,17 +218,21 @@ test("one ChatGPT sign-in serves every Google route and the gateway reloads all 
   expect(writes(api)).toEqual(["POST servers/gmail/reload", "POST servers/google-calendar/reload", "POST servers/google-drive/reload"]);
 });
 
-test("a sign-in that the bridge found revoked counts as signed out for every app of its account until the next sign-in", async () => {
+test("an app whose call found its sign-in revoked counts as signed out until the next sign-in, and the apps of its account that still work do not", async () => {
   const { home, hub } = hubWith({});
   const google = join(home, ".local/share/hedge-mcphub/data/google-codex");
   mkdirSync(google, { recursive: true });
   writeFileSync(join(google, "auth.json"), "{}");
   utimesSync(join(google, "auth.json"), 1000, 1000);
   expect(await lostSignIns(hub)).toEqual([]);
-  writeFileSync(join(google, "sign-in-lost"), "");
-  utimesSync(join(google, "sign-in-lost"), 2000, 2000);
-  for (const app of googleApps) expect(await appSignedIn(hub, app)).toBe(false);
-  expect(await lostSignIns(hub)).toEqual([{ apps: googleApps, since: 2_000_000 }]);
+  writeFileSync(join(google, "sign-in-lost-google-drive"), "");
+  utimesSync(join(google, "sign-in-lost-google-drive"), 2500, 2500);
+  expect(await appSignedIn(hub, gmail)).toBe(true);
+  expect(await appSignedIn(hub, googleDrive)).toBe(false);
+  expect(await lostSignIns(hub)).toEqual([{ apps: [googleDrive], since: 2_500_000 }]);
+  writeFileSync(join(google, "sign-in-lost-gmail"), "");
+  utimesSync(join(google, "sign-in-lost-gmail"), 2000, 2000);
+  expect(await lostSignIns(hub)).toEqual([{ apps: [gmail, googleDrive], since: 2_000_000 }]);
   utimesSync(join(google, "auth.json"), 3000, 3000);
   for (const app of googleApps) expect(await appSignedIn(hub, app)).toBe(true);
   expect(await lostSignIns(hub)).toEqual([]);
@@ -240,8 +244,8 @@ test("a declared upstream file that is not an upstream hides no lost sign-in of 
   mkdirSync(slackHome, { recursive: true });
   writeFileSync(join(slackHome, "auth.json"), "{}");
   utimesSync(join(slackHome, "auth.json"), 1000, 1000);
-  writeFileSync(join(slackHome, "sign-in-lost"), "");
-  utimesSync(join(slackHome, "sign-in-lost"), 2000, 2000);
+  writeFileSync(join(slackHome, "sign-in-lost-slack"), "");
+  utimesSync(join(slackHome, "sign-in-lost-slack"), 2000, 2000);
   expect(await lostSignIns(hub)).toEqual([{ apps: [slack], since: 2_000_000 }]);
 });
 

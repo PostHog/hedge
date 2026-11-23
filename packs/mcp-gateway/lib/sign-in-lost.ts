@@ -10,7 +10,7 @@ export type SignInWatch = { lost(): Promise<LostSignIn[]>; threads: Threads; sta
 
 export const checkSignInsEveryMs = 5 * 60_000;
 const lostCodes = /\b(token_revoked|token_expired|refresh_token_reused|invalid_grant|invalid_auth|not_authed|account_inactive)\b/;
-const marker = "sign-in-lost";
+const marker = (app: string) => `sign-in-lost-${app}`;
 const keepAlerts = 50;
 
 export const signInLost = (text: string) => lostCodes.test(text);
@@ -20,14 +20,14 @@ const titles = (apps: Named[]) => apps.map((app) => app.title).join(", ");
 export const reAuthLine = (apps: Named[]) =>
   `${titles(apps)} ${apps.length > 1 ? "need" : "needs"} re-auth: on the hub, run: hedge mcp-gateway sign-in ${apps[0]!.name}. When calls still fail after it, reconnect ${titles(apps)} in ChatGPT, Settings, Apps.`;
 
-export async function markSignInLost(codexHome: string) {
-  if ((await signInLostSince(codexHome)) === undefined) await writeFile(join(codexHome, marker), `${new Date().toISOString()}\n`, { mode: 0o600 });
+export async function markSignInLost(codexHome: string, app: string) {
+  if ((await signInLostSince(codexHome, app)) === undefined) await writeFile(join(codexHome, marker(app)), `${new Date().toISOString()}\n`, { mode: 0o600 });
 }
 
-export const clearSignInLost = (codexHome: string) => rm(join(codexHome, marker), { force: true });
+export const clearSignInLost = (codexHome: string, app: string) => rm(join(codexHome, marker(app)), { force: true });
 
-export async function signInLostSince(codexHome: string): Promise<number | undefined> {
-  const [lost, auth] = await Promise.all([marker, "auth.json"].map((file) => stat(join(codexHome, file)).catch(() => undefined)));
+export async function signInLostSince(codexHome: string, app: string): Promise<number | undefined> {
+  const [lost, auth] = await Promise.all([marker(app), "auth.json"].map((file) => stat(join(codexHome, file)).catch(() => undefined)));
   return lost && auth && lost.mtimeMs > auth.mtimeMs ? lost.mtimeMs : undefined;
 }
 

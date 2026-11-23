@@ -13,6 +13,7 @@ const tools = {
   other: { name: "gmail.read_email", description: "Reads mail.", inputSchema: { type: "object" } },
 };
 const approvals = new Map<string, (result: unknown) => void>();
+const replies = (process.env.FAKE_CODEX_REPLIES ?? "").split(",").filter(Boolean);
 
 log({ argv: process.argv.slice(2) });
 createInterface({ input: process.stdin }).on("line", async (line) => {
@@ -25,10 +26,11 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
   if (message.method === "mcpServerStatus/list") return reply({ data: [{ name: "codex_apps", tools }] });
   if (message.method === "thread/start") return reply({ thread: { id: "thread-1" } });
   if (message.method !== "mcpServer/tool/call") return send({ id: message.id, error: { code: -32601, message: "unknown" } });
-  const args = message.params!.arguments as { ask?: boolean; fail?: "revoked" | "slack-auth" | "plain" };
-  if (args.fail === "revoked") return send({ id: message.id, error: { code: -32603, message: 'MCP startup failed: HTTP 401: {"error":{"code":"token_revoked"}}' } });
-  if (args.fail === "slack-auth") return reply({ isError: true, content: [{ type: "text", text: '{"ok":false,"error":"invalid_auth"}' }] });
-  if (args.fail === "plain") return reply({ isError: true, content: [{ type: "text", text: "channel_not_found" }] });
+  const args = message.params!.arguments as { ask?: boolean };
+  const scripted = replies.shift();
+  if (scripted === "revoked") return send({ id: message.id, error: { code: -32603, message: 'MCP startup failed: HTTP 401: {"error":{"code":"token_revoked"}}' } });
+  if (scripted === "slack-auth") return reply({ isError: true, content: [{ type: "text", text: '{"ok":false,"error":"invalid_auth"}' }] });
+  if (scripted === "plain") return reply({ isError: true, content: [{ type: "text", text: "channel_not_found" }] });
   if (args.ask) {
     const answer = await new Promise((resolve) => {
       approvals.set("approval-1", resolve);

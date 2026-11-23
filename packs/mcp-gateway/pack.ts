@@ -254,10 +254,12 @@ async function admin(args: string[], ctx: Context) {
   const gateway = await import("./lib/hub.ts");
   if (mode === "doctor") {
     const healthy = await gateway.doctor(hub);
+    const unread = await apps.codexApps(hub.home).then(() => undefined, (error: Error) => error.message);
+    if (unread) ctx.print(`Hedge cannot read the declared upstreams, so it checks only the built-in apps' sign-ins: ${unread}`);
     const lost = await apps.lostSignIns(hub);
     const { reAuthLine } = await import("./lib/sign-in-lost.ts");
     for (const { apps: signedOut } of lost) ctx.print(reAuthLine(signedOut));
-    return healthy && !lost.length ? 0 : 1;
+    return healthy && !unread && !lost.length ? 0 : 1;
   }
   if (mode === "sign-in") await gateway.signIn(hub);
   if (mode === "restart") await gateway.restart(hub);

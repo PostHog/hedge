@@ -30,8 +30,9 @@ let queue: Promise<unknown> = Promise.resolve();
 let catalog = new Map<string, Tool>();
 let thread: Promise<string> | undefined;
 
-const lost = async (text: string) => signInLost(text) && (await markSignInLost(home).catch(() => {}), true);
 const reAuth = reAuthLine([app]);
+const lost = async (text: string) => signInLost(text) && (await markSignInLost(home!, app.name).catch(() => {}), true);
+const flagged = async (error: Error & { code?: number }) => ((await lost(error.message)) ? Object.assign(new Error(`${reAuth} Cause: ${error.message}`), { code: error.code }) : error);
 const reply = (message: Record<string, unknown>) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 const tell = (message: Record<string, unknown>) => backend.stdin.write(`${JSON.stringify(message)}\n`);
 const stop = (error: Error, code = 1) => {
@@ -102,7 +103,7 @@ async function invoke(id: Id, params: { name: string; arguments?: Record<string,
     thread ??= call("thread/start", { cwd: "/app/data", ephemeral: true }).then((started) => started.thread.id as string, (error) => { thread = undefined; throw error; });
     const args = params.arguments ?? {};
     const { structuredContent, ...answered } = await call("mcpServer/tool/call", { threadId: await thread, server: "codex_apps", tool: `${app.prefix}${params.name}`, arguments: app.skinTones ? withUnicodeSkinTones(args) : args });
-    if (!answered.isError) await clearSignInLost(home!).catch(() => {});
+    if (!answered.isError) await clearSignInLost(home!, app.name).catch(() => {});
     const result = answered.isError && (await lost(JSON.stringify(answered.content ?? ""))) ? { ...answered, content: [{ type: "text", text: reAuth }, ...(answered.content ?? [])] } : answered;
     return structuredContent == null ? result : { ...result, structuredContent };
   } finally { active = undefined; }
@@ -113,9 +114,9 @@ async function handle(message: Message) {
   const params = message.params ?? {};
   if (message.method === "initialize") return { protocolVersion: versions.includes(params.protocolVersion) ? params.protocolVersion : versions[0], capabilities: { tools: {} }, serverInfo: { name: `hedge-${app.name}`, version: "1" } };
   if (message.method === "ping") return {};
-  if (message.method === "tools/list") return { tools: [...(await discover()).values()] };
+  if (message.method === "tools/list") return { tools: [...(await discover().catch(async (error) => { throw await flagged(error); })).values()] };
   if (message.method === "tools/call") {
-    const turn = queue.then(() => invoke(message.id!, params as { name: string }));
+    const turn = queue.then(() => invoke(message.id!, params as { name: string }).catch(async (error) => { throw await flagged(error); }));
     queue = turn.catch(() => {});
     return turn;
   }
@@ -139,6 +140,6 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   if (message.id === undefined) return;
   handle(message).then(
     (result) => reply({ id: message.id, result }),
-    async (error: Error & { code?: number }) => reply({ id: message.id, error: { code: error.code ?? -32603, message: (await lost(error.message)) ? `${reAuth} Cause: ${error.message}` : error.message } }),
+    (error: Error & { code?: number }) => reply({ id: message.id, error: { code: error.code ?? -32603, message: error.message } }),
   );
 }).on("close", () => stop(new Error("The gateway closed the app bridge."), 0));

@@ -17,7 +17,7 @@ function slackHome() {
   const logged: string[] = [];
   const watch = {
     lost: async () => {
-      const since = await signInLostSince(home);
+      const since = await signInLostSince(home, "slack");
       return since === undefined ? [] : [{ apps: [slack], since }];
     },
     threads: { start: async (def: { title: string; prompt: string }) => { if (down) throw new Error("T3 is down"); started.push(def); return { id: `t${started.length}` }; }, send: async () => true },
@@ -40,40 +40,40 @@ test("the re-auth line names the one step that signs every app of the account in
 
 test("calls that keep failing on one lost sign-in start one re-auth thread, and a sign-in that is lost again after a new one starts another", async () => {
   const { home, watch, started, logged, signIn } = slackHome();
-  await markSignInLost(home);
+  await markSignInLost(home, "slack");
+  utimesSync(join(home, "sign-in-lost-slack"), 2000, 2000);
   await alertLostSignIns(watch);
-  await markSignInLost(home);
-  await markSignInLost(home);
+  await markSignInLost(home, "slack");
+  await markSignInLost(home, "slack");
   await alertLostSignIns(watch);
   expect(started.map(({ title }) => title)).toEqual(["Slack needs re-auth"]);
   expect(started[0]!.prompt).toContain("hedge mcp-gateway sign-in slack");
   expect(logged).toEqual([reAuthLine([slack])]);
-  signIn(Date.now() / 1000 + 60);
+  signIn(3000);
   await alertLostSignIns(watch);
   expect(started).toHaveLength(1);
-  await markSignInLost(home);
-  utimesSync(join(home, "sign-in-lost"), Date.now() / 1000 + 120, Date.now() / 1000 + 120);
+  await markSignInLost(home, "slack");
   await alertLostSignIns(watch);
   expect(started.map(({ title }) => title)).toEqual(["Slack needs re-auth", "Slack needs re-auth"]);
 });
 
 test("a call that works again clears the lost sign-in, so the next loss starts a new thread", async () => {
   const { home, watch, started } = slackHome();
-  await markSignInLost(home);
+  await markSignInLost(home, "slack");
+  utimesSync(join(home, "sign-in-lost-slack"), 2000, 2000);
   await alertLostSignIns(watch);
-  await clearSignInLost(home);
-  expect(await signInLostSince(home)).toBeUndefined();
+  await clearSignInLost(home, "slack");
+  expect(await signInLostSince(home, "slack")).toBeUndefined();
   await alertLostSignIns(watch);
   expect(started).toHaveLength(1);
-  await markSignInLost(home);
-  utimesSync(join(home, "sign-in-lost"), Date.now() / 1000 + 60, Date.now() / 1000 + 60);
+  await markSignInLost(home, "slack");
   await alertLostSignIns(watch);
   expect(started).toHaveLength(2);
 });
 
 test("a re-auth thread that T3 could not start is tried again at the next check", async () => {
   const { home, watch, started, logged, setDown } = slackHome();
-  await markSignInLost(home);
+  await markSignInLost(home, "slack");
   setDown(true);
   await alertLostSignIns(watch);
   expect(logged).toEqual([reAuthLine([slack]), "Could not start the re-auth thread: T3 is down"]);
