@@ -1,8 +1,9 @@
 import { basename } from "node:path";
-import { nestedProgramsAt, parse, type Command, type Scope } from "./shell-words.ts";
+import { commandsIn, nestedProgramsAt, parse, type Command, type Scope } from "./shell-words.ts";
 
-type Finding = { what: string; how: string };
-type Reach = "exit" | { printedBy: number } | { how: string };
+type Fix = { exitAt: number; groupAt?: number };
+type Finding = { what: string; how: string; fix?: Fix };
+type Reach = "exit" | { printedBy: number } | { how: string; fix?: Fix };
 type Program = { commands: Command[]; depths: number[] };
 
 const maxNesting = 8;
@@ -99,12 +100,6 @@ const setsOption = (option: string) => (args: string[]) => {
   return on;
 };
 
-const setsErrexit = (args: string[]) => {
-  let on = setsOption("errexit")(args);
-  for (const arg of args) if (/^[-+][A-Za-z]+$/.test(arg) && arg.slice(1).split("o")[0].includes("e")) on = arg.startsWith("-");
-  return on;
-};
-
 function statusReads(raw: string): number | undefined {
   if (!plainWord.test(raw)) return undefined;
   return raw.replace(/'[^']*'/g, "").match(new RegExp(statusRead, "g"))?.length ?? 0;
@@ -124,15 +119,6 @@ function reporter(command: Command | undefined, reachable: boolean, failingExit:
   }
   const printed = command.name === "echo" && statusCount > 0;
   return printed && command.redirects.every((redirect) => printsToTheAgent.test(redirect)) ? "printed" : undefined;
-}
-
-function pipeStart({ commands, depths }: Program, start: number): number | undefined {
-  let first = start;
-  while (first > 0 && commands[first - 1].after === "|") {
-    first--;
-    if (depths[first] !== 0 || closers.has(commands[first].name)) return undefined;
-  }
-  return first;
 }
 
 function statementEnd({ commands, depths }: Program, start: number, depth: number): number {
@@ -172,22 +158,37 @@ function reachOf(program: Program, start: number): Reach {
     return found === "printed" ? { printedBy: index } : found;
   };
   let end = pipelineEnd(program, start, depth);
+  const pipeEnd = end;
   if (end !== start && !setting(program, start, setsOption("pipefail"))) return { how: "a pipe" };
-  if (depth > 0) return closesOnly(program, end, depth) ? "exit" : { how: "the group or loop it runs in" };
-  let chained = false;
-  while (commands[end].after === "&&" && end + 1 < commands.length) {
-    end = pipelineEnd(program, end + 1, depth);
-    chained = true;
-  }
+  if (depth > 0) return closesOnly(program, end, depth) || exitGroup(program, start, end) ? "exit" : { how: "the group or loop it runs in" };
+  while (commands[end].after === "&&" && end + 1 < commands.length) end = pipelineEnd(program, end + 1, depth);
   const after = commands[end].after;
   const next = end + 1;
   if (after === undefined) return "exit";
   if (after === "&") return { how: "running it in the background with `&`" };
   if (after === "||") return reportedBy(next, true) ?? { how: "the `||` after it" };
-  const first = pipeStart(program, start);
-  const errexitApplies = !chained && first !== undefined && !commands[first].keywords.includes("!");
-  if (errexitApplies && separators.has(after) && setting(program, start, setsErrexit)) return "exit";
-  return reportedBy(next, false) ?? { how: separatorName(after) };
+  return reportedBy(next, false) ?? { how: separatorName(after), fix: exitFix(commands, start, pipeEnd) };
+}
+
+const stopsShell = ({ bare, rawPrefix, stdin, redirects, scope }: Command) => bare.join(" ") === "exit" && rawPrefix.length === 0 && stdin === undefined && redirects.length === 0 && parens(scope) === 0;
+
+const pipelineStart = (commands: Command[], index: number): number => (index > 0 && commands[index - 1].after === "|" ? pipelineStart(commands, index - 1) : index);
+function exitFix(commands: Command[], start: number, pipeEnd: number): Fix | undefined {
+  const { after, afterAt } = commands[pipeEnd];
+  if (after === undefined || afterAt === undefined || !(separators.has(after) || after === "&&")) return undefined;
+  const before = commands[start - 1];
+  if (start !== pipeEnd || before?.after === "|") return undefined;
+  if (!["&&", "||"].includes(before?.after ?? "")) return { exitAt: afterAt };
+  return before.afterAt === undefined ? undefined : { exitAt: afterAt, groupAt: before.afterAt + 2 };
+}
+function exitGroup(program: Program, start: number, end: number): boolean {
+  const { commands, depths } = program;
+  const first = pipelineStart(commands, start);
+  const [exit, closer] = [commands[end + 1], commands[end + 2]];
+  const opensHere = depths[first] === 1 && commands[first].keywords.join(" ") === "{";
+  const closesAfterExit = exit !== undefined && stopsShell(exit) && exit.after === ";" && closer?.bare.join(" ") === "}" && closer.rawPrefix.length === 0;
+  if (!opensHere || commands[end].after !== "||" || !closesAfterExit || closer.after === "|") return false;
+  return commands[listEnd(program, end + 2, 0)].after !== "&" && !changesHowItPrints(commands.slice(0, end + 1), exit);
 }
 
 const named = (command: Command, names: Set<string>) => [command.name, ...command.prefix].some((word) => names.has(word));
@@ -203,9 +204,11 @@ function hiddenIn(text: string, nesting: number): { found?: Finding; carries?: s
   if (nesting > maxNesting) throw new Error(`it nests more than ${maxNesting} shell programs`);
   const pipelines = parse(text);
   const guarded: (string | undefined)[] = [];
+  const carried: boolean[] = [];
   for (const pipeline of pipelines) {
     for (const [index, command] of pipeline.entries()) {
-      let what = guardedName(command);
+      const own = guardedName(command);
+      let what = own;
       for (const inner of nestedProgramsAt(pipeline, index)) {
         const { found, carries } = hiddenIn(inner.program, nesting + 1);
         if (found) return { found };
@@ -214,6 +217,7 @@ function hiddenIn(text: string, nesting: number): { found?: Finding; carries?: s
         if (!passesOn) return { found: { what: carries, how: "the `$(…)` substitution it runs in" } };
         what ??= carries;
       }
+      carried.push(own === undefined);
       guarded.push(what);
     }
   }
@@ -225,7 +229,7 @@ function hiddenIn(text: string, nesting: number): { found?: Finding; carries?: s
     if (!what || command.tested) continue;
     if (inThisShell(commands.slice(0, index)).some((each) => named(each, traps))) return { found: { what, how: "a `trap` earlier in the call" } };
     const reach = reachOf(program, index);
-    if (reach !== "exit" && "how" in reach) return { found: { what, how: reach.how } };
+    if (reach !== "exit" && "how" in reach) return { found: { what, how: reach.how, fix: nesting === 0 && !carried[index] ? reach.fix : undefined } };
     if (reach !== "exit" && nesting > 0) return { found: { what, how: "the nested shell or `$(…)` that prints it" } };
     if (reach !== "exit" && changesHowItPrints(commands.slice(0, reach.printedBy), commands[reach.printedBy])) return { found: { what, how: changedPrinting } };
     carries ??= what;
@@ -235,12 +239,39 @@ function hiddenIn(text: string, nesting: number): { found?: Finding; carries?: s
 
 export const exitMaskReason = (what: string, how: string, person: string) => `Hedge blocked this command: ${how} hides the exit status of \`${what}\`, `
   + "so a failure reads as a success. These forms pass: run it alone or as the last command; chain the next step with `&&`; "
+  + "end it with `|| exit` before the next step; "
   + `print its status on the next command, as in \`${what} … > /tmp/out.log 2>&1; echo "exit=$?"; cat /tmp/out.log\`; `
-  + "for a pipe, start with `set -o pipefail;`. "
+  + "for a pipe, start with `set -o pipefail;`. In place of a loop or group, write one command per item, joined with `&&`. "
+  + "`set -e` does not count: the shell ignores it inside an `&&` list, and Claude Code runs each command in one. "
   + "A call with only `--help` or `-h` after the command passes too. "
   + `If you are not sure, stop and ask ${person}.`;
 
 export function exitMaskRisk(command: string, person: string): string | undefined {
   const { found } = hiddenIn(command, 0);
   return found && exitMaskReason(found.what, found.how, person);
+}
+
+const maxRewrites = 64;
+function exitingAt(text: string, at: number, groupAt: number | undefined): string {
+  const spaced = /\s/.test(text[at - 1] ?? " ") ? "" : " ";
+  const after = text[at] === "#" || text[at] === "&" ? " " : "";
+  const exited = `${text.slice(0, at)}${spaced}|| exit${groupAt === undefined ? "" : "; }"}${after}${text.slice(at)}`;
+  if (groupAt === undefined) return exited;
+  return `${exited.slice(0, groupAt)} {${/\s/.test(exited[groupAt] ?? "") ? "" : " "}${exited.slice(groupAt)}`;
+}
+
+export function exitMaskRewrite(command: string): string | undefined {
+  let text = command;
+  try {
+    if (commandsIn(command).some((each) => each.name === "function" || each.keywords.includes("!"))) return undefined;
+    for (let step = 0; step < maxRewrites; step++) {
+      const { found } = hiddenIn(text, 0);
+      if (!found) return step === 0 ? undefined : text;
+      if (!found.fix) return undefined;
+      text = exitingAt(text, found.fix.exitAt, found.fix.groupAt);
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
 }
