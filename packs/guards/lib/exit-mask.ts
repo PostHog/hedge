@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 import { commandsIn, nestedProgramsAt, parse, type Command, type Scope } from "./shell-words.ts";
 
-type Fix = { pipefail?: true; exitAt?: number; groupAt?: number };
+type Fix = { exitAt: number; groupAt?: number };
 type Finding = { what: string; how: string; fix?: Fix };
 type Reach = "exit" | { printedBy: number } | { how: string; fix?: Fix };
 type Program = { commands: Command[]; depths: number[] };
@@ -159,7 +159,7 @@ function reachOf(program: Program, start: number): Reach {
   };
   let end = pipelineEnd(program, start, depth);
   const pipeEnd = end;
-  if (end !== start && !setting(program, start, setsOption("pipefail"))) return { how: "a pipe", fix: pipefailFix(program, start, end) };
+  if (end !== start && !setting(program, start, setsOption("pipefail"))) return { how: "a pipe" };
   if (depth > 0) return closesOnly(program, end, depth) || exitGroup(program, start, end) ? "exit" : { how: "the group or loop it runs in" };
   while (commands[end].after === "&&" && end + 1 < commands.length) end = pipelineEnd(program, end + 1, depth);
   const after = commands[end].after;
@@ -171,9 +171,6 @@ function reachOf(program: Program, start: number): Reach {
 }
 
 const stopsShell = ({ bare, rawPrefix, stdin, redirects, scope }: Command) => bare.join(" ") === "exit" && rawPrefix.length === 0 && stdin === undefined && redirects.length === 0 && parens(scope) === 0;
-const gitSteps = new Set(["init", "add", "commit", "push", "pull", "fetch", "checkout", "switch", "rebase", "merge", "reset", "restore", "rm", "mv", "tag", "cherry-pick", "revert"]);
-
-const writeStep = (step: Command) => step.name === "cd" || (step.name === "git" && gitSteps.has(step.args[gitSubcommandAt(step.args)]));
 
 const plainStage = (command: Command, scope: Command["scope"]) => command.scope === scope && !closers.has(command.name);
 const plainStages = (commands: Command[], first: number, last: number) => commands.slice(first, last + 1).every((command) => plainStage(command, commands[first].scope));
@@ -192,18 +189,9 @@ function exitGroup(program: Program, start: number, end: number): boolean {
   const first = pipelineStart(commands, start);
   const [exit, closer] = [commands[end + 1], commands[end + 2]];
   const opensHere = depths[first] === 1 && commands[first].keywords.join(" ") === "{";
-  const closesAfterExit = exit !== undefined && stopsShell(exit) && exit.after === ";" && closer?.bare.join(" ") === "}";
+  const closesAfterExit = exit !== undefined && stopsShell(exit) && exit.after === ";" && closer?.name === "}" && closer.rawPrefix.length === 0;
   if (!opensHere || commands[end].after !== "||" || !closesAfterExit || closer.after === "|") return false;
   return commands[listEnd(program, end + 2, 0)].after !== "&" && !changesHowItPrints(commands.slice(0, end + 1), exit);
-}
-
-const passesThrough = ({ name, args, rawPrefix, redirects }: Command) => ["tail", "cat"].includes(name) && args.every((arg) => /^(-[a-z0-9]*|[0-9]+)$/.test(arg)) && rawPrefix.length + redirects.length === 0;
-
-function pipefailFix({ commands }: Program, start: number, pipeEnd: number): Fix | undefined {
-  const otherPipe = commands.some((command, index) => command.after === "|" && index < start);
-  const plainChain = commands.slice(start, pipeEnd).every((command) => command.after === "|") && plainStages(commands, start, pipeEnd) && commands.slice(start + 1, pipeEnd + 1).every(passesThrough);
-  if (otherPipe || !plainChain || commands[pipeEnd].after !== undefined) return undefined;
-  return commands.slice(0, start).every((command) => writeStep(command) || stopsShell(command)) ? { pipefail: true } : undefined;
 }
 
 const named = (command: Command, names: Set<string>) => [command.name, ...command.prefix].some((word) => names.has(word));
@@ -263,18 +251,7 @@ export function exitMaskRisk(command: string, person: string): string | undefine
   return found && exitMaskReason(found.what, found.how, person);
 }
 
-const pipefail = "set -o pipefail; ";
 const maxRewrites = 64;
-const readsStatus = /\$\{?[?_]|PIPESTATUS|pipestatus|SHELLOPTS|pipefail|\bshopt\b|\bset\s+[-+]o\s*(?:$|[;&|)>#\n])/;
-const hidesCode = new Set(["trap", "eval", "source", "."]);
-
-function pipefailKeepsEveryCommand(text: string): boolean {
-  if (readsStatus.test(text)) return false;
-  return !commandsIn(text).some((command) => named(command, hidesCode));
-}
-
-const pipesIn = (commands: Command[]) => commands.filter((command) => command.after === "|").length;
-
 function exitingAt(text: string, at: number, groupAt: number | undefined): string {
   const spaced = /\s/.test(text[at - 1] ?? " ") ? "" : " ";
   const after = text[at] === "#" || text[at] === "&" ? " " : "";
@@ -291,11 +268,7 @@ export function exitMaskRewrite(command: string): string | undefined {
       const { found } = hiddenIn(text, 0);
       if (!found) return step === 0 ? undefined : text;
       if (!found.fix) return undefined;
-      const { pipefail: needsPipefail, exitAt, groupAt } = found.fix;
-      if (needsPipefail && !(pipefailKeepsEveryCommand(command) && pipesIn(commandsIn(command)) === pipesIn(parse(command).flat()))) return undefined;
-      const shift = needsPipefail ? pipefail.length : 0;
-      if (needsPipefail) text = pipefail + text;
-      if (exitAt !== undefined) text = exitingAt(text, exitAt + shift, groupAt === undefined ? undefined : groupAt + shift);
+      text = exitingAt(text, found.fix.exitAt, found.fix.groupAt);
     }
   } catch {
     return undefined;

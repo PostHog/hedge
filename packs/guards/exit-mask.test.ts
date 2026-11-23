@@ -374,10 +374,6 @@ describe("the exit-status mask guard", () => {
   });
 
   test.each([
-    ["git push | tail -3", "set -o pipefail; git push | tail -3"],
-    ["hedge proof gate --pr 1 2>&1 | tail -20", "set -o pipefail; hedge proof gate --pr 1 2>&1 | tail -20"],
-    ["cd . && git push 2>&1 | tail -3", "set -o pipefail; cd . && git push 2>&1 | tail -3"],
-    ["cd \"$(pwd)\" && git push 2>&1 | tail -3", "set -o pipefail; cd \"$(pwd)\" && git push 2>&1 | tail -3"],
     ["git commit -m x; git push", "git commit -m x || exit; git push"],
     ["git push; echo done", "git push || exit; echo done"],
     ["git push ; echo done", "git push || exit; echo done"],
@@ -387,7 +383,6 @@ describe("the exit-status mask guard", () => {
     ["git commit -F - <<'EOF'\nFix; the | gate\nEOF\ngit push", "git commit -F - <<'EOF' || exit\nFix; the | gate\nEOF\ngit push"],
     ["git commit -F - <<EOF\nline one \\\nEOF\ngit push\nEOF\necho done", "git commit -F - <<EOF || exit\nline one \\\nEOF\ngit push\nEOF\necho done"],
     ["set -e; git commit -m 'a; b' ; git push; echo done", "set -e; git commit -m 'a; b' || exit; git push || exit; echo done"],
-    ["git commit -m x; git push | tail -3", "set -o pipefail; git commit -m x || exit; git push | tail -3"],
     ["git push; if true; then echo pushed; fi", "git push || exit; if true; then echo pushed; fi"],
     ["git push; true || exit 1", "git push || exit; true || exit 1"],
     ["git push; echo pushed || exit 1; echo done", "git push || exit; echo pushed || exit 1; echo done"],
@@ -410,8 +405,6 @@ describe("the exit-status mask guard", () => {
     ["cd . && printf 'msg' | git commit -F -; echo done", "cd . && { printf 'msg' | git commit -F - || exit; }; echo done"],
     ["git push; sleep 0 &", "git push || exit; sleep 0 &"],
     ["git commit -F - <<'EOF'\nline one \\\nEOF\ngit push", "git commit -F - <<'EOF' || exit\nline one \\\nEOF\ngit push"],
-    ["( git push | tail -3 )", "set -o pipefail; ( git push | tail -3 )"],
-    ["git push 2>&1 | tail -n 20 | cat", "set -o pipefail; git push 2>&1 | tail -n 20 | cat"],
     ["git push; true || echo extra", "git push || exit; true || echo extra"],
   ])("rewrites a hidden status into a form that shows it: %s", (command, rewrite) => {
     expect(exitMaskRewrite(command)).toBe(rewrite);
@@ -511,6 +504,17 @@ describe("the exit-status mask guard", () => {
     "cd . && ( printf msg ) | git commit -F -; echo cleanup",
     "cd . || git push | ( set -o ) | cat",
     "git push | ( cat )",
+    "git push | tail -3",
+    "hedge proof gate --pr 1 2>&1 | tail -20",
+    "cd . && git push 2>&1 | tail -3",
+    "cd \"$(pwd)\" && git push 2>&1 | tail -3",
+    "git commit -m x; git push | tail -3",
+    "( git push | tail -3 )",
+    "git push 2>&1 | tail -n 20 | cat",
+    "cd x && { git push || exit; command }; } | cat; echo done",
+    "cd x && { git push || exit; command }; } & echo done",
+    "{ git push || exit; command }; } | cat",
+    "cd x && { git push || exit; FOO=1 }; } | cat; echo done",
     "git push | grep -q needle | cat",
     "git push | set -o 2>&1",
     "git push | tee push.log",
@@ -575,16 +579,6 @@ describe("the exit-status mask guard", () => {
       const rejected = pushRepo(false)(rewrite);
       expect(rejected.status).not.toBe(0);
       expect(rejected.stdout).not.toContain(printed);
-      expect(pushRepo(false)(command).status).toBe(0);
-    });
-
-    test("fails a piped push that the remote rejects, where the original succeeds", () => {
-      const command = "cd . && git push -q origin HEAD:main 2>&1 | tail -3";
-      const rewrite = "set -o pipefail; cd . && git push -q origin HEAD:main 2>&1 | tail -3";
-      expect(exitMaskRewrite(command)).toBe(rewrite);
-      expect(pushRepo(true)(rewrite)).toEqual(pushRepo(true)(command));
-      expect(pushRepo(true)(rewrite).remote).toBe("first\n");
-      expect(pushRepo(false)(rewrite).status).not.toBe(0);
       expect(pushRepo(false)(command).status).toBe(0);
     });
 
