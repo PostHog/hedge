@@ -169,7 +169,7 @@ const reportedBy = (check: RequiredCheck, entry: Entry) => check.appId === undef
 function withheldFromDraft(check: RequiredCheck, entries: Entry[], required: RequiredCheck[]) {
   const workflow = workflowOf(check.context);
   if (!workflow || entries.some((entry) => entry.name === check.context)) return false;
-  const partners = required.filter((other) => other.context !== check.context && other.context.startsWith(workflow));
+  const partners = required.filter((other) => !other.postedOnceReady && other.context.startsWith(workflow));
   if (check.postedOnceReady && !(partners.length > 0 && partners.every((other) => entries.some((entry) => entry.name === other.context)))) return false;
   const siblings = entries.filter((entry) => entry.name.startsWith(workflow) && (check.postedOnceReady || reportedBy(check, entry)));
   return siblings.length > 0 && siblings.every((entry) => entry.outcome === "pass") && (check.appId === undefined || siblings.some((entry) => !entry.status));

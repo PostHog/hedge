@@ -313,6 +313,20 @@ test("on a draft, a pinned check posted only once ready still waits while anothe
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results; withheld from drafts, required once ready: Backend / Gate (its workflow finished without posting it)");
 });
 
+test("on a draft, a pinned check posted only once ready waits until every other required check of its workflow reported", async () => {
+  const pr = await listedDraft();
+  pr.required("main", [{ context: "Backend / Test results", integration_id: 7 }, { context: "Backend / Gate" }, { context: "Backend / Lint" }]);
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }, { name: "Backend / Setup", bucket: "pass", app: 9 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results; withheld from drafts, required once ready: Backend / Lint (its workflow finished without posting it)");
+});
+
+test("on a draft, two checks of one workflow posted only once ready read as withheld once its other required check reported", async () => {
+  const pr = await listedDraft("example/product=Backend / Test results, example/product=Backend / Coverage results");
+  pr.required("main", [{ context: "Backend / Test results", integration_id: 7 }, { context: "Backend / Coverage results", integration_id: 7 }, { context: "Backend / Gate" }]);
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: green, 1 required check(s) pass; withheld from drafts, required once ready: Backend / Test results, Backend / Coverage results (its workflow finished without posting it)");
+});
+
 test("on a draft, a pinned check posted only once ready waits when its workflow has no other required check", async () => {
   const pr = await listedDraft();
   pr.required("main", [{ context: "Backend / Test results", integration_id: 7 }]);

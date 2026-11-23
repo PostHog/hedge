@@ -440,8 +440,8 @@ requires any, every check counts. On a draft, a required check named "<workflow>
 as withheld from drafts when its workflow reported other checks on the commit and all of them passed. For a check
 pinned to an app, those are the app's own checks, with at least one check run. A pinned check that
 pull-requests.draftSkippedChecks lists for the repository, as owner/name=check pairs, may also be withheld on the
-workflow's checks from any app, still with at least one check run, once every other required check of its workflow,
-at least one, has reported; only the pinned app can pass it. CI is unknown
+workflow's checks from any app, still with at least one check run, once every required check of its workflow that
+the setting does not list, at least one, has reported; only the pinned app can pass it. CI is unknown
 when GitHub does not answer for the rulesets or branch protection. A clean merge of the PR's base carries the review and the evidence of
 its other parent forward. The review needs a finished --lens panel round on the PR, and HEAD read by a panel round or
 by a review that finished after one, such as a final read; single-reviewer rounds alone never count. The first round
