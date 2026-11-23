@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { link, mkdir, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { optionalStringSetting } from "../../base/lib/settings.ts";
 import { gradeOf } from "./proof-autonomy.ts";
@@ -52,16 +52,17 @@ export function pathOf({ body, changedFiles, criticalPaths }: PathInput): PathOf
 
 const pathLike = /[/.*]/;
 const listMarker = /^\s*(?:[-*+]|\d+[.)])\s+/;
-const cleanEntry = (word: string) => word.replace(/^[\s"'(\[]+|[\s"'),:;\]]+$/g, "").replace(/^\.?\//, "");
+const rootless = (path: string) => path.trim().replace(/^\.?\//, "");
+const cleanEntry = (word: string) => rootless(word.replace(/^[\s"'(\[]+|[\s"'),:;\]]+$/g, ""));
 
 function criticalEntries(list: string) {
   const lines = list.split("\n").filter((line) => !/^\s*#/.test(line)).map((line) => line.replace(listMarker, ""));
   const quoted = lines.flatMap((line) => [...line.matchAll(/`([^`]+)`/g)].map((match) => match[1]!));
   const unquoted = lines.map((line) => line.replace(/`[^`]+`/g, " "));
-  const cells = unquoted.flatMap((line) => line.includes("|") ? line.split("|") : []);
-  const words = unquoted.flatMap((line) => line.split(/[\s|]+/));
-  const firstWords = unquoted.map((line) => line.trim().split(/[\s|]+/)[0] ?? "");
-  return [...quoted, ...[...cells, ...words].filter((word) => pathLike.test(word)), ...firstWords].map(cleanEntry).filter(Boolean);
+  const cells = unquoted.flatMap((line) => line.includes("|") ? line.split("|").filter((cell) => !/^\s*:?-+:?\s*$/.test(cell)) : []);
+  const words = unquoted.flatMap((line) => line.split(/[\s|]+/)).filter((word) => pathLike.test(word));
+  const firstWords = unquoted.map((line) => line.trim().split(/\s+/)[0] ?? "");
+  return [...quoted.map(rootless), ...[...cells, ...words, ...firstWords].map(cleanEntry)].filter(Boolean);
 }
 
 function matchesEntry(file: string, entry: string) {
@@ -83,7 +84,14 @@ const prTriagePath = (home: string, identity: ProofIdentity) => join(armDirector
 
 export async function armFor(home: string, identity: ProofIdentity, setting: TriageSetting): Promise<Arm> {
   const saved = await readJson<{ arm?: Arm } | undefined>(prTriagePath(home, identity), undefined);
-  return saved?.arm ?? armOf(setting, identity.repository, identity.pr);
+  return saved?.arm ?? await firstReservedArm(home, identity) ?? armOf(setting, identity.repository, identity.pr);
+}
+
+async function firstReservedArm(home: string, identity: ProofIdentity) {
+  const reviews = join(prDirectory(home, identity), "reviews");
+  const names = await readdir(reviews).catch(() => []);
+  const rounds = await Promise.all(names.map((name) => readJson<{ startedAt?: string; triage?: TriageMark } | undefined>(join(reviews, name, "round.json"), undefined).catch(() => undefined)));
+  return rounds.filter((round) => round?.triage).sort((a, b) => (a!.startedAt ?? "").localeCompare(b!.startedAt ?? ""))[0]?.triage?.arm;
 }
 
 export async function saveArm(home: string, identity: ProofIdentity, setting: TriageSetting, arm: Arm) {

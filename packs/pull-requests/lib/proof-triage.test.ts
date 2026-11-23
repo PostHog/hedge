@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { armOf } from "./proof-triage.ts";
 import { checkout, cleanFixtures, fakeModel, graded, settings, type Checkout } from "./proof-testing.ts";
@@ -58,16 +58,17 @@ test("a high grade, a missing or unreadable grade, a changed file in a danger ar
   expect((await firstLine(listed)).triage).toEqual({ arm: "treated", path: "strict", why: ["critical path: pricing.ts"] });
 });
 
-async function listedPath(list: string) {
-  const pr = await triaged("on", graded("non-critical", "medium"), "rates/plans/old plans.ts");
+async function listedPath(list: string, file = "rates/plans/old plans.ts") {
+  const pr = await triaged("on", graded("non-critical", "medium"), file);
   writeFileSync(join(pr.home, "critical-paths.md"), list);
   pr.env.HEDGE_SETTINGS = JSON.stringify({ ...JSON.parse(pr.env.HEDGE_SETTINGS!), "pull-requests.criticalPathFiles": "example/product=critical-paths.md" });
   return { list, triage: (await firstLine(pr, "--single")).triage };
 }
 
 test("a critical-path list matches its entries as bullets, plain lines, quoted paths with spaces, table cells, a leading ./ or /, a trailing colon, and globs", async () => {
-  const lists = ["- `rates/plans/old plans.ts`\n", "| Path | Owner |\n| --- | --- |\n| rates/plans/old plans.ts | billing |\n", "- rates: the charging code\n", "rates\n", "- ./rates/\n", "Everything under /rates/ needs a second read.\n", "- rates/*\n", "- */plans/**\n"];
+  const lists = ["- `rates/plans/old plans.ts`\n", "| Path | Owner |\n| --- | --- |\n| rates/plans/old plans.ts | billing |\n", "| Area | Owner |\n| --- | --- |\n| rates | billing |\n", "- rates: the charging code\n", "rates\n", "- ./rates/\n", "Everything under /rates/ needs a second read.\n", "- rates/*\n", "- */plans/**\n"];
   for (const list of lists) expect(await listedPath(list)).toEqual({ list, triage: { arm: "treated", path: "strict", why: ["critical path: rates/plans/old plans.ts"] } });
+  expect(await listedPath("- `[slug]/rates.ts`\n", "[slug]/rates.ts")).toEqual({ list: "- `[slug]/rates.ts`\n", triage: { arm: "treated", path: "strict", why: ["critical path: [slug]/rates.ts"] } });
   for (const list of ["* billing/\n", "+ billing/*\n"]) expect(await listedPath(list)).toEqual({ list, triage: { arm: "treated", path: "standard", why: [] } });
 });
 
@@ -93,6 +94,24 @@ test("a pull request keeps the arm of its first reserved review under any spelli
   triage("split");
   expect((await firstLine(pr, "--single", ...target("Example/Product"))).triage).toMatchObject({ arm: "treated" });
   expect(JSON.parse(readFileSync(join(pr.home, ".local/state/hedge/proof/example/product", String(control), "triage.json"), "utf8"))).toEqual({ setting: "on", arm: "treated" });
+});
+
+test("a round reserved before its arm file was written still gives the pull request its arm", async () => {
+  const control = [1, 2, 3, 4, 5, 6, 7, 8].find((number) => armOf("split", "example/product", number) === "control")!;
+  const target = ["--repo", "example/product", "--pr", String(control)];
+  const pr = await checkout();
+  const ledger = join(pr.home, ".local/state/hedge/proof/example/product", String(control));
+  pr.pullRequestState({ body: graded("non-critical", "medium"), number: control });
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": "on" });
+  const reviewed = await pr.commit("feature.ts", "export const greet = (name: string) => name;\n");
+  await pr.hedge("require", "--none", "--reason", "fixture", ...target);
+  fakeModel(pr, "REVIEWER", noFindings("feature.ts"));
+  expect((await firstLine(pr, "--single", ...target)).triage).toMatchObject({ arm: "treated" });
+  rmSync(join(ledger, "triage.json"));
+  await pr.commit("feature.ts", "export const greet = (name: string) => `hi ${name}`;\n");
+
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": "split" });
+  expect((await firstLine(pr, "--scope", "final", "--base", reviewed, ...target)).triage).toMatchObject({ arm: "treated" });
 });
 
 test("a test file in a danger area keeps the standard path, and a critical-path file hedge cannot read puts the pull request on the strict path", async () => {
