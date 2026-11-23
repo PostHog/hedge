@@ -126,7 +126,7 @@ bun run typecheck
 bun scripts/build-page.ts
 ```
 
-The last command writes the site to `site/`. [GLOSSARY.md](GLOSSARY.md) holds
+The tests need `jq` on your `PATH`. The last command writes the site to `site/`. [GLOSSARY.md](GLOSSARY.md) holds
 the words Hedge uses.
 
 ## License

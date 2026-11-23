@@ -150,6 +150,8 @@ test("an app GitHub cannot read behind a status that decides no pinned check lea
 
   pr.statuses([{ context: "CI / preview", state: "success", by: "docs[bot]" }]);
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: green, 1 required check(s) pass");
+  pr.pullRequestState({ draft: true });
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: green, 1 required check(s) pass");
 });
 
 test("a required status context not pinned to an app reads its newest status, whoever posted it", async () => {

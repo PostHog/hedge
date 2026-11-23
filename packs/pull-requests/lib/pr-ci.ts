@@ -142,7 +142,7 @@ function withPinnedStatuses(entries: Entry[], required: RequiredCheck[], draft: 
   const spelledTwice = (entry: Entry) => entries.some((other) => other.status && other.name !== entry.name && other.name.toLowerCase() === entry.name.toLowerCase());
   const nearPin = (entry: Entry) => pins.some((check) => {
     const workflow = workflowOf(check.context);
-    return check.context === entry.name || (draft && workflow !== undefined && entry.name.startsWith(workflow));
+    return check.context === entry.name || (draft && workflow !== undefined && entry.name.startsWith(workflow) && !entries.some((other) => other.name === check.context));
   });
   return entries.map((entry) => {
     if (!entry.status || !entry.botLogin || !nearPin(entry) || spelledTwice(entry)) return entry;
