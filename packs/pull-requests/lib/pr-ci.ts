@@ -15,10 +15,10 @@ export const runIn = (cwd: string, env: Record<string, string | undefined>): Run
 export type PullRequest = { title: string; body: string; draft: boolean; state: "open" | "closed" | "merged"; head: string; base: string; baseSha: string; defaultBranch?: string; mergedAt?: string; mergeCommit?: string };
 
 type CheckRun = { id: number; name: string; status: string; conclusion: string | null; app?: number | null };
-type CommitStatus = { context: string; state: string; creator?: string; bot?: boolean };
+type CommitStatus = { context: string; state: string; creator?: string; byBot?: boolean };
 type RequiredCheck = { context: string; appId?: number };
 type Outcome = "pass" | "fail" | "pending";
-type Entry = { name: string; outcome: Outcome; appId?: number; status?: true; bot?: string };
+type Entry = { name: string; outcome: Outcome; appId?: number; status?: true; botLogin?: string; superseded?: true };
 
 const passing = new Set(["success", "neutral", "skipped"]);
 const rank: Record<Outcome, number> = { pass: 0, pending: 1, fail: 2 };
@@ -112,16 +112,16 @@ function entriesOf(identity: ProofIdentity, run: Run): Entry[] {
     if ((newest.get(key)?.id ?? -1) < check.id) newest.set(key, check);
     return newest;
   }, new Map<string, CheckRun>()).values()];
-  const statuses = commitRecords<CommitStatus>(identity, run, "statuses", '.[] | {context, state, creator: .creator.login, bot: (.creator.type == "Bot")}');
+  const statuses = commitRecords<CommitStatus>(identity, run, "statuses", '.[] | {context, state, creator: .creator.login, byBot: (.creator.type == "Bot")}');
   const newest = statuses.filter((status, index) => statuses.findIndex((other) => other.context === status.context && other.creator === status.creator) === index);
   return [
     ...newestRuns.map((check): Entry => ({ name: check.name, appId: check.app ?? undefined, outcome: check.status !== "completed" ? "pending" : passing.has(check.conclusion ?? "") ? "pass" : "fail" })),
-    ...newest.map((status): Entry => ({ name: status.context, status: true, ...botOf(status), outcome: status.state === "success" ? "pass" : status.state === "pending" ? "pending" : "fail" })),
+    ...newest.map((status): Entry => ({ name: status.context, status: true, ...botOf(status), ...newest.find((other) => other.context === status.context) === status ? {} : { superseded: true as const }, outcome: status.state === "success" ? "pass" : status.state === "pending" ? "pending" : "fail" })),
   ];
 }
 
 const botSuffix = "[bot]";
-const botOf = ({ creator, bot }: CommitStatus) => bot && creator?.endsWith(botSuffix) ? { bot: creator } : {};
+const botOf = ({ creator, byBot }: CommitStatus) => byBot && creator?.endsWith(botSuffix) ? { botLogin: creator } : {};
 
 function appOfBot(bot: string, run: Run): number | undefined {
   const result = run(["gh", "api", `apps/${bot.slice(0, -botSuffix.length)}`]);
@@ -130,11 +130,21 @@ function appOfBot(bot: string, run: Run): number | undefined {
   throw new Error(`cannot read the app behind ${bot} over REST (${firstLine(result.stderr)})`);
 }
 
-function withStatusApps(entries: Entry[], required: RequiredCheck[], run: Run): Entry[] {
-  const pinned = new Set(required.filter((check) => check.appId !== undefined).map((check) => check.context));
+const current = (entries: Entry[]) => entries.filter((entry) => !entry.superseded);
+
+function withPinnedStatuses(entries: Entry[], required: RequiredCheck[], run: Run): Entry[] {
+  const pins = required.filter((check) => check.appId !== undefined);
   const apps = new Map<string, number | undefined>();
   const appOf = (bot: string) => apps.has(bot) ? apps.get(bot) : apps.set(bot, appOfBot(bot, run)).get(bot);
-  return entries.map((entry) => entry.bot && pinned.has(entry.name) ? { ...entry, appId: appOf(entry.bot) } : entry);
+  const pinnedAppOf = (entry: Entry) => {
+    if (!entry.botLogin || !pins.some((check) => check.context === entry.name)) return undefined;
+    const appId = appOf(entry.botLogin);
+    return pins.some((check) => check.context === entry.name && check.appId === appId) ? appId : undefined;
+  };
+  return entries.flatMap((entry) => {
+    const appId = pinnedAppOf(entry);
+    return appId !== undefined ? [{ ...entry, appId }] : entry.superseded ? [] : [entry];
+  });
 }
 
 function listOf(names: string[], limit = 8) {
@@ -143,11 +153,12 @@ function listOf(names: string[], limit = 8) {
 }
 
 const reportedBy = (check: RequiredCheck, entry: Entry) => check.appId === undefined || entry.appId === check.appId;
+const ranBy = (check: RequiredCheck, entry: Entry) => check.appId === undefined || (!entry.status && entry.appId === check.appId);
 
 function withheldFromDraft(check: RequiredCheck, entries: Entry[]) {
   const split = check.context.indexOf(" / ");
   if (split <= 0 || entries.some((entry) => entry.name === check.context)) return false;
-  const siblings = entries.filter((entry) => entry.name.startsWith(check.context.slice(0, split + 3)) && reportedBy(check, entry));
+  const siblings = entries.filter((entry) => entry.name.startsWith(check.context.slice(0, split + 3)) && ranBy(check, entry));
   return siblings.length > 0 && siblings.every((entry) => entry.outcome === "pass");
 }
 
@@ -195,9 +206,9 @@ export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date)
     const stacked = !required.length && pr.defaultBranch !== undefined && pr.defaultBranch !== pr.base;
     if (stacked) required = requiredChecks(home, identity.repository, pr.defaultBranch!, run, now);
     const entries = entriesOf(identity, run);
-    const checks = checksOf(entries);
-    if (!required.length) return { ...everyCheck(entries, identity.commit), checks };
-    const verdict = requiredVerdict(withStatusApps(entries, required, run), required, pr.draft);
+    const checks = checksOf(current(entries));
+    if (!required.length) return { ...everyCheck(current(entries), identity.commit), checks };
+    const verdict = requiredVerdict(withPinnedStatuses(entries, required, run), required, pr.draft);
     return { ...stacked ? { ...verdict, detail: `${verdict.detail} (required by ${pr.defaultBranch}; the base ${pr.base} requires none)` } : verdict, checks };
   } catch (error) {
     return { state: "unknown", detail: (error as Error).message };

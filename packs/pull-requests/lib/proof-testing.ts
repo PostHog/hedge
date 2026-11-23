@@ -78,6 +78,12 @@ case "$*" in
   "api apps/"*)
     all="$*"; slug=\${all#api apps/}; slug=\${slug%% *}
     cat "${github}/app-$slug" 2>/dev/null || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }; exit 0;;
+  "api "*"/statuses"*)
+    all="$*"; sha=\${all#*/commits/}; sha=\${sha%%/*}; filter=.; previous=
+    for arg in "$@"; do [ "$previous" = "--jq" ] && filter=$arg; previous=$arg; done
+    file="${github}/statuses-$sha"; [ -f "$file" ] || file="${github}/statuses-any"
+    [ -f "$file" ] || exit 0
+    jq -c "$filter" "$file"; exit $?;;
   "api "*)
     all="$*"; sha=; case "$all" in */commits/*/*) sha=\${all#*/commits/}; sha=\${sha%%/*};; esac
     case "$*" in *"/check-runs"*) kind=check-runs;; *) kind=statuses;; esac
@@ -105,7 +111,7 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
     if (base !== undefined) writeFileSync(join(github, "base"), base);
     if (baseSha !== undefined) writeFileSync(join(github, "base-sha"), JSON.stringify(baseSha));
   };
-  const statuses = (list: { context: string; state: string; by?: string }[], commit = "any") => writeFileSync(join(github, `statuses-${commit}`), lines(list.map(({ context, state, by = "the-user" }) => ({ context, state, creator: by, bot: by.endsWith("[bot]") }))));
+  const statuses = (list: { context: string; state: string; by?: string }[], commit = "any") => writeFileSync(join(github, `statuses-${commit}`), JSON.stringify(list.map(({ context, state, by = "the-user" }) => ({ context, state, creator: { login: by, type: by.endsWith("[bot]") ? "Bot" : "User" } }))));
   const githubApp = (slug: string, id: number) => writeFileSync(join(github, `app-${slug}`), JSON.stringify({ id, slug, name: slug }));
   const githubHead = (commit: string | undefined, next?: string) => {
     if (commit) writeFileSync(join(github, "head"), commit); else rmSync(join(github, "head"), { force: true });

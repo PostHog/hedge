@@ -72,6 +72,29 @@ test("a check pinned to an app passes on a commit status its app's bot posts, an
   expect(green.code).toBe(0);
 });
 
+test("a status context not pinned to an app reads its newest status, whoever posted it", async () => {
+  const { pr } = await reviewed();
+  pr.required("main", [{ context: "deploy" }]);
+  pr.statuses([{ context: "deploy", state: "success", by: "a-maintainer" }, { context: "deploy", state: "failure", by: "ci[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: green, 1 required check(s) pass");
+
+  pr.required("main", []);
+  pr.statuses([{ context: "deploy", state: "success", by: "new-ci[bot]" }, { context: "deploy", state: "failure", by: "old-ci[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: green, ");
+});
+
+test("on a draft, a status from the pinned app's bot passes its own check but withholds no sibling", async () => {
+  const { pr } = await reviewed();
+  pr.pullRequestState({ draft: true });
+  pr.required("main", [{ context: "CI / lint", integration_id: 7 }, { context: "CI / scan", integration_id: 7 }]);
+  pr.githubApp("product", 7);
+  pr.ci("none");
+  pr.statuses([{ context: "CI / lint", state: "success", by: "product[bot]" }]);
+  const gate = await pr.hedge("gate");
+  expect(gate.code).toBe(75);
+  expect(ciLine(gate.output)).toBe("ci: pending, required not reported yet: CI / scan");
+});
+
 test("a draft passes without a required check its workflow withholds from drafts, and a ready PR still needs it", async () => {
   const { pr } = await reviewed();
   pr.required("main", [{ context: "Backend / Test results" }]);
