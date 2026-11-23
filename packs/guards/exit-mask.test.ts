@@ -517,6 +517,9 @@ describe("the exit-status mask guard", () => {
     "cd . && printf 'msg' | git commit -F -; echo done",
     "set -o pipefail; false | git commit -m x; false || echo cleanup",
     "set -o pipefail; git push | cat; echo done",
+    "cd x && { git push || exit; '}'; } | cat; echo done",
+    "cd x && { git push || exit; /x/}; } | cat; echo done",
+    "cd x && { git push || exit; \\}; } & echo done",
     "git push | grep -q needle | cat",
     "git push | set -o 2>&1",
     "git push | tee push.log",
@@ -629,23 +632,23 @@ describe("the exit-status mask guard", () => {
     expect(answer).toEqual({
       hookEventName: "PreToolUse",
       updatedInput: { command: "git push || exit; echo done", description: "Push" },
-      additionalContext: expect.stringContaining("`git push || exit; echo done`"),
+      additionalContext: expect.stringContaining("`git push || exit; echo done`: it added `|| exit` after each push"),
     });
   });
 
   test("the hook refuses on Codex, which takes a rewrite only with an allow that skips its approval", () => {
-    expect(runHookProcess("codex", bash("git push | tail -3")).permissionDecision).toBe("deny");
+    expect(runHookProcess("codex", bash("git push; echo done")).permissionDecision).toBe("deny");
   });
 
   test("the hook refuses when Claude Code forbids personal hooks to change a call", () => {
-    expect(runHookProcess("claude", bash("git push | tail -3"), { CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG: "1" }).permissionDecision).toBe("deny");
+    expect(runHookProcess("claude", bash("git push; echo done"), { CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG: "1" }).permissionDecision).toBe("deny");
   });
 
   test("the hook refuses a rewrite that another shell guard refuses", () => {
     const home = temp.make("home-");
     mkdirSync(join(home, ".local/state/hedge"), { recursive: true });
     writeFileSync(join(home, ".local/state/hedge/settings.json"), JSON.stringify({ "guards.owners": "acme" }));
-    const answer = guard(bash("gh pr merge 1 --repo evil/app | tail -3"), home, temp.make("root-"), "claude");
+    const answer = guard(bash("gh pr merge 1 --repo evil/app; echo done"), home, temp.make("root-"), "claude");
     expect(answer?.hookSpecificOutput).toMatchObject({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("`evil`") });
   });
 

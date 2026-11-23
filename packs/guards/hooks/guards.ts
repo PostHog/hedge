@@ -59,8 +59,8 @@ function check(call: ToolCall, { person, owners, mainPushRepos, allowRules, unre
     ?? gitRisk(command, cwd, person, mainPushRepos) ?? exitMaskRisk(command, person) ?? (isSleepPoll(command) ? sleepPollReason(person) : undefined);
 }
 
-const rewriteNote = (command: string) => `Hedge ran this command as \`${command}\`, so the exit status of each push, commit, merge, `
-  + "gate or watch in it shows, and the call stops when one fails. Write it this way next time.";
+const rewriteNote = (command: string) => `Hedge ran this command as \`${command}\`: it added \`|| exit\` after each push, commit, merge, `
+  + "gate or watch whose exit status the call hid, so the call stops when one of those fails. Write it this way next time.";
 
 const restrictsPersonalHooks = () => !/^(?:|0|false|no|off)$/i.test((process.env.CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG ?? "").trim());
 

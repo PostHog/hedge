@@ -186,7 +186,7 @@ function exitGroup(program: Program, start: number, end: number): boolean {
   const first = pipelineStart(commands, start);
   const [exit, closer] = [commands[end + 1], commands[end + 2]];
   const opensHere = depths[first] === 1 && commands[first].keywords.join(" ") === "{";
-  const closesAfterExit = exit !== undefined && stopsShell(exit) && exit.after === ";" && closer?.name === "}" && closer.rawPrefix.length === 0;
+  const closesAfterExit = exit !== undefined && stopsShell(exit) && exit.after === ";" && closer?.bare.join(" ") === "}" && closer.rawPrefix.length === 0;
   if (!opensHere || commands[end].after !== "||" || !closesAfterExit || closer.after === "|") return false;
   return commands[listEnd(program, end + 2, 0)].after !== "&" && !changesHowItPrints(commands.slice(0, end + 1), exit);
 }
