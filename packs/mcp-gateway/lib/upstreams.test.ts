@@ -242,6 +242,25 @@ test("an app whose call found its sign-in revoked counts as signed out until a n
   expect(await lostSignIns(hub)).toEqual([]);
 });
 
+test("a route that finds its grant still revoked when a sign-in reloads it stays signed out", async () => {
+  const { home, hub } = hubWith({});
+  for (const app of googleApps) await registerUpstream(hub, app);
+  const codex = join(home, ".local/share/hedge/codex/current/bin/codex");
+  writeFileSync(codex, `#!/bin/sh\necho '{}' > "$CODEX_HOME/auth.json"\n`);
+  chmodSync(codex, 0o755);
+  const google = join(home, ".local/share/hedge-mcphub/data/google-codex");
+  mkdirSync(google, { recursive: true });
+  writeFileSync(join(google, "sign-in-lost-google-drive"), "");
+  const gateway = hub.fetch;
+  hub.fetch = async (input, init) => {
+    if (String(input).endsWith("/api/servers/google-drive/reload")) writeFileSync(join(google, "sign-in-lost-google-drive"), "");
+    return gateway(input, init);
+  };
+  expect(await signInApp(hub, gmail)).toBe(0);
+  expect(await appSignedIn(hub, gmail)).toBe(true);
+  expect(await appSignedIn(hub, googleDrive)).toBe(false);
+});
+
 test("a declared upstream file that is not an upstream hides no lost sign-in of a built-in app", async () => {
   const { home, hub } = hubWith({ "broken.json": "{" });
   const slackHome = join(home, ".local/share/hedge-mcphub/data/slack-codex");

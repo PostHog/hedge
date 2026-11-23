@@ -146,6 +146,7 @@ export async function signInApp(hub: Hub, app: CodexApp) {
   const code = await deviceSignIn(hub, app);
   if (code) return code;
   const sharing = (await codexApps(hub.home)).filter((other) => account(other) === account(app));
+  for (const other of sharing) await clearSignInLost(appHome(hub.home, other), other.name);
   const call = await managementApi(hub);
   const reloaded: CodexApp[] = [];
   for (const other of sharing) {
@@ -155,7 +156,6 @@ export async function signInApp(hub: Hub, app: CodexApp) {
   }
   const toolless: CodexApp[] = [];
   for (const other of reloaded) if (await listsNoTools(call, other).catch(() => false)) toolless.push(other);
-  for (const other of sharing) await clearSignInLost(appHome(hub.home, other), other.name);
   for (const other of toolless) hub.print(`The gateway finds no ${other.title} tools for this sign-in. Connect ${other.title} in ChatGPT, Settings, Apps, with this ChatGPT account, then run: hedge mcp-gateway reconnect ${other.name}`);
   if (toolless.length) return 1;
   hub.print(`${sharing.map((other) => other.title).join(", ")} signed in. Agents reach them through the gateway now.`);

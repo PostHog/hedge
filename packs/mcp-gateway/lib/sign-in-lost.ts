@@ -8,7 +8,8 @@ export type LostSignIn = { app: Named; since: number };
 const lostCodes = /\b(token_revoked|token_expired|refresh_token_reused|invalid_grant|invalid_auth|not_authed|account_inactive)\b/;
 const marker = (app: string) => `sign-in-lost-${app}`;
 
-export const signInLost = (text: string) => lostCodes.test(text);
+export const lostCode = (text: string) => text.match(lostCodes)?.[1];
+export const signInLost = (text: string) => lostCode(text) !== undefined;
 
 export const reAuthLine = (app: Named) =>
   `${app.title} needs re-auth: on the hub, run: hedge mcp-gateway sign-in ${app.name}. When calls still fail after it, reconnect ${app.title} in ChatGPT, Settings, Apps.`;

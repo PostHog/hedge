@@ -163,12 +163,36 @@ for (const [runtime, command] of Object.entries(runtimes)) describe.skipIf(!node
     expect(await bridge.signedOut()).toBe(false);
   });
 
-  test("a revoked sign-in that fails the tool list reaches the gateway as the re-auth step, and the agent's call marks it lost in the call queue", async () => {
+  test("a revoked sign-in that fails the tool list, as when the gateway starts, reaches the gateway as the re-auth step, and the hub counts it signed out", async () => {
     const bridge = upstream("", { FAKE_CODEX_LIST_REVOKED: "1" });
     await bridge.initialize();
     expect((await bridge.request("tools/list")).error!.message).toStartWith("Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack.");
-    expect(await bridge.signedOut()).toBe(false);
-    expect((await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } })).error!.message).toStartWith("Slack needs re-auth");
+    expect(await bridge.signedOut()).toBe(true);
+  });
+
+  test("a tool list whose only auth code is in the app's tools error names that code as the cause", async () => {
+    const bridge = upstream("", { FAKE_CODEX_LIST_TOOLS_ERROR: "1" });
+    await bridge.initialize();
+    expect((await bridge.request("tools/list")).error!.message).toEndWith("Cause: The Codex app backend could not list the Slack tools. (token_revoked)");
+    expect(await bridge.signedOut()).toBe(true);
+  });
+
+  test("a call whose only auth code is in the backend's error data reaches the agent as the re-auth step that names the code", async () => {
+    const bridge = upstream("", { FAKE_CODEX_REPLIES: "revoked-data" });
+    await bridge.initialize();
+    const read = await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } });
+    expect(read.error!.message).toEndWith("Apps. Cause: Unauthorized (token_revoked)");
+    expect(await bridge.signedOut()).toBe(true);
+  });
+
+  test("a failed result whose only auth code is in its structured content leads with the re-auth step", async () => {
+    const bridge = upstream("", { FAKE_CODEX_REPLIES: "structured-auth" });
+    await bridge.initialize();
+    const read = await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } });
+    expect((read.result as { content: Array<{ text: string }> }).content.map((item) => item.text)).toEqual([
+      "Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps.",
+      "Unauthorized",
+    ]);
     expect(await bridge.signedOut()).toBe(true);
   });
 
