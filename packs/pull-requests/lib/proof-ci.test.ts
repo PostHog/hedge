@@ -72,15 +72,27 @@ test("a check pinned to an app passes on a commit status its app's bot posts, an
   expect(green.code).toBe(0);
 });
 
-test("a status context not pinned to an app reads its newest status, whoever posted it", async () => {
+test("the gate's check list names the pinned app's status that decided a check, beside a newer status from someone else", async () => {
+  const { pr } = await reviewed();
+  pr.required("main", [{ context: "storybook", integration_id: 7 }]);
+  pr.githubApp("product", 7);
+  pr.ci("none");
+  pr.statuses([{ context: "storybook", state: "success", by: "a-maintainer" }, { context: "storybook", state: "failure", by: "product[bot]" }]);
+  const gate = await pr.hedge("gate", "--json");
+  expect(JSON.parse(gate.output).ci.checks).toEqual(["storybook (status): pass", "storybook (status, app 7): fail"]);
+});
+
+test("a required status context not pinned to an app reads its newest status, whoever posted it", async () => {
   const { pr } = await reviewed();
   pr.required("main", [{ context: "deploy" }]);
   pr.statuses([{ context: "deploy", state: "success", by: "a-maintainer" }, { context: "deploy", state: "failure", by: "ci[bot]" }]);
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: green, 1 required check(s) pass");
+});
 
-  pr.required("main", []);
+test("without required checks, a status context reads its newest status, whoever posted it", async () => {
+  const { pr } = await reviewed();
   pr.statuses([{ context: "deploy", state: "success", by: "new-ci[bot]" }, { context: "deploy", state: "failure", by: "old-ci[bot]" }]);
-  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: green, ");
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: green, 2 check(s) on ");
 });
 
 test("on a draft, a status from the pinned app's bot passes its own check but withholds no sibling", async () => {

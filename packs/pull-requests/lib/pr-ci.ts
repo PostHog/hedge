@@ -197,7 +197,8 @@ function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boo
   return verdict;
 }
 
-const checksOf = (entries: Entry[]) => [...new Set(entries.map((entry) => `${entry.name}${entry.status ? " (status)" : entry.appId === undefined ? "" : ` (app ${entry.appId})`}: ${entry.outcome}`))].sort();
+const sourceOf = (entry: Entry) => [entry.status ? "status" : "", entry.appId === undefined ? "" : `app ${entry.appId}`].filter(Boolean).join(", ");
+const checksOf = (entries: Entry[]) => [...new Set(entries.map((entry) => `${entry.name}${sourceOf(entry) ? ` (${sourceOf(entry)})` : ""}: ${entry.outcome}`))].sort();
 
 export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date): CiResult {
   try {
@@ -206,10 +207,10 @@ export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date)
     const stacked = !required.length && pr.defaultBranch !== undefined && pr.defaultBranch !== pr.base;
     if (stacked) required = requiredChecks(home, identity.repository, pr.defaultBranch!, run, now);
     const entries = entriesOf(identity, run);
-    const checks = checksOf(current(entries));
-    if (!required.length) return { ...everyCheck(current(entries), identity.commit), checks };
-    const verdict = requiredVerdict(withPinnedStatuses(entries, required, run), required, pr.draft);
-    return { ...stacked ? { ...verdict, detail: `${verdict.detail} (required by ${pr.defaultBranch}; the base ${pr.base} requires none)` } : verdict, checks };
+    if (!required.length) return { ...everyCheck(current(entries), identity.commit), checks: checksOf(current(entries)) };
+    const counted = withPinnedStatuses(entries, required, run);
+    const verdict = requiredVerdict(counted, required, pr.draft);
+    return { ...stacked ? { ...verdict, detail: `${verdict.detail} (required by ${pr.defaultBranch}; the base ${pr.base} requires none)` } : verdict, checks: checksOf(counted) };
   } catch (error) {
     return { state: "unknown", detail: (error as Error).message };
   }
