@@ -84,7 +84,9 @@ const inDangerAreas = (files: string[]) =>
 
 export const treatedBudget = (triage: TriageMark | undefined, ceiling: number) => triage?.arm === "treated" && triage.path !== "excluded" ? Math.min(triage.path === "strict" ? 3 : 2, ceiling) : undefined;
 
-export async function readTriage(directory: string): Promise<{ budget?: number; triage: TriageMark } | Record<string, never>> {
-  const round = await readJson<{ budget?: number; triage?: TriageMark } | undefined>(join(directory, "round.json"), undefined);
-  return round?.triage ? { ...round.budget === undefined ? {} : { budget: round.budget }, triage: round.triage } : {};
+export type ReadBudget = { budget: number; uncapped?: string };
+
+export async function readTriage(directory: string): Promise<(Partial<ReadBudget> & { triage: TriageMark }) | Record<string, never>> {
+  const round = await readJson<(Partial<ReadBudget> & { triage?: TriageMark }) | undefined>(join(directory, "round.json"), undefined);
+  return round?.triage ? { ...round.budget === undefined ? {} : { budget: round.budget }, ...round.uncapped === undefined ? {} : { uncapped: round.uncapped }, triage: round.triage } : {};
 }

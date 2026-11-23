@@ -10,7 +10,7 @@ import { panelOutcome, unansweredPanelCause } from "./proof-panel.ts";
 import { redactSecrets } from "../../base/hooks/secret-guard.ts";
 import { anchorHeading } from "./finding-anchors.ts";
 import type { Growth } from "./proof-end-table.ts";
-import type { TriageMark } from "./proof-triage.ts";
+import type { ReadBudget, TriageMark } from "./proof-triage.ts";
 import { endTableNote, gradeOf, shellQuoted, type Autonomy } from "./proof-autonomy.ts";
 
 export type ProofIdentity = { repository: string; pr: number; commit: string };
@@ -267,7 +267,7 @@ export type CapturedBy = "hedge" | "author";
 export type DecisionMark = Pick<Decision, "mark" | "id">;
 export type DropRead = (directory: string) => Promise<boolean>;
 export type OnHistory = (commit: string) => boolean;
-export type ReviewRequest = { dropUnanswered?: DropRead; onHistory?: OnHistory; autonomy?: () => Autonomy; opening?: () => Promise<boolean>; sanity?: () => Promise<void>; scope: string; base?: string; from?: string; forkBase?: string; decision?: Decision; phase?: string; arbiter: Arbiter; limits: ReviewLimits; cleanBaseMerge?: CleanBaseMerge; quietCommit?: QuietCommit; capturedBy?: CapturedBy; lock?: LockRound; lockBudget: LockBudget; now: () => Date; emptyRange?: () => boolean; triage?: TriageMark; budget?: number };
+export type ReviewRequest = { dropUnanswered?: DropRead; onHistory?: OnHistory; autonomy?: () => Autonomy; opening?: () => Promise<boolean>; sanity?: () => Promise<void>; scope: string; base?: string; from?: string; forkBase?: string; decision?: Decision; phase?: string; arbiter: Arbiter; limits: ReviewLimits; cleanBaseMerge?: CleanBaseMerge; quietCommit?: QuietCommit; capturedBy?: CapturedBy; lock?: LockRound; lockBudget: LockBudget; now: () => Date; emptyRange?: () => boolean; triage?: TriageMark; budget?: ReadBudget };
 export type Reserved = { round: number | "final"; id: string; directory: string };
 type Permit = { arbiter: Arbiter; limits: ReviewLimits; autonomy?: () => Autonomy };
 
@@ -276,7 +276,7 @@ async function reserveDecided(reviews: string, name: string, record: object, dec
 }
 
 type Stamping = { lock: LockRound | undefined; now: () => Date };
-type Reserving = Stamping & { lockBudget: LockBudget; dropUnanswered?: DropRead; emptyRange?: () => boolean; onHistory?: OnHistory; triage?: TriageMark; budget?: number };
+type Reserving = Stamping & { lockBudget: LockBudget; dropUnanswered?: DropRead; emptyRange?: () => boolean; onHistory?: OnHistory; triage?: TriageMark; budget?: ReadBudget };
 
 async function droppableReads(reviews: string, identity: ProofIdentity, dropUnanswered: DropRead | undefined) {
   if (!dropUnanswered) return [];
@@ -319,7 +319,7 @@ async function startFinalRead(home: string, identity: ProofIdentity, base: strin
     let read = 1;
     while (taken.has(finalReadPrefix + read)) read++;
     const name = finalReadPrefix + read;
-    await reserveDecided(reviews, name, { ...identity, round: "final", read, scope: "final", base, from, phase, arbiter: verdict, capturedBy, ...triage ? { budget, triage } : {} }, decision, stamping);
+    await reserveDecided(reviews, name, { ...identity, round: "final", read, scope: "final", base, from, phase, arbiter: verdict, capturedBy, ...triage ? { ...budget, triage } : {} }, decision, stamping);
     return { round: "final", id: name, directory: join(reviews, name) };
   });
 }
@@ -361,7 +361,7 @@ async function startRound(home: string, identity: ProofIdentity, reviews: string
     return permitReview(home, identity, spent >= free, spent >= ceiling ? budgetSpent(permit.limits) : undefined, decision, permit);
   };
   return reserveWeighed(reviews, lockBudget, snapshot, permitRound, async ({ round }, verdict) => {
-    await reserveDecided(reviews, String(round), { ...identity, round, scope, base, from, ...forkBase ? { forkBase } : {}, arbiter: verdict, capturedBy, ...triage ? { budget, triage } : {} }, decision, stamping);
+    await reserveDecided(reviews, String(round), { ...identity, round, scope, base, from, ...forkBase ? { forkBase } : {}, arbiter: verdict, capturedBy, ...triage ? { ...budget, triage } : {} }, decision, stamping);
     return { round, id: String(round), directory: join(reviews, String(round)) };
   });
 }

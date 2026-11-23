@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { armOf } from "./proof-triage.ts";
 import { answerFixed, checkout, cleanFixtures, fakeModel, graded, settings, type Checkout } from "./proof-testing.ts";
@@ -307,4 +307,60 @@ test("a first panel after two reads of a treated pull request is refused at the 
   await answerFixed(pr, "final-1");
   await pr.commit("feature.ts", "export const greet = (name: string) => `hello ${name}`;\n");
   await expect(pr.hedge("review")).rejects.toThrow("The review budget of 2 reviews is spent");
+});
+
+test("respond sizes the budget at the pull request's head, so an older commit named by --commit cannot let a known answer in early", async () => {
+  const pr = await budgeted("on", graded("non-critical", "medium"));
+  fakeModel(pr, "REVIEWER", major.replace("COVERED: feature.ts", "COVERED: feature.ts, send-mail.ts"));
+  await pr.hedge("review", "--single");
+  const first = await pr.git("rev-parse", "HEAD");
+  await answerFixed(pr, "1");
+  await pr.commit("send-mail.ts", "export const send = () => {};\n");
+  expect(await firstLine(pr, "--scope", "final", "--base", first)).toMatchObject({ budget: 3, triage: { path: "strict" } });
+  writeFileSync(join(pr.repository, "known.md"), "1. known: listed under Known issues\n");
+
+  await expect(pr.hedge("respond", "--round", "final-1", "known.md", "--commit", first)).rejects.toThrow("review budget of 3 reviews");
+});
+
+const failPullRead = (pr: Checkout, read: number) => {
+  const github = join(dirname(pr.home), "github");
+  const script = `n=$(cat ${github}/reads 2>/dev/null || echo 0); n=$((n+1)); echo $n > ${github}/reads; if [ $n -eq ${read} ]; then echo 'HTTP 503' > ${github}/pull-error-42; else rm -f ${github}/pull-error-42; fi; cp ${github}/counter.sh ${github}/while-reading\n`;
+  writeFileSync(join(github, "counter.sh"), script);
+  writeFileSync(join(github, "while-reading"), script);
+};
+
+test("a one-way pull request whose pull request cannot be read is not capped: a known answer waits for the profile's ceiling, and the review prints and records why", async () => {
+  const pr = await budgeted("on", oneWay, 6);
+  await pr.hedge("review", "--single");
+  expect((await readAgain(pr, "1")).code).toBe(0);
+  expect((await readAgain(pr, "final-1")).code).toBe(0);
+  writeFileSync(join(pr.repository, "known.md"), "1. known: listed under Known issues\n");
+  await expect(pr.hedge("respond", "--round", "final-2", "known.md")).rejects.toThrow("review budget of 6 reviews");
+
+  pr.pullRequestState({ unreadable: "gh: Service Unavailable (HTTP 503)" });
+  await expect(pr.hedge("respond", "--round", "final-2", "known.md")).rejects.toThrow("review budget of 6 reviews");
+
+  rmSync(join(dirname(pr.home), "github", "pull-error-42"));
+  await answerFixed(pr, "final-2");
+  const base = await pr.git("rev-parse", "HEAD");
+  await pr.commit("feature.ts", "export const greet = (name: string) => `bye ${name}`;\n");
+  failPullRead(pr, 2);
+  const uncapped = { budget: 6, uncapped: "the pull request could not be read" };
+  expect(await firstLine(pr, "--scope", "final", "--base", base)).toMatchObject({ round: "final", ...uncapped, triage: { arm: "treated" } });
+  expect(roundRecord(pr, "final-3")).toMatchObject(uncapped);
+});
+
+test("a head on GitHub whose changed files cannot be read here leaves the known answer at the profile's ceiling", async () => {
+  const pr = await budgeted("on", graded("non-critical", "medium"));
+  await pr.hedge("review", "--single");
+  expect((await readAgain(pr, "1")).code).toBe(0);
+  writeFileSync(join(pr.repository, "known.md"), "1. known: listed under Known issues\n");
+  pr.githubHead("b".repeat(40));
+  await expect(pr.hedge("respond", "--round", "final-1", "known.md")).rejects.toThrow("review budget of 100 reviews");
+});
+
+test("a body that was read without a merge-risk grade still gets the strict budget", async () => {
+  const pr = await budgeted("on", "Greets new members.\n");
+  expect(await firstLine(pr)).toMatchObject({ budget: 3, triage: { path: "strict", why: ["merge-risk grade none"] } });
+  expect(roundRecord(pr, "1")).not.toHaveProperty("uncapped");
 });
