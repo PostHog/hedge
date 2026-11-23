@@ -155,13 +155,15 @@ function listOf(names: string[], limit = 8) {
 }
 
 const reportedBy = (check: RequiredCheck, entry: Entry) => check.appId === undefined || entry.appId === check.appId;
-const ranBy = (check: RequiredCheck, entry: Entry) => check.appId === undefined || (!entry.status && entry.appId === check.appId);
+const ranBy = (check: RequiredCheck, entry: Entry) => !entry.status && entry.appId === check.appId;
 
 function withheldFromDraft(check: RequiredCheck, entries: Entry[]) {
   const split = check.context.indexOf(" / ");
   if (split <= 0 || entries.some((entry) => entry.name === check.context)) return false;
-  const siblings = entries.filter((entry) => entry.name.startsWith(check.context.slice(0, split + 3)) && ranBy(check, entry));
-  return siblings.some((entry) => !entry.status) && siblings.every((entry) => entry.outcome === "pass");
+  const siblings = entries.filter((entry) => entry.name.startsWith(check.context.slice(0, split + 3)));
+  if (check.appId === undefined) return siblings.length > 0 && siblings.every((entry) => entry.outcome === "pass");
+  const workflow = siblings.filter((entry) => entry.status || ranBy(check, entry));
+  return workflow.some((entry) => ranBy(check, entry)) && workflow.every((entry) => entry.outcome === "pass");
 }
 
 function everyCheck(entries: Entry[], commit: string): CiResult {

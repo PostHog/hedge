@@ -155,23 +155,23 @@ test("on a draft, a status from the pinned app's bot passes its own check but wi
   expect(ciLine(gate.output)).toBe("ci: pending, required not reported yet: CI / scan");
 });
 
-test("on a draft, statuses alone never prove that a missing check's workflow finished", async () => {
+test("on a draft, a failing status beside a pinned check's workflow keeps a missing check required", async () => {
   const { pr } = await reviewed();
   pr.pullRequestState({ draft: true });
-  pr.required("main", [{ context: "CI / lint", integration_id: 7 }, { context: "CI / scan" }]);
+  pr.required("main", [{ context: "CI / lint", integration_id: 7 }, { context: "CI / scan", integration_id: 7 }]);
   pr.githubApp("product", 7);
-  pr.ci("none");
-  pr.statuses([{ context: "CI / lint", state: "success", by: "product[bot]" }, { context: "CI / lint", state: "failure", by: "a-maintainer" }]);
-  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: CI / scan");
+  pr.ci([{ name: "CI / build", bucket: "pass", app: 7 }]);
+  pr.statuses([{ context: "CI / lint", state: "success", by: "product[bot]" }, { context: "CI / setup", state: "failure", by: "product[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: CI / scan; not required: failing: CI / setup");
 });
 
-test("on a draft whose required checks are all unpinned, a passing status alone does not withhold a missing one", async () => {
+test("on a draft whose required checks are all unpinned, passing sibling statuses withhold a missing one, as on main", async () => {
   const { pr } = await reviewed();
   pr.pullRequestState({ draft: true });
   pr.required("main", [{ context: "CI / scan" }]);
   pr.ci("none");
   pr.statuses([{ context: "CI / lint", state: "success", by: "ci[bot]" }]);
-  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: CI / scan");
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: green, 0 required check(s) pass; withheld from drafts, required once ready: CI / scan (its workflow finished without posting it)");
 });
 
 test("a draft passes without a required check its workflow withholds from drafts, and a ready PR still needs it", async () => {
