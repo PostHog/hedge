@@ -773,6 +773,8 @@ test("with triage switched off after a treated round, its saved labels waive not
 
   expect((await respond(pr, "1. fixed in abc1234: greets\n4. rejected: fine\n6. fixed in abc1234: test\n")).output).toContain("Answer findings 2 too");
   expect((await pr.hedge("review", "--wait", "--round", "1")).output).not.toContain("Advisory");
+  writeFileSync(join(reviewDirectory(pr), "responses.md"), "1. fixed in abc1234: greets\n4. rejected: fine\n6. fixed in abc1234: test\n");
+  expect((await pr.hedge("gate").then((result) => result, (error: Error) => ({ code: 1, output: error.message }))).output).toContain("unanswered findings 2");
   await respond(pr, "1. fixed in abc1234: greets\n2. rejected: fine\n4. rejected: fine\n6. fixed in abc1234: test\n");
   const judge = fakeModel(pr, "JUDGE", verdict());
   await pr.hedge("gate");
