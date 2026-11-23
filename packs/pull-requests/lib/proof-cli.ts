@@ -696,7 +696,11 @@ const askTriage = ({ env, home, run }: CommandContext, panelCheckout?: string) =
 };
 
 async function printLabels(directory: string, context: CommandContext) {
-  const triaged = await labelRound(directory, triageSetting(context.env), askTriage(context, (await readPlan(directory))?.cwd), (write) => onceFree(dirname(directory), context, write));
+  const triaged = await labelRound(directory, triageSetting(context.env), askTriage(context, (await readPlan(directory))?.cwd), (write) => onceFree(dirname(directory), context, write)).catch((error: unknown) => {
+    if (!(error instanceof RoundBusy)) throw error;
+    context.print(`Another hedge command held the review budget for the whole wait, so the triage saved no labels: every finding of round ${basename(directory)} needs an answer.`);
+    return undefined;
+  });
   for (const line of triaged ? labelLines(triaged) : []) context.print(line);
 }
 

@@ -372,6 +372,21 @@ test("a wait that finds the review budget held keeps the triage answer and saves
   expect(savedLabels(pr)).toMatchObject({ ok: true, labels: [{ finding: 1 }, { finding: 2, label: "advisory" }, { finding: 4 }] });
 });
 
+test("a wait whose review budget stays held saves no labels, says every finding needs an answer, and still prints the findings", async () => {
+  const pr = await treated();
+  fakeModel(pr, "TRIAGE", adviseSecond);
+  await panelRound(pr);
+  const holder = await lockHolder(join(pr.pullRequest, "reviews"));
+  pr.panel.onPause = async () => {};
+
+  const waited = await pr.hedge("review", "--wait", "--round", "1");
+  await holder.release();
+
+  expect(waited.code).toBe(0);
+  expect(waited.output).toContain("Another hedge command held the review budget for the whole wait, so the triage saved no labels: every finding of round 1 needs an answer.");
+  expect(existsSync(join(reviewDirectory(pr), "triage-labels.json"))).toBe(false);
+});
+
 test("a labels file of another shape counts every finding as needing an answer in respond", async () => {
   const pr = await treated();
   fakeModel(pr, "TRIAGE", adviseSecond);
