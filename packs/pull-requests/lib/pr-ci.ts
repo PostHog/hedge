@@ -136,9 +136,10 @@ function withPinnedStatuses(entries: Entry[], required: RequiredCheck[], run: Ru
   const pins = required.filter((check) => check.appId !== undefined);
   const apps = new Map<string, number | undefined>();
   const appOf = (bot: string) => apps.has(bot) ? apps.get(bot) : apps.set(bot, appOfBot(bot, run)).get(bot);
+  const spelledTwice = (entry: Entry) => entries.some((other) => other.status && other.botLogin === entry.botLogin && other.name !== entry.name && other.name.toLowerCase() === entry.name.toLowerCase());
   const pinOf = (entry: Entry) => {
     const named = pins.filter((check) => entry.status && check.context === entry.name);
-    if (!entry.botLogin || !named.length) return undefined;
+    if (!entry.botLogin || !named.length || spelledTwice(entry)) return undefined;
     const appId = appOf(entry.botLogin);
     return named.find((check) => check.appId === appId);
   };

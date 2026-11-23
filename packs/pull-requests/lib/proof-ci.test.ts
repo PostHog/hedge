@@ -94,6 +94,14 @@ test("the pinned app's rerun clears its own older failure", async () => {
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: green, 1 required check(s) pass");
 });
 
+test("a pinned check waits when its app posted the check's context in another spelling too", async () => {
+  const { pr } = await reviewed();
+  pr.required("main", [{ context: "Visual Review / storybook", integration_id: 7 }]);
+  pr.githubApp("product", 7);
+  pr.statuses([{ context: "Visual Review / Storybook", state: "failure", by: "product[bot]" }, { context: "Visual Review / storybook", state: "success", by: "product[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Visual Review / storybook; not required: failing: Visual Review / Storybook");
+});
+
 test("the gate's check list names the pinned app's status that decided a check, beside a newer status from someone else", async () => {
   const { pr } = await reviewed();
   pr.required("main", [{ context: "storybook", integration_id: 7 }]);
