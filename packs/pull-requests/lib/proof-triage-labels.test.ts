@@ -337,7 +337,7 @@ test("a wait saves no labels while another command holds the review budget, and 
   expect(savedLabels(pr)).toMatchObject({ ok: true, labels: [{ finding: 1 }, { finding: 2, label: "advisory" }, { finding: 4 }] });
 });
 
-test("a labels file of another shape counts every finding as needing an answer in respond and the gate", async () => {
+test("a labels file of another shape counts every finding as needing an answer, and show still reads the round", async () => {
   const pr = await treated();
   fakeModel(pr, "TRIAGE", adviseSecond);
   await pr.hedge("review", "--single");
