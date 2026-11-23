@@ -31,9 +31,8 @@ hub, and it starts with no servers.
    `hedge mcp-gateway doctor` on the hub says what does not work.
    When ChatGPT revokes the sign-in of a Codex app, such as the Slack
    bridge, agent calls to it answer with a line such as `Slack needs
-   re-auth: on the hub, run: hedge mcp-gateway sign-in slack`, the doctor
-   prints that line, and the hub starts a T3 thread that asks for the
-   sign-in.
+   re-auth: on the hub, run: hedge mcp-gateway sign-in slack`, and the
+   doctor prints that line until a new sign-in or a working call clears it.
 
    Some servers accept only a sign-in that returns to `127.0.0.1`, so the
    gateway's own sign-in link fails for them. A pack marks such a server

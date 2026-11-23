@@ -9,10 +9,9 @@
   like auth error now answers the agent with one line, such as `Slack needs
   re-auth: on the hub, run: hedge mcp-gateway sign-in slack`, in place of a
   bare 401. The bridge marks the sign-in lost in its Codex home.
-- A lost sign-in fails the app's sign-in check in `hedge doctor` and
-  `hedge mcp-gateway doctor`, until a new sign-in replaces it.
-- The hub's new `sign-in-watch` service starts one T3 thread for each lost
-  sign-in, which drives the re-auth with the person.
+- A lost sign-in fails the app's sign-in check in `hedge doctor`, and
+  `hedge mcp-gateway doctor` prints its re-auth line. A new sign-in or a
+  working call clears it.
 
 ### Conductor-managed lanes default to T3 subthreads
 

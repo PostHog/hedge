@@ -109,16 +109,6 @@ export default {
       });
       hedge.config({ provider: "codex", plans: ["codex", "both"], when: workflow, key: `apps.${app.app}.enabled`, value: false });
     }
-    hedge.service({
-      on: "hub",
-      os: "linux",
-      when: flow,
-      id: "sign-in-watch",
-      run: async (ctx) => {
-        const [{ watchSignIns }, apps, hub] = await Promise.all([import("./lib/sign-in-lost.ts"), upstreams(), host(ctx)]);
-        return watchSignIns({ lost: () => apps.lostSignIns(hub), threads: ctx.threads, statePath: join(ctx.stateDir, "sign-in-watch.json"), log: ctx.log }, ctx.sleep);
-      },
-    });
     const query = hedge.setting({
       key: "mcp-gateway.mailQuery",
       type: "string",

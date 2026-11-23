@@ -6,7 +6,7 @@ import { browserGatewayUrl } from "./client.ts";
 import { dataDir, managementApi, syncGatewayGroup, type Api, type Hub } from "./hub.ts";
 import { bridgeFile, codexMount, codexPackage, gatewayCurrent, install, legacyBridgeFile, localEntry, missingMount, waitingNote } from "./install.ts";
 import { handCallback, loopbackClientOf, registerLoopbackClient } from "./loopback.ts";
-import { signInLostSince, type LostSignIn } from "./sign-in-lost.ts";
+import { clearSignInLost, signInLostSince, type LostSignIn } from "./sign-in-lost.ts";
 
 const account = (app: CodexApp) => `${app.account ?? app.name}-codex`;
 export const appHome = (home: string, app: CodexApp) => join(dataDir(home), "data", account(app));
@@ -155,6 +155,7 @@ export async function signInApp(hub: Hub, app: CodexApp) {
   }
   const toolless: CodexApp[] = [];
   for (const other of reloaded) if (await listsNoTools(call, other).catch(() => false)) toolless.push(other);
+  for (const other of sharing) await clearSignInLost(appHome(hub.home, other), other.name);
   for (const other of toolless) hub.print(`The gateway finds no ${other.title} tools for this sign-in. Connect ${other.title} in ChatGPT, Settings, Apps, with this ChatGPT account, then run: hedge mcp-gateway reconnect ${other.name}`);
   if (toolless.length) return 1;
   hub.print(`${sharing.map((other) => other.title).join(", ")} signed in. Agents reach them through the gateway now.`);

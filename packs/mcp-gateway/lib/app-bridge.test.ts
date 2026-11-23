@@ -163,10 +163,12 @@ for (const [runtime, command] of Object.entries(runtimes)) describe.skipIf(!node
     expect(await bridge.signedOut()).toBe(false);
   });
 
-  test("a revoked sign-in that fails the tool list reaches the gateway as the re-auth step, and the hub counts it signed out", async () => {
+  test("a revoked sign-in that fails the tool list reaches the gateway as the re-auth step, and the agent's call marks it lost in the call queue", async () => {
     const bridge = upstream("", { FAKE_CODEX_LIST_REVOKED: "1" });
     await bridge.initialize();
     expect((await bridge.request("tools/list")).error!.message).toStartWith("Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack.");
+    expect(await bridge.signedOut()).toBe(false);
+    expect((await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } })).error!.message).toStartWith("Slack needs re-auth");
     expect(await bridge.signedOut()).toBe(true);
   });
 

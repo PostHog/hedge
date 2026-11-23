@@ -218,12 +218,14 @@ test("one ChatGPT sign-in serves every Google route and the gateway reloads all 
   expect(writes(api)).toEqual(["POST servers/gmail/reload", "POST servers/google-calendar/reload", "POST servers/google-drive/reload"]);
 });
 
-test("an app whose call found its sign-in revoked counts as signed out until the next sign-in, and the apps of its account that still work do not", async () => {
+test("an app whose call found its sign-in revoked counts as signed out until a new sign-in of its account, and the apps of its account that still work do not", async () => {
   const { home, hub } = hubWith({});
+  for (const app of googleApps) await registerUpstream(hub, app);
+  const codex = join(home, ".local/share/hedge/codex/current/bin/codex");
+  writeFileSync(codex, `#!/bin/sh\necho '{}' > "$CODEX_HOME/auth.json"\n`);
+  chmodSync(codex, 0o755);
+  expect(await signInApp(hub, gmail)).toBe(0);
   const google = join(home, ".local/share/hedge-mcphub/data/google-codex");
-  mkdirSync(google, { recursive: true });
-  writeFileSync(join(google, "auth.json"), "{}");
-  utimesSync(join(google, "auth.json"), 1000, 1000);
   expect(await lostSignIns(hub)).toEqual([]);
   writeFileSync(join(google, "sign-in-lost-google-drive"), "");
   utimesSync(join(google, "sign-in-lost-google-drive"), 2500, 2500);
@@ -234,6 +236,8 @@ test("an app whose call found its sign-in revoked counts as signed out until the
   utimesSync(join(google, "sign-in-lost-gmail"), 2000, 2000);
   expect(await lostSignIns(hub)).toEqual([{ app: gmail, since: 2_000_000 }, { app: googleDrive, since: 2_500_000 }]);
   utimesSync(join(google, "auth.json"), 3000, 3000);
+  expect(await lostSignIns(hub)).toHaveLength(2);
+  expect(await signInApp(hub, googleCalendar)).toBe(0);
   for (const app of googleApps) expect(await appSignedIn(hub, app)).toBe(true);
   expect(await lostSignIns(hub)).toEqual([]);
 });
