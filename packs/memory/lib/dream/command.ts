@@ -5,6 +5,7 @@ import { quote, readRole, remoteHedge } from "../../../hub/lib/machine.ts";
 import { analyze, render, type Analyst } from "./analyze.ts";
 import { audit, type Checker } from "./audit.ts";
 import { budget, homeCheckouts, memoryRootIn } from "./budget.ts";
+import { commitChange, commitUsage, parseChange } from "./commit.ts";
 import { publish } from "./publish.ts";
 import { searchSessions } from "./search.ts";
 import { collect, collectedDir, dateOf, type DreamBoxes } from "./collect.ts";
@@ -14,7 +15,7 @@ import { scorecardText } from "./scorecard.ts";
 export { dreamPeers } from "./collect.ts";
 
 export type DreamIo = {
-  home: string; env: Env; self: string; now(): number;
+  home: string; env: Env; self: string; cwd: string; now(): number;
   print(text: string): void; say(line: string): void;
   peers(): string[];
   onPeer(alias: string, command: string): Promise<Result>;
@@ -35,6 +36,8 @@ const usage = `Usage:
   hedge dream budget [<memory checkout>] [--json]       Check the memory size limits; exit 1 when one fails
   hedge dream scorecard [<memory checkout>]             On the hub: print the memory scorecard
   hedge dream logs [--since 7d]                         Print this machine's Dream sessions, for the deep dream
+  hedge dream commit "<Verb>: <name>" --why <text> --prevalence <text> --evidence <text> --topics <text> [--co-author <who>] <path>...
+                                                        Commit the named memories and their index lines in the Dream's format
   hedge dream publish <worktree>                        Push a Dream worktree's commits to main, with the memory sync's guards
   hedge dream search <word>...
                                                         Find the sessions of the last 30 days that name every word`;
@@ -104,6 +107,20 @@ async function publishWorktree(args: string[], io: DreamIo): Promise<number> {
   return answer.code;
 }
 
+async function commitMemory(args: string[], io: DreamIo): Promise<number> {
+  const change = parseChange(args);
+  if (!change) return io.say(commitUsage), 2;
+  try {
+    const answer = await commitChange(change, io.cwd, io.git);
+    if (answer.code) io.say(`Hedge dream: ${answer.message}`);
+    else io.print(answer.message);
+    return answer.code;
+  } catch (error) {
+    io.say(`Hedge dream: ${(error as Error).message}`);
+    return 1;
+  }
+}
+
 async function nightly(args: string[], io: DreamIo): Promise<number> {
   let run: string;
   try {
@@ -144,7 +161,7 @@ export async function dreamCommand(args: string[], io: DreamIo): Promise<number>
     io.print(digestLines(io.home, io.self, parseSince(since, io.now()), io.now(), io.env));
     return 0;
   }
-  if (!command || !["collect", "analyze", "audit", "prepare", "run", "budget", "scorecard", "logs", "publish", "search"].includes(command)) {
+  if (!command || !["collect", "analyze", "audit", "prepare", "run", "budget", "scorecard", "logs", "commit", "publish", "search"].includes(command)) {
     io.print(`${usage}\n`);
     return command === undefined || command === "help" || command === "--help" ? 0 : 2;
   }
@@ -162,6 +179,7 @@ export async function dreamCommand(args: string[], io: DreamIo): Promise<number>
   if (command === "audit") return printRun(command, () => auditRun(positional(rest) ?? join(state, dateOf(io.now())), rest, io), io);
   if (command === "logs") return logs(rest, io);
   if (command === "search") return search(rest, io);
+  if (command === "commit") return commitMemory(rest, io);
   if (command === "publish") return publishWorktree(rest, io);
   const checkout = positional(rest) ?? memoryCheckout(io.home, io.env);
   if (command === "scorecard") {

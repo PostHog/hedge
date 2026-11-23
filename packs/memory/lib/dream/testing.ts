@@ -1,6 +1,6 @@
-import { symlinkSync } from "node:fs";
+import { symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { gitEnv } from "../../../../src/testing/git.ts";
+import { git, gitEnv } from "../../../../src/testing/git.ts";
 import { writeHome } from "../../../hub/lib/testing.ts";
 import type { DreamIo } from "./command.ts";
 
@@ -31,8 +31,36 @@ export function quietIo(home: string, fields: Partial<DreamIo> = {}) {
   const io: DreamIo = {
     home, env: { HEDGE_SETTINGS: JSON.stringify(dreamSettings) }, self: "hub-host", now: () => dreamNow,
     print: (text) => void printed.push(text), say: (text) => void said.push(text),
-    peers: () => [], onPeer: offline, boxes: () => undefined, git: offline, analyst: offline, checker: offline, launch: offline,
+    cwd: home, peers: () => [], onPeer: offline, boxes: () => undefined, git: offline, analyst: offline, checker: offline, launch: offline,
     ...fields,
   };
   return { io, printed, said };
 }
+
+const flakySigner = (timeouts: string) => `#!/bin/sh
+case " $* " in
+  *" -Y sign "*)
+    left=$(cat "${timeouts}")
+    if [ "$left" -gt 0 ]; then
+      echo $((left - 1)) > "${timeouts}"
+      echo "curl: (28) Operation timed out after 10002 milliseconds with 0 bytes received" >&2
+      exit 1
+    fi
+    ;;
+esac
+exec ssh-keygen "$@"
+`;
+
+export function signCommits(repo: string, dir: string) {
+  const key = join(dir, "signer");
+  const counter = join(dir, "timeouts");
+  const program = join(dir, "sign.sh");
+  Bun.spawnSync(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "dream test", "-f", key]);
+  const timeOut = (times: number) => writeFileSync(counter, `${times}\n`);
+  timeOut(0);
+  writeFileSync(program, flakySigner(counter), { mode: 0o755 });
+  for (const [name, value] of [["gpg.format", "ssh"], ["user.signingkey", key], ["gpg.ssh.program", program], ["commit.gpgsign", "true"]]) git(repo, "config", name!, value!);
+  return { timeOut };
+}
+
+export const isSigned = (repo: string, commit: string) => git(repo, "cat-file", "commit", commit).includes("-----BEGIN SSH SIGNATURE-----");

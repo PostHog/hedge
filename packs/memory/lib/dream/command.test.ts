@@ -50,6 +50,7 @@ function io(home: string, fields: Partial<DreamIo> = {}) {
     peers: () => ["devbox-1", "devbox-2"],
     onPeer: async (alias, command) => (peerCalls.push(`${alias}: ${command}`), alias === "devbox-1" ? ok(line(digest())) : { code: 255, stdout: "", stderr: "ssh: connect timed out" }),
     boxes: () => undefined,
+    cwd: home,
     git: async () => ok(),
     analyst: () => analyst,
     checker: () => async () => ({ verdict: "confirmed", reason: "", evidence: "", correction: "" }),
