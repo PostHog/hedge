@@ -24,8 +24,14 @@
   `findings.md` that the pass labels, once and with its own severity. A wait
   that finds the round held before its labels are saved exits 2, as while
   lenses still run.
+- Saved labels waive answers only while `pull-requests.triage` is not `off`
+  and only in rounds recorded as treated and not excluded. Switching the
+  setting to `off` makes `respond`, the review budget, the gate, the judge and
+  the receipt work as without triage, and keeps the `triage-labels.json`
+  files.
 - `hedge proof triage --findings <file> --diff <file>` prints the labels of a
-  findings file as JSON and touches no proof ledger.
+  findings file as JSON and touches no proof ledger. It works with the setting
+  `off`, for shadow runs.
 
 ### Conductor-managed lanes default to T3 subthreads
 
