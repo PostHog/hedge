@@ -142,7 +142,7 @@ test("on a draft, a pending status of the same workflow keeps a missing required
   pr.pullRequestState({ draft: true });
   pr.required("main", [{ context: "CI / scan" }]);
   pr.ci([{ name: "CI / lint", bucket: "pass" }]);
-  pr.statuses([{ context: "CI / build", state: "pending", by: "ci[bot]" }]);
+  pr.statuses([{ context: "ci / build", state: "pending", by: "ci[bot]" }]);
   expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: pending, required not reported yet: CI / scan");
 });
 
