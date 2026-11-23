@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { stat, writeFile } from "node:fs/promises";
+import { rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { Threads } from "../../../src/sdk/index.ts";
 import type { CodexApp } from "./apps.ts";
@@ -20,7 +20,11 @@ const titles = (apps: Named[]) => apps.map((app) => app.title).join(", ");
 export const reAuthLine = (apps: Named[]) =>
   `${titles(apps)} ${apps.length > 1 ? "need" : "needs"} re-auth: on the hub, run: hedge mcp-gateway sign-in ${apps[0]!.name}. When calls still fail after it, reconnect ${titles(apps)} in ChatGPT, Settings, Apps.`;
 
-export const markSignInLost = (codexHome: string) => writeFile(join(codexHome, marker), `${new Date().toISOString()}\n`, { mode: 0o600 });
+export async function markSignInLost(codexHome: string) {
+  if ((await signInLostSince(codexHome)) === undefined) await writeFile(join(codexHome, marker), `${new Date().toISOString()}\n`, { mode: 0o600 });
+}
+
+export const clearSignInLost = (codexHome: string) => rm(join(codexHome, marker), { force: true });
 
 export async function signInLostSince(codexHome: string): Promise<number | undefined> {
   const [lost, auth] = await Promise.all([marker, "auth.json"].map((file) => stat(join(codexHome, file)).catch(() => undefined)));

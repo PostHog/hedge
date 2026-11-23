@@ -1,22 +1,31 @@
 import { afterEach, expect, test } from "bun:test";
+import { utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../../../src/testing/git.ts";
 import { gmail, googleCalendar, slack } from "./apps.ts";
-import { alertLostSignIns, reAuthLine, signInLost, type LostSignIn } from "./sign-in-lost.ts";
+import { alertLostSignIns, clearSignInLost, markSignInLost, reAuthLine, signInLost, signInLostSince } from "./sign-in-lost.ts";
 
 const temp = tempDirs();
 afterEach(() => temp.cleanup());
 
-function watched(lost: LostSignIn[], fails = false) {
-  const started: Array<{ key: string; title: string; prompt: string }> = [];
+function slackHome() {
+  const home = temp.make("slack-codex-");
+  writeFileSync(join(home, "auth.json"), "{}");
+  utimesSync(join(home, "auth.json"), 1000, 1000);
+  const started: Array<{ title: string; prompt: string }> = [];
+  let down = false;
   const logged: string[] = [];
   const watch = {
-    lost: async () => lost,
-    threads: { start: async (def: { key: string; title: string; prompt: string }) => { if (fails) throw new Error("T3 is down"); started.push(def); return { id: `t${started.length}` }; }, send: async () => true },
+    lost: async () => {
+      const since = await signInLostSince(home);
+      return since === undefined ? [] : [{ apps: [slack], since }];
+    },
+    threads: { start: async (def: { title: string; prompt: string }) => { if (down) throw new Error("T3 is down"); started.push(def); return { id: `t${started.length}` }; }, send: async () => true },
     statePath: join(temp.make("sign-in-watch-"), "state", "sign-in-watch.json"),
     log: (line: string) => void logged.push(line),
   };
-  return { watch, started, logged };
+  const signIn = (at: number) => utimesSync(join(home, "auth.json"), at, at);
+  return { home, watch, started, logged, signIn, setDown: (value: boolean) => { down = value; } };
 }
 
 test("the auth errors of a dead sign-in count as lost, and other failures do not", () => {
@@ -29,26 +38,46 @@ test("the re-auth line names the one step that signs every app of the account in
   expect(reAuthLine([gmail, googleCalendar])).toStartWith("Gmail, Google Calendar need re-auth: on the hub, run: hedge mcp-gateway sign-in gmail.");
 });
 
-test("a lost sign-in starts one re-auth thread, and later checks start none until it is lost again", async () => {
-  const lost = [{ apps: [slack], since: 1_700_000_000_000 }];
-  const { watch, started, logged } = watched(lost);
+test("calls that keep failing on one lost sign-in start one re-auth thread, and a sign-in that is lost again after a new one starts another", async () => {
+  const { home, watch, started, logged, signIn } = slackHome();
+  await markSignInLost(home);
   await alertLostSignIns(watch);
+  await markSignInLost(home);
+  await markSignInLost(home);
   await alertLostSignIns(watch);
-  expect(started.map(({ key, title }) => ({ key, title }))).toEqual([{ key: "sign-in-lost-slack-1700000000000", title: "Slack needs re-auth" }]);
+  expect(started.map(({ title }) => title)).toEqual(["Slack needs re-auth"]);
   expect(started[0]!.prompt).toContain("hedge mcp-gateway sign-in slack");
   expect(logged).toEqual([reAuthLine([slack])]);
-  lost[0]!.since = 1_700_000_900_000;
+  signIn(Date.now() / 1000 + 60);
   await alertLostSignIns(watch);
-  expect(started.map(({ key }) => key)).toEqual(["sign-in-lost-slack-1700000000000", "sign-in-lost-slack-1700000900000"]);
+  expect(started).toHaveLength(1);
+  await markSignInLost(home);
+  utimesSync(join(home, "sign-in-lost"), Date.now() / 1000 + 120, Date.now() / 1000 + 120);
+  await alertLostSignIns(watch);
+  expect(started.map(({ title }) => title)).toEqual(["Slack needs re-auth", "Slack needs re-auth"]);
+});
+
+test("a call that works again clears the lost sign-in, so the next loss starts a new thread", async () => {
+  const { home, watch, started } = slackHome();
+  await markSignInLost(home);
+  await alertLostSignIns(watch);
+  await clearSignInLost(home);
+  expect(await signInLostSince(home)).toBeUndefined();
+  await alertLostSignIns(watch);
+  expect(started).toHaveLength(1);
+  await markSignInLost(home);
+  utimesSync(join(home, "sign-in-lost"), Date.now() / 1000 + 60, Date.now() / 1000 + 60);
+  await alertLostSignIns(watch);
+  expect(started).toHaveLength(2);
 });
 
 test("a re-auth thread that T3 could not start is tried again at the next check", async () => {
-  const lost = [{ apps: [slack], since: 5 }];
-  const down = watched(lost, true);
-  await alertLostSignIns(down.watch);
-  expect(down.logged).toEqual([reAuthLine([slack]), "Could not start the re-auth thread: T3 is down"]);
-  const up = watched(lost);
-  up.watch.statePath = down.watch.statePath;
-  await alertLostSignIns(up.watch);
-  expect(up.started.map(({ key }) => key)).toEqual(["sign-in-lost-slack-5"]);
+  const { home, watch, started, logged, setDown } = slackHome();
+  await markSignInLost(home);
+  setDown(true);
+  await alertLostSignIns(watch);
+  expect(logged).toEqual([reAuthLine([slack]), "Could not start the re-auth thread: T3 is down"]);
+  setDown(false);
+  await alertLostSignIns(watch);
+  expect(started.map(({ title }) => title)).toEqual(["Slack needs re-auth"]);
 });

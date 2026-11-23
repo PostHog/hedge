@@ -70,7 +70,7 @@ export default {
       os: "linux",
       when: slack,
       id: "slack-bridge-sign-in",
-      say: "Slack needs re-auth: the Slack bridge has no ChatGPT sign-in, ChatGPT revoked it, or the gateway finds no Slack tools for it. Connect Slack in ChatGPT, Settings, Apps, then sign in with that ChatGPT account.",
+      say: "The Slack bridge has no ChatGPT sign-in, ChatGPT revoked it, or the gateway finds no Slack tools for it. Connect Slack in ChatGPT, Settings, Apps, then sign in with that ChatGPT account.",
       test: async (ctx) => (await upstreams()).appReady(await host(ctx), slackApp),
       repair: { ask: "Sign the Slack bridge in to ChatGPT.", command: "hedge mcp-gateway slack-bridge sign-in", interactive: true },
     });
@@ -103,7 +103,7 @@ export default {
         os: "linux",
         when: workflow,
         id: `${app.name}-sign-in`,
-        say: `${app.title} needs re-auth: it has no ChatGPT sign-in, or ChatGPT revoked it. Sign in with the account whose workspace has ${app.title} connected.`,
+        say: `${app.title} has no ChatGPT sign-in, or ChatGPT revoked it. Sign in with the account whose workspace has ${app.title} connected.`,
         test: async (ctx) => (await upstreams()).appSignedIn(await host(ctx), app),
         repair: { ask: `Sign ${app.title} in to ChatGPT.`, command: `hedge mcp-gateway sign-in ${app.name}`, interactive: true },
       });

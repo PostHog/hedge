@@ -70,9 +70,10 @@ export const appSignedIn = async (hub: Pick<Hub, "home">, app: CodexApp) =>
 
 export async function lostSignIns(hub: Pick<Hub, "home">): Promise<LostSignIn[]> {
   const lost: LostSignIn[] = [];
-  for (const [home, apps] of Map.groupBy(await codexApps(hub.home), (app) => appHome(hub.home, app))) {
+  const apps = await codexApps(hub.home).catch(() => builtInApps);
+  for (const [home, sharing] of Map.groupBy(apps, (app) => appHome(hub.home, app))) {
     const since = await signInLostSince(home);
-    if (since !== undefined) lost.push({ apps, since });
+    if (since !== undefined) lost.push({ apps: sharing, since });
   }
   return lost;
 }

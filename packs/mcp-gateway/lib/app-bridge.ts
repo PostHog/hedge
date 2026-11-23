@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { backendArguments, describe, parseUpstream, slack, toolAllowed, type CodexApp } from "./apps.ts";
-import { markSignInLost, reAuthLine, signInLost } from "./sign-in-lost.ts";
+import { clearSignInLost, markSignInLost, reAuthLine, signInLost } from "./sign-in-lost.ts";
 import { withUnicodeSkinTones } from "./skin-tones.ts";
 
 type Id = number | string;
@@ -102,6 +102,7 @@ async function invoke(id: Id, params: { name: string; arguments?: Record<string,
     thread ??= call("thread/start", { cwd: "/app/data", ephemeral: true }).then((started) => started.thread.id as string, (error) => { thread = undefined; throw error; });
     const args = params.arguments ?? {};
     const { structuredContent, ...answered } = await call("mcpServer/tool/call", { threadId: await thread, server: "codex_apps", tool: `${app.prefix}${params.name}`, arguments: app.skinTones ? withUnicodeSkinTones(args) : args });
+    if (!answered.isError) await clearSignInLost(home!).catch(() => {});
     const result = answered.isError && (await lost(JSON.stringify(answered.content ?? ""))) ? { ...answered, content: [{ type: "text", text: reAuth }, ...(answered.content ?? [])] } : answered;
     return structuredContent == null ? result : { ...result, structuredContent };
   } finally { active = undefined; }

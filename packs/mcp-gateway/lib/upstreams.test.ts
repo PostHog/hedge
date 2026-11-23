@@ -234,6 +234,17 @@ test("a sign-in that the bridge found revoked counts as signed out for every app
   expect(await lostSignIns(hub)).toEqual([]);
 });
 
+test("a declared upstream file that is not an upstream hides no lost sign-in of a built-in app", async () => {
+  const { home, hub } = hubWith({ "broken.json": "{" });
+  const slackHome = join(home, ".local/share/hedge-mcphub/data/slack-codex");
+  mkdirSync(slackHome, { recursive: true });
+  writeFileSync(join(slackHome, "auth.json"), "{}");
+  utimesSync(join(slackHome, "auth.json"), 1000, 1000);
+  writeFileSync(join(slackHome, "sign-in-lost"), "");
+  utimesSync(join(slackHome, "sign-in-lost"), 2000, 2000);
+  expect(await lostSignIns(hub)).toEqual([{ apps: [slack], since: 2_000_000 }]);
+});
+
 test("a sign-in reloads every Google route even when the gateway fails to list one route's tools", async () => {
   const { api, home, hub } = hubWith({});
   for (const app of googleApps) await registerUpstream(hub, app);

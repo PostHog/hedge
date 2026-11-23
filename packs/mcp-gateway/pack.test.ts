@@ -253,7 +253,7 @@ describe("on the hub", () => {
     const { home, hedge } = machine(hubMachine, { workflows: { "slack-bridge": true } });
     writeMcpHubSettings(home);
     const { state } = gatewayServer({ home, servers: ["tickets", "calendar", "slack"], toolCounts: { slack: 21 } });
-    const finding = "To do: Slack needs re-auth: the Slack bridge has no ChatGPT sign-in, ChatGPT revoked it, or the gateway finds no Slack tools for it. Connect Slack in ChatGPT, Settings, Apps, then sign in with that ChatGPT account. Run: hedge mcp-gateway slack-bridge sign-in";
+    const finding = "To do: The Slack bridge has no ChatGPT sign-in, ChatGPT revoked it, or the gateway finds no Slack tools for it. Connect Slack in ChatGPT, Settings, Apps, then sign in with that ChatGPT account. Run: hedge mcp-gateway slack-bridge sign-in";
     expect((await hedge(["doctor"])).output).toContain(finding);
     mkdirSync(join(home, ".local/share/hedge-mcphub/data/slack-codex"), { recursive: true });
     writeFileSync(join(home, ".local/share/hedge-mcphub/data/slack-codex/auth.json"), "{}");

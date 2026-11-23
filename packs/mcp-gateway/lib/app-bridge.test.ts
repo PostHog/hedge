@@ -150,26 +150,34 @@ for (const [runtime, command] of Object.entries(runtimes)) describe.skipIf(!node
     expect(await bridge.exited).toBe(0);
   });
 
-  test("a revoked ChatGPT sign-in reaches the agent as one re-auth step, and marks the sign-in lost for the hub", async () => {
-    const bridge = upstream("", { FAKE_CODEX_REVOKED: "1" });
+  test("a revoked ChatGPT sign-in reaches the agent as one re-auth step, and marks the sign-in lost for the hub until a call works again", async () => {
+    const bridge = upstream();
     await bridge.initialize();
-    const read = await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1" } });
+    const read = await bridge.request("tools/call", { name: "slack_read_thread", arguments: { fail: "revoked" } });
     expect(read.error!.message).toStartWith("Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps. Cause: MCP startup failed: HTTP 401");
     expect(bridge.lostMarked()).toBe(true);
+    await bridge.request("tools/call", { name: "slack_read_thread", arguments: {} });
+    expect(bridge.lostMarked()).toBe(false);
   });
 
-  test("Slack refusing the app's own grant leads the failed result with the re-auth step, and a plain failure stays as Slack wrote it", async () => {
-    const refused = upstream("", { FAKE_CODEX_SLACK_AUTH: "1" });
-    await refused.initialize();
-    expect((await refused.request("tools/call", { name: "slack_read_thread", arguments: {} })).result).toEqual({ isError: true, content: [
+  test("Slack refusing the app's own grant leads the failed result with the re-auth step", async () => {
+    const bridge = upstream();
+    await bridge.initialize();
+    expect((await bridge.request("tools/call", { name: "slack_read_thread", arguments: { fail: "slack-auth" } })).result).toEqual({ isError: true, content: [
       { type: "text", text: "Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps." },
       { type: "text", text: '{"ok":false,"error":"invalid_auth"}' },
     ] });
-    expect(refused.lostMarked()).toBe(true);
-    const failed = upstream("", { FAKE_CODEX_FAILS: "1" });
-    await failed.initialize();
-    expect((await failed.request("tools/call", { name: "slack_read_thread", arguments: {} })).result).toEqual({ isError: true, content: [{ type: "text", text: "channel_not_found" }] });
-    expect(failed.lostMarked()).toBe(false);
+    expect(bridge.lostMarked()).toBe(true);
+  });
+
+  test("a failure that is not about the sign-in stays as Slack wrote it, and keeps a lost sign-in lost", async () => {
+    const bridge = upstream();
+    await bridge.initialize();
+    expect((await bridge.request("tools/call", { name: "slack_read_thread", arguments: { fail: "plain" } })).result).toEqual({ isError: true, content: [{ type: "text", text: "channel_not_found" }] });
+    expect(bridge.lostMarked()).toBe(false);
+    await bridge.request("tools/call", { name: "slack_read_thread", arguments: { fail: "revoked" } });
+    await bridge.request("tools/call", { name: "slack_read_thread", arguments: { fail: "plain" } });
+    expect(bridge.lostMarked()).toBe(true);
   });
 
   test("an approval the Slack app asks for goes to the calling agent, and its answer goes back", async () => {
