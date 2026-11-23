@@ -64,7 +64,7 @@ export async function finalGate(head: ProofIdentity, context: JudgingContext, { 
   const pushedHead = pushedHeadOf(head, run, (read) => { pull ??= read; });
   const files = await proofFiles(home, head);
   const checked = await proofGate(home, head, {
-    landed, cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)), ci: () => ciOf(home, head, run, now?.() ?? new Date()),
+    landed, cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)), ci: () => ciOf(home, head, run, now?.() ?? new Date(), env),
     pushedHead, ledger: hubLedger(home, env, ssh), now: now?.(), devPull: devPullOf(run),
   });
   const judged: Judged = checked.code === 0 ? await judgeHead(head, checked, context) : { code: checked.code, lines: [], covered: "", judge: { state: "skipped", lines: [] }, reason: checked.failure };
@@ -111,12 +111,12 @@ const pushedHeadOf = (head: ProofIdentity, run: Run, seen: (pull: PullRequest) =
 export async function currentSummary(ref: PrRef, pull: PullRequest, ledger: Ledger, context: GateContext): Promise<ProofSummary | undefined> {
   const saved = await savedGate(context.home, ref, pull, ledger);
   if (!saved) return undefined;
-  const { home, run, now } = context;
+  const { home, env, run, now } = context;
   const head = { ...ref, commit: pull.head };
   let readAsSaved = true;
   const live = await proofGate(home, head, {
     landed: pull.state === "merged", cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)),
-    ci: () => ciOf(home, head, run, now?.() ?? new Date()),
+    ci: () => ciOf(home, head, run, now?.() ?? new Date(), env),
     pushedHead: pushedHeadOf(head, run, (read) => { readAsSaved &&= JSON.stringify(keyOf(read, saved.key.landed, saved.key.fingerprint)) === JSON.stringify(saved.key); }),
     ledger, now: now?.(), devPull: devPullOf(run),
   });
@@ -128,10 +128,10 @@ export async function currentSummary(ref: PrRef, pull: PullRequest, ledger: Ledg
 export async function receiptSummary(head: ProofIdentity, pull: PullRequest, ledger: Ledger, context: GateContext): Promise<{ summary: ProofSummary; gated: boolean }> {
   const current = await currentSummary(head, pull, ledger, context);
   if (current) return { summary: current, gated: true };
-  const { home, run, now } = context;
+  const { home, env, run, now } = context;
   const live = await proofGate(home, head, {
     landed: pull.state === "merged", cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)),
-    ci: () => ciOf(home, head, run, now?.() ?? new Date()), pushedHead: pushedHeadOf(head, run), ledger, now: now?.(), devPull: devPullOf(run),
+    ci: () => ciOf(home, head, run, now?.() ?? new Date(), env), pushedHead: pushedHeadOf(head, run), ledger, now: now?.(), devPull: devPullOf(run),
   });
   return { summary: { ...live.proofSummary, code: live.code, judge: { state: "skipped", lines: [] } }, gated: false };
 }

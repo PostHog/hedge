@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { checkout, cleanFixtures, reviewHead } from "./proof-testing.ts";
+import { checkout, cleanFixtures, reviewHead, settings } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
@@ -283,6 +283,73 @@ test("on a draft, a check from another app than the pinned one neither passes no
 
   pr.ci([{ name: "CI / lint", bucket: "pass", app: 9 }]);
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: CI / test");
+});
+
+async function listedDraft(listing: unknown = "example/product=Backend / Test results") {
+  const { pr } = await reviewed();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.draftSkippedChecks": listing });
+  pr.pullRequestState({ draft: true });
+  pr.required("main", [{ context: "Backend / Test results", integration_id: 7 }, { context: "Backend / Gate" }]);
+  return pr;
+}
+
+const listedLine = "withheld from drafts, required once ready: Backend / Test results (pull-requests.draftSkippedChecks lists it)";
+
+test("on a draft, a check that pull-requests.draftSkippedChecks lists is not required while it has not reported, and the other required checks still decide", async () => {
+  const pr = await listedDraft();
+  pr.ci([{ name: "Backend / Gate", bucket: "pending", app: 9 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe(`ci: pending, required waiting on: Backend / Gate; ${listedLine}`);
+
+  pr.ci([{ name: "Backend / Gate", bucket: "fail", app: 9 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith(`ci: red, required failing: Backend / Gate; ${listedLine}.`);
+
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }]);
+  const green = await pr.hedge("gate");
+  expect(green.code).toBe(0);
+  expect(ciLine(green.output)).toBe(`ci: green, 1 required check(s) pass; ${listedLine}`);
+});
+
+test("on a draft, a listed check that its pinned app posted counts", async () => {
+  const pr = await listedDraft();
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }, { name: "Backend / Test results", bucket: "fail", app: 7 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: red, required failing: Backend / Test results");
+
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }, { name: "Backend / Test results", bucket: "pass", app: 7 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: green, 2 required check(s) pass");
+});
+
+test("on a draft, a listed check still waits when another app posted a check of its name", async () => {
+  const pr = await listedDraft();
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }, { name: "Backend / Test results", bucket: "pass", app: 9 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results");
+});
+
+test("on a draft, a listed check still waits when a check of its name in other letter case reported", async () => {
+  const pr = await listedDraft();
+  pr.githubApp("product", 7);
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }]);
+  pr.statuses([{ context: "Backend / Test Results", state: "failure", by: "product[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: pending, required not reported yet: Backend / Test results");
+});
+
+test("a ready PR still needs a listed check", async () => {
+  const pr = await listedDraft();
+  pr.pullRequestState({ draft: false });
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results");
+});
+
+test("a ready PR does not read pull-requests.draftSkippedChecks, so a value of the wrong type leaves its CI known", async () => {
+  const pr = await listedDraft(5);
+  pr.pullRequestState({ draft: false });
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }, { name: "Backend / Test results", bucket: "pass", app: 7 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: green, 2 required check(s) pass");
+});
+
+test("on a draft, a check is not withheld for another repository's listing", async () => {
+  const pr = await listedDraft("example/other=Backend / Test results");
+  pr.ci([{ name: "Backend / Gate", bucket: "pass", app: 9 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: Backend / Test results");
 });
 
 test("the newest run of a check from each app decides: a rerun clears an older failure, and another app's pass hides no failure", async () => {

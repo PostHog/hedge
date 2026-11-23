@@ -437,7 +437,10 @@ required checks of the base branch, from its rulesets and branch protection, dec
 required. A required check that has not reported counts as still running, since GitHub can start it after other
 checks finished; the CI line then names the checks that failed, required or not. A stacked PR whose base requires nothing is held to the default branch's required checks. When no branch
 requires any, every check counts. On a draft, a required check named "<workflow> / <job>" that never reported counts
-as withheld from drafts when its workflow reported other checks on the commit and all of them passed. CI is unknown
+as withheld from drafts when its workflow reported other checks on the commit and all of them passed. For a check
+pinned to an app, those are the app's own checks, with at least one check run. On a draft, a required check that
+pull-requests.draftSkippedChecks lists for the repository, as owner/name=check pairs, counts as withheld while no
+check of its name reported; once its own app posts it, it counts. A ready PR needs it. CI is unknown
 when GitHub does not answer for the rulesets or branch protection. A clean merge of the PR's base carries the review and the evidence of
 its other parent forward. The review needs a finished --lens panel round on the PR, and HEAD read by a panel round or
 by a review that finished after one, such as a final read; single-reviewer rounds alone never count. The first round
@@ -1202,7 +1205,7 @@ async function untilCiFinishes(head: ProofIdentity, context: CommandContext, min
   while (now() < deadline) {
     await sleep(Math.min(ciPollInterval, deadline - now()));
     if (now() >= deadline) break;
-    const ci = ciOf(context.home, head, context.run, new Date(now()));
+    const ci = ciOf(context.home, head, context.run, new Date(now()), context.env);
     if (ci.state === "unknown") return { ranOut: false, failedRead: ci.detail };
     if (ci.state !== "pending") return { ranOut: false };
   }

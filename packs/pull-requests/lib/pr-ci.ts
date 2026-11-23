@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { optionalStringSetting } from "../../base/lib/settings.ts";
 import type { CiResult, ProofIdentity } from "./proof.ts";
 
 export type Run = (command: string[]) => { code: number; stdout: string; stderr: string };
@@ -16,7 +17,7 @@ export type PullRequest = { title: string; body: string; draft: boolean; state: 
 
 type CheckRun = { id: number; name: string; status: string; conclusion: string | null; app?: number | null };
 type CommitStatus = { context: string; state: string; creator?: { login?: string; type?: string } | null };
-type RequiredCheck = { context: string; appId?: number };
+type RequiredCheck = { context: string; appId?: number; postedOnceReady?: true };
 type Outcome = "pass" | "fail" | "pending";
 type Entry = { name: string; outcome: Outcome; appId?: number; status?: true; botLogin?: string };
 
@@ -190,21 +191,22 @@ function notRequired(entries: Entry[], { countRunning = true } = {}) {
 
 function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boolean): CiResult {
   const counted = new Set<Entry>();
-  const [failing, pending, missing, withheld]: string[][] = [[], [], [], []];
+  const [failing, pending, missing, withheld, listed]: string[][] = [[], [], [], [], []];
   for (const check of required) {
     const named = entries.filter((entry) => entry.name === check.context);
     const own = named.filter((entry) => reportedBy(check, entry));
     const matches = own.some((entry) => entry.status) ? [...new Set([...own, ...named.filter((entry) => !entry.status)])] : own;
     matches.forEach((entry) => counted.add(entry));
-    if (!matches.length) { (draft && withheldFromDraft(check, entries) ? withheld : missing).push(check.context); continue; }
+    if (!matches.length) { (!draft ? missing : check.postedOnceReady && !entries.some((entry) => entry.name.toLowerCase() === check.context.toLowerCase()) ? listed : withheldFromDraft(check, entries) ? withheld : missing).push(check.context); continue; }
     const worst = matches.reduce((a, b) => rank[b.outcome] > rank[a.outcome] ? b : a).outcome;
     if (worst === "fail") failing.push(check.context);
     else if (worst === "pending") pending.push(check.context);
   }
   const verdict: CiResult = failing.length ? { state: "red", detail: `required failing: ${listOf(failing)}` }
     : pending.length || missing.length ? { state: "pending", detail: [pending.length ? `required waiting on: ${listOf(pending)}` : "", missing.length ? `required not reported yet: ${listOf(missing)}` : ""].filter(Boolean).join("; ") }
-    : { state: "green", detail: `${required.length - withheld.length} required check(s) pass` };
+    : { state: "green", detail: `${required.length - withheld.length - listed.length} required check(s) pass` };
   if (withheld.length) verdict.detail += `; withheld from drafts, required once ready: ${listOf(withheld)} (its workflow finished without posting it)`;
+  if (listed.length) verdict.detail += `; withheld from drafts, required once ready: ${listOf(listed)} (pull-requests.draftSkippedChecks lists it)`;
   verdict.detail += notRequired(entries.filter((entry) => !counted.has(entry)), { countRunning: verdict.state === "green" });
   return verdict;
 }
@@ -212,7 +214,15 @@ function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boo
 const sourceOf = (entry: Entry) => [entry.status ? "status" : "", entry.appId === undefined ? "" : `app ${entry.appId}`].filter(Boolean).join(", ");
 const checksOf = (entries: Entry[]) => [...new Set(entries.map((entry) => `${entry.name}${sourceOf(entry) ? ` (${sourceOf(entry)})` : ""}: ${entry.outcome}`))].sort();
 
-export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date): CiResult {
+function postedOnceReady(repository: string, env: Record<string, string | undefined>) {
+  const pairs = (optionalStringSetting("pull-requests.draftSkippedChecks", env) ?? "").split(",").map((pair) => pair.trim()).filter(Boolean);
+  return new Set(pairs.flatMap((pair) => {
+    const split = pair.indexOf("=");
+    return split > 0 && pair.slice(0, split).trim().toLowerCase() === repository.toLowerCase() ? [pair.slice(split + 1).trim()] : [];
+  }));
+}
+
+export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date, env: Record<string, string | undefined>): CiResult {
   try {
     const pr = readPullRequest(identity, run);
     let required = requiredChecks(home, identity.repository, pr.base, run, now);
@@ -220,6 +230,8 @@ export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date)
     if (stacked) required = requiredChecks(home, identity.repository, pr.defaultBranch!, run, now);
     const entries = entriesOf(identity, run);
     if (!required.length) return { ...everyCheck(entries, identity.commit), checks: checksOf(entries) };
+    const readyOnly = pr.draft ? postedOnceReady(identity.repository, env) : new Set<string>();
+    required = required.map((check) => readyOnly.has(check.context) ? { ...check, postedOnceReady: true as const } : check);
     const counted = withPinnedStatuses(entries, required, pr.draft, run);
     const verdict = requiredVerdict(counted, required, pr.draft);
     return { ...stacked ? { ...verdict, detail: `${verdict.detail} (required by ${pr.defaultBranch}; the base ${pr.base} requires none)` } : verdict, checks: checksOf(counted) };

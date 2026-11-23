@@ -110,6 +110,13 @@
       "ask": "never"
     },
     {
+      "key": "pull-requests.draftSkippedChecks",
+      "question": "Which required checks does a repository's CI post only once a pull request is ready, as owner/name=check pairs separated by commas? On a draft, the gate does not wait for such a check, and counts it once it is posted. A ready pull request needs it.",
+      "type": "string",
+      "optional": true,
+      "ask": "never"
+    },
+    {
       "key": "pull-requests.criticalPathFiles",
       "question": "Which file lists the critical paths of each repository, as owner/name=path pairs separated by commas? A path is relative to your home folder. The judge fails a merge-risk Tier line that is not critical when the diff touches a path on the list.",
       "type": "string",
