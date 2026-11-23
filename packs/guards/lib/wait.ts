@@ -185,8 +185,8 @@ function problemWith(id: string, seen: Seen): string | undefined {
 export function backgroundWaitRisk(call: StatusCall): string | undefined {
   const input = call.tool_input ?? {};
   const { taskIds } = input;
-  if (input.waiting === false) return undefined;
   if (!Array.isArray(taskIds) || taskIds.length === 0 || taskIds.some((id) => typeof id !== "string")) return fieldReason;
+  if (input.waiting === false) return undefined;
   const seen = seenIn(call.transcript_path);
   const problems = (taskIds as string[]).map((id) => problemWith(id, seen));
   if (problems.some((problem) => problem === undefined)) return undefined;

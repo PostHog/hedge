@@ -172,15 +172,12 @@ function reachOf(program: Program, start: number): Reach {
 
 const stopsShell = ({ bare, rawPrefix, stdin, redirects, scope }: Command) => bare.join(" ") === "exit" && rawPrefix.length === 0 && stdin === undefined && redirects.length === 0 && parens(scope) === 0;
 
-const plainStage = (command: Command, scope: Command["scope"]) => command.scope === scope && !closers.has(command.name);
-const plainStages = (commands: Command[], first: number, last: number) => commands.slice(first, last + 1).every((command) => plainStage(command, commands[first].scope));
 const pipelineStart = (commands: Command[], index: number): number => (index > 0 && commands[index - 1].after === "|" ? pipelineStart(commands, index - 1) : index);
 function exitFix(commands: Command[], start: number, pipeEnd: number): Fix | undefined {
   const { after, afterAt } = commands[pipeEnd];
   if (after === undefined || afterAt === undefined || !(separators.has(after) || after === "&&")) return undefined;
-  const first = pipelineStart(commands, start);
-  if (!plainStages(commands, first, pipeEnd)) return undefined;
-  const before = commands[first - 1];
+  const before = commands[start - 1];
+  if (start !== pipeEnd || before?.after === "|") return undefined;
   if (!["&&", "||"].includes(before?.after ?? "")) return { exitAt: afterAt };
   return before.afterAt === undefined ? undefined : { exitAt: afterAt, groupAt: before.afterAt + 2 };
 }

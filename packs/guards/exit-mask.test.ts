@@ -401,8 +401,6 @@ describe("the exit-status mask guard", () => {
     ["cd . && git commit -F - <<EOF; echo done\nmsg\nEOF", "cd . && { git commit -F - <<EOF || exit; }; echo done\nmsg\nEOF"],
     ["cd . && git push # note\necho done", "cd . && { git push || exit; } # note\necho done"],
     ["cd . &&git push;echo tight", "cd . && { git push || exit; };echo tight"],
-    ["printf 'msg' | git commit -F -; echo done", "printf 'msg' | git commit -F - || exit; echo done"],
-    ["cd . && printf 'msg' | git commit -F -; echo done", "cd . && { printf 'msg' | git commit -F - || exit; }; echo done"],
     ["git push; sleep 0 &", "git push || exit; sleep 0 &"],
     ["git commit -F - <<'EOF'\nline one \\\nEOF\ngit push", "git commit -F - <<'EOF' || exit\nline one \\\nEOF\ngit push"],
     ["git push; true || echo extra", "git push || exit; true || echo extra"],
@@ -515,6 +513,10 @@ describe("the exit-status mask guard", () => {
     "cd x && { git push || exit; command }; } & echo done",
     "{ git push || exit; command }; } | cat",
     "cd x && { git push || exit; FOO=1 }; } | cat; echo done",
+    "printf 'msg' | git commit -F -; echo done",
+    "cd . && printf 'msg' | git commit -F -; echo done",
+    "set -o pipefail; false | git commit -m x; false || echo cleanup",
+    "set -o pipefail; git push | cat; echo done",
     "git push | grep -q needle | cat",
     "git push | set -o 2>&1",
     "git push | tee push.log",
@@ -570,7 +572,6 @@ describe("the exit-status mask guard", () => {
       ["git push -q origin HEAD:main; git log -1 --format=%s", "git push -q origin HEAD:main || exit; git log -1 --format=%s", "first"],
       ["test -d . && cd . || exit && git push -q origin HEAD:main; echo cleanup", "test -d . && cd . || exit && { git push -q origin HEAD:main || exit; }; echo cleanup", "cleanup"],
       ["git add -A && git commit -q -m staged; git push -q origin HEAD:main; git show --format=%s --name-only HEAD", "git add -A && { git commit -q -m staged || exit; }; git push -q origin HEAD:main || exit; git show --format=%s --name-only HEAD", "staged\n\nnotes.txt"],
-      ["printf 'piped message' | git commit -q --allow-empty -F -; git push -q origin HEAD:main; git log -1 --format=%s", "printf 'piped message' | git commit -q --allow-empty -F - || exit; git push -q origin HEAD:main || exit; git log -1 --format=%s", "piped message"],
     ])("runs the same commands as the original after an accepted push, and stops after a rejected one: %s", (command, rewrite, printed) => {
       expect(exitMaskRewrite(command)).toBe(rewrite);
       const accepted = pushRepo(true)(rewrite);
@@ -600,13 +601,13 @@ describe("the exit-status mask guard", () => {
       expect(result).toMatchObject({ status: 0, stdout: "first\ndone\n" });
     });
 
-    test("commits in the repository a cd before it names, with the piped message", () => {
-      const command = "cd work && printf 'piped message' | git commit -q --allow-empty -F -; git push -q origin HEAD:main; echo cleanup";
-      const rewrite = "cd work && { printf 'piped message' | git commit -q --allow-empty -F - || exit; }; git push -q origin HEAD:main || exit; echo cleanup";
+    test("commits in the repository a cd before it names", () => {
+      const command = "cd work && git commit -q --allow-empty -m 'cd message'; git push -q origin HEAD:main; echo cleanup";
+      const rewrite = "cd work && { git commit -q --allow-empty -m 'cd message' || exit; }; git push -q origin HEAD:main || exit; echo cleanup";
       expect(exitMaskRewrite(command)).toBe(rewrite);
       const accepted = pushRepo(true)(rewrite, ".");
       expect(accepted).toEqual(pushRepo(true)(command, "."));
-      expect(accepted.remote).toBe("piped message\n");
+      expect(accepted.remote).toBe("cd message\n");
     });
   });
 

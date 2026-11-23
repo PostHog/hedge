@@ -56,7 +56,7 @@ describe("the background wait check", () => {
     expect(waitOn({ taskIds: [running] }, join(temp.make("missing-"), "none.jsonl"))).toBeUndefined();
   });
 
-  test.each([{ taskId: running }, { taskIds: running }, { taskId: [running] }, { taskIds: [running, 7] }, {}, { taskIds: [] }])("refuses a call that does not pass taskIds as a list of IDs: %j", (input) => {
+  test.each([{ taskId: running }, { taskIds: running }, { taskId: [running] }, { taskIds: [running, 7] }, {}, { taskIds: [] }, { waiting: false }, { taskIds: [], waiting: false }])("refuses a call that does not pass taskIds as a list of IDs: %j", (input) => {
     expect(reason(input)).toContain('`{"taskIds": ["<id>"]}`');
   });
 
@@ -152,7 +152,7 @@ describe("the background wait check", () => {
     expect(waitOn({ taskIds: [running, finished, subagent] })).toBeUndefined();
   });
 
-  test.each([{ taskIds: [finished, subagent], waiting: false }, { waiting: false }, { taskIds: [], waiting: false }])("lets a call that clears the wait through, whatever the IDs: %j", (input) => {
+  test.each([{ taskIds: [finished, subagent], waiting: false }, { taskIds: [running], waiting: false }])("lets a call that clears the wait through, whatever the IDs: %j", (input) => {
     expect(waitOn(input)).toBeUndefined();
   });
 
