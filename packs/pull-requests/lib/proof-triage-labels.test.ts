@@ -397,13 +397,26 @@ test("a labels file of another shape counts every finding as needing an answer i
 });
 
 const advisoryTwo = { finding: 2, severity: "major", label: "advisory", reason: "no trigger" };
+const everyFinding = (second: object) => [{ finding: 1, severity: "blocker", label: "needs-answer", reason: "a trigger" }, second, { finding: 4, severity: "none", label: "needs-answer", reason: "the finding states no severity" }];
+
+test("a saved labels file that labels each finding with its own severity waives the advisory answer", async () => {
+  const pr = await treated();
+  fakeModel(pr, "TRIAGE", adviseSecond);
+  await pr.hedge("review", "--single");
+  writeFileSync(join(reviewDirectory(pr), "triage-labels.json"), JSON.stringify({ ok: true, labels: everyFinding(advisoryTwo) }));
+
+  expect((await respond(pr, "1. fixed in abc1234: greets\n4. rejected: fine\n6. fixed in abc1234: test\n")).code).toBe(0);
+});
 
 test.each([
-  ["a failed pass", { ok: false, labels: [advisoryTwo] }],
-  ["an unknown severity", { ok: true, labels: [{ ...advisoryTwo, severity: "typo" }] }],
-  ["no reason", { ok: true, labels: [{ finding: 2, severity: "major", label: "advisory" }] }],
-  ["a blank reason", { ok: true, labels: [{ ...advisoryTwo, reason: " " }] }],
-  ["a finding labelled both ways", { ok: true, labels: [{ ...advisoryTwo, label: "needs-answer" }, advisoryTwo] }],
+  ["a failed pass", { ok: false, labels: everyFinding(advisoryTwo) }],
+  ["an unknown severity", { ok: true, labels: everyFinding({ ...advisoryTwo, severity: "typo" }) }],
+  ["no reason", { ok: true, labels: everyFinding({ finding: 2, severity: "major", label: "advisory" }) }],
+  ["a blank reason", { ok: true, labels: everyFinding({ ...advisoryTwo, reason: " " }) }],
+  ["a finding labelled both ways", { ok: true, labels: [...everyFinding(advisoryTwo), { ...advisoryTwo, label: "needs-answer" }] }],
+  ["a file that leaves out the other findings", { ok: true, labels: [advisoryTwo] }],
+  ["a severity the finding does not state", { ok: true, labels: everyFinding({ ...advisoryTwo, severity: "blocker" }) }],
+  ["a label for a finding the pass does not label", { ok: true, labels: [...everyFinding(advisoryTwo), { ...advisoryTwo, finding: 3 }] }],
 ])("a saved advisory label from %s waives no answer in respond", async (_case, saved) => {
   const pr = await treated();
   fakeModel(pr, "TRIAGE", adviseSecond);
@@ -687,12 +700,12 @@ test.each([false, "false"])("a wait on a round whose saved pass has ok %p tells 
   const pr = await treated();
   fakeModel(pr, "TRIAGE", adviseSecond);
   await panelRound(pr);
-  writeFileSync(join(reviewDirectory(pr), "triage-labels.json"), JSON.stringify({ ok, labels: [{ finding: 1, severity: "major", label: "needs-answer", reason: "a trigger" }, advisoryTwo] }));
+  writeFileSync(join(reviewDirectory(pr), "triage-labels.json"), JSON.stringify({ ok, labels: everyFinding(advisoryTwo) }));
 
   const wait = await pr.hedge("review", "--wait", "--round", "1");
 
   expect(wait.output).not.toContain("Advisory");
-  expect(wait.output).toContain("Needs an answer: findings 1, 2");
+  expect(wait.output).toContain("Needs an answer: findings 1, 2, 4");
 });
 
 test("the proof receipt lists each advisory finding with its first severity", async () => {

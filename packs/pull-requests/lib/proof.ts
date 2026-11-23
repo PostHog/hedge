@@ -806,10 +806,14 @@ const isFindingLabel = (item: unknown): item is FindingLabel => {
   return Number.isInteger(finding) && (severity === "blocker" || severity === "major" || severity === "none") && (label === "advisory" || label === "needs-answer") && typeof reason === "string" && reason.trim() !== "";
 };
 
+const labelsEachCandidate = (labels: FindingLabel[], candidates: LabelCandidate[]) =>
+  labels.length === candidates.length && candidates.every(({ finding, severity }) => labels.filter((label) => label.finding === finding && label.severity === severity).length === 1);
+
 export async function readLabels<T extends { ok?: boolean; labels: FindingLabel[] }>(directory: string) {
   const saved = await readJson<unknown>(labelsPath(directory), undefined).catch(() => undefined);
   const labels = (saved as { labels?: unknown } | undefined)?.labels;
-  return Array.isArray(labels) && labels.every(isFindingLabel) && new Set(labels.map(({ finding }) => finding)).size === labels.length ? saved as T : undefined;
+  const findings = await readFile(join(directory, "findings.md"), "utf8").catch(() => undefined);
+  return findings !== undefined && Array.isArray(labels) && labels.every(isFindingLabel) && labelsEachCandidate(labels, labelCandidates(findings)) ? saved as T : undefined;
 }
 
 export async function advisoryLabels(directory: string) {
