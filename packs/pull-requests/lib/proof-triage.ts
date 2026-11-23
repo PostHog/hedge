@@ -12,7 +12,8 @@ export type TriageSetting = (typeof triageSettings)[number];
 export type Arm = "treated" | "control";
 export type ReviewPath = "strict" | "standard" | "excluded";
 export type PathOf = { path: ReviewPath; why: string[] };
-export type TriageMark = { arm: Arm } & PathOf;
+export type Assignment = { setting: TriageSetting; arm: Arm };
+export type TriageMark = Assignment & PathOf;
 
 export const dangerAreas: { area: string; pattern: RegExp }[] = [
   { area: "guards", pattern: /guard/i },
@@ -53,7 +54,11 @@ export function pathOf({ body, changedFiles, criticalPaths }: PathInput): PathOf
 const pathLike = /[/.*]/;
 const listMarker = /^\s*(?:[-*+]|\d+[.)])\s+/;
 const rootless = (path: string) => path.trim().replace(/^\.?\//, "");
-const cleanEntry = (word: string) => rootless(word.replace(/^[\s"'(\[]+|[\s"'),:;\]]+$/g, ""));
+const cleanEntries = (word: string) => {
+  const trimmed = word.replace(/^[\s"']+|[\s"',:;]+$/g, "");
+  const unwrapped = trimmed.replace(/^\(+|\)+$/g, "");
+  return [trimmed, unwrapped, unwrapped.replace(/^\[+|\]+$/g, "")].map(rootless);
+};
 
 function criticalEntries(list: string) {
   const lines = list.split("\n").filter((line) => !/^\s*#/.test(line)).map((line) => line.replace(listMarker, ""));
@@ -62,7 +67,7 @@ function criticalEntries(list: string) {
   const cells = unquoted.flatMap((line) => line.includes("|") ? line.split("|").filter((cell) => !/^\s*:?-+:?\s*$/.test(cell)) : []);
   const words = unquoted.flatMap((line) => line.split(/[\s|]+/)).filter((word) => pathLike.test(word));
   const firstWords = unquoted.map((line) => line.trim().split(/\s+/)[0] ?? "");
-  return [...quoted.map(rootless), ...[...cells, ...words, ...firstWords].map(cleanEntry)].filter(Boolean);
+  return [...quoted.map(rootless), ...[...cells, ...words, ...firstWords].flatMap(cleanEntries)].filter(Boolean);
 }
 
 function matchesEntry(file: string, entry: string) {
@@ -82,19 +87,20 @@ const inDangerAreas = (files: string[]) =>
 const armDirectory = (home: string, identity: ProofIdentity) => prDirectory(home, { ...identity, repository: identity.repository.toLowerCase() });
 const prTriagePath = (home: string, identity: ProofIdentity) => join(armDirectory(home, identity), "triage.json");
 
-export async function armFor(home: string, identity: ProofIdentity, setting: TriageSetting): Promise<Arm> {
-  const saved = await readJson<{ arm?: Arm } | undefined>(prTriagePath(home, identity), undefined);
-  return saved?.arm ?? await firstReservedArm(home, identity) ?? armOf(setting, identity.repository, identity.pr);
+export async function assignmentOf(home: string, identity: ProofIdentity, setting: TriageSetting): Promise<Assignment> {
+  const saved = await readJson<Assignment | undefined>(prTriagePath(home, identity), undefined);
+  return saved ?? await firstReserved(home, identity) ?? { setting, arm: armOf(setting, identity.repository, identity.pr) };
 }
 
-async function firstReservedArm(home: string, identity: ProofIdentity) {
+async function firstReserved(home: string, identity: ProofIdentity): Promise<Assignment | undefined> {
   const reviews = join(prDirectory(home, identity), "reviews");
-  const names = await readdir(reviews).catch(() => []);
+  const names = (await readdir(reviews).catch(() => [])).filter((name) => !name.startsWith("."));
   const rounds = await Promise.all(names.map((name) => readJson<{ startedAt?: string; triage?: TriageMark } | undefined>(join(reviews, name, "round.json"), undefined).catch(() => undefined)));
-  return rounds.filter((round) => round?.triage).sort((a, b) => (a!.startedAt ?? "").localeCompare(b!.startedAt ?? ""))[0]?.triage?.arm;
+  const first = rounds.filter((round) => round?.triage).sort((a, b) => (a!.startedAt ?? "").localeCompare(b!.startedAt ?? ""))[0]?.triage;
+  return first && { setting: first.setting, arm: first.arm };
 }
 
-export async function saveArm(home: string, identity: ProofIdentity, setting: TriageSetting, arm: Arm) {
+export async function saveAssignment(home: string, identity: ProofIdentity, { setting, arm }: Assignment) {
   const directory = armDirectory(home, identity);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const temporary = join(directory, `.triage-${crypto.randomUUID()}`);

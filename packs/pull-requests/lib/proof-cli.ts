@@ -25,7 +25,7 @@ import { quietCommitIn } from "./proof-delta.ts";
 import { baseRefs, baseTip, changedFiles, cleanBaseMerge, mergeBase, pullRequestDetails, remotesOf, reviewTier, tierCeiling, tierLenses, topLevel, type ReviewTier } from "./proof-checkout.ts";
 import { arbiterOf, finalGate, reviewLimit, type FinalGate } from "./proof-gate.ts";
 import { anchorCheck } from "./finding-anchors.ts";
-import { armFor, pathOf, readTriage, saveArm, triageSetting, type TriageSetting } from "./proof-triage.ts";
+import { assignmentOf, pathOf, readTriage, saveAssignment, triageSetting, type TriageSetting } from "./proof-triage.ts";
 import { readCriticalPaths } from "./proof-judge.ts";
 import { reviewRules } from "./review-rules.ts";
 import { recordSanity, requireSanity } from "./proof-sanity.ts";
@@ -727,8 +727,7 @@ async function reserveRound(options: Map<string, string>, head: ProofIdentity, c
   const lastRead = scope === "final" && (options.get("--phase") ?? "review") === "review";
   const from = lastRead ? await panelCommit(context.home, head) ?? base : rangeStart(scope, base, head, context.run);
   const { decision, ...permit } = await decisionOf(options, head, context);
-  const setting = triageSetting(context.env);
-  const triage = await triageMark(head, setting, pull?.body, context);
+  const triage = await triageMark(head, triageSetting(context.env), pull?.body, context);
   const tier = reviewTier(head, context.run, pull?.body);
   if (tier.name === "read" && capturedBy === "hedge" && !panel && !decision && !await panelCommit(context.home, head)) throw new Error("A PR of the Read tier gets one read, and it is the panel: run hedge proof review, which runs its combined lens");
   const firstPanel = panel && !await panelCommit(context.home, head);
@@ -737,14 +736,14 @@ async function reserveRound(options: Map<string, string>, head: ProofIdentity, c
   const dropUnanswered = (directory: string) => roundStep(directory, context, () => dropFinalRead(directory, head, now()));
   const emptyRange = () => from !== undefined && rangeIsEmpty(context.run, from, head.commit, mergeBase(head, context.run));
   const reserved = await startReview(context.home, head, { dropUnanswered, emptyRange, triage, onHistory: onHistoryOf(head, context.run), opening: async () => panel && !await panelCommit(context.home, head), sanity: () => requireSanity(context.home, head, context.run, () => bloatJudge(head, context)), scope, base, from, ...isCommitSha(pull?.baseSha) ? { forkBase: pull.baseSha } : {}, ...permit, limits, decision, phase: options.get("--phase"), cleanBaseMerge: cleanBaseMerge(head, context.run), quietCommit: quietCommitIn(context.run, () => baseRefs(head, context.run)), capturedBy, lock: async (directory) => lockNewRound(directory, await context.lock()), lockBudget: async (reviews, step) => withRoundLock(reviews, await context.lock(), step), now });
-  if (triage) await saveArm(context.home, head, setting, triage.arm);
+  if (triage) await saveAssignment(context.home, head, triage);
   return { ...reserved, scope, base, from, phase: options.get("--phase") };
 }
 
 async function triageMark(head: ProofIdentity, setting: TriageSetting, body: string | undefined, { home, env, run }: CommandContext) {
   if (setting === "off") return undefined;
   const criticalPaths = await readCriticalPaths(home, head.repository, env).catch((error: Error) => error);
-  return { arm: await armFor(home, head, setting), ...pathOf({ body, changedFiles: changedFiles(head, run), criticalPaths }) };
+  return { ...await assignmentOf(home, head, setting), ...pathOf({ body, changedFiles: changedFiles(head, run), criticalPaths }) };
 }
 
 async function unrecordedRound(options: Map<string, string>, head: ProofIdentity, context: CommandContext) {
