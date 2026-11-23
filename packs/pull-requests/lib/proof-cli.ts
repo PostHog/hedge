@@ -744,7 +744,7 @@ async function reviewBudget(head: ProofIdentity, body: string | undefined, ceili
   const tier = reviewTier(head, context.run, body);
   const uncapped = triage && (body === undefined ? "the pull request could not be read" : changedFiles(head, context.run) === undefined ? "its changed files could not be read" : undefined);
   const treated = uncapped ? undefined : treatedBudget(triage, ceiling);
-  const budget = uncapped ? ceiling : treated ?? tierCeiling(tier, ceiling);
+  const budget = treated ?? tierCeiling(tier, ceiling);
   return { triage, tier, treated, budget, record: { budget, ...uncapped ? { uncapped } : {} } };
 }
 
