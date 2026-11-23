@@ -143,7 +143,10 @@ function withPinnedStatuses(entries: Entry[], required: RequiredCheck[], draft: 
   const apps = new Map<string, number | undefined>();
   const appOf = (bot: string) => apps.has(bot) ? apps.get(bot) : apps.set(bot, appOfBot(bot, run)).get(bot);
   const spelledTwice = (entry: Entry) => entries.some((other) => other.status && other.name !== entry.name && other.name.toLowerCase() === entry.name.toLowerCase());
-  const canWaive = (check: RequiredCheck, workflow: string) => draft && !entries.some((other) => other.name === check.context) && entries.some((other) => !other.status && other.appId === check.appId && other.name.startsWith(workflow));
+  const canWaive = (check: RequiredCheck, workflow: string) => {
+    const runs = entries.filter((other) => !other.status && other.appId === check.appId && other.name.startsWith(workflow));
+    return draft && !entries.some((other) => other.name === check.context) && runs.length > 0 && runs.every((other) => other.outcome === "pass");
+  };
   const nearPin = (entry: Entry) => pins.some((check) => {
     const workflow = workflowOf(check.context);
     return check.context === entry.name || (entry.outcome !== "pass" && workflow !== undefined && entry.name.startsWith(workflow) && canWaive(check, workflow));
