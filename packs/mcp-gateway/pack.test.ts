@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, describe, expect, mock, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { providerConfigAdapter } from "../../src/adapters/provider-config/adapter.ts";
 import { main, type CliOptions } from "../../src/cli.ts";
@@ -242,6 +242,7 @@ describe("on the hub", () => {
     const unread = await hedge(["mcp-gateway", "doctor"]);
     expect(unread.code).toBe(1);
     expect(unread.output).toContain("Hedge cannot read the declared upstreams, so it checks only the built-in apps' sign-ins:");
+    rmSync(join(home, ".config/hedge/mcp-gateway/upstreams/broken.json"));
     const slackHome = join(home, ".local/share/hedge-mcphub/data/slack-codex");
     mkdirSync(slackHome, { recursive: true });
     writeFileSync(join(slackHome, "auth.json"), "{}");

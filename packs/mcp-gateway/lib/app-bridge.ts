@@ -32,8 +32,12 @@ let thread: Promise<string> | undefined;
 
 const reAuth = reAuthLine(app);
 const lost = async (text: string) => signInLost(text) && (await markSignInLost(home!, app.name).catch(() => {}), true);
-const explained = (error: Error & { code?: number }) => Object.assign(new Error(`${reAuth} Cause: ${error.message}`), { code: error.code });
-const flagged = async (error: Error & { code?: number }) => ((await lost(error.message)) ? explained(error) : error);
+const flagged = async (error: Error & { code?: number }) => ((await lost(error.message)) ? Object.assign(new Error(`${reAuth} Cause: ${error.message}`), { code: error.code }) : error);
+const queued = <T>(work: () => Promise<T>) => {
+  const turn = queue.then(work).catch(async (error) => { throw await flagged(error); });
+  queue = turn.catch(() => {});
+  return turn;
+};
 const reply = (message: Record<string, unknown>) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 const tell = (message: Record<string, unknown>) => backend.stdin.write(`${JSON.stringify(message)}\n`);
 const stop = (error: Error, code = 1) => {
@@ -115,11 +119,9 @@ async function handle(message: Message) {
   const params = message.params ?? {};
   if (message.method === "initialize") return { protocolVersion: versions.includes(params.protocolVersion) ? params.protocolVersion : versions[0], capabilities: { tools: {} }, serverInfo: { name: `hedge-${app.name}`, version: "1" } };
   if (message.method === "ping") return {};
-  if (message.method === "tools/list") return { tools: [...(await discover().catch((error) => { throw signInLost(error.message) ? explained(error) : error; })).values()] };
+  if (message.method === "tools/list") return { tools: [...(await queued(discover)).values()] };
   if (message.method === "tools/call") {
-    const turn = queue.then(() => invoke(message.id!, params as { name: string }).catch(async (error) => { throw await flagged(error); }));
-    queue = turn.catch(() => {});
-    return turn;
+    return queued(() => invoke(message.id!, params as { name: string }));
   }
   throw Object.assign(new Error(`Method not found: ${message.method}`), { code: -32601 });
 }
