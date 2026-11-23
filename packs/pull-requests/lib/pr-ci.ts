@@ -135,14 +135,14 @@ const workflowOf = (context: string) => {
   return split > 0 ? context.slice(0, split + 3) : undefined;
 };
 
-function withPinnedStatuses(entries: Entry[], required: RequiredCheck[], run: Run): Entry[] {
+function withPinnedStatuses(entries: Entry[], required: RequiredCheck[], draft: boolean, run: Run): Entry[] {
   const pins = required.filter((check) => check.appId !== undefined);
   const apps = new Map<string, number | undefined>();
   const appOf = (bot: string) => apps.has(bot) ? apps.get(bot) : apps.set(bot, appOfBot(bot, run)).get(bot);
   const spelledTwice = (entry: Entry) => entries.some((other) => other.status && other.name !== entry.name && other.name.toLowerCase() === entry.name.toLowerCase());
   const nearPin = (entry: Entry) => pins.some((check) => {
     const workflow = workflowOf(check.context);
-    return check.context === entry.name || (workflow !== undefined && entry.name.startsWith(workflow));
+    return check.context === entry.name || (draft && workflow !== undefined && entry.name.startsWith(workflow));
   });
   return entries.map((entry) => {
     if (!entry.status || !entry.botLogin || !nearPin(entry) || spelledTwice(entry)) return entry;
@@ -213,7 +213,7 @@ export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date)
     if (stacked) required = requiredChecks(home, identity.repository, pr.defaultBranch!, run, now);
     const entries = entriesOf(identity, run);
     if (!required.length) return { ...everyCheck(entries, identity.commit), checks: checksOf(entries) };
-    const counted = withPinnedStatuses(entries, required, run);
+    const counted = withPinnedStatuses(entries, required, pr.draft, run);
     const verdict = requiredVerdict(counted, required, pr.draft);
     return { ...stacked ? { ...verdict, detail: `${verdict.detail} (required by ${pr.defaultBranch}; the base ${pr.base} requires none)` } : verdict, checks: checksOf(counted) };
   } catch (error) {

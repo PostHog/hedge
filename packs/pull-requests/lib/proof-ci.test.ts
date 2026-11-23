@@ -139,12 +139,16 @@ test("a status whose app GitHub cannot read makes CI unknown", async () => {
   expect(ciLine(unknown.output)).toStartWith("ci: unknown, cannot read the app behind product[bot] over REST (gh: Service Unavailable (HTTP 503))");
 });
 
-test("an app GitHub cannot read behind a status outside every pinned check's workflow leaves CI readable", async () => {
+test("an app GitHub cannot read behind a status that decides no pinned check leaves CI readable", async () => {
   const { pr } = await reviewed();
   pr.required("main", [{ context: "CI / deploy", integration_id: 7 }]);
   pr.githubApp("docs", { error: "gh: Service Unavailable (HTTP 503)" });
   pr.ci([{ name: "CI / deploy", bucket: "pass", app: 7 }]);
+
   pr.statuses([{ context: "Docs / preview", state: "success", by: "docs[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: green, 1 required check(s) pass");
+
+  pr.statuses([{ context: "CI / preview", state: "success", by: "docs[bot]" }]);
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: green, 1 required check(s) pass");
 });
 
