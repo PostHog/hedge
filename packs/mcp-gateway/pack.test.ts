@@ -251,6 +251,8 @@ describe("on the hub", () => {
     const revoked = await hedge(["mcp-gateway", "doctor"]);
     expect(revoked.code).toBe(1);
     expect(revoked.output).toEndWith("Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps.");
+    writeFileSync(join(home, ".config/hedge/mcp-gateway/upstreams/broken.json"), "{");
+    expect((await hedge(["mcp-gateway", "doctor"])).output).toEndWith("Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps.");
   });
 
   test("a failure before the bridge starts goes to standard error, never onto the MCP stream", async () => {

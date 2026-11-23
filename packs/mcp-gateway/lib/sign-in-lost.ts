@@ -8,8 +8,8 @@ export type LostSignIn = { app: Named; since: number };
 const lostCodes = /\b(token_revoked|token_expired|refresh_token_reused|invalid_grant|invalid_auth|not_authed|account_inactive)\b/;
 const marker = (app: string) => `sign-in-lost-${app}`;
 
-const texts = (said: unknown): string[] =>
-  typeof said === "string" ? [said] : said && typeof said === "object" ? Object.values(said).flatMap(texts) : [];
+const texts = (said: unknown, depth = 0): string[] =>
+  typeof said === "string" ? [said] : said && typeof said === "object" && depth < 8 ? Object.values(said).flatMap((inner) => texts(inner, depth + 1)) : [];
 export const lostCode = (said: unknown) => texts(said).map((text) => text.match(lostCodes)?.[1]).find(Boolean);
 export const signInLost = (said: unknown) => lostCode(said) !== undefined;
 

@@ -13,6 +13,13 @@ test("the auth errors of a dead sign-in count as lost, and other failures do not
   for (const text of ["channel_not_found", "HTTP 429 rate limited", "my_token_revoked_notes", "The Codex app backend exited."]) expect(signInLost(text)).toBe(false);
 });
 
+test("an error payload nested past any real error's depth is read only as deep as an error goes, so its message still counts", () => {
+  let nested: unknown = "token_revoked";
+  for (let level = 0; level < 100_000; level++) nested = { inner: nested };
+  expect(signInLost(["HTTP 401 token_revoked", nested])).toBe(true);
+  expect(signInLost(nested)).toBe(false);
+});
+
 test("the re-auth line names the one step that signs the app in again", () => {
   expect(reAuthLine(slack)).toBe("Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps.");
 });
