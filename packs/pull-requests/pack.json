@@ -118,7 +118,7 @@
     },
     {
       "key": "pull-requests.triage",
-      "question": "Should Hedge run the opt-in triage of review findings? For now it only records each pull request's arm and the review path of each review, and changes no review.",
+      "question": "Should Hedge run the opt-in triage of review findings? It records each pull request's arm and the review path of each review. A treated pull request gets a hard budget of two reads, or three on the strict path.",
       "type": "choice",
       "default": "off",
       "ask": "never",
