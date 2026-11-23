@@ -1,0 +1,160 @@
+import { afterEach, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { armOf } from "./proof-triage.ts";
+import { checkout, cleanFixtures, fakeModel, graded, settings, type Checkout } from "./proof-testing.ts";
+
+afterEach(cleanFixtures);
+
+const noFindings = (file: string) => `FINDINGS:\n(none)\nCOVERED: ${file}\n`;
+
+async function triaged(triage: string | undefined, body: string, file = "feature.ts", content = "export const greet = (name: string) => name;\n") {
+  const pr = await checkout();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, ...triage === undefined ? {} : { "pull-requests.triage": triage } });
+  pr.pullRequestState({ body });
+  mkdirSync(dirname(join(pr.repository, file)), { recursive: true });
+  await pr.commit(file, content);
+  await pr.hedge("require", "--none", "--reason", "fixture");
+  fakeModel(pr, "REVIEWER", noFindings(file));
+  return pr;
+}
+
+const firstLine = async (pr: Checkout, ...args: string[]) => JSON.parse((await pr.hedge("review", ...args)).output.split("\n")[0]!);
+const roundRecord = (pr: Checkout, round: string) => JSON.parse(readFileSync(join(pr.pullRequest, "reviews", round, "round.json"), "utf8"));
+const oneWay = "## Merge risk\n\n<!-- merge-risk -->\n> 🔵 **Merge risk: medium** · one-way door\n> - **Tier:** non-critical\n<!-- /merge-risk -->\n";
+
+test("the arm of a pull request comes from a stable hash of its repository and number, the same on every machine, and the setting decides who is treated", () => {
+  const arms = Array.from({ length: 40 }, (_, pr) => armOf("split", "example/product", pr + 1));
+  expect(new Set(arms)).toEqual(new Set(["treated", "control"]));
+  expect(Array.from({ length: 40 }, (_, pr) => armOf("split", "Example/Product", pr + 1))).toEqual(arms);
+  expect(armOf("split", "example/product", 7)).toBe(armOf("split", "example/product", 7));
+  expect(Array.from({ length: 40 }, (_, pr) => armOf("on", "example/product", pr + 1))).toEqual(Array(40).fill("treated"));
+  expect(Array.from({ length: 40 }, (_, pr) => armOf("off", "example/product", pr + 1))).toEqual(Array(40).fill("control"));
+});
+
+test("with triage on, hedge proof review prints the arm and the standard path of a medium-risk change outside every danger area, and the ledger keeps both", async () => {
+  const pr = await triaged("on", graded("non-critical", "medium"));
+
+  expect(await firstLine(pr, "--single")).toMatchObject({ round: 1, triage: { setting: "on", arm: "treated", path: "standard" } });
+
+  expect(roundRecord(pr, "1")).toMatchObject({ commit: await pr.git("rev-parse", "HEAD"), triage: { setting: "on", arm: "treated", path: "standard", why: [] } });
+});
+
+test("a high grade, a missing or unreadable grade, a changed file in a danger area, or a file on the critical-path list puts the pull request on the strict path", async () => {
+  const pathAt = async (body: string, file?: string) => {
+    const pr = await triaged("on", body, file);
+    return (await firstLine(pr)).triage;
+  };
+  expect(await pathAt(graded("critical (b)", "high"))).toEqual({ setting: "on", arm: "treated", path: "strict", why: ["merge-risk grade high"] });
+  expect(await pathAt("Greets new members.\n")).toEqual({ setting: "on", arm: "treated", path: "strict", why: ["merge-risk grade none"] });
+  expect(await pathAt("Greets.\n\n<!-- merge-risk -->\n> **Merge risk: unclear**\n<!-- /merge-risk -->\n")).toEqual({ setting: "on", arm: "treated", path: "strict", why: ["merge-risk grade unreadable"] });
+  expect(await pathAt(graded("non-critical", "medium"), "email-sender.ts")).toEqual({ setting: "on", arm: "treated", path: "strict", why: ["sends: email-sender.ts"] });
+  expect(await pathAt(graded("non-critical", "medium"), "redact.ts")).toEqual({ setting: "on", arm: "treated", path: "strict", why: ["redaction: redact.ts"] });
+
+  const listed = await triaged("on", graded("non-critical", "medium"), "pricing.ts");
+  writeFileSync(join(listed.home, "critical-paths.md"), "# Critical paths\n\n- `pricing.ts`\n- billing/\n");
+  listed.env.HEDGE_SETTINGS = JSON.stringify({ ...JSON.parse(listed.env.HEDGE_SETTINGS!), "pull-requests.criticalPathFiles": "example/product=critical-paths.md" });
+  expect((await firstLine(listed)).triage).toEqual({ setting: "on", arm: "treated", path: "strict", why: ["critical path: pricing.ts"] });
+});
+
+async function listedPath(list: string, file = "rates/plans/old plans.ts") {
+  const pr = await triaged("on", graded("non-critical", "medium"), file);
+  writeFileSync(join(pr.home, "critical-paths.md"), list);
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...JSON.parse(pr.env.HEDGE_SETTINGS!), "pull-requests.criticalPathFiles": "example/product=critical-paths.md" });
+  return { list, triage: (await firstLine(pr, "--single")).triage };
+}
+
+test("a critical-path list matches its entries as bullets, plain lines, quoted paths with spaces, table cells, a leading ./ or /, a trailing colon, and globs", async () => {
+  const lists = ["- `rates/plans/old plans.ts`\n", "| Path | Owner |\n| --- | --- |\n| rates/plans/old plans.ts | billing |\n", "| Area | Owner |\n| --- | --- |\n| rates | billing |\n", "- rates: the charging code\n", "rates\n", "- ./rates/\n", "Everything under /rates/ needs a second read.\n", "- rates/*\n", "- */plans/**\n", "- {fees,rates}/**\n"];
+  for (const list of lists) expect(await listedPath(list)).toEqual({ list, triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: rates/plans/old plans.ts"] } });
+  for (const list of ["- `[slug]/rates.ts`\n", "- [slug]/rates.ts\n", "- app routes ([slug]/)\n"]) expect(await listedPath(list, "[slug]/rates.ts")).toEqual({ list, triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: [slug]/rates.ts"] } });
+  expect(await listedPath("- reports/q4,\n", "reports/q4,")).toEqual({ list: "- reports/q4,\n", triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: reports/q4,"] } });
+  for (const list of ["- `src/{tenant}.ts`\n", "Review src/{tenant}.ts.\n"]) expect(await listedPath(list, "src/{tenant}.ts")).toEqual({ list, triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: src/{tenant}.ts"] } });
+  expect(await listedPath("- [[slug]/rates.ts]\n", "[slug]/rates.ts")).toEqual({ list: "- [[slug]/rates.ts]\n", triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: [slug]/rates.ts"] } });
+  for (const list of ["* billing/\n", "+ billing/*\n"]) expect(await listedPath(list)).toEqual({ list, triage: { setting: "on", arm: "treated", path: "standard", why: [] } });
+});
+
+test("a merge-risk grade quoted outside the callout counts as no grade", async () => {
+  const pr = await triaged("on", "Greets new members.\n\n```md\n**Merge risk: low**\n```\n");
+  expect((await firstLine(pr)).triage).toEqual({ setting: "on", arm: "treated", path: "strict", why: ["merge-risk grade none"] });
+});
+
+test("each review records the arm its setting gives the pull request, the same under any spelling of the repository, and keeps no arm of its own", async () => {
+  const control = [1, 2, 3, 4, 5, 6, 7, 8].find((number) => armOf("split", "example/product", number) === "control")!;
+  const target = (repository: string) => ["--repo", repository, "--pr", String(control)];
+  const triage = (setting: string) => { pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": setting }); };
+  const pr = await checkout();
+  pr.pullRequestState({ body: graded("non-critical", "medium"), number: control });
+  const reviewed = await pr.commit("feature.ts", "export const greet = (name: string) => name;\n");
+  for (const repository of ["example/product", "Example/Product"]) await pr.hedge("require", "--none", "--reason", "fixture", ...target(repository));
+  fakeModel(pr, "REVIEWER", noFindings("feature.ts"));
+
+  triage("on");
+  expect((await firstLine(pr, "--single", ...target("example/product"))).triage).toMatchObject({ setting: "on", arm: "treated" });
+  await pr.commit("feature.ts", "export const greet = (name: string) => `hi ${name}`;\n");
+  triage("split");
+  expect((await firstLine(pr, "--scope", "final", "--base", reviewed, ...target("example/product"))).triage).toMatchObject({ setting: "split", arm: "control" });
+  expect((await firstLine(pr, "--single", ...target("Example/Product"))).triage).toMatchObject({ setting: "split", arm: "control" });
+});
+
+test("a test file in a danger area keeps the standard path", async () => {
+  const tests = await triaged("on", graded("non-critical", "medium"), "email-sender.test.ts", "test(\"sends\", () => {});\n");
+  expect((await firstLine(tests)).triage).toEqual({ setting: "on", arm: "treated", path: "standard", why: [] });
+});
+
+test("a critical-path file hedge cannot read puts the pull request on the strict path", async () => {
+  const unreadable = await triaged("on", graded("non-critical", "medium"));
+  unreadable.env.HEDGE_SETTINGS = JSON.stringify({ ...JSON.parse(unreadable.env.HEDGE_SETTINGS!), "pull-requests.criticalPathFiles": "example/product=missing.md" });
+  expect((await firstLine(unreadable)).triage).toEqual({ setting: "on", arm: "treated", path: "strict", why: ["critical-path list unreadable"] });
+});
+
+test("a one-way door is excluded and runs today's flow", async () => {
+  const pr = await triaged("on", oneWay);
+  expect((await firstLine(pr)).triage).toEqual({ setting: "on", arm: "treated", path: "excluded", why: ["one-way door"] });
+});
+
+test("a final read records the path at its own head", async () => {
+  const pr = await triaged("on", graded("non-critical", "medium"));
+  expect((await pr.hedge("review", "--single")).code).toBe(0);
+  const reviewed = await pr.git("rev-parse", "HEAD");
+  const fixed = await pr.commit("send-mail.ts", "export const send = () => {};\n");
+  fakeModel(pr, "REVIEWER", noFindings("send-mail.ts"));
+
+  expect(await firstLine(pr, "--scope", "final", "--base", reviewed)).toMatchObject({ round: "final", triage: { setting: "on", arm: "treated", path: "strict" } });
+  expect(roundRecord(pr, "final-1")).toMatchObject({ commit: fixed, triage: { setting: "on", arm: "treated", path: "strict", why: ["sends: send-mail.ts"] } });
+  expect(roundRecord(pr, "1")).toMatchObject({ commit: reviewed, triage: { path: "standard" } });
+});
+
+test("with triage off, or not set, hedge proof review prints and records nothing of it", async () => {
+  for (const setting of ["off", undefined]) {
+    const pr = await triaged(setting, graded("critical (b)", "high"));
+    expect(await firstLine(pr, "--single")).not.toHaveProperty("triage");
+    expect(existsSync(join(pr.pullRequest, "triage.json"))).toBe(false);
+    expect(roundRecord(pr, "1")).not.toHaveProperty("triage");
+  }
+});
+
+test("a review reserved with triage on keeps its mark when it is retried after triage is switched off, and the next review records none", async () => {
+  const pr = await triaged("on", graded("non-critical", "medium"));
+  pr.env.HEDGE_PROOF_REVIEWER = "exit 1";
+  await pr.hedge("review", "--single").catch(() => undefined);
+  expect(roundRecord(pr, "1")).toMatchObject({ triage: { setting: "on", arm: "treated" } });
+
+  pr.env.HEDGE_SETTINGS = JSON.stringify(settings);
+  fakeModel(pr, "REVIEWER", noFindings("feature.ts"));
+  expect(await firstLine(pr, "--single")).toMatchObject({ round: 1, triage: { setting: "on", arm: "treated", path: "standard" } });
+  const reviewed = await pr.git("rev-parse", "HEAD");
+  await pr.commit("feature.ts", "export const greet = (name: string) => `hi ${name}`;\n");
+  expect(await firstLine(pr, "--scope", "final", "--base", reviewed)).not.toHaveProperty("triage");
+  expect(roundRecord(pr, "final-1")).not.toHaveProperty("triage");
+});
+
+test("a final read that changes only a plain file keeps the strict path of a danger-area file an earlier commit changed", async () => {
+  const pr = await triaged("on", graded("non-critical", "medium"), "send-mail.ts", "export const send = () => {};\n");
+  expect((await firstLine(pr)).triage).toMatchObject({ path: "strict" });
+  const reviewed = await pr.git("rev-parse", "HEAD");
+  await pr.commit("feature.ts", "export const greet = (name: string) => name;\n");
+  fakeModel(pr, "REVIEWER", noFindings("feature.ts"));
+
+  expect((await firstLine(pr, "--scope", "final", "--base", reviewed)).triage).toEqual({ setting: "on", arm: "treated", path: "strict", why: ["sends: send-mail.ts"] });
+});
