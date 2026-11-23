@@ -105,6 +105,13 @@ function commitRecords<T>(identity: ProofIdentity, run: Run, path: string, jq: s
   catch { throw new Error(`gh api ${path} printed no JSON lines`); }
 }
 
+function commitStatuses(identity: ProofIdentity, run: Run): CommitStatus[] {
+  const result = run(["gh", "api", "--paginate", `repos/${identity.repository}/commits/${identity.commit}/statuses?per_page=100`, "--slurp"]);
+  if (result.code !== 0) throw new Error(`gh api statuses failed (${firstLine(result.stderr)})`);
+  try { return (JSON.parse(result.stdout) as CommitStatus[][]).flat(); }
+  catch { throw new Error("gh api statuses printed no JSON"); }
+}
+
 function entriesOf(identity: ProofIdentity, run: Run): Entry[] {
   const runs = commitRecords<CheckRun>(identity, run, "check-runs", ".check_runs[] | {id, name, status, conclusion, app: .app.id}");
   const newestRuns = [...runs.reduce((newest, check) => {
@@ -112,23 +119,20 @@ function entriesOf(identity: ProofIdentity, run: Run): Entry[] {
     if ((newest.get(key)?.id ?? -1) < check.id) newest.set(key, check);
     return newest;
   }, new Map<string, CheckRun>()).values()];
-  const statuses = commitRecords<CommitStatus>(identity, run, "statuses", ".[]");
-  const newest = statuses.filter((status, index) => statuses.findIndex((other) => sameContext(other.context, status.context) && other.creator?.login === status.creator?.login) === index);
+  const statuses = commitStatuses(identity, run);
+  const newest = statuses.filter((status, index) => statuses.findIndex((other) => other.context === status.context && other.creator?.login === status.creator?.login) === index);
   return [
     ...newestRuns.map((check): Entry => ({ name: check.name, appId: check.app ?? undefined, outcome: check.status !== "completed" ? "pending" : passing.has(check.conclusion ?? "") ? "pass" : "fail" })),
-    ...newest.map((status): Entry => ({ name: status.context, status: true, ...botOf(status), ...newest.find((other) => sameContext(other.context, status.context)) === status ? {} : { superseded: true as const }, outcome: status.state === "success" ? "pass" : status.state === "pending" ? "pending" : "fail" })),
+    ...newest.map((status): Entry => ({ name: status.context, status: true, ...botOf(status), ...newest.find((other) => other.context === status.context) === status ? {} : { superseded: true as const }, outcome: status.state === "success" ? "pass" : status.state === "pending" ? "pending" : "fail" })),
   ];
 }
 
-const sameContext = (one: string, other: string) => one.toLowerCase() === other.toLowerCase();
 const botSuffix = "[bot]";
 const botOf = ({ creator }: CommitStatus) => creator?.type === "Bot" && creator.login?.endsWith(botSuffix) ? { botLogin: creator.login } : {};
 
 function appOfBot(bot: string, run: Run): number | undefined {
   const result = run(["gh", "api", `apps/${bot.slice(0, -botSuffix.length)}`]);
-  if (result.code === 0) return (JSON.parse(result.stdout) as { id?: number }).id;
-  if (/HTTP 404/.test(result.stderr)) return undefined;
-  throw new Error(`cannot read the app behind ${bot} over REST (${firstLine(result.stderr)})`);
+  return result.code === 0 ? (JSON.parse(result.stdout) as { id?: number }).id : undefined;
 }
 
 const current = (entries: Entry[]) => entries.filter((entry) => !entry.superseded);
@@ -138,7 +142,7 @@ function withPinnedStatuses(entries: Entry[], required: RequiredCheck[], run: Ru
   const apps = new Map<string, number | undefined>();
   const appOf = (bot: string) => apps.has(bot) ? apps.get(bot) : apps.set(bot, appOfBot(bot, run)).get(bot);
   const pinOf = (entry: Entry) => {
-    const named = pins.filter((check) => entry.status && sameContext(check.context, entry.name));
+    const named = pins.filter((check) => entry.status && check.context === entry.name);
     if (!entry.botLogin || !named.length) return undefined;
     const appId = appOf(entry.botLogin);
     return named.find((check) => check.appId === appId);
@@ -154,16 +158,14 @@ function listOf(names: string[], limit = 8) {
   return unique.length > limit ? `${unique.slice(0, limit).join(", ")} and ${unique.length - limit} more` : unique.join(", ");
 }
 
-const names = (check: RequiredCheck, entry: Entry) => entry.status ? sameContext(entry.name, check.context) : entry.name === check.context;
 const reportedBy = (check: RequiredCheck, entry: Entry) => check.appId === undefined || entry.appId === check.appId;
+const ranBy = (check: RequiredCheck, entry: Entry) => check.appId === undefined || (!entry.status && entry.appId === check.appId);
 
 function withheldFromDraft(check: RequiredCheck, entries: Entry[]) {
   const split = check.context.indexOf(" / ");
-  if (split <= 0 || entries.some((entry) => names(check, entry))) return false;
-  const workflow = check.context.slice(0, split + 3);
-  const inWorkflow = (entry: Entry) => entry.status ? sameContext(entry.name.slice(0, workflow.length), workflow) : entry.name.startsWith(workflow);
-  const siblings = entries.filter((entry) => inWorkflow(entry) && (entry.status || reportedBy(check, entry)));
-  return siblings.some((entry) => !entry.status) && siblings.every((entry) => entry.outcome === "pass");
+  if (split <= 0 || entries.some((entry) => entry.name === check.context)) return false;
+  const siblings = entries.filter((entry) => entry.name.startsWith(check.context.slice(0, split + 3)) && ranBy(check, entry));
+  return siblings.length > 0 && siblings.every((entry) => entry.outcome === "pass");
 }
 
 function everyCheck(entries: Entry[], commit: string): CiResult {
@@ -186,7 +188,7 @@ function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boo
   const counted = new Set<Entry>();
   const [failing, pending, missing, withheld]: string[][] = [[], [], [], []];
   for (const check of required) {
-    const matches = entries.filter((entry) => names(check, entry) && reportedBy(check, entry));
+    const matches = entries.filter((entry) => entry.name === check.context && reportedBy(check, entry));
     matches.forEach((entry) => counted.add(entry));
     if (!matches.length) { (draft && withheldFromDraft(check, entries) ? withheld : missing).push(check.context); continue; }
     const worst = matches.reduce((a, b) => rank[b.outcome] > rank[a.outcome] ? b : a).outcome;

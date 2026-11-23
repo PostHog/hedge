@@ -80,12 +80,10 @@ case "$*" in
     [ -f "${github}/app-error-$slug" ] && { cat "${github}/app-error-$slug" >&2; exit 1; }
     cat "${github}/app-$slug" 2>/dev/null || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }; exit 0;;
   "api "*"/statuses"*)
-    all="$*"; sha=\${all#*/commits/}; sha=\${sha%%/*}; filter=; previous=
-    for arg in "$@"; do [ "$previous" = "--jq" ] && filter=$arg; previous=$arg; done
-    [ "$filter" = ".[]" ] || { echo "the fake gh serves statuses only through --jq .[], not $filter" >&2; exit 1; }
+    all="$*"; sha=\${all#*/commits/}; sha=\${sha%%/*}
     file="${github}/statuses-$sha"; [ -f "$file" ] || file="${github}/statuses-any"
-    [ -f "$file" ] || exit 0
-    "${process.execPath}" -e 'for (const status of JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))) console.log(JSON.stringify(status));' "$file"; exit $?;;
+    page='[]'; [ -f "$file" ] && page=$(cat "$file")
+    case " $* " in *" --paginate "*" --slurp "*) printf '[%s]\n' "$page";; *) printf '%s\n' "$page";; esac; exit 0;;
   "api "*)
     all="$*"; sha=; case "$all" in */commits/*/*) sha=\${all#*/commits/}; sha=\${sha%%/*};; esac
     case "$*" in *"/check-runs"*) kind=check-runs;; *) kind=statuses;; esac
