@@ -8,8 +8,9 @@ export type LostSignIn = { app: Named; since: number };
 const lostCodes = /\b(token_revoked|token_expired|refresh_token_reused|invalid_grant|invalid_auth|not_authed|account_inactive)\b/;
 const marker = (app: string) => `sign-in-lost-${app}`;
 
-const flat = (said: unknown) => (typeof said === "string" ? said : JSON.stringify(said ?? "").replace(/\\[nrt]/g, " "));
-export const lostCode = (said: unknown) => flat(said).match(lostCodes)?.[1];
+const texts = (said: unknown): string[] =>
+  typeof said === "string" ? [said] : said && typeof said === "object" ? Object.values(said).flatMap(texts) : [];
+export const lostCode = (said: unknown) => texts(said).map((text) => text.match(lostCodes)?.[1]).find(Boolean);
 export const signInLost = (said: unknown) => lostCode(said) !== undefined;
 
 export const reAuthLine = (app: Named) =>
