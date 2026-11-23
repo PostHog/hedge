@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { armOf, triageFindings } from "./proof-triage.ts";
-import { checkout, cleanFixtures, fakeModel, graded, lockHolder, lookup, markPanel, models, settings, verdict, type Checkout } from "./proof-testing.ts";
+import { checkout, cleanFixtures, fakeModel, graded, lockHolder, lookup, models, settings, verdict, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
@@ -34,10 +34,12 @@ async function treated(triage = "on", number = 42) {
 const reviewDirectory = (pr: Checkout, round = "1") => join(pr.pullRequest, "reviews", round);
 const savedLabels = (pr: Checkout, round = "1") => JSON.parse(readFileSync(join(reviewDirectory(pr, round), "triage-labels.json"), "utf8"));
 
-function finishedPanel(pr: Checkout) {
-  markPanel(pr, "1");
-  writeFileSync(join(reviewDirectory(pr), "lenses", "correctness.md"), `FINDINGS:\n${findings}\nCOVERED: feature.ts\n`);
-  rmSync(join(reviewDirectory(pr), "findings.md"));
+async function panelRound(pr: Checkout) {
+  const first = join(pr.home, "first-lens");
+  writeFileSync(join(pr.home, "lens-findings"), `FINDINGS:\n${findings}\nCOVERED: feature.ts\n`);
+  writeFileSync(join(pr.home, "lens-clean"), "FINDINGS:\n(none)\nCOVERED: feature.ts\n");
+  pr.env.HEDGE_PROOF_REVIEWER = `cat >/dev/null; if [ -e "${first}" ]; then cat "${pr.home}/lens-clean"; else touch "${first}"; cat "${pr.home}/lens-findings"; fi`;
+  await pr.hedge("review");
 }
 
 async function respond(pr: Checkout, answers: string, round = "1") {
@@ -206,11 +208,9 @@ test("the triage reads a reply whose one labels key is spelled with an escape", 
 
 test("a wait on a finished panel with no labels yet runs the first triage pass, saves it and prints it", async () => {
   const pr = await treated();
-  pr.env.HEDGE_PROOF_TRIAGE = "exit 3";
-  await pr.hedge("review", "--single");
-  finishedPanel(pr);
-  rmSync(join(reviewDirectory(pr), "triage-labels.json"));
   const triage = fakeModel(pr, "TRIAGE", adviseSecond);
+  await panelRound(pr);
+  expect(existsSync(join(reviewDirectory(pr), "triage-labels.json"))).toBe(false);
 
   const wait = await pr.hedge("review", "--wait", "--round", "1");
 
@@ -223,8 +223,8 @@ test("a wait on a finished panel with no labels yet runs the first triage pass, 
 test("a wait on a round whose triage call failed asks no model again, so the first pass stays the round's labels", async () => {
   const pr = await treated();
   pr.env.HEDGE_PROOF_TRIAGE = "exit 3";
-  await pr.hedge("review", "--single");
-  finishedPanel(pr);
+  await panelRound(pr);
+  await pr.hedge("review", "--wait", "--round", "1");
   const triage = fakeModel(pr, "TRIAGE", adviseSecond);
 
   const wait = await pr.hedge("review", "--wait", "--round", "1");
@@ -236,11 +236,8 @@ test("a wait on a round whose triage call failed asks no model again, so the fir
 
 test("with triage switched off, a wait asks no triage model and saves no labels, even for a round reserved while it was on", async () => {
   const pr = await treated();
-  pr.env.HEDGE_PROOF_TRIAGE = "exit 3";
-  await pr.hedge("review", "--single");
-  finishedPanel(pr);
-  rmSync(join(reviewDirectory(pr), "triage-labels.json"));
   const triage = fakeModel(pr, "TRIAGE", adviseSecond);
+  await panelRound(pr);
   pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": "off" });
 
   await pr.hedge("review", "--wait", "--round", "1");
@@ -275,20 +272,17 @@ test("a failed triage call prints none of the model's own output", async () => {
   expect(review.output).toContain("- The triage labelled none of them; triage-labels.json in the round's folder says why.");
 });
 
-test("a triage call that throws before the model answers labels every blocker and major finding needs-answer", async () => {
-  const triaged = await triageFindings(findings, "", async () => { throw new Error("settings.json is not readable"); });
+test("a triage call that throws before the model answers labels every blocker and major finding needs-answer, and keeps none of the error's text", async () => {
+  const triaged = await triageFindings(findings, "", async () => { throw new Error("settings.json is not readable near private-detail"); });
 
-  expect(triaged).toMatchObject({ ok: false, cause: "settings.json is not readable", labels: [{ finding: 1, label: "needs-answer", reason: "the triage call failed: settings.json is not readable" }, { finding: 2, label: "needs-answer" }, { finding: 4 }] });
+  expect(triaged).toMatchObject({ ok: false, cause: "the call threw before the model answered", labels: [{ finding: 1, label: "needs-answer", reason: "the triage call failed: the call threw before the model answered" }, { finding: 2, label: "needs-answer" }, { finding: 4 }] });
+  expect(JSON.stringify(triaged)).not.toContain("private-detail");
 });
 
 test("a wait while another command holds a round with no labels yet asks no triage model, and says to wait again", async () => {
   const pr = await treated();
-  fakeModel(pr, "REVIEWER", findings);
-  pr.env.HEDGE_PROOF_TRIAGE = "exit 3";
-  await pr.hedge("review", "--single");
-  finishedPanel(pr);
-  rmSync(join(reviewDirectory(pr), "triage-labels.json"));
   const triage = fakeModel(pr, "TRIAGE", adviseSecond);
+  await panelRound(pr);
   const holder = await lockHolder(reviewDirectory(pr));
 
   const wait = await pr.hedge("review", "--wait", "--round", "1");
@@ -329,11 +323,15 @@ test("an advisory finding answered as fixed buys no further round, where the sam
   }
 });
 
+async function answeredPanel(pr: Checkout, triage = adviseSecond) {
+  fakeModel(pr, "TRIAGE", triage);
+  await panelRound(pr);
+  await pr.hedge("review", "--wait", "--round", "1");
+}
+
 async function gatedWithAdvisory() {
   const pr = await treated();
-  fakeModel(pr, "TRIAGE", adviseSecond);
-  await pr.hedge("review", "--single");
-  markPanel(pr, "1");
+  await answeredPanel(pr);
   await respond(pr, "1. fixed in abc1234: greets\n4. rejected: fine\n6. fixed in abc1234: test\n");
   const judge = fakeModel(pr, "JUDGE", verdict());
   const gate = await pr.hedge("gate").then((result) => result, (error: Error) => ({ code: 1, output: error.message }));
@@ -365,17 +363,48 @@ test("hedge proof triage labels a findings file against a diff and prints the la
   expect(existsSync(join(pr.home, ".local/state/hedge/proof"))).toBe(false);
 });
 
-test("the triage asks the lookup row's model with no tools, outside the checkout, and records its time and tokens beside the labels", async () => {
+const claudeReply = JSON.stringify({ type: "result", is_error: false, result: adviseSecond, usage: { input_tokens: 12, output_tokens: 7 }, total_cost_usd: 0.25 });
+
+test("the triage asks the lookup row's model with no tools", async () => {
   const pr = await treated();
-  const claude = argvModel(pr, "claude", JSON.stringify({ type: "result", is_error: false, result: adviseSecond, usage: { input_tokens: 12, output_tokens: 7 }, total_cost_usd: 0.25 }));
+  const claude = argvModel(pr, "claude", claudeReply);
 
   await pr.hedge("review", "--single");
 
   expect(claude.argv()).toContain("[--model]\n[lookup-model]\n");
   expect(claude.argv()).toContain("[--tools]\n[]\n");
+});
+
+test("the triage runs in Hedge's state in the home folder, outside the checkout", async () => {
+  const pr = await treated();
+  const claude = argvModel(pr, "claude", claudeReply);
+
+  await pr.hedge("review", "--single");
+
   const cwd = claude.argv().match(/^\[cwd=(.*)\]$/m)?.[1];
   expect(`${cwd}/`.startsWith(`${pr.home}/`)).toBe(true);
   expect(`${cwd}/`.startsWith(`${pr.repository}/`)).toBe(false);
+});
+
+test("the triage asks no model when its directory resolves inside the checkout under review", async () => {
+  const pr = await treated();
+  const claude = argvModel(pr, "claude", claudeReply);
+  mkdirSync(join(pr.home, ".local/state/hedge"), { recursive: true });
+  mkdirSync(join(pr.repository, "inside"));
+  symlinkSync(join(pr.repository, "inside"), join(pr.home, ".local/state/hedge/triage"));
+
+  await pr.hedge("review", "--single");
+
+  expect(claude.argv()).toBe("");
+  expect(savedLabels(pr)).toMatchObject({ ok: false, cause: "the triage directory is inside the checkout under review", labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "needs-answer" }, { finding: 4 }] });
+});
+
+test("the triage records the model's time and tokens beside the labels", async () => {
+  const pr = await treated();
+  argvModel(pr, "claude", claudeReply);
+
+  await pr.hedge("review", "--single");
+
   expect(savedLabels(pr)).toMatchObject({ model: "lookup-model", ok: true, durationMs: expect.any(Number), usage: { input: 12, output: 7, costUsd: 0.25 }, labels: [{ finding: 1 }, { finding: 2, label: "advisory" }, { finding: 4 }] });
 });
 
@@ -402,10 +431,7 @@ test("a machine whose model table has no lookup row labels every blocker and maj
 
 test("a wait while another command holds the round still prints the labels already saved", async () => {
   const pr = await treated();
-  fakeModel(pr, "TRIAGE", adviseSecond);
-  await pr.hedge("review", "--single");
-  finishedPanel(pr);
-  await pr.hedge("review", "--wait", "--round", "1");
+  await answeredPanel(pr);
   const holder = await lockHolder(reviewDirectory(pr));
 
   const wait = await pr.hedge("review", "--wait", "--round", "1");
@@ -417,12 +443,9 @@ test("a wait while another command holds the round still prints the labels alrea
 
 test("a wait on a round labelled nothing while triage is now off, as another command holds it, prints no warning about triage labels", async () => {
   const pr = await treated();
-  pr.env.HEDGE_PROOF_TRIAGE = "exit 3";
-  await pr.hedge("review", "--single");
-  finishedPanel(pr);
+  fakeModel(pr, "TRIAGE", adviseSecond);
+  await panelRound(pr);
   pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": "off" });
-  await pr.hedge("review", "--wait", "--round", "1");
-  rmSync(join(reviewDirectory(pr), "triage-labels.json"));
   const holder = await lockHolder(reviewDirectory(pr));
 
   const wait = await pr.hedge("review", "--wait", "--round", "1");
@@ -435,9 +458,7 @@ test("the proof receipt lists each advisory finding with its first severity", as
   const pr = await treated();
   pr.pullRequestState({ body: `## Testing\n\nThe greeting.\n\n${graded("non-critical", "medium")}` });
   pr.env.HEDGE_HANDLERS = JSON.stringify({ "proof-receipt": publisherScript(pr) });
-  fakeModel(pr, "TRIAGE", adviseSecond);
-  await pr.hedge("review", "--single");
-  markPanel(pr, "1");
+  await answeredPanel(pr);
   await respond(pr, "1. fixed in abc1234: greets\n4. rejected: fine\n6. fixed in abc1234: test\n");
   await pr.hedge("gate");
 
@@ -450,9 +471,7 @@ test("the full receipt answers an unanswered advisory finding as advisory", asyn
   const pr = await treated();
   pr.pullRequestState({ body: `## Testing\n\nThe greeting.\n\n${graded("non-critical", "medium")}` });
   pr.env.HEDGE_HANDLERS = JSON.stringify({ "proof-receipt": publisherScript(pr) });
-  fakeModel(pr, "TRIAGE", adviseSecond);
-  await pr.hedge("review", "--single");
-  markPanel(pr, "1");
+  await answeredPanel(pr);
   await respond(pr, "1. fixed in abc1234: greets\n4. rejected: fine\n6. fixed in abc1234: test\n");
   await pr.hedge("gate");
 
@@ -465,15 +484,26 @@ test("the full receipt keeps the advisory mark beside an answer the author gave 
   const pr = await treated();
   pr.pullRequestState({ body: `## Testing\n\nThe greeting.\n\n${graded("non-critical", "medium")}` });
   pr.env.HEDGE_HANDLERS = JSON.stringify({ "proof-receipt": publisherScript(pr) });
-  fakeModel(pr, "TRIAGE", adviseSecond);
-  await pr.hedge("review", "--single");
-  markPanel(pr, "1");
+  await answeredPanel(pr);
   await respond(pr, "1. fixed in abc1234: greets\n2. rejected: a matter of taste\n4. rejected: fine\n6. fixed in abc1234: test\n");
   await pr.hedge("gate");
 
   await pr.hedge("receipt");
 
   expect(readFileSync(join(pr.home, "published.json"), "utf8")).toContain("rejected: a matter of taste (advisory, needs no answer)");
+});
+
+test("an advisory blocker that the author answers known still holds the merge", async () => {
+  const pr = await treated();
+  pr.pullRequestState({ body: `${graded("non-critical", "medium")}\n\n## Known issues\n\n- feature.ts:1 a name with a space throws\n`, number: 42 });
+  await answeredPanel(pr, labels([1, "advisory", "a matter of taste"], [2, "advisory", "taste"]));
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": "on", "pull-requests.reviewCeiling": 1 });
+  await respond(pr, "1. known: listed under Known issues\n4. rejected: fine\n6. fixed in abc1234: test\n");
+  fakeModel(pr, "JUDGE", verdict());
+
+  const gate = await pr.hedge("gate").then((result) => result, (error: Error) => ({ code: 1, output: error.message }));
+
+  expect(gate.output).toContain("answers findings 1 known, and an open blocker holds the merge");
 });
 
 function argvModel(pr: Checkout, provider: "claude" | "codex", answer: string) {

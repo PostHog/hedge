@@ -815,8 +815,8 @@ const advisoryIn = async (directory: string) => new Set((await advisoryLabels(di
 
 const majorItem = /^\s*(?:[-*]|\d+[.)])\s+(?:[^|\n]*\|)?\s*\**major\**\s*\|/i;
 
-const knownBlockers = (findings: string, responses: string, advisory: ReadonlySet<number>) =>
-  answeredFindings(findings, responses, advisory).findings.flatMap((finding, index) => finding.answer?.verdict === "known" && !majorItem.test(finding.text) && !needsNoAnswer(finding) ? [index + 1] : []);
+const knownBlockers = (findings: string, responses: string) =>
+  answeredFindings(findings, responses).findings.flatMap((finding, index) => finding.answer?.verdict === "known" && !majorItem.test(finding.text) && !needsNoAnswer(finding) ? [index + 1] : []);
 
 const locations = (text: string) => [...text.matchAll(/(?<![\w./-])([\w./-]+:\d+)(?![\w:])/g)].map((match) => match[1]!);
 
@@ -1354,7 +1354,7 @@ async function responseStatuses(home: string, identity: ProofIdentity, body: str
     if (missing.length) return { problem: "missing", line: `review: ${reviewLabel(name)} has unanswered findings ${missing.join(", ")}; answer each with hedge proof respond --round ${name} <responses.md>` };
     const unlisted = body === undefined ? [] : unlistedKnown(findings, responses, knownIssues(body));
     if (unlisted.length) return { problem: "missing", line: `known issues: ${reviewLabel(name)} answers findings ${unlisted.join(", ")} known, but the "## Known issues" section of the PR body does not list their file:line` };
-    const blockers = knownBlockers(findings, responses, advisory);
+    const blockers = knownBlockers(findings, responses);
     return blockers.length ? { problem: "missing", line: `known issues: ${reviewLabel(name)} answers findings ${blockers.join(", ")} known, and an open blocker holds the merge` } : undefined;
   }));
   return statuses.filter((status) => status !== undefined);

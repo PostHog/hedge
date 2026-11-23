@@ -169,7 +169,7 @@ export async function triageFindings(findings: string, diff: string, ask: AskTri
   const unrated = (candidate: LabelCandidate) => candidate.severity === "none" ? label(candidate, "needs-answer", "the finding states no severity") : undefined;
   if (!rated.length) return { ok: true, durationMs: 0, labels: candidates.map((candidate) => unrated(candidate)!) };
   const started = performance.now();
-  const answer = await ask(triagePrompt(rated, diff)).catch((error: Error): ModelAnswer => ({ ok: false, cause: error.message, model: "" }));
+  const answer = await ask(triagePrompt(rated, diff)).catch((): ModelAnswer => ({ ok: false, cause: "the call threw before the model answered", model: "" }));
   const durationMs = Math.round(performance.now() - started);
   const replied = answer.ok ? parsedLabels(answer.text) : undefined;
   const failed = !answer.ok ? `the triage call failed: ${oneLine(answer.cause)}` : !replied ? "the triage reply is not readable" : undefined;

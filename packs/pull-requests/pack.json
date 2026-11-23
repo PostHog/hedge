@@ -118,7 +118,7 @@
     },
     {
       "key": "pull-requests.triage",
-      "question": "Should Hedge run the opt-in triage of review findings? In a treated pull request, a lookup model labels each blocker and major finding needs-answer or advisory, and an advisory finding needs no answer. The triage needs a Claude lookup model; with any other, every finding needs an answer.",
+      "question": "Should Hedge run the opt-in triage of review findings? In a treated pull request, a lookup model labels each blocker and major finding needs-answer or advisory, and an advisory finding needs no answer. The triage needs a Claude lookup model; with any other, every blocker and major finding needs an answer.",
       "type": "choice",
       "default": "off",
       "ask": "never",
