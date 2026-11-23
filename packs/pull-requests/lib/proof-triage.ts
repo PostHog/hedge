@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { link, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { optionalStringSetting } from "../../base/lib/settings.ts";
 import { gradeOf } from "./proof-autonomy.ts";
@@ -51,21 +51,23 @@ export function pathOf({ body, changedFiles, criticalPaths }: PathInput): PathOf
 }
 
 const pathLike = /[/.*]/;
+const listMarker = /^\s*(?:[-*+]|\d+[.)])\s+/;
 const cleanEntry = (word: string) => word.replace(/^[\s"'(\[]+|[\s"'),:;\]]+$/g, "").replace(/^\.?\//, "");
 
 function criticalEntries(list: string) {
-  const quoted = [...list.matchAll(/`([^`\n]+)`/g)].map((match) => match[1]!);
-  const unquoted = list.replace(/`[^`\n]+`/g, " ");
-  const cells = unquoted.split("\n").flatMap((line) => line.includes("|") ? line.split("|").map((cell) => cell.trim()) : []);
-  const words = [...cells, ...unquoted.split(/[\s|]+/)];
-  const listed = list.split("\n").flatMap((line) => /^\s*(?:[-*+]|\d+[.)])\s+([^\s`]+)/.exec(line)?.[1] ?? []);
-  return [...quoted, ...words.filter((word) => pathLike.test(word)), ...listed].map(cleanEntry).filter(Boolean);
+  const lines = list.split("\n").filter((line) => !/^\s*#/.test(line)).map((line) => line.replace(listMarker, ""));
+  const quoted = lines.flatMap((line) => [...line.matchAll(/`([^`]+)`/g)].map((match) => match[1]!));
+  const unquoted = lines.map((line) => line.replace(/`[^`]+`/g, " "));
+  const cells = unquoted.flatMap((line) => line.includes("|") ? line.split("|") : []);
+  const words = unquoted.flatMap((line) => line.split(/[\s|]+/));
+  const firstWords = unquoted.map((line) => line.trim().split(/[\s|]+/)[0] ?? "");
+  return [...quoted, ...[...cells, ...words].filter((word) => pathLike.test(word)), ...firstWords].map(cleanEntry).filter(Boolean);
 }
 
 function matchesEntry(file: string, entry: string) {
   const directory = entry.replace(/\/\*\*?$|\/$/, "");
-  if (directory !== entry || !entry.includes("*")) return file === directory || file.startsWith(`${directory}/`);
-  return new Bun.Glob(entry).match(file);
+  if (!directory.includes("*")) return file === directory || file.startsWith(`${directory}/`);
+  return new Bun.Glob(directory).match(file) || new Bun.Glob(`${directory}/**`).match(file);
 }
 
 function onCriticalPaths(files: string[], list: string | undefined) {
@@ -76,18 +78,22 @@ function onCriticalPaths(files: string[], list: string | undefined) {
 const inDangerAreas = (files: string[]) =>
   files.filter(isProductionFile).flatMap((file) => dangerAreas.filter(({ pattern }) => pattern.test(file)).map(({ area }) => `${area}: ${file}`));
 
-const prTriagePath = (home: string, identity: ProofIdentity) => join(prDirectory(home, identity), "triage.json");
-const savedArm = async (home: string, identity: ProofIdentity) => (await readJson<{ arm?: Arm } | undefined>(prTriagePath(home, identity), undefined))?.arm;
+const armDirectory = (home: string, identity: ProofIdentity) => prDirectory(home, { ...identity, repository: identity.repository.toLowerCase() });
+const prTriagePath = (home: string, identity: ProofIdentity) => join(armDirectory(home, identity), "triage.json");
 
 export async function armFor(home: string, identity: ProofIdentity, setting: TriageSetting): Promise<Arm> {
-  const arm = armOf(setting, identity.repository, identity.pr);
-  await mkdir(prDirectory(home, identity), { recursive: true, mode: 0o700 });
-  try { await writeFile(prTriagePath(home, identity), JSON.stringify({ setting, arm }) + "\n", { flag: "wx", mode: 0o600 }); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    return (await savedArm(home, identity)) ?? arm;
-  }
-  return arm;
+  const saved = await readJson<{ arm?: Arm } | undefined>(prTriagePath(home, identity), undefined);
+  return saved?.arm ?? armOf(setting, identity.repository, identity.pr);
+}
+
+export async function saveArm(home: string, identity: ProofIdentity, setting: TriageSetting, arm: Arm) {
+  const directory = armDirectory(home, identity);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const temporary = join(directory, `.triage-${crypto.randomUUID()}`);
+  try {
+    await writeFile(temporary, JSON.stringify({ setting, arm }) + "\n", { flag: "wx", mode: 0o600 });
+    await link(temporary, prTriagePath(home, identity)).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
+  } finally { await rm(temporary, { force: true }); }
 }
 
 export async function readTriage(directory: string): Promise<{ triage: TriageMark } | Record<string, never>> {
