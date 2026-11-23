@@ -695,8 +695,16 @@ const askTriage = ({ env, home, run }: CommandContext, panelCheckout?: string) =
 };
 
 async function printLabels(directory: string, context: CommandContext) {
-  const triaged = await labelRound(directory, triageSetting(context.env), askTriage(context, (await readPlan(directory))?.cwd), async (write) => withRoundLock(dirname(directory), await context.lock(), write));
+  const triaged = await labelRound(directory, triageSetting(context.env), askTriage(context, (await readPlan(directory))?.cwd), (write) => onceFree(dirname(directory), context, write));
   for (const line of triaged ? labelLines(triaged) : []) context.print(line);
+}
+
+async function onceFree<T>(directory: string, context: CommandContext, step: () => Promise<T>) {
+  for (let poll = 0; ; poll++) {
+    try { return await withRoundLock(directory, await context.lock(), step); }
+    catch (error) { if (!(error instanceof RoundBusy) || poll >= waitPolls) throw error; }
+    await pausing(context)();
+  }
 }
 
 async function askReviewer(reserved: SingleRound, head: ProofIdentity, author: Family, context: CommandContext) {

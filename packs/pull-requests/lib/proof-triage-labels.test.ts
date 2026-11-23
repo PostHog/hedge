@@ -351,18 +351,18 @@ test("a round that weighs the budget while a wait replaces a malformed labels fi
   await expect(slow).rejects.toThrow("The reviews changed while this one weighed the budget");
 });
 
-test("a wait saves no labels while another command holds the review budget, and saves them when it runs again", async () => {
+test("a wait that finds the review budget held keeps the triage answer and saves it once the holder lets go", async () => {
   const pr = await treated();
   fakeModel(pr, "TRIAGE", adviseSecond);
   await panelRound(pr);
   const holder = await lockHolder(join(pr.pullRequest, "reviews"));
+  let pauses = 0;
+  pr.panel.onPause = async () => { pauses++; await holder.release(); };
 
-  const held = await pr.hedge("review", "--wait", "--round", "1");
-  await holder.release();
+  const waited = await pr.hedge("review", "--wait", "--round", "1");
 
-  expect(held.code).toBe(2);
-  expect(existsSync(join(reviewDirectory(pr), "triage-labels.json"))).toBe(false);
-  expect((await pr.hedge("review", "--wait", "--round", "1")).code).toBe(0);
+  expect(waited.code).toBe(0);
+  expect(pauses).toBe(1);
   expect(savedLabels(pr)).toMatchObject({ ok: true, labels: [{ finding: 1 }, { finding: 2, label: "advisory" }, { finding: 4 }] });
 });
 
