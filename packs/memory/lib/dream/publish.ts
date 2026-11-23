@@ -2,6 +2,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { secretKinds } from "../../../base/hooks/secret-guard.ts";
 import type { Result } from "../../../hub/lib/coder.ts";
+import { onceMoreOnSigningTimeout, signingTimedOut } from "./signing.ts";
 
 type Git = (...args: string[]) => Promise<Result>;
 type Must = (...args: string[]) => Promise<string>;
@@ -57,7 +58,7 @@ const sameRepo = async (g: Git, memory: string, git: (args: string[]) => Promise
 };
 
 export async function publish(worktree: string, subtree: string, memory: string, git: (args: string[]) => Promise<Result>): Promise<Published> {
-  const g: Git = (...args) => git(["-c", "commit.gpgsign=false", "-C", worktree, ...args]);
+  const g: Git = (...args) => git(["-C", worktree, ...args]);
   const must: Must = async (...args) => {
     const answer = await g(...args);
     if (answer.code !== 0) throw new Error(`git ${args[0]} failed`);
@@ -74,11 +75,15 @@ export async function publish(worktree: string, subtree: string, memory: string,
     }
     const merges = Number((await g("rev-list", "--merges", "--count", "origin/main..HEAD")).stdout.trim()) > 0;
     const current = (await g("merge-base", "--is-ancestor", "origin/main", "HEAD")).code === 0;
-    const settled = current ? { code: 0 } : merges ? await g("merge", "--quiet", "--no-edit", "origin/main") : await g("rebase", "--quiet", "origin/main");
+    const operation = merges ? "merge" : "rebase";
+    const abort = () => g(operation, "--abort");
+    const settled = current ? { code: 0, stdout: "", stderr: "" } : await onceMoreOnSigningTimeout(() => (merges ? g("merge", "--quiet", "--no-edit", "origin/main") : g("rebase", "--quiet", "origin/main")), abort);
     if (settled.code !== 0) {
       const conflicts = (await g("diff", "--name-only", "--diff-filter=U")).stdout.trim().split("\n").filter(Boolean).join(", ");
-      await g(merges ? "merge" : "rebase", "--abort");
-      return { code: 1, message: `rebasing onto main conflicts in ${conflicts || "the worktree"}. Merge origin/main, keep both sides, and publish again.` };
+      await abort();
+      if (!conflicts && signingTimedOut(settled)) return { code: 1, message: "signing the rebased commits timed out twice. Publish again." };
+      if (!conflicts) return { code: 1, message: `rebasing onto main failed: ${settled.stderr.trim().split("\n").at(-1) || `git ${operation} exited ${settled.code}`}. Publish again.` };
+      return { code: 1, message: `rebasing onto main conflicts in ${conflicts}. Merge origin/main, keep both sides, and publish again.` };
     }
     let refused: string | undefined;
     let head = "";

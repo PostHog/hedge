@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { git, gitEnv, template, tempDirs } from "../../../../src/testing/git.ts";
 import { writeHome } from "../../../hub/lib/testing.ts";
 import { dreamCommand } from "./command.ts";
-import { dreamSettings, note, quietIo, realGit } from "./testing.ts";
+import { dreamSettings, isSigned, note, quietIo, realGit, signCommits } from "./testing.ts";
 
 const temp = tempDirs();
 afterAll(() => temp.cleanup());
@@ -62,6 +62,63 @@ test("publish rebases the Dream's commits onto the memory repo's newer main and 
   expect(mainOf(home, "log", "--format=%s", "main")).toBe(["Report: 2026-11-05", "Condense: rule", "memory: laptop", "memory: laptop"].join("\n"));
   expect(mainOf(home, "show", "main:memory/tech/rule.md")).toContain("Shorter.");
   expect(mainOf(home, "show", "main:memory/tech/new.md")).toContain("name: new");
+});
+
+test("publish signs the commits it rebases onto main, as the checkout's signing settings say", async () => {
+  const { home, laptop, worktree, io } = await dreamWorktree();
+  commit(worktree, "Condense: rule", { "memory/tech/rule.md": note("rule", {}, "Shorter.") });
+  commit(worktree, "Report: 2026-11-05", { "dreams/2026-11-05.md": "1 session from hub.\n" });
+  commit(laptop, "memory: laptop", { "memory/tech/new.md": note("new") });
+  git(laptop, "push", "-q", "origin", "HEAD:main");
+  signCommits(worktree, home);
+  const { io: dream } = io();
+
+  expect(await dreamCommand(["publish", worktree], dream)).toBe(0);
+
+  git(worktree, "fetch", "-q", "origin", "main");
+  expect(mainOf(home, "log", "--format=%s", "-2", "main")).toBe("Report: 2026-11-05\nCondense: rule");
+  expect([isSigned(worktree, "origin/main"), isSigned(worktree, "origin/main~1")]).toEqual([true, true]);
+});
+
+test("publish rebases once more when signing times out, and stops with a clear line when it times out again", async () => {
+  const { home, laptop, worktree, io } = await dreamWorktree();
+  commit(worktree, "Condense: rule", { "memory/tech/rule.md": note("rule", {}, "Shorter.") });
+  commit(laptop, "memory: laptop", { "memory/tech/new.md": note("new") });
+  git(laptop, "push", "-q", "origin", "HEAD:main");
+  const signer = signCommits(worktree, home);
+  const before = mainOf(home, "rev-parse", "main");
+  signer.timeOut(2);
+  const first = io();
+
+  expect(await dreamCommand(["publish", worktree], first.io)).toBe(1);
+
+  expect(first.said).toEqual(["Hedge dream: signing the rebased commits timed out twice. Publish again."]);
+  expect(git(worktree, "rev-parse", "--abbrev-ref", "HEAD")).toBe("dream/2026-11-05");
+  expect(mainOf(home, "rev-parse", "main")).toBe(before);
+  signer.timeOut(1);
+  const second = io();
+
+  expect(await dreamCommand(["publish", worktree], second.io)).toBe(0);
+
+  git(worktree, "fetch", "-q", "origin", "main");
+  expect(mainOf(home, "log", "-1", "--format=%s", "main")).toBe("Condense: rule");
+  expect(isSigned(worktree, "origin/main")).toBe(true);
+});
+
+test("publish names a signing failure that is not a timeout, and leaves the worktree on its branch", async () => {
+  const { home, laptop, worktree, io } = await dreamWorktree();
+  commit(worktree, "Condense: rule", { "memory/tech/rule.md": note("rule", {}, "Shorter.") });
+  commit(laptop, "memory: laptop", { "memory/tech/new.md": note("new") });
+  git(laptop, "push", "-q", "origin", "HEAD:main");
+  signCommits(worktree, home);
+  git(worktree, "config", "user.signingkey", join(home, "missing-key"));
+  const { io: dream, said } = io();
+
+  expect(await dreamCommand(["publish", worktree], dream)).toBe(1);
+
+  expect(said[0]).toStartWith("Hedge dream: rebasing onto main failed: ");
+  expect(said[0]).toEndWith(". Publish again.");
+  expect(git(worktree, "rev-parse", "--abbrev-ref", "HEAD")).toBe("dream/2026-11-05");
 });
 
 test("publish refuses commits outside the memory folder and dreams/, a conflict marker, a binary file, or a secret, even one a later commit removes or one in a commit message, and pushes nothing", async () => {

@@ -113,20 +113,26 @@ the person reviews change by change and merges.
    check in **Fix** when wording cannot stop it; sharpen the index line of one
    that recurs unopened; delete one that nobody read.
 
-6. **Commit** each change on its own, with its index line in the same commit:
+6. **Commit** each change on its own with `hedge dream commit`, run in
+   `<run>/memory`:
 
-   ```text
-   <Add | Update | Merge | Condense | Move | Delete>: <memory name>
-
-   <Why, in one or two sentences.>
-   Prevalence: <n> sessions on <machines>, or Budget
-   Evidence: <machine> <provider> <session id>, ...
-   Topics: <every finding topic in the group>
+   ```sh
+   hedge dream commit "<Add | Update | Merge | Condense | Move | Delete>: <memory name>" \
+     --why "<Why, in one or two sentences.>" \
+     --prevalence "<n> sessions on <machines>, or Budget" \
+     --evidence "<machine> <provider> <session id>, ..." \
+     --topics "<every finding topic in the group>" \
+     --co-author "<the Co-Authored-By value your harness asks for>" \
+     <path of each memory file the change touches>...
    ```
 
-   The scorecard links a memory to its findings by its file name and its
-   `Topics:` lines, so name a new memory after its main topic. Done when
-   `git status` in `<run>/memory` is clean.
+   It stages only the named files and the index lines that link to them,
+   and leaves every other change for its own commit. Name both paths of a
+   move, and each deleted file: it refuses a deletion or a staged change that
+   you did not name. Never use `git add -A` or `git commit -a`. The scorecard
+   links a memory to its findings by its file name and its `Topics:` lines,
+   so name a new memory after its main topic. Done when `git status` in
+   `<run>/memory` is clean.
 
 7. **Sort** the changes for the person. They decide only two things: whether
    something enters memory, and whether a problem gets fixed.

@@ -25,6 +25,7 @@ await runCommand(() => dreamCommand(Bun.argv.slice(2), {
   home,
   env,
   self: env.CODER_WORKSPACE_NAME ?? hostname(),
+  cwd: process.cwd(),
   now: Date.now,
   print: (text) => void process.stdout.write(text.endsWith("\n") || !text ? text : `${text}\n`),
   say: (line) => console.error(line),
