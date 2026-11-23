@@ -190,15 +190,15 @@ export async function triageRuns(directory: string) {
 }
 
 export async function labelsDue(directory: string, setting: TriageSetting) {
-  return await triageRuns(directory) && (setting !== "off" || await savedLabels(directory) !== undefined);
+  return setting !== "off" && await triageRuns(directory);
 }
 
 export const savedLabels = (directory: string) => readLabels<Triaged>(directory);
 
 export async function labelRound(directory: string, setting: TriageSetting, ask: AskTriage, publish = (write: () => Promise<void>) => write()): Promise<Triaged | undefined> {
-  if (!await triageRuns(directory)) return undefined;
+  if (setting === "off" || !await triageRuns(directory)) return undefined;
   const saved = await savedLabels(directory);
-  if (saved || setting === "off") return saved;
+  if (saved) return saved;
   const findings = await readFile(join(directory, "findings.md"), "utf8");
   const diff = await readFile(join(directory, "diff.patch"), "utf8").catch(() => "");
   const triaged = await triageFindings(findings, diff, ask);

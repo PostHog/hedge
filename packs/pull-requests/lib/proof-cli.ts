@@ -348,7 +348,7 @@ each answer against HEAD.`,
       if (files.length !== 1) throw usageError("respond", "Pass one responses file");
       const head = identity();
       const ceiling = tierCeiling(tierOf(head, context), numberSetting("pull-requests.reviewCeiling", context.env));
-      print(await respondToReview(home, head, roundId(required(options, "--round", "respond")), resolve(cwd, files[0]!), ceiling));
+      print(await respondToReview(home, head, roundId(required(options, "--round", "respond")), resolve(cwd, files[0]!), ceiling, triageSetting(context.env)));
       return 0;
     },
   },
@@ -736,7 +736,7 @@ async function askReviewer(reserved: SingleRound, head: ProofIdentity, author: F
     }
     throw new Error(`The reviewer ${answer.model} gave no findings (${answer.cause}). ${label} stays reserved; run hedge proof review again to retry it.${unsaved}`);
   }
-  const anchors = anchorCheck(answer.text, diff, await reviewRecords(home, head));
+  const anchors = anchorCheck(answer.text, diff, await reviewRecords(home, head, triageSetting(context.env)));
   await storeCapturedFindings(reserved.directory, head, roundId(reserved.id), answer.text, answer.model, answer.usage);
   if (anchors) await writeFile(join(reserved.directory, "anchors.md"), anchors + "\n", { mode: 0o600 });
   print(JSON.stringify({ round: reserved.round, id: reserved.id, directory: reserved.directory, reviewer: answer.model, ...await readTriage(reserved.directory) }));
@@ -960,7 +960,7 @@ async function panelBriefs(reserved: { directory: string; from?: string }, head:
   const from = reserved.from!;
   const pr = pullRequestDetails(head, run);
   const owed = await readOwed(home, head);
-  const settled = (await reviewRecords(home, head)).filter((review) => review.responses).map((review) => `${review.label}:\n${review.responses!.trim()}`).join("\n\n");
+  const settled = (await reviewRecords(home, head, triageSetting(context.env))).filter((review) => review.responses).map((review) => `${review.label}:\n${review.responses!.trim()}`).join("\n\n");
   const { files: changedFiles, leftOut, diff } = reviewRange(run, from, head.commit, mergeBase(head, run));
   const diffFile = join(reserved.directory, "diff.patch");
   await writeFile(diffFile, diff, { mode: 0o600 });

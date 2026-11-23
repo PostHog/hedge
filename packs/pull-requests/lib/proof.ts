@@ -10,7 +10,7 @@ import { panelOutcome, unansweredPanelCause } from "./proof-panel.ts";
 import { redactSecrets } from "../../base/hooks/secret-guard.ts";
 import { anchorHeading } from "./finding-anchors.ts";
 import type { Growth } from "./proof-end-table.ts";
-import type { TriageMark } from "./proof-triage.ts";
+import type { TriageMark, TriageSetting } from "./proof-triage.ts";
 import { endTableNote, gradeOf, shellQuoted, type Autonomy } from "./proof-autonomy.ts";
 
 export type ProofIdentity = { repository: string; pr: number; commit: string };
@@ -169,12 +169,12 @@ async function savedFindings(directory: string) {
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
 }
 
-async function reviewsSpent(reviews: string, phase: FinalReadPhase, spending: Spending, dropping: string[] = []): Promise<Spent> {
+async function reviewsSpent(reviews: string, phase: FinalReadPhase, spending: Spending, setting: TriageSetting, dropping: string[] = []): Promise<Spent> {
   const rounds = await Promise.all((await reviewNames(reviews)).filter((name) => !dropping.includes(name)).map(async (name) => {
     const round = await readJson<ReservedAs | undefined>(join(reviews, name, "round.json"), undefined);
     if (!round) return undefined;
     const findings = await savedFindings(join(reviews, name));
-    const leadsToFixes = findings === undefined ? spending === "unfinished spends" : unanswered(findings, "", await advisoryIn(join(reviews, name))).length > 0;
+    const leadsToFixes = findings === undefined ? spending === "unfinished spends" : unanswered(findings, "", await advisoryIn(join(reviews, name), setting)).length > 0;
     return { name, reservation: reservationOf(round), finished: findings !== undefined, labels: await readFile(labelsPath(join(reviews, name)), "utf8").catch(() => ""), spends: (round.phase ?? "review") === phase && leadsToFixes };
   }));
   const present = rounds.filter((round) => round !== undefined).sort((a, b) => a.name.localeCompare(b.name));
@@ -293,7 +293,7 @@ async function startFinalRead(home: string, identity: ProofIdentity, base: strin
   const snapshot = async () => {
     const dropping = await droppableReads(reviews, identity, dropUnanswered);
     const counted = await finishedReviews(home, identity);
-    return { ...await reviewsSpent(reviews, phase, "unfinished spends", dropping), reviews: counted, counted: counted.map(({ name }) => name), dropping };
+    return { ...await reviewsSpent(reviews, phase, "unfinished spends", triage?.setting ?? "off", dropping), reviews: counted, counted: counted.map(({ name }) => name), dropping };
   };
   const permitRead = async ({ spent, names, finished: saved, reviews: finished }: Awaited<ReturnType<typeof snapshot>>) => {
     const { counted, found: carried } = gateCarry(identity, finished, cleanBaseMerge, quietCommit);
@@ -350,12 +350,13 @@ type RoundStart = { scope: string; base?: string; from?: string; forkBase?: stri
 
 async function startRound(home: string, identity: ProofIdentity, reviews: string, { scope, base, from, forkBase, decision, permit, cleanBaseMerge, capturedBy, opening, sanity, reserving: { lockBudget, triage, ...stamping } }: RoundStart): Promise<Reserved> {
   const { free, ceiling } = permit.limits;
-  const snapshot = async () => ({ ...await reviewsSpent(reviews, "review", "unfinished spends"), round: await nextRound(reviews) });
+  const setting = triage?.setting ?? "off";
+  const snapshot = async () => ({ ...await reviewsSpent(reviews, "review", "unfinished spends", setting), round: await nextRound(reviews) });
   const permitRound = async ({ round, spent }: Awaited<ReturnType<typeof snapshot>>) => {
     if (round === 1 && scope !== "full") throw new Error("Round 1 is --scope full: it reviews the whole PR diff. Drop --base");
     if (round > 1) await requireFinished(reviews, round);
     const opened = round > 1 && scope === "full" && await opening();
-    if (round > 1 && decision?.mark !== "👤" && !opened) await requireBoughtRound(home, identity);
+    if (round > 1 && decision?.mark !== "👤" && !opened) await requireBoughtRound(home, identity, setting);
     if (round > 1 && !opened) await checkLaterRound(reviews, round, scope, base, decision, cleanBaseMerge);
     if (round > 1) await sanity();
     return permitReview(home, identity, spent >= free, spent >= ceiling ? budgetSpent(permit.limits) : undefined, decision, permit);
@@ -392,13 +393,13 @@ async function checkLaterRound(reviews: string, round: number, scope: string, ba
   if (!coversReview(base, previous.commit, cleanBaseMerge)) throw new Error(`Round ${round} needs --base ${previous.commit}, the commit of round ${round - 1}`);
 }
 
-async function requireBoughtRound(home: string, identity: ProofIdentity) {
+async function requireBoughtRound(home: string, identity: ProofIdentity, setting: TriageSetting) {
   const last = (await finishedReviews(home, identity)).at(-1);
   if (!last) return;
   const directory = join(pullRequestDirectory(home, identity), "reviews", last.name);
   const findings = await readFile(join(directory, "findings.md"), "utf8");
   const responses = await readFile(join(directory, "responses.md"), "utf8").catch(() => "");
-  if (answeredFindings(findings, responses, await advisoryIn(directory)).findings.some(buysRound)) return;
+  if (answeredFindings(findings, responses, await advisoryIn(directory, setting)).findings.some(buysRound)) return;
   const label = reviewLabel(last.name);
   const stop = `${label[0]!.toUpperCase()}${label.slice(1)} found no bug in production code that the PR introduced, so the review loop stops.`;
   throw new Error(`${stop} Reject a finding the base has too with its base lines, and list it under Known issues. When fixes since ${label} changed production code, give them a final read with --scope final. Do not ask the user for another round. Only the user's --override runs one: when the user asks for it, confirm it with your question tool. Question: "${roundQuestion} ${identity.repository}#${identity.pr}: ${stop}" Options: "${runOption}", "${stopOption}". When they choose "${runOption}", run this command again with --override '<date> "${runOption}"'`);
@@ -616,18 +617,18 @@ async function storeFindings(directory: string, identity: ProofIdentity, round: 
   await writeJson(join(directory, "round.json"), { ...await readReservation(directory) ?? reservation, reviewer, capturedBy, ...usage ? { usage } : {} });
 }
 
-export async function respondToReview(home: string, identity: ProofIdentity, round: RoundId, responses: string, ceiling: number) {
+export async function respondToReview(home: string, identity: ProofIdentity, round: RoundId, responses: string, ceiling: number, setting: TriageSetting) {
   const bytes = await readFile(responses);
   if (!bytes.toString().trim()) throw new Error(`${responses} is empty. Answer each finding: fixed in which commit, or rejected and why`);
   const directory = await roundDirectory(home, identity, round);
   const findings = await savedFindings(directory);
   if (findings === undefined) throw new Error(`Review round ${round} has no findings yet`);
-  const missing = unanswered(findings, bytes.toString(), await advisoryIn(directory));
+  const missing = unanswered(findings, bytes.toString(), await advisoryIn(directory, setting));
   if (missing.length) throw new Error(`Answer findings ${missing.join(", ")} too: one line each, numbered in the order of findings.md, such as "${missing[0]}. fixed in 1a2b3c4: <how>", "${missing[0]}. rejected: <why>", or, at the review budget, "${missing[0]}. known: <why>" for a finding listed under Known issues. Minor and nit findings need no answer; a TESTS item gets a test-only rewrite or delete`);
   if (answeredFindings(findings, bytes.toString()).findings.some(({ answer }) => answer?.verdict === "known")) {
     const reviews = join(pullRequestDirectory(home, identity), "reviews");
     const phase = (await readJson<{ phase?: FinalReadPhase }>(join(directory, "round.json"), {})).phase ?? "review";
-    const { spent } = await reviewsSpent(reviews, phase, "finished only");
+    const { spent } = await reviewsSpent(reviews, phase, "finished only", setting);
     if (spent < ceiling) throw new Error(`Answer a finding "known" only once the review budget of ${ceiling} reviews is spent; ${spent} ran. Fix or reject it now`);
   }
   const destination = join(directory, "responses.md");
@@ -816,17 +817,23 @@ export async function readLabels<T extends { ok?: boolean; labels: FindingLabel[
   return findings !== undefined && Array.isArray(labels) && labels.every(isFindingLabel) && labelsEachCandidate(labels, labelCandidates(findings)) ? saved as T : undefined;
 }
 
-export async function advisoryLabels(directory: string) {
+const waivesIn = async (directory: string) => {
+  const { triage } = await readJson<{ triage?: { arm?: string; path?: string } }>(join(directory, "round.json"), {});
+  return triage?.arm === "treated" && triage.path !== "excluded";
+};
+
+export async function advisoryLabels(directory: string, setting: TriageSetting) {
+  if (setting === "off" || !await waivesIn(directory)) return [];
   const saved = await readLabels(directory);
   return (saved?.ok === true ? saved.labels : []).filter(({ label, severity }) => label === "advisory" && severity !== "none");
 }
 
-async function advisoryOf(directory: string) {
-  const advisory = (await advisoryLabels(directory)).map(({ finding, severity }) => ({ finding, severity }));
+async function advisoryOf(directory: string, setting: TriageSetting) {
+  const advisory = (await advisoryLabels(directory, setting)).map(({ finding, severity }) => ({ finding, severity }));
   return advisory.length ? { advisory } : {};
 }
 
-const advisoryIn = async (directory: string) => new Set((await advisoryLabels(directory)).map(({ finding }) => finding));
+const advisoryIn = async (directory: string, setting: TriageSetting) => new Set((await advisoryLabels(directory, setting)).map(({ finding }) => finding));
 
 const majorItem = /^\s*(?:[-*]|\d+[.)])\s+(?:[^|\n]*\|)?\s*\**major\**\s*\|/i;
 
@@ -1359,12 +1366,12 @@ async function headReview(home: string, identity: ProofIdentity, { counted: fini
   return { problem: "missing", line: latest ? `review: HEAD not reviewed, last review covered ${short(latest.commit)}` : "review: HEAD not reviewed" };
 }
 
-async function responseStatuses(home: string, identity: ProofIdentity, body: string | undefined): Promise<Status[]> {
+async function responseStatuses(home: string, identity: ProofIdentity, body: string | undefined, setting: TriageSetting): Promise<Status[]> {
   const reviews = join(pullRequestDirectory(home, identity), "reviews");
   const statuses = await Promise.all((await finishedReviews(home, identity)).map(async ({ name }): Promise<Status | undefined> => {
     const findings = await readFile(join(reviews, name, "findings.md"), "utf8");
     const responses = await readFile(join(reviews, name, "responses.md"), "utf8").catch(() => "");
-    const advisory = await advisoryIn(join(reviews, name));
+    const advisory = await advisoryIn(join(reviews, name), setting);
     const missing = unanswered(findings, responses, advisory);
     if (missing.length) return { problem: "missing", line: `review: ${reviewLabel(name)} has unanswered findings ${missing.join(", ")}; answer each with hedge proof respond --round ${name} <responses.md>` };
     const unlisted = body === undefined ? [] : unlistedKnown(findings, responses, knownIssues(body));
@@ -1404,7 +1411,7 @@ function headStatus(identity: ProofIdentity, before: PushedHead, after: PushedHe
 }
 
 /** devPull reads the dev PR that a prod PR waits on (hedge proof require --after-dev). */
-export type GateOptions = { ci: () => CiResult; pushedHead: () => PushedHead; ledger: Ledger; landed?: boolean; cleanBaseMerge?: CleanBaseMerge; quietCommit?: QuietCommit; now?: Date; devPull?: (dev: DevPr) => DevPull | Promise<DevPull> };
+export type GateOptions = { triage?: TriageSetting; ci: () => CiResult; pushedHead: () => PushedHead; ledger: Ledger; landed?: boolean; cleanBaseMerge?: CleanBaseMerge; quietCommit?: QuietCommit; now?: Date; devPull?: (dev: DevPr) => DevPull | Promise<DevPull> };
 
 // A fenced block is an example, never the section: drop it before looking for the heading.
 const unfenced = (body: string) => body.replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[^\n]*$/gm, "");
@@ -1458,7 +1465,7 @@ async function readDev(dev: DevPr | undefined, devPull: GateOptions["devPull"]):
   catch (error) { return { ref: dev, error: (error as Error).message.trim().split("\n")[0] || "unknown error" }; }
 }
 
-export async function proofGate(home: string, identity: ProofIdentity, { ci, pushedHead, ledger, landed = false, cleanBaseMerge = () => undefined, quietCommit = () => undefined, now = new Date(), devPull }: GateOptions) {
+export async function proofGate(home: string, identity: ProofIdentity, { triage = "off", ci, pushedHead, ledger, landed = false, cleanBaseMerge = () => undefined, quietCommit = () => undefined, now = new Date(), devPull }: GateOptions) {
   const before = pushedHead();
   const grade = gradeOf("error" in before ? undefined : before.body);
   const tier = grade.tier;
@@ -1469,7 +1476,7 @@ export async function proofGate(home: string, identity: ProofIdentity, { ci, pus
   const kinds = await Promise.all((owed?.kinds ?? []).map((kind) => kindStatus(weigh, kind, landed, cleanBaseMerge, dev)));
   const devResult = kinds.find((kind) => kind.dev)?.dev;
   const review = await reviewStatus(weigh, cleanBaseMerge, quietCommit);
-  const responses = await responseStatuses(home, identity, landed || !("body" in before) ? undefined : before.body ?? "");
+  const responses = await responseStatuses(home, identity, landed || !("body" in before) ? undefined : before.body ?? "", triage);
   const dropped = (await droppedFinalReads(home, identity)).map(({ line, cause }) => `review: ${line}${cause ? "; hedge proof show prints its cause" : ""}`);
   const ciResult = ci();
   const head = headStatus(identity, before, pushedHead());
@@ -1500,7 +1507,7 @@ const receiptPath = (home: string, ref: PrRef) => join(prDirectory(home, ref), "
 export const receiptOf = async (home: string, ref: PrRef) => (await readJson<{ url?: string } | undefined>(receiptPath(home, ref), undefined))?.url;
 export const recordReceipt = (home: string, ref: PrRef, url: string) => writeJson(receiptPath(home, ref), { url });
 
-export async function reviewRecords(home: string, identity: ProofIdentity) {
+export async function reviewRecords(home: string, identity: ProofIdentity, setting: TriageSetting = "off") {
   const reviews = join(pullRequestDirectory(home, identity), "reviews");
   return Promise.all((await finishedReviews(home, identity)).map(async ({ name, commit, reviewer }) => {
     const reservation = await readJson<Reservation | undefined>(join(reviews, name, "round.json"), undefined);
@@ -1508,7 +1515,7 @@ export async function reviewRecords(home: string, identity: ProofIdentity) {
       label: reviewLabel(name), directory: join(reviews, name), commit, reviewer, capturedBy: reservation?.capturedBy ?? "author",
       findings: await readFile(join(reviews, name, "findings.md"), "utf8"),
       responses: await readFile(join(reviews, name, "responses.md"), "utf8").catch(() => undefined),
-      ...await advisoryOf(join(reviews, name)),
+      ...await advisoryOf(join(reviews, name), setting),
     };
   }));
 }

@@ -461,6 +461,22 @@ test("a control pull request, a one-way door, and triage off run no triage and p
   }
 });
 
+test("a labels file in a round of a control pull request or of a one-way door waives nothing", async () => {
+  const control = [1, 2, 3, 4, 5, 6, 7, 8].find((number) => armOf("split", "example/product", number) === "control")!;
+  const runs: [string, number, string?][] = [["split", control], ["on", 42, "one-way"]];
+  for (const [setting, number, door] of runs) {
+    const pr = await treated(setting, number);
+    if (door) pr.pullRequestState({ body: graded("non-critical", "medium").replace("two-way door", "one-way door"), number });
+    const where = ["--repo", "example/product", "--pr", String(number)];
+    await pr.hedge("review", "--single", ...where);
+    writeFileSync(join(pr.home, ".local/state/hedge/proof/example/product", String(number), "reviews", "1", "triage-labels.json"), JSON.stringify({ ok: true, labels: everyFinding(advisoryTwo) }));
+    writeFileSync(join(pr.repository, "responses.md"), "1. fixed in abc1234: greets\n4. rejected: fine\n6. fixed in abc1234: test\n");
+
+    const answered = await pr.hedge("respond", "--round", "1", "responses.md", ...where).then((result) => result, (error: Error) => ({ code: 1, output: error.message }));
+    expect(answered.output).toContain("Answer findings 2 too");
+  }
+});
+
 test("an advisory finding answered as fixed buys no further round, where the same answer without triage does", async () => {
   const runs: [string, boolean][] = [["on", false], ["off", true]];
   for (const [setting, buys] of runs) {
@@ -477,9 +493,9 @@ test("an advisory finding answered as fixed buys no further round, where the sam
   }
 });
 
-test("a final read whose findings are all advisory spends no review budget, so the next one needs no arbiter, where without triage it does", async () => {
-  const runs: [string, boolean][] = [["on", false], ["off", true]];
-  for (const [setting, arbitrated] of runs) {
+test("a final read whose findings are all advisory spends no review budget, so the next one needs no arbiter, where without triage, or with triage switched off before it, it does", async () => {
+  const runs: [string, string, boolean][] = [["on", "on", false], ["off", "off", true], ["on", "off", true]];
+  for (const [setting, later, arbitrated] of runs) {
     const pr = await treated(setting);
     const arbiter = join(pr.home, "arbiter-asked");
     pr.env.HEDGE_REVIEW_ARBITER = `cat >/dev/null; touch '${arbiter}'; echo CONTINUE`;
@@ -496,6 +512,7 @@ test("a final read whose findings are all advisory spends no review budget, so t
     triage.answer(labels([1, "advisory", "names no trigger"]));
     await finalRead("a");
     expect(existsSync(arbiter)).toBe(false);
+    pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": later });
 
     expect((await finalRead("b")).code).toBe(0);
     expect(existsSync(arbiter)).toBe(arbitrated);
@@ -745,6 +762,26 @@ test("the full receipt keeps the advisory mark beside an answer the author gave 
   await pr.hedge("receipt");
 
   expect(readFileSync(join(pr.home, "published.json"), "utf8")).toContain("rejected: a matter of taste (advisory, needs no answer)");
+});
+
+test("with triage switched off after a treated round, its saved labels waive nothing: respond, the review, the gate, the judge and the receipt work as without triage", async () => {
+  const pr = await treated();
+  pr.pullRequestState({ body: `## Testing\n\nThe greeting.\n\n${graded("non-critical", "medium")}` });
+  pr.env.HEDGE_HANDLERS = JSON.stringify({ "proof-receipt": publisherScript(pr) });
+  await answeredPanel(pr);
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": "off" });
+
+  expect((await respond(pr, "1. fixed in abc1234: greets\n4. rejected: fine\n6. fixed in abc1234: test\n")).output).toContain("Answer findings 2 too");
+  expect((await pr.hedge("review", "--wait", "--round", "1")).output).not.toContain("Advisory");
+  await respond(pr, "1. fixed in abc1234: greets\n2. rejected: fine\n4. rejected: fine\n6. fixed in abc1234: test\n");
+  const judge = fakeModel(pr, "JUDGE", verdict());
+  await pr.hedge("gate");
+  await pr.hedge("receipt");
+
+  expect(judge.prompts().join("\n")).not.toContain("The triage labelled");
+  expect(pr.githubBody()).not.toContain("Advisory findings");
+  expect(readFileSync(join(pr.home, "published.json"), "utf8")).not.toContain("advisory");
+  expect(existsSync(join(reviewDirectory(pr), "triage-labels.json"))).toBe(true);
 });
 
 test("an advisory blocker that the author answers known still holds the merge", async () => {

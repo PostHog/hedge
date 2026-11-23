@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { triageSetting, type TriageSetting } from "./proof-triage.ts";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { stringSetting } from "../../base/lib/settings.ts";
@@ -39,8 +40,8 @@ async function writeBody(head: ProofIdentity, body: string, context: ReceiptCont
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 
-async function receiptReviews(head: ProofIdentity, home: string): Promise<ReceiptReview[]> {
-  return Promise.all(reviewDisplay(await reviewRecords(home, head)).map(async (review) => {
+async function receiptReviews(head: ProofIdentity, home: string, setting: TriageSetting): Promise<ReceiptReview[]> {
+  return Promise.all(reviewDisplay(await reviewRecords(home, head, setting)).map(async (review) => {
     const plan = await readPlan(review.directory);
     return plan?.lenses.length ? { ...review, lenses: plan.lenses } : review;
   }));
@@ -59,7 +60,7 @@ export async function runReceipt(head: ProofIdentity, items: string[] | undefine
   const display = await readDisplay(home, head);
   const notChecked = items ?? await readNotChecked(home, head);
   const covered = decisions.filter((decision) => covers(decision, head));
-  const reviews = await receiptReviews(head, home);
+  const reviews = await receiptReviews(head, home, triageSetting(env));
   let rendered: ReturnType<typeof renderSection>;
   try {
     rendered = renderSection({ summary, gated, landed: first.state === "merged", display, notChecked, reviews, screenshots: await screenshotFiles(summary) });
