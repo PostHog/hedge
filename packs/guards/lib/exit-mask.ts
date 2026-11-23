@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 import { commandsIn, nestedProgramsAt, parse, type Command, type Scope } from "./shell-words.ts";
 
-type Fix = "pipefail" | { andAt: number; operator: string };
+type Fix = { pipefail?: true; exitAt?: number };
 type Finding = { what: string; how: string; fix?: Fix };
 type Reach = "exit" | { printedBy: number } | { how: string; fix?: Fix };
 type Program = { commands: Command[]; depths: number[] };
@@ -158,7 +158,7 @@ function reachOf(program: Program, start: number): Reach {
     return found === "printed" ? { printedBy: index } : found;
   };
   let end = pipelineEnd(program, start, depth);
-  if (end !== start && !setting(program, start, setsOption("pipefail"))) return { how: "a pipe", fix: "pipefail" };
+  if (end !== start && !setting(program, start, setsOption("pipefail"))) return { how: "a pipe", fix: pipefailFix(program, start, end) };
   if (depth > 0) return closesOnly(program, end, depth) ? "exit" : { how: "the group or loop it runs in" };
   while (commands[end].after === "&&" && end + 1 < commands.length) end = pipelineEnd(program, end + 1, depth);
   const after = commands[end].after;
@@ -166,12 +166,22 @@ function reachOf(program: Program, start: number): Reach {
   if (after === undefined) return "exit";
   if (after === "&") return { how: "running it in the background with `&`" };
   if (after === "||") return reportedBy(next, true) ?? { how: "the `||` after it" };
-  return reportedBy(next, false) ?? { how: separatorName(after), fix: chainingFix(program, end) };
+  return reportedBy(next, false) ?? { how: separatorName(after), fix: exitFix(commands[end]) };
 }
 
-function chainingFix({ commands }: Program, end: number): Fix | undefined {
-  const { after, afterAt } = commands[end];
-  return after !== undefined && afterAt !== undefined && separators.has(after) ? { andAt: afterAt, operator: after } : undefined;
+const exitFix = ({ after, afterAt }: Command): Fix | undefined => (after !== undefined && afterAt !== undefined && separators.has(after) ? { exitAt: afterAt } : undefined);
+
+function pipefailFix(program: Program, start: number, pipeEnd: number): Fix | undefined {
+  const { commands } = program;
+  let last = pipeEnd;
+  while (commands[last].after === "&&" && last + 1 < commands.length) last = pipelineEnd(program, last + 1, 0);
+  const reached = commands.slice(0, last + 1);
+  const otherPipe = reached.some((command, index) => command.after === "|" && (index < start || index >= pipeEnd));
+  const nested = reached.some((command) => command.substitutions.length > 0);
+  if (otherPipe || nested) return undefined;
+  if (commands[last].after === undefined) return { pipefail: true };
+  const after = exitFix(commands[last]);
+  return after && { pipefail: true, ...after };
 }
 
 const named = (command: Command, names: Set<string>) => [command.name, ...command.prefix].some((word) => names.has(word));
@@ -219,9 +229,10 @@ function hiddenIn(text: string, nesting: number): { found?: Finding; carries?: s
 
 export const exitMaskReason = (what: string, how: string, person: string) => `Hedge blocked this command: ${how} hides the exit status of \`${what}\`, `
   + "so a failure reads as a success. These forms pass: run it alone or as the last command; chain the next step with `&&`; "
+  + "end it with `|| exit` before the next step; "
   + `print its status on the next command, as in \`${what} … > /tmp/out.log 2>&1; echo "exit=$?"; cat /tmp/out.log\`; `
   + "for a pipe, start with `set -o pipefail;`. In place of a loop or group, write one command per item, joined with `&&`. "
-  + "`set -e` does not count: Claude Code runs the command inside an `&&` list, where the shell ignores it. "
+  + "`set -e` does not count: the shell ignores it inside an `&&` list, and Claude Code runs each command in one. "
   + "A call with only `--help` or `-h` after the command passes too. "
   + `If you are not sure, stop and ask ${person}.`;
 
@@ -232,35 +243,37 @@ export function exitMaskRisk(command: string, person: string): string | undefine
 
 const pipefail = "set -o pipefail; ";
 const maxRewrites = 64;
-const readsStatus = /\$\{?\?|PIPESTATUS|pipestatus|SHELLOPTS/;
+const readsStatus = /\$\{?\?|PIPESTATUS|pipestatus|SHELLOPTS|pipefail|\bshopt\b|\bset\s+[-+]o\s*(?:$|[;&|)>#\n])/;
 const hidesCode = new Set(["trap", "eval", "source", "."]);
 
 function pipefailKeepsEveryCommand(text: string): boolean {
   if (readsStatus.test(text)) return false;
-  return !commandsIn(text).some((command) => command.after === "||" || command.tested || command.keywords.includes("!") || named(command, hidesCode));
+  return !commandsIn(text).some((command) => command.after === "||" || command.tested || named(command, hidesCode));
 }
 
-function chained(text: string, { andAt, operator }: { andAt: number; operator: string }): string {
-  const spaced = /\s/.test(text[andAt - 1] ?? " ") ? "" : " ";
-  if (operator === ";") return `${text.slice(0, andAt)}${spaced}&&${text.slice(andAt + 1)}`;
-  return `${text.slice(0, andAt)}${spaced}&&${text[andAt] === "#" ? " " : ""}${text.slice(andAt)}`;
+function exitingAt(text: string, at: number, restoring: boolean): string {
+  const spaced = /\s/.test(text[at - 1] ?? " ") ? "" : " ";
+  const restore = restoring ? "; set +o pipefail" : "";
+  return `${text.slice(0, at)}${spaced}|| exit${restore}${text[at] === "#" ? " " : ""}${text.slice(at)}`;
 }
 
-/** The command in a form whose every push, commit, merge, gate and watch shows its exit status, when that form only adds
- * `set -o pipefail` before a pipe or turns a `;` or line break after such a command into `&&`, so no other command runs
- * that would not have run before. Undefined when the command needs no rewrite or has no such form. */
+/** The command in a form whose every push, commit, merge, gate and watch shows its exit status: `|| exit` after such a
+ * command where a `;` or line break follows it, and `set -o pipefail` around a pipe it runs in. The other commands run
+ * as before while it succeeds, and none runs after it fails. Undefined when the command needs no rewrite or has no
+ * such form, such as when `!` negates a pipeline or a `function` keyword hides a body. */
 export function exitMaskRewrite(command: string): string | undefined {
   let text = command;
-  let piped = false;
   try {
-    if (commandsIn(command).some((each) => each.name === "function")) return undefined;
+    if (commandsIn(command).some((each) => each.name === "function" || each.keywords.includes("!"))) return undefined;
     for (let step = 0; step < maxRewrites; step++) {
       const { found } = hiddenIn(text, 0);
       if (!found) return step === 0 ? undefined : text;
       if (!found.fix) return undefined;
-      if (found.fix !== "pipefail") text = chained(text, found.fix);
-      else if (piped || !pipefailKeepsEveryCommand(command)) return undefined;
-      else [text, piped] = [pipefail + text, true];
+      const { pipefail: needsPipefail, exitAt } = found.fix;
+      if (needsPipefail && !pipefailKeepsEveryCommand(command)) return undefined;
+      const shift = needsPipefail ? pipefail.length : 0;
+      if (needsPipefail) text = pipefail + text;
+      if (exitAt !== undefined) text = exitingAt(text, exitAt + shift, needsPipefail === true);
     }
   } catch {
     return undefined;

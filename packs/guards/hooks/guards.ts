@@ -60,7 +60,7 @@ function check(call: ToolCall, { person, owners, mainPushRepos, allowRules, unre
 }
 
 const rewriteNote = (command: string) => `Hedge ran this command as \`${command}\`, so the exit status of each push, commit, merge, `
-  + "gate or watch in it shows, and no command runs after one that fails. Write it this way next time.";
+  + "gate or watch in it shows, and the call stops when one fails. Write it this way next time.";
 
 const restrictsPersonalHooks = () => !/^(?:|0|false|no|off)$/i.test((process.env.CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG ?? "").trim());
 

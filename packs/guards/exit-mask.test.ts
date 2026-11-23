@@ -14,7 +14,7 @@ beforeAll(() => {
   bin = join(stubs.make("exit-mask-bin-"), "bin");
   mkdirSync(bin);
   for (const name of ["git", "gh", "hedge", "fleet"]) {
-    writeFileSync(join(bin, name), '#!/bin/sh\n[ "$1" = heavy ] && [ "$2" = -- ] && shift 2 && exec "$@"\ncalls=$(($(cat "$STUB_CALLS" 2>/dev/null || echo 0) + 1))\necho "$calls" > "$STUB_CALLS"\n[ "$calls" = "$STUB_FAILS" ] && exit 3\nexit 0\n');
+    writeFileSync(join(bin, name), '#!/bin/sh\n[ "$1" = heavy ] && [ "$2" = -- ] && shift 2 && exec "$@"\necho "${0##*/} $*" >> "$STUB_CALLS.trace"\ncalls=$(($(cat "$STUB_CALLS" 2>/dev/null || echo 0) + 1))\necho "$calls" > "$STUB_CALLS"\n[ "$calls" = "$STUB_FAILS" ] && exit 3\nexit 0\n');
     chmodSync(join(bin, name), 0o755);
   }
 });
@@ -33,7 +33,8 @@ function runFailing(command: string, failing: number, harness: Harness = "codex"
   const env = { PATH: `${bin}:/usr/bin:/bin`, STUB_CALLS: calls, STUB_FAILS: String(failing), AGENT_COMMAND: command };
   const run = spawnSync("bash", [flag, program], { cwd: temp.make("exit-mask-run-"), env, encoding: "utf8" });
   const made = Number(spawnSync("cat", [calls], { encoding: "utf8" }).stdout || 0);
-  return { seen: { status: run.status, output: `${run.stdout}${run.stderr}` }, made };
+  const trace = spawnSync("cat", [`${calls}.trace`], { encoding: "utf8" }).stdout;
+  return { seen: { status: run.status, output: `${run.stdout}${run.stderr}` }, made, trace, stdout: run.stdout, stderr: run.stderr };
 }
 
 function showsEveryFailureIn(command: string, harness: Harness) {
@@ -371,30 +372,49 @@ describe("the exit-status mask guard", () => {
     ["git push | tail -3", "set -o pipefail; git push | tail -3"],
     ["hedge proof gate --pr 1 2>&1 | tail -20", "set -o pipefail; hedge proof gate --pr 1 2>&1 | tail -20"],
     ["gh pr ready 12 && gh pr merge 12 --squash 2>&1 | tail -5", "set -o pipefail; gh pr ready 12 && gh pr merge 12 --squash 2>&1 | tail -5"],
-    ["git commit -m x; git push", "git commit -m x && git push"],
-    ["git push; echo done", "git push && echo done"],
-    ["git push ; echo done", "git push && echo done"],
-    ["git push\necho done", "git push &&\necho done"],
-    ["git push # pushes the branch\necho done", "git push && # pushes the branch\necho done"],
-    ["git push\n\n# then\necho done", "git push &&\n\n# then\necho done"],
-    ["git commit -F - <<'EOF'\nFix; the | gate\nEOF\ngit push", "git commit -F - <<'EOF' &&\nFix; the | gate\nEOF\ngit push"],
-    ["set -e; git commit -m 'a; b' ; git push; echo done", "set -e; git commit -m 'a; b' && git push && echo done"],
-    ["cd . && git push 2>&1 | tail -3; echo done", "set -o pipefail; cd . && git push 2>&1 | tail -3 && echo done"],
-    ["git push; if true; then echo pushed; fi", "git push && if true; then echo pushed; fi"],
-    ["git push; true || exit 1", "git push && true || exit 1"],
+    ["git commit -m x; git push", "git commit -m x || exit; git push"],
+    ["git push; echo done", "git push || exit; echo done"],
+    ["git push ; echo done", "git push || exit; echo done"],
+    ["git push\necho done", "git push || exit\necho done"],
+    ["git push # pushes the branch\necho done", "git push || exit # pushes the branch\necho done"],
+    ["git push\n\n# then\necho done", "git push || exit\n\n# then\necho done"],
+    ["git commit -F - <<'EOF'\nFix; the | gate\nEOF\ngit push", "git commit -F - <<'EOF' || exit\nFix; the | gate\nEOF\ngit push"],
+    ["git commit -F - <<EOF\nline one \\\nEOF\ngit push\nEOF\necho done", "git commit -F - <<EOF || exit\nline one \\\nEOF\ngit push\nEOF\necho done"],
+    ["set -e; git commit -m 'a; b' ; git push; echo done", "set -e; git commit -m 'a; b' || exit; git push || exit; echo done"],
+    ["cd . && git push 2>&1 | tail -3; echo done", "set -o pipefail; cd . && git push 2>&1 | tail -3 || exit; set +o pipefail; echo done"],
+    ["git push 2>&1 | tail -3\necho done | cat", "set -o pipefail; git push 2>&1 | tail -3 || exit; set +o pipefail\necho done | cat"],
+    ["git commit -m x; git push | tail -3", "set -o pipefail; git commit -m x || exit; git push | tail -3"],
+    ["git push; if true; then echo pushed; fi", "git push || exit; if true; then echo pushed; fi"],
+    ["git push; true || exit 1", "git push || exit; true || exit 1"],
+    ["git push; echo pushed || exit 1; echo done", "git push || exit; echo pushed || exit 1; echo done"],
+    ["git push; false; echo done", "git push || exit; false; echo done"],
+    ["git push && echo ok; echo done", "git push && echo ok || exit; echo done"],
+    ["git push; sleep 0 &", "git push || exit; sleep 0 &"],
+    ["git commit -F - <<'EOF'\nline one \\\nEOF\ngit push", "git commit -F - <<'EOF' || exit\nline one \\\nEOF\ngit push"],
+    ["( git push | tail -3 )", "set -o pipefail; ( git push | tail -3 )"],
+    ["git push | tail -3 && echo ok; echo done", "set -o pipefail; git push | tail -3 && echo ok || exit; set +o pipefail; echo done"],
+    ["git push; true || echo extra", "git push || exit; true || echo extra"],
   ])("rewrites a hidden status into a form that shows it: %s", (command, rewrite) => {
     expect(exitMaskRewrite(command)).toBe(rewrite);
     expect(exitMaskRisk(rewrite, "Robin")).toBeUndefined();
     expect(shellShowsEveryFailure(rewrite)).toBe(true);
-    for (const harness of ["codex", "claude"] as const) expect(runFailing(rewrite, 0, harness)).toEqual(runFailing(command, 0, harness));
+    for (const harness of ["codex", "claude"] as const) {
+      const passing = runFailing(command, 0, harness);
+      expect(runFailing(rewrite, 0, harness)).toEqual(passing);
+      for (let call = 1; call <= passing.made; call++) {
+        const before = runFailing(command, call, harness);
+        const after = runFailing(rewrite, call, harness);
+        expect(after.seen.status).not.toBe(0);
+        expect(before.trace.startsWith(after.trace)).toBe(true);
+        expect(before.stdout.startsWith(after.stdout)).toBe(true);
+      }
+    }
   });
 
   test.each([
     "git push || true",
     "git push || echo failed",
     "git push &",
-    "git push; sleep 1 &",
-    "git push; true || echo extra",
     "for branch in a b; do git push origin $branch; done",
     "{ git push; } | cat",
     "bash -c 'git push | cat'",
@@ -415,6 +435,21 @@ describe("the exit-status mask guard", () => {
     "git push | cat; source ./next.sh",
     'git push | cat; eval "$next"',
     "git push; function f { echo f; }; f",
+    "! git push; echo done",
+    "! git push | tail -3",
+    "git push | tail -3; [[ -o pipefail ]] && echo extra",
+    "git push | tail -3; [ -o pipefail ] && echo extra",
+    "git push | tail -3; shopt -qo pipefail && echo extra",
+    "git push | tail -3; set -o > options.txt",
+    "git push | tail -3; set +o | grep -q 'set -o' && echo extra",
+    "git log | head -1; git push | tail -3",
+    "git push | tail -3 && git log | head -1; echo done",
+    "git commit -m \"$(git log -1 --format=%s | tr a-z A-Z)\" | tail -1",
+    "git push | tail -3; git commit -m x | tail -1",
+    "{ git push | tail -3; }; echo done",
+    "git commit -F - <<EOF | tail -1\n$(git log | head -1)\nEOF",
+    "git push | tail -3; shopt -o > options.txt",
+    "bash <<EOF\ngit push \\\n| tail -3\nEOF",
   ])("refuses instead of rewriting when no rewrite keeps every other command as it was: %s", (command) => {
     expect(exitMaskRewrite(command)).toBeUndefined();
     expect(refused(command)).toBe(true);
@@ -437,8 +472,8 @@ describe("the exit-status mask guard", () => {
     const answer = runHookProcess("claude", bash("git push 2>&1 | tail -3; echo done"));
     expect(answer).toEqual({
       hookEventName: "PreToolUse",
-      updatedInput: { command: "set -o pipefail; git push 2>&1 | tail -3 && echo done", description: "Push" },
-      additionalContext: expect.stringContaining("`set -o pipefail; git push 2>&1 | tail -3 && echo done`"),
+      updatedInput: { command: "set -o pipefail; git push 2>&1 | tail -3 || exit; set +o pipefail; echo done", description: "Push" },
+      additionalContext: expect.stringContaining("`set -o pipefail; git push 2>&1 | tail -3 || exit; set +o pipefail; echo done`"),
     });
   });
 
