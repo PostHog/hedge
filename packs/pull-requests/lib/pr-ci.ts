@@ -105,13 +105,6 @@ function commitRecords<T>(identity: ProofIdentity, run: Run, path: string, jq: s
   catch { throw new Error(`gh api ${path} printed no JSON lines`); }
 }
 
-function commitStatuses(identity: ProofIdentity, run: Run): CommitStatus[] {
-  const result = run(["gh", "api", "--paginate", `repos/${identity.repository}/commits/${identity.commit}/statuses?per_page=100`, "--slurp"]);
-  if (result.code !== 0) throw new Error(`gh api statuses failed (${firstLine(result.stderr)})`);
-  try { return (JSON.parse(result.stdout) as CommitStatus[][]).flat(); }
-  catch { throw new Error("gh api statuses printed no JSON"); }
-}
-
 function entriesOf(identity: ProofIdentity, run: Run): Entry[] {
   const runs = commitRecords<CheckRun>(identity, run, "check-runs", ".check_runs[] | {id, name, status, conclusion, app: .app.id}");
   const newestRuns = [...runs.reduce((newest, check) => {
@@ -119,7 +112,7 @@ function entriesOf(identity: ProofIdentity, run: Run): Entry[] {
     if ((newest.get(key)?.id ?? -1) < check.id) newest.set(key, check);
     return newest;
   }, new Map<string, CheckRun>()).values()];
-  const statuses = commitStatuses(identity, run);
+  const statuses = commitRecords<CommitStatus>(identity, run, "statuses", ".[]");
   const newest = statuses.filter((status, index) => statuses.findIndex((other) => other.context === status.context && other.creator?.login === status.creator?.login) === index);
   return [
     ...newestRuns.map((check): Entry => ({ name: check.name, appId: check.app ?? undefined, outcome: check.status !== "completed" ? "pending" : passing.has(check.conclusion ?? "") ? "pass" : "fail" })),
@@ -132,7 +125,9 @@ const botOf = ({ creator }: CommitStatus) => creator?.type === "Bot" && creator.
 
 function appOfBot(bot: string, run: Run): number | undefined {
   const result = run(["gh", "api", `apps/${bot.slice(0, -botSuffix.length)}`]);
-  return result.code === 0 ? (JSON.parse(result.stdout) as { id?: number }).id : undefined;
+  if (result.code === 0) return (JSON.parse(result.stdout) as { id?: number }).id;
+  if (/HTTP 404/.test(result.stderr)) return undefined;
+  throw new Error(`cannot read the app behind ${bot} over REST (${firstLine(result.stderr)})`);
 }
 
 const current = (entries: Entry[]) => entries.filter((entry) => !entry.superseded);
@@ -165,7 +160,7 @@ function withheldFromDraft(check: RequiredCheck, entries: Entry[]) {
   const split = check.context.indexOf(" / ");
   if (split <= 0 || entries.some((entry) => entry.name === check.context)) return false;
   const siblings = entries.filter((entry) => entry.name.startsWith(check.context.slice(0, split + 3)) && ranBy(check, entry));
-  return siblings.length > 0 && siblings.every((entry) => entry.outcome === "pass");
+  return siblings.some((entry) => !entry.status) && siblings.every((entry) => entry.outcome === "pass");
 }
 
 function everyCheck(entries: Entry[], commit: string): CiResult {
