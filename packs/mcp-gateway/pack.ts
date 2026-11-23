@@ -70,7 +70,7 @@ export default {
       os: "linux",
       when: slack,
       id: "slack-bridge-sign-in",
-      say: "The Slack bridge has no ChatGPT sign-in, ChatGPT revoked it, or the gateway finds no Slack tools for it. Connect Slack in ChatGPT, Settings, Apps, then sign in with that ChatGPT account.",
+      say: "The Slack bridge has no ChatGPT sign-in, or the gateway finds no Slack tools for it. Connect Slack in ChatGPT, Settings, Apps, then sign in with that ChatGPT account.",
       test: async (ctx) => (await upstreams()).appReady(await host(ctx), slackApp),
       repair: { ask: "Sign the Slack bridge in to ChatGPT.", command: "hedge mcp-gateway slack-bridge sign-in", interactive: true },
     });
@@ -103,7 +103,7 @@ export default {
         os: "linux",
         when: workflow,
         id: `${app.name}-sign-in`,
-        say: `${app.title} has no ChatGPT sign-in, or ChatGPT revoked it. Sign in with the account whose workspace has ${app.title} connected.`,
+        say: `${app.title} has no ChatGPT sign-in. Sign in with the account whose workspace has ${app.title} connected.`,
         test: async (ctx) => (await upstreams()).appSignedIn(await host(ctx), app),
         repair: { ask: `Sign ${app.title} in to ChatGPT.`, command: `hedge mcp-gateway sign-in ${app.name}`, interactive: true },
       });
@@ -242,16 +242,7 @@ async function admin(args: string[], ctx: Context) {
     return apps.signInApp(hub, app);
   }
   const gateway = await import("./lib/hub.ts");
-  if (mode === "doctor") {
-    const healthy = await gateway.doctor(hub);
-    const [{ builtInApps }, { reAuthLine }] = await Promise.all([import("./lib/apps.ts"), import("./lib/sign-in-lost.ts")]);
-    const declared = await apps.codexApps(hub.home).then((list) => ({ list, unread: undefined }), (error: Error) => ({ list: builtInApps, unread: error.message }));
-    const { unread } = declared;
-    if (unread) ctx.print(`Hedge cannot read the declared upstreams, so it checks only the built-in apps' sign-ins: ${unread}`);
-    const lost = await apps.lostSignIns(hub, declared.list);
-    for (const { app } of lost) ctx.print(reAuthLine(app));
-    return healthy && !unread && !lost.length ? 0 : 1;
-  }
+  if (mode === "doctor") return (await gateway.doctor(hub)) ? 0 : 1;
   if (mode === "sign-in") await gateway.signIn(hub);
   if (mode === "restart") await gateway.restart(hub);
   if (mode === "reconnect") await gateway.reconnect(name!, hub);

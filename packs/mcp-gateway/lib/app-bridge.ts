@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { backendArguments, describe, parseUpstream, slack, toolAllowed, type CodexApp } from "./apps.ts";
-import { clearSignInLost, lostCode, markSignInLost, reAuthLine, signInLost } from "./sign-in-lost.ts";
+import { lostCode, reAuthLine, signInLost } from "./sign-in-lost.ts";
 import { withUnicodeSkinTones } from "./skin-tones.ts";
 
 type Id = number | string;
@@ -32,20 +32,12 @@ let thread: Promise<string> | undefined;
 
 const reAuth = reAuthLine(app);
 type Failure = Error & { code?: number; data?: unknown };
-let worked = 0;
-let markers: Promise<unknown> = Promise.resolve();
-const settle = (change: () => Promise<unknown>) => (markers = markers.then(change).catch(() => {}));
-const lost = async (said: unknown, seen = worked) => {
-  if (!signInLost(said)) return false;
-  await settle(async () => { if (worked === seen) await markSignInLost(home!, app.name); });
-  return true;
-};
 const detail = (error: Failure) => [error.message, error.data];
 const explained = (error: Failure) => {
   const code = lostCode(detail(error))!;
   return Object.assign(new Error(`${reAuth} Cause: ${error.message}${error.message.includes(code) ? "" : ` (${code})`}`), { code: error.code });
 };
-const flagged = async (error: Failure, seen?: number) => ((await lost(detail(error), seen)) ? explained(error) : error);
+const flagged = (error: Failure) => (signInLost(detail(error)) ? explained(error) : error);
 const reply = (message: Record<string, unknown>) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 const tell = (message: Record<string, unknown>) => backend.stdin.write(`${JSON.stringify(message)}\n`);
 const stop = (error: Error, code = 1) => {
@@ -116,8 +108,7 @@ async function invoke(id: Id, params: { name: string; arguments?: Record<string,
     thread ??= call("thread/start", { cwd: "/app/data", ephemeral: true }).then((started) => started.thread.id as string, (error) => { thread = undefined; throw error; });
     const args = params.arguments ?? {};
     const { structuredContent, ...answered } = await call("mcpServer/tool/call", { threadId: await thread, server: "codex_apps", tool: `${app.prefix}${params.name}`, arguments: app.skinTones ? withUnicodeSkinTones(args) : args });
-    if (!answered.isError) worked++, await settle(() => clearSignInLost(home!, app.name));
-    const result = answered.isError && (await lost([answered.content, structuredContent])) ? { ...answered, content: [{ type: "text", text: reAuth }, ...(answered.content ?? [])] } : answered;
+    const result = answered.isError && signInLost([answered.content, structuredContent]) ? { ...answered, content: [{ type: "text", text: reAuth }, ...(answered.content ?? [])] } : answered;
     return structuredContent == null ? result : { ...result, structuredContent };
   } finally { active = undefined; }
 }
@@ -127,12 +118,9 @@ async function handle(message: Message) {
   const params = message.params ?? {};
   if (message.method === "initialize") return { protocolVersion: versions.includes(params.protocolVersion) ? params.protocolVersion : versions[0], capabilities: { tools: {} }, serverInfo: { name: `hedge-${app.name}`, version: "1" } };
   if (message.method === "ping") return {};
-  if (message.method === "tools/list") {
-    const seen = worked;
-    return { tools: [...(await discover().catch(async (error: Failure) => { throw await flagged(error, seen); })).values()] };
-  }
+  if (message.method === "tools/list") return { tools: [...(await discover().catch((error: Failure) => { throw flagged(error); })).values()] };
   if (message.method === "tools/call") {
-    const turn = queue.then(() => invoke(message.id!, params as { name: string })).catch(async (error: Failure) => { throw await flagged(error); });
+    const turn = queue.then(() => invoke(message.id!, params as { name: string })).catch((error: Failure) => { throw flagged(error); });
     queue = turn.catch(() => {});
     return turn;
   }

@@ -6,7 +6,6 @@ import { browserGatewayUrl } from "./client.ts";
 import { dataDir, managementApi, syncGatewayGroup, type Api, type Hub } from "./hub.ts";
 import { bridgeFile, codexMount, codexPackage, gatewayCurrent, install, legacyBridgeFile, localEntry, missingMount, waitingNote } from "./install.ts";
 import { handCallback, loopbackClientOf, registerLoopbackClient } from "./loopback.ts";
-import { clearSignInLost, signInLostSince, type LostSignIn } from "./sign-in-lost.ts";
 
 const account = (app: CodexApp) => `${app.account ?? app.name}-codex`;
 export const appHome = (home: string, app: CodexApp) => join(dataDir(home), "data", account(app));
@@ -65,14 +64,7 @@ const refuseTheirs = (config: Config | undefined, upstream: Upstream) => {
   if (config && !ours(config)) throw new Error(`Keep the MCP gateway's ${upstream.name} server: Hedge did not add it. Remove it in the gateway's dashboard to use ${upstream.title}.`);
 };
 
-export const appSignedIn = async (hub: Pick<Hub, "home">, app: CodexApp) =>
-  (await exists(join(appHome(hub.home, app), "auth.json"))) && (await signInLostSince(appHome(hub.home, app), app.name)) === undefined;
-
-export async function lostSignIns(hub: Pick<Hub, "home">, apps?: CodexApp[]): Promise<LostSignIn[]> {
-  const checked = apps ?? (await codexApps(hub.home).catch(() => builtInApps));
-  const found = await Promise.all(checked.map(async (app) => ({ app, since: await signInLostSince(appHome(hub.home, app), app.name) })));
-  return found.filter((each): each is LostSignIn & { app: CodexApp } => each.since !== undefined);
-}
+export const appSignedIn = (hub: Pick<Hub, "home">, app: CodexApp) => exists(join(appHome(hub.home, app), "auth.json"));
 
 export async function registerUpstream(hub: Hub, upstream: Upstream) {
   const codexMissing = `${upstream.title} runs through Codex, and this hub has no Codex from Hedge. Run: hedge install-codex`;
@@ -146,7 +138,6 @@ export async function signInApp(hub: Hub, app: CodexApp) {
   const code = await deviceSignIn(hub, app);
   if (code) return code;
   const sharing = (await codexApps(hub.home)).filter((other) => account(other) === account(app));
-  for (const other of sharing) await clearSignInLost(appHome(hub.home, other), other.name);
   const call = await managementApi(hub);
   const reloaded: CodexApp[] = [];
   for (const other of sharing) {

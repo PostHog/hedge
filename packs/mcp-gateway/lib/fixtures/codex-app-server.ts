@@ -14,8 +14,6 @@ const tools = {
 };
 const approvals = new Map<string, (result: unknown) => void>();
 const replies = (process.env.FAKE_CODEX_REPLIES ?? "").split(",").filter(Boolean);
-let heldList: number | string | undefined;
-let listHeld = false;
 
 log({ argv: process.argv.slice(2) });
 createInterface({ input: process.stdin }).on("line", async (line) => {
@@ -25,7 +23,6 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
   if (message.id === undefined) return;
   const reply = (result: unknown) => send({ id: message.id, result });
   if (message.method === "initialize") return process.env.FAKE_CODEX_SILENT ? undefined : reply({ userAgent: "fake" });
-  if (message.method === "mcpServerStatus/list" && process.env.FAKE_CODEX_LIST_AFTER_CALL && !listHeld) return void (listHeld = true, heldList = message.id);
   if (message.method === "mcpServerStatus/list" && process.env.FAKE_CODEX_LIST_REVOKED) return send({ id: message.id, error: { code: -32603, message: 'HTTP 401: {"error":{"code":"token_revoked"}}' } });
   if (message.method === "mcpServerStatus/list" && process.env.FAKE_CODEX_LIST_TOOLS_ERROR) return reply({ data: [{ name: "codex_apps", tools: {}, toolsError: "HTTP 401: token_revoked" }] });
   if (message.method === "mcpServerStatus/list") return reply({ data: [{ name: "codex_apps", tools }] });
@@ -46,5 +43,4 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     log({ approval: answer });
   }
   reply({ content: [{ type: "text", text: `${message.params!.tool} done` }], structuredContent: null });
-  if (heldList !== undefined) send({ id: heldList, error: { code: -32603, message: 'HTTP 401: {"error":{"code":"token_revoked"}}' } }), (heldList = undefined);
 });
