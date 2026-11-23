@@ -69,6 +69,7 @@ test("a critical-path list matches its entries as bullets, plain lines, quoted p
   for (const list of lists) expect(await listedPath(list)).toEqual({ list, triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: rates/plans/old plans.ts"] } });
   for (const list of ["- `[slug]/rates.ts`\n", "- [slug]/rates.ts\n", "- app routes ([slug]/)\n"]) expect(await listedPath(list, "[slug]/rates.ts")).toEqual({ list, triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: [slug]/rates.ts"] } });
   expect(await listedPath("- reports/q4,\n", "reports/q4,")).toEqual({ list: "- reports/q4,\n", triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: reports/q4,"] } });
+  expect(await listedPath("- [[slug]/rates.ts]\n", "[slug]/rates.ts")).toEqual({ list: "- [[slug]/rates.ts]\n", triage: { setting: "on", arm: "treated", path: "strict", why: ["critical path: [slug]/rates.ts"] } });
   for (const list of ["* billing/\n", "+ billing/*\n"]) expect(await listedPath(list)).toEqual({ list, triage: { setting: "on", arm: "treated", path: "standard", why: [] } });
 });
 
@@ -129,4 +130,19 @@ test("with triage off, or not set, hedge proof review prints and records nothing
     expect(existsSync(join(pr.pullRequest, "triage.json"))).toBe(false);
     expect(roundRecord(pr, "1")).not.toHaveProperty("triage");
   }
+});
+
+test("a review reserved with triage on keeps its mark when it is retried after triage is switched off, and the next review records none", async () => {
+  const pr = await triaged("on", graded("non-critical", "medium"));
+  pr.env.HEDGE_PROOF_REVIEWER = "exit 1";
+  await pr.hedge("review", "--single").catch(() => undefined);
+  expect(roundRecord(pr, "1")).toMatchObject({ triage: { setting: "on", arm: "treated" } });
+
+  pr.env.HEDGE_SETTINGS = JSON.stringify(settings);
+  fakeModel(pr, "REVIEWER", noFindings("feature.ts"));
+  expect(await firstLine(pr, "--single")).toMatchObject({ round: 1, triage: { setting: "on", arm: "treated", path: "standard" } });
+  const reviewed = await pr.git("rev-parse", "HEAD");
+  await pr.commit("feature.ts", "export const greet = (name: string) => `hi ${name}`;\n");
+  expect(await firstLine(pr, "--scope", "final", "--base", reviewed)).not.toHaveProperty("triage");
+  expect(roundRecord(pr, "final-1")).not.toHaveProperty("triage");
 });

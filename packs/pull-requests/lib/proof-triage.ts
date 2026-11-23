@@ -54,8 +54,8 @@ const listMarker = /^\s*(?:[-*+]|\d+[.)])\s+/;
 const rootless = (path: string) => path.trim().replace(/^\.?\//, "");
 const cleanEntries = (word: string) => {
   const trimmed = word.replace(/^[\s"']+|[\s"',:;]+$/g, "");
-  const unwrapped = trimmed.replace(/^\(+|\)+$/g, "");
-  return [word, trimmed, unwrapped, unwrapped.replace(/^\[+|\]+$/g, "")].map(rootless);
+  const unwrapped = trimmed.replace(/^\((.*)\)$/, "$1");
+  return [word, trimmed, unwrapped, unwrapped.replace(/^\[(.*)\]$/, "$1")].map(rootless);
 };
 
 function criticalEntries(list: string) {
