@@ -67,6 +67,25 @@ describe("the background wait check", () => {
     expect(reason({ taskIds: [finished] }, path)).toContain(`already finished (${status})`);
   });
 
+  const stopped = (id: string, toolUseId: string) => ({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: JSON.stringify({ message: `Successfully stopped task: ${id} (npm test)`, task_id: id }) }] } });
+  const call = (name: string, id: string, input: object) => ({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] } });
+
+  test("counts a background command that TaskStop stopped as finished", () => {
+    const path = transcript(startedInBackground(finished), call("TaskStop", "toolu_stop", { task_id: finished }), stopped(finished, "toolu_stop"));
+    expect(reason({ taskIds: [finished] }, path)).toContain(`\`${finished}\` already finished (stopped)`);
+  });
+
+  test("keeps the output file of a stopped command whose notification came too", () => {
+    const path = transcript(startedInBackground(finished), call("TaskStop", "toolu_stop", { task_id: finished }), stopped(finished, "toolu_stop"), { type: "queue-operation", operation: "enqueue", content: notification(finished, "killed") });
+    expect(reason({ taskIds: [finished] }, path)).toContain(`already finished (killed). Read its output now in ${outputFile}`);
+  });
+
+  test("ignores a stop message that another tool printed", () => {
+    const mentionsTaskStop = { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "TaskStop" }, { type: "tool_use", id: "toolu_echo", name: "Bash", input: { command: "cat stop.json" } }] } };
+    const path = transcript(startedInBackground(running), mentionsTaskStop, stopped(running, "toolu_echo"));
+    expect(waitOn({ taskIds: [running] }, path)).toBeUndefined();
+  });
+
   test("ignores a notification that only appears in a command, its output, or a message that quotes it", () => {
     const quoted = notification(running, "completed");
     const path = transcript(

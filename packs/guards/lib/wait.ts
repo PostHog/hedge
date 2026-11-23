@@ -97,6 +97,27 @@ type Seen = { subagents: Set<string>; finished: Map<string, Finished> };
 const subagentShape = /^a[0-9a-f]{16}$/;
 const delegatedShape = /^(?:node|thread|run):/;
 const notificationStart = "<task-notification>";
+const stoppedStart = "Successfully stopped task: ";
+
+function stoppedTaskOf(block: Block & { tool_use_id?: unknown; content?: unknown }): string | undefined {
+  if (block?.type !== "tool_result" || typeof block.content !== "string") return undefined;
+  try {
+    const result = JSON.parse(block.content);
+    return typeof result?.task_id === "string" ? result.task_id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function stopsIn(entry: TranscriptEntry, stopCalls: Set<string>, stopResults: Map<string, string>) {
+  const content = entry.message?.content;
+  if (!Array.isArray(content)) return;
+  for (const block of content as (Block & { tool_use_id?: unknown })[]) {
+    if (block?.type === "tool_use" && block.name === "TaskStop" && block.id) stopCalls.add(block.id);
+    const stopped = stoppedTaskOf(block);
+    if (stopped && typeof block.tool_use_id === "string") stopResults.set(block.tool_use_id, stopped);
+  }
+}
 
 export const isBackgroundWait = (name = "") => /^mcp__t3[-_]code__t3_background_wait$/.test(name);
 
@@ -121,11 +142,14 @@ function notificationsOf(entry: TranscriptEntry & { content?: unknown }): string
 function seenIn(path: string | undefined): Seen {
   const seen: Seen = { subagents: new Set(), finished: new Map() };
   if (!path) return seen;
+  const stopCalls = new Set<string>();
+  const stopResults = new Map<string, string>();
   try {
     for (const line of linesFromEnd(path)) {
-      if (!line.includes(notificationStart) && !line.includes("agentId: ")) continue;
+      if (![notificationStart, "agentId: ", stoppedStart, '"TaskStop"'].some((mark) => line.includes(mark))) continue;
       const entry = parse(line);
       if (!entry) continue;
+      stopsIn(entry, stopCalls, stopResults);
       if (entry.type === "user") for (const text of textsOf(entry.message?.content)) for (const [, id] of text.matchAll(/^agentId: (\S+)/gm)) seen.subagents.add(id);
       for (const text of notificationsOf(entry).filter((each) => each.trimStart().startsWith(notificationStart))) {
         const id = text.match(/<task-id>([^<]+)<\/task-id>/)?.[1];
@@ -136,6 +160,7 @@ function seenIn(path: string | undefined): Seen {
   } catch {
     return seen;
   }
+  for (const [callId, id] of stopResults) if (stopCalls.has(callId) && !seen.finished.has(id)) seen.finished.set(id, { status: "stopped" });
   return seen;
 }
 
