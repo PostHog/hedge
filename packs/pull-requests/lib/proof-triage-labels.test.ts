@@ -332,6 +332,7 @@ test("a review of a new HEAD leaves an older read without labels alone and reads
   const base = JSON.parse(readFileSync(join(reviewDirectory(pr), "round.json"), "utf8")).commit;
   await pr.commit("feature.ts", "export const greet = (name: string) => name.trim();\n");
 
+  await expect(pr.hedge("review", "--single")).rejects.toThrow("Round 2 needs --scope fixes");
   const next = await pr.hedge("review", "--scope", "fixes", "--base", base);
 
   expect(JSON.parse(next.output.split("\n")[0]!)).toMatchObject({ id: "2" });
