@@ -996,7 +996,7 @@ async function waitForReview(options: Map<string, string>, head: ProofIdentity, 
   if (code === 0) context.print(await readFile(join(directory, "findings.md"), "utf8"));
   if (code === 0 && await labelsDue(directory, triageSetting(context.env))) await roundStep(directory, context, () => printLabels(directory, context)).catch((error: unknown) => {
     if (!(error instanceof RoundBusy)) throw error;
-    return savedLabels(directory).then((saved) => saved?.ok ? labelLines(saved).forEach((line) => context.print(line))
+    return savedLabels(directory).then((saved) => saved ? labelLines(saved).forEach((line) => context.print(line))
       : context.print(`Another hedge command holds review round ${basename(directory)}, so the triage labels are not printed. Run hedge proof review --wait again to see them.`));
   });
   if (code === 1) context.print("A lens failed, and the round stays unfinished. Run the same hedge proof review --lens command to rerun the failed lenses.");

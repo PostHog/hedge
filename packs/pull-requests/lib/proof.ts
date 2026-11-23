@@ -220,16 +220,11 @@ const cut = (text: string, cap: number) => text.length > cap ? text.slice(0, cap
 async function arbiterPrompt(home: string, identity: ProofIdentity) {
   const reviews = join(pullRequestDirectory(home, identity), "reviews");
   const sections = await Promise.all((await finishedReviews(home, identity)).map(async ({ name }) => {
-    const findings = ladderFindings(await countedFindings(join(reviews, name), await readFile(join(reviews, name, "findings.md"), "utf8"))).trim();
+    const findings = ladderFindings(await readFile(join(reviews, name, "findings.md"), "utf8")).trim();
     const responses = (await readFile(join(reviews, name, "responses.md"), "utf8").catch(() => "")).trim();
     return `# ${reviewLabel(name)}\n\n${cut(findings, findingsCap)}${responses ? `\n\n# Responses to ${reviewLabel(name)}\n\n${cut(responses, responsesCap)}` : ""}`;
   }));
   return [arbiterInstructions, ...sections].join("\n\n");
-}
-
-async function countedFindings(directory: string, findings: string) {
-  const advisory = new Set((await advisoryLabels(directory)).map(({ finding }) => finding));
-  return labelCandidates(findings).filter(({ finding }) => advisory.has(finding)).reduce((text, { text: item }) => text.replace(item, ""), findings);
 }
 
 const namesEscalate = (output: string) => /escalate/i.test(output);
