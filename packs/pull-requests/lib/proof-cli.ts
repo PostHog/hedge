@@ -297,8 +297,9 @@ hedge keeps its token use as usage in lenses/<name>.json, or in round.json for o
 A final read, --scope final, reads every fix from the commit of the first panel round to HEAD with the Correctness
 lens of PANEL.md.
 --wait waits up to 9 minutes for the panel of the unfinished round, the latest round, or --round, and prints each
-lens. Exit 0 when the round is finished, with its findings; 1 when a lens failed; 2 when lenses still run, so run
---wait again; 4 when a lens stopped on spent quota. It restarts a lens whose worker died, and waits while another
+lens. Exit 0 when the round is finished, with its findings; 1 when a lens failed; 2 when lenses still run, or when
+another hedge command holds the round before its triage labels are saved, so run --wait again; 4 when a lens stopped
+on spent quota. It restarts a lens whose worker died, and waits while another
 hedge proof command works on the round.
 ${overrideHelp}`,
     examples: ["hedge proof review", "hedge proof review --lens security", "hedge proof review --scope final --base 1a2b3c4", "hedge proof review --lens team-billing --knowledge team-billing=perspective.md", "hedge proof review --wait"],
