@@ -66,6 +66,9 @@ test("a check pinned to an app passes on a commit status its app's bot posts, an
   pr.statuses([{ context: "Visual Review / storybook", state: "success", by: "a-maintainer" }, { context: "Visual Review / storybook", state: "failure", by: "product[bot]" }]);
   expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: red, required failing: Visual Review / storybook");
 
+  pr.statuses([{ context: "Visual Review / storybook", state: "success", by: "product[bot]" }, { context: "Visual Review / storybook", state: "failure", by: "product[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: green, 1 required check(s) pass");
+
   pr.statuses([{ context: "Visual Review / storybook", state: "failure", by: "a-maintainer" }, { context: "Visual Review / storybook", state: "success", by: "product[bot]" }]);
   const green = await pr.hedge("gate");
   expect(ciLine(green.output)).toBe("ci: green, 1 required check(s) pass; not required: failing: Visual Review / storybook");
