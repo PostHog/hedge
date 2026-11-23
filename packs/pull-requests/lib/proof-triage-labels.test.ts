@@ -286,6 +286,15 @@ test("a triage call that throws at once, before it returns a promise, labels eve
   expect(JSON.stringify(triaged)).not.toContain("private-detail");
 });
 
+test("a reply whose fence opener holds a long run of blanks is refused at once", async () => {
+  const started = performance.now();
+
+  const triaged = await triageFindings(findings, "", async () => ({ ok: true, text: `\`\`\`${" ".repeat(80_000)}x`, model: "triage-model" }));
+
+  expect(performance.now() - started).toBeLessThan(500);
+  expect(triaged).toMatchObject({ ok: false, labels: [{ finding: 1, label: "needs-answer" }, { finding: 2, label: "needs-answer" }, { finding: 4 }] });
+});
+
 test("a failed triage call keeps none of its output, so no secret or exit status it reports is saved", async () => {
   const pr = await treated();
   const token = ["ghp", "_", "A1b2C3d4".repeat(5)].join("");
