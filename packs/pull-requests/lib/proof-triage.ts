@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { optionalStringSetting } from "../../base/lib/settings.ts";
 import { gradeOf } from "./proof-autonomy.ts";
+import { riskCalloutOf } from "./decision-ledger.ts";
 import { isProductionFile, mergeRiskGrade } from "./proof-checkout.ts";
-import { prDirectory, readJson, writeJson, type ProofIdentity } from "./proof.ts";
+import { prDirectory, readJson, type ProofIdentity } from "./proof.ts";
 
 export const triageSettings = ["off", "split", "on"] as const;
 export type TriageSetting = (typeof triageSettings)[number];
@@ -39,7 +40,7 @@ export type PathInput = { body: string | undefined; changedFiles: string[] | und
 
 export function pathOf({ body, changedFiles, criticalPaths }: PathInput): PathOf {
   if (gradeOf(body).oneWay) return { path: "excluded", why: ["one-way door"] };
-  const grade = mergeRiskGrade(body);
+  const grade = body !== undefined && riskCalloutOf(body) === undefined ? "none" : mergeRiskGrade(body);
   const why = [
     ...["high", "unreadable", "none"].includes(grade) ? [`merge-risk grade ${grade}`] : [],
     ...changedFiles === undefined ? ["changed files unknown"] : [],
@@ -49,34 +50,47 @@ export function pathOf({ body, changedFiles, criticalPaths }: PathInput): PathOf
   return { path: why.length ? "strict" : "standard", why };
 }
 
+const pathLike = /[/.*]/;
+const cleanEntry = (word: string) => word.replace(/^[\s"'(\[]+|[\s"'),:;\]]+$/g, "").replace(/^\.?\//, "");
+
 function criticalEntries(list: string) {
-  return list.split("\n").map((line) => line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, "").replace(/`/g, "").trim().split(/\s+/)[0] ?? "")
-    .filter((entry) => entry && !entry.startsWith("#"));
+  const quoted = [...list.matchAll(/`([^`\n]+)`/g)].map((match) => match[1]!);
+  const unquoted = list.replace(/`[^`\n]+`/g, " ");
+  const cells = unquoted.split("\n").flatMap((line) => line.includes("|") ? line.split("|").map((cell) => cell.trim()) : []);
+  const words = [...cells, ...unquoted.split(/[\s|]+/)];
+  const listed = list.split("\n").flatMap((line) => /^\s*(?:[-*+]|\d+[.)])\s+([^\s`]+)/.exec(line)?.[1] ?? []);
+  return [...quoted, ...words.filter((word) => pathLike.test(word)), ...listed].map(cleanEntry).filter(Boolean);
+}
+
+function matchesEntry(file: string, entry: string) {
+  const directory = entry.replace(/\/\*\*?$|\/$/, "");
+  if (directory !== entry || !entry.includes("*")) return file === directory || file.startsWith(`${directory}/`);
+  return new Bun.Glob(entry).match(file);
 }
 
 function onCriticalPaths(files: string[], list: string | undefined) {
   const entries = list ? criticalEntries(list) : [];
-  const matches = (file: string, entry: string) => entry.includes("*") ? new Bun.Glob(entry).match(file) : file === entry || file.startsWith(entry.endsWith("/") ? entry : `${entry}/`);
-  return files.filter((file) => entries.some((entry) => matches(file, entry)));
+  return files.filter((file) => entries.some((entry) => matchesEntry(file, entry)));
 }
 
 const inDangerAreas = (files: string[]) =>
   files.filter(isProductionFile).flatMap((file) => dangerAreas.filter(({ pattern }) => pattern.test(file)).map(({ area }) => `${area}: ${file}`));
 
 const prTriagePath = (home: string, identity: ProofIdentity) => join(prDirectory(home, identity), "triage.json");
-const roundTriagePath = (directory: string) => join(directory, "triage.json");
+const savedArm = async (home: string, identity: ProofIdentity) => (await readJson<{ arm?: Arm } | undefined>(prTriagePath(home, identity), undefined))?.arm;
 
-export async function recordTriage(home: string, identity: ProofIdentity, directory: string, setting: TriageSetting, path: PathOf): Promise<TriageMark> {
+export async function armFor(home: string, identity: ProofIdentity, setting: TriageSetting): Promise<Arm> {
   const arm = armOf(setting, identity.repository, identity.pr);
-  await writeFile(prTriagePath(home, identity), JSON.stringify({ setting, arm }) + "\n", { flag: "wx", mode: 0o600 }).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
-  const mark = { arm, ...path };
-  await writeJson(roundTriagePath(directory), { commit: identity.commit, ...mark });
-  return mark;
+  await mkdir(prDirectory(home, identity), { recursive: true, mode: 0o700 });
+  try { await writeFile(prTriagePath(home, identity), JSON.stringify({ setting, arm }) + "\n", { flag: "wx", mode: 0o600 }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return (await savedArm(home, identity)) ?? arm;
+  }
+  return arm;
 }
 
 export async function readTriage(directory: string): Promise<{ triage: TriageMark } | Record<string, never>> {
-  const recorded = await readJson<(TriageMark & { commit: string }) | undefined>(roundTriagePath(directory), undefined);
-  if (!recorded) return {};
-  const { commit: _, ...mark } = recorded;
-  return { triage: mark };
+  const triage = (await readJson<{ triage?: TriageMark } | undefined>(join(directory, "round.json"), undefined))?.triage;
+  return triage ? { triage } : {};
 }

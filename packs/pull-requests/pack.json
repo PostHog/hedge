@@ -118,7 +118,7 @@
     },
     {
       "key": "pull-requests.triage",
-      "question": "Should a model sort the blockers and majors of each review into findings that need an answer and advisory ones, which the pull request does not fix?",
+      "question": "Should Hedge run the opt-in triage of review findings? For now it only records each pull request's arm and the review path of each review, and changes no review.",
       "type": "choice",
       "default": "off",
       "ask": "never",
