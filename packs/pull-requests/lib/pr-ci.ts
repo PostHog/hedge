@@ -137,14 +137,17 @@ function withPinnedStatuses(entries: Entry[], required: RequiredCheck[], run: Ru
   const apps = new Map<string, number | undefined>();
   const appOf = (bot: string) => apps.has(bot) ? apps.get(bot) : apps.set(bot, appOfBot(bot, run)).get(bot);
   const pinOf = (entry: Entry) => {
-    const named = pins.filter((check) => entry.status && check.context === entry.name);
+    const named = pins.filter((check) => entry.status && check.context.toLowerCase() === entry.name.toLowerCase());
     if (!entry.botLogin || !named.length) return undefined;
     const appId = appOf(entry.botLogin);
     return named.find((check) => check.appId === appId);
   };
+  const decided = new Set<RequiredCheck>();
   return entries.flatMap((entry) => {
     const pin = pinOf(entry);
-    return pin ? [{ ...entry, appId: pin.appId }] : entry.superseded ? [] : [entry];
+    if (!pin || decided.has(pin)) return entry.superseded ? [] : [entry];
+    decided.add(pin);
+    return [{ ...entry, name: pin.context, appId: pin.appId }];
   });
 }
 

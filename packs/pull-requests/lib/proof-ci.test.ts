@@ -85,6 +85,17 @@ test("the gate's check list names the pinned app's status that decided a check, 
   expect(JSON.parse(gate.output).ci.checks).toEqual(["storybook (status): pass", "storybook (status, app 7): fail"]);
 });
 
+test("the pinned app's newest status decides its check, also when it spells the context in another case", async () => {
+  const { pr } = await reviewed();
+  pr.required("main", [{ context: "deploy", integration_id: 7 }]);
+  pr.githubApp("product", 7);
+  pr.statuses([{ context: "Deploy", state: "failure", by: "product[bot]" }, { context: "deploy", state: "success", by: "product[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: red, required failing: deploy");
+
+  pr.statuses([{ context: "deploy", state: "success", by: "product[bot]" }, { context: "Deploy", state: "failure", by: "product[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: green, 1 required check(s) pass");
+});
+
 test("a status from a bot without an app leaves a pinned check unreported", async () => {
   const { pr } = await reviewed();
   pr.required("main", [{ context: "deploy", integration_id: 7 }]);
@@ -96,7 +107,8 @@ test("a status whose app GitHub cannot read makes CI unknown", async () => {
   const { pr } = await reviewed();
   pr.required("main", [{ context: "deploy", integration_id: 7 }]);
   pr.githubApp("product", { error: "gh: Service Unavailable (HTTP 503)" });
-  pr.statuses([{ context: "deploy", state: "success", by: "product[bot]" }]);
+  pr.ci([{ name: "deploy", bucket: "pass", app: 7 }]);
+  pr.statuses([{ context: "deploy", state: "failure", by: "product[bot]" }]);
   const unknown = await pr.hedge("gate");
   expect(unknown.code).toBe(1);
   expect(ciLine(unknown.output)).toStartWith("ci: unknown, cannot read the app behind product[bot] over REST (gh: Service Unavailable (HTTP 503))");
@@ -134,6 +146,15 @@ test("on a draft, statuses alone never prove that a missing check's workflow fin
   pr.githubApp("product", 7);
   pr.ci("none");
   pr.statuses([{ context: "CI / lint", state: "success", by: "product[bot]" }, { context: "CI / lint", state: "failure", by: "a-maintainer" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: CI / scan");
+});
+
+test("on a draft whose required checks are all unpinned, a passing status alone does not withhold a missing one", async () => {
+  const { pr } = await reviewed();
+  pr.pullRequestState({ draft: true });
+  pr.required("main", [{ context: "CI / scan" }]);
+  pr.ci("none");
+  pr.statuses([{ context: "CI / lint", state: "success", by: "ci[bot]" }]);
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: CI / scan");
 });
 
