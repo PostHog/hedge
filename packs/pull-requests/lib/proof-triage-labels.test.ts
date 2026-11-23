@@ -127,7 +127,7 @@ test("the triage fails closed: a failed call, an unreadable reply, an unknown la
 });
 
 test("the triage reads a reply that is one labels object, bare or in a code fence", async () => {
-  for (const reply of [adviseSecond, `\`\`\`json\n${adviseSecond}\n\`\`\``, `\`\`\`JSON\n${adviseSecond}\n\`\`\``, `~~~json\n${adviseSecond}\n~~~`, `~~~\n${adviseSecond}\n~~~`, `\`\`\`\`json\n${adviseSecond}\n\`\`\`\``]) {
+  for (const reply of [adviseSecond, `\`\`\`json\n${adviseSecond}\n\`\`\``, `\`\`\`JSON\n${adviseSecond}\n\`\`\``, `~~~json\n${adviseSecond}\n~~~`, `~~~\n${adviseSecond}\n~~~`, `\`\`\`\`json\n${adviseSecond}\n\`\`\`\``, `\`\`\`json\n${adviseSecond}\n\`\`\`\``, `\`\`\` json\n${adviseSecond}\n  \`\`\``]) {
     const pr = await treated();
     fakeModel(pr, "TRIAGE", reply);
 
@@ -299,14 +299,11 @@ test("a failed triage call keeps none of its output, so no secret or exit status
   expect(savedLabels(pr)).toMatchObject({ ok: false, cause: "the model call failed; Hedge keeps none of its output", labels: [{ finding: 1, reason: "the triage call failed: the model call failed; Hedge keeps none of its output" }, { finding: 2 }, { finding: 4 }] });
 });
 
-test("a round that weighs the budget while a triage saves the labels of the round before backs out and asks to weigh again", async () => {
+test("a round that weighs the budget while a wait saves the labels of the round before backs out and asks to weigh again", async () => {
   const pr = await treated();
   pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.triage": "on", "pull-requests.freeReviews": 1, "pull-requests.reviewCeiling": 20 });
   fakeModel(pr, "TRIAGE", adviseSecond);
-  await pr.hedge("review", "--single");
-  const labelsFile = join(reviewDirectory(pr), "triage-labels.json");
-  const triaged = readFileSync(labelsFile, "utf8");
-  rmSync(labelsFile);
+  await panelRound(pr);
   await respond(pr, "1. fixed in abc1234: greets\n2. fixed in abc1234: says more\n4. rejected: fine\n6. fixed in abc1234: test\n");
   const base = JSON.parse(readFileSync(join(reviewDirectory(pr), "round.json"), "utf8")).commit;
   await pr.commit("feature.ts", "export const greet = (name: string) => name.trim();\n");
@@ -317,10 +314,37 @@ test("a round that weighs the budget while a triage saves the labels of the roun
 
   const slow = pr.hedge("review-start", "--scope", "fixes", "--base", base);
   await readFile(started, "utf8");
-  writeFileSync(labelsFile, triaged);
+  const wait = await pr.hedge("review", "--wait", "--round", "1");
   await writeFile(go, "go\n");
 
+  expect(wait.code).toBe(0);
+  expect(savedLabels(pr)).toMatchObject({ ok: true, labels: [{ finding: 1 }, { finding: 2, label: "advisory" }, { finding: 4 }] });
   await expect(slow).rejects.toThrow("The reviews changed while this one weighed the budget");
+});
+
+test("a wait saves no labels while another command holds the review budget, and saves them when it runs again", async () => {
+  const pr = await treated();
+  fakeModel(pr, "TRIAGE", adviseSecond);
+  await panelRound(pr);
+  const holder = await lockHolder(join(pr.pullRequest, "reviews"));
+
+  const held = await pr.hedge("review", "--wait", "--round", "1");
+  await holder.release();
+
+  expect(held.code).toBe(2);
+  expect(existsSync(join(reviewDirectory(pr), "triage-labels.json"))).toBe(false);
+  expect((await pr.hedge("review", "--wait", "--round", "1")).code).toBe(0);
+  expect(savedLabels(pr)).toMatchObject({ ok: true, labels: [{ finding: 1 }, { finding: 2, label: "advisory" }, { finding: 4 }] });
+});
+
+test("a labels file of another shape counts every finding as needing an answer in respond and the gate", async () => {
+  const pr = await treated();
+  fakeModel(pr, "TRIAGE", adviseSecond);
+  await pr.hedge("review", "--single");
+  writeFileSync(join(reviewDirectory(pr), "triage-labels.json"), JSON.stringify({ ok: true, labels: { finding: 2, label: "advisory" } }));
+
+  expect((await respond(pr, "1. fixed in abc1234: greets\n4. rejected: fine\n6. fixed in abc1234: test\n")).output).toContain("Answer findings 2 too");
+  expect((await pr.hedge("show", "--round", "1")).code).toBe(0);
 });
 
 test("a triage call that throws before the model answers labels every blocker and major finding needs-answer, and keeps none of the error's text", async () => {

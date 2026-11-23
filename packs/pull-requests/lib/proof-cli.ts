@@ -1,7 +1,7 @@
 import { closeSync, existsSync, openSync } from "node:fs";
 import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { askGap, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity } from "./proof.ts";
 import { AnswerTaken, appendOnce, decideAlone, hearUser, ledgerHolds, ledgerOf } from "./decision-cli.ts";
 import { HubUnreachable, keptOwed, refText, usersAcceptance, thisMachine, type Decision, type Ssh } from "./decision-ledger.ts";
@@ -694,7 +694,7 @@ const askTriage = ({ env, home, run }: CommandContext, panelCheckout?: string) =
 };
 
 async function printLabels(directory: string, context: CommandContext) {
-  const triaged = await labelRound(directory, triageSetting(context.env), askTriage(context, (await readPlan(directory))?.cwd));
+  const triaged = await labelRound(directory, triageSetting(context.env), askTriage(context, (await readPlan(directory))?.cwd), async (write) => withRoundLock(dirname(directory), await context.lock(), write));
   for (const line of triaged ? labelLines(triaged) : []) context.print(line);
 }
 

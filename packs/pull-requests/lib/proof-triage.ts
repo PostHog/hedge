@@ -6,7 +6,7 @@ import { optionalStringSetting } from "../../base/lib/settings.ts";
 import { gradeOf } from "./proof-autonomy.ts";
 import { riskCalloutOf } from "./decision-ledger.ts";
 import { isProductionFile, mergeRiskGrade } from "./proof-checkout.ts";
-import { labelCandidates, labelsPath, readJson, writeJson, type FindingLabel, type LabelCandidate } from "./proof.ts";
+import { labelCandidates, labelsPath, readJson, readLabels, writeJson, type FindingLabel, type LabelCandidate } from "./proof.ts";
 import { untrusted } from "./proof-judge.ts";
 import type { ModelAnswer, Usage } from "./proof-models.ts";
 
@@ -138,7 +138,7 @@ function repeatsAKey(json: string) {
 const onlyWholeNumbers = (json: string) => [...json.matchAll(/"(?:[^"\\]|\\.)*"|-?\d[\d.eE+-]*/g)].every(([token]) => token.startsWith('"') || /^\d+$/.test(token));
 
 function labelsObject(text: string) {
-  const reply = text.trim().replace(/^(`{3,}|~{3,})(?:json)?\s*\n([\s\S]*)\n\1$/i, "$2");
+  const reply = text.trim().replace(/^(`{3,}|~{3,})[ \t]*(?:json)?[ \t]*\n([\s\S]*)\n[ \t]{0,3}\1[`~]*$/i, "$2");
   try {
     const parsed = JSON.parse(reply) as unknown;
     if (repeatsAKey(reply) || !onlyWholeNumbers(reply)) return undefined;
@@ -194,16 +194,16 @@ export async function labelsDue(directory: string, setting: TriageSetting) {
   return await triageRuns(directory) && (setting !== "off" || existsSync(labelsPath(directory)));
 }
 
-export const savedLabels = (directory: string) => readJson<Triaged | undefined>(labelsPath(directory), undefined).catch(() => undefined);
+export const savedLabels = (directory: string) => readLabels<Triaged>(directory);
 
-export async function labelRound(directory: string, setting: TriageSetting, ask: AskTriage): Promise<Triaged | undefined> {
+export async function labelRound(directory: string, setting: TriageSetting, ask: AskTriage, publish = (write: () => Promise<void>) => write()): Promise<Triaged | undefined> {
   if (!await triageRuns(directory)) return undefined;
   const saved = await savedLabels(directory);
   if (saved || setting === "off") return saved;
   const findings = await readFile(join(directory, "findings.md"), "utf8");
   const diff = await readFile(join(directory, "diff.patch"), "utf8").catch(() => "");
   const triaged = await triageFindings(findings, diff, ask);
-  await writeJson(labelsPath(directory), triaged);
+  await publish(() => writeJson(labelsPath(directory), triaged));
   return triaged;
 }
 
