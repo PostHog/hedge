@@ -139,7 +139,7 @@ function repeatsAKey(json: string) {
 const onlyWholeNumbers = (json: string) => [...json.matchAll(/"(?:[^"\\]|\\.)*"|-?\d[\d.eE+-]*/g)].every(([token]) => token.startsWith('"') || /^\d+$/.test(token));
 
 function labelsObject(text: string) {
-  const reply = text.trim().replace(/^(```|~~~)(?:json)?\s*\n([\s\S]*)\n\1$/i, "$2");
+  const reply = text.trim().replace(/^(`{3,}|~{3,})(?:json)?\s*\n([\s\S]*)\n\1$/i, "$2");
   try {
     const parsed = JSON.parse(reply) as unknown;
     if (repeatsAKey(reply) || !onlyWholeNumbers(reply)) return undefined;

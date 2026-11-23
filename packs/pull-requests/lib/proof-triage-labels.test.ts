@@ -126,7 +126,7 @@ test("the triage fails closed: a failed call, an unreadable reply, an unknown la
 });
 
 test("the triage reads a reply that is one labels object, bare or in a code fence", async () => {
-  for (const reply of [adviseSecond, `\`\`\`json\n${adviseSecond}\n\`\`\``, `\`\`\`JSON\n${adviseSecond}\n\`\`\``, `~~~json\n${adviseSecond}\n~~~`, `~~~\n${adviseSecond}\n~~~`]) {
+  for (const reply of [adviseSecond, `\`\`\`json\n${adviseSecond}\n\`\`\``, `\`\`\`JSON\n${adviseSecond}\n\`\`\``, `~~~json\n${adviseSecond}\n~~~`, `~~~\n${adviseSecond}\n~~~`, `\`\`\`\`json\n${adviseSecond}\n\`\`\`\``]) {
     const pr = await treated();
     fakeModel(pr, "TRIAGE", reply);
 
@@ -336,6 +336,17 @@ test("a review of a new HEAD leaves an older read without labels alone and reads
 
   expect(JSON.parse(next.output.split("\n")[0]!)).toMatchObject({ id: "2" });
   expect(existsSync(join(reviewDirectory(pr), "triage-labels.json"))).toBe(false);
+});
+
+test("a review that asks for another read than the stopped one at its HEAD runs as today and asks no triage model", async () => {
+  const pr = await treated();
+  const triage = fakeModel(pr, "TRIAGE", adviseSecond);
+  await pr.hedge("review", "--single");
+  rmSync(join(reviewDirectory(pr), "triage-labels.json"));
+  const base = JSON.parse(readFileSync(join(reviewDirectory(pr), "round.json"), "utf8")).commit;
+
+  await expect(pr.hedge("review", "--scope", "final", "--base", base)).rejects.toThrow("HEAD is already reviewed");
+  expect(triage.prompts()).toHaveLength(1);
 });
 
 test("a review at a HEAD read before runs as today when its read needs no labels: triage off, labels saved, a panel left to its wait, or a round the author recorded", async () => {

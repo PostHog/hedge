@@ -655,7 +655,7 @@ async function runReview(options: Map<string, string>, head: ProofIdentity, cont
   const { home, run } = context;
   const author = await authorOf(home, head);
   requireCheckoutOfPull(options, head, run);
-  const pending = await unfinishedReview(home, head, "hedge") ?? await unlabelledRead(head, context);
+  const pending = await unfinishedReview(home, head, "hedge") ?? await unlabelledRead(head, options, context);
   if (pending) requireSameRequest(pending, options, run);
   const reserved: SingleRound = pending
     ? { round: pending.reservation.round, id: basename(pending.directory), directory: pending.directory, scope: pending.reservation.scope, base: pending.reservation.base, from: pending.reservation.from ?? rangeStart(pending.reservation.scope, pending.reservation.base, head, run), phase: (pending.reservation as { phase?: string }).phase }
@@ -669,10 +669,11 @@ async function runReview(options: Map<string, string>, head: ProofIdentity, cont
   });
 }
 
-async function unlabelledRead(head: ProofIdentity, context: CommandContext) {
+async function unlabelledRead(head: ProofIdentity, options: Map<string, string>, context: CommandContext) {
   for (const directory of await roundDirectories(context.home, head)) {
     const reservation = await readReservation(directory);
     if (reservation?.capturedBy !== "hedge" || reservation.commit !== head.commit || !existsSync(join(directory, "findings.md")) || await readPlan(directory)) continue;
+    if (reservedOptions(reservation) !== requestedOptions(options, reservation, context.run)) continue;
     if (await labelsDue(directory, triageSetting(context.env)) && !await savedLabels(directory)) return { reservation, directory };
   }
   return undefined;
