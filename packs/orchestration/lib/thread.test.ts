@@ -176,6 +176,23 @@ test("hedge thread send leaves auto to T3 for a running turn that waits on a que
   expect(JSON.parse(output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-card", delivery: "steered" });
 });
 
+test.each([["this-box", "mcp:local-card"], ["devbox-2", "mcp:linked-card"]])("hedge thread send queues a slash command behind a question card on %s", async (host, id) => {
+  const t3 = await stub(fixture([writable], [...linkedThreads, linkedCard], [localCard]));
+
+  const { output } = await thread(t3, ["send", "--host", host, id, "/goal Continue the migration"]);
+
+  expect(sends(t3)).toEqual([expect.objectContaining({ threadId: id, message: "/goal Continue the migration", mode: "queue" })]);
+  expect(JSON.parse(output)).toMatchObject({ threadId: id, delivery: "queued" });
+});
+
+test("hedge thread send steers a message that starts with a path, as T3 reads it as text", async () => {
+  const t3 = await stub(fixture([linkedEnvironment], linkedThreads, [localCard]));
+
+  await thread(t3, ["send", "--host", "this-box", "mcp:local-card", "/src/a.ts has the fix"]);
+
+  expect(sends(t3)).toEqual([expect.objectContaining({ mode: "auto" })]);
+});
+
 test("hedge thread send refuses an archived thread, an empty message, and a thread it cannot place, and sends nothing", async () => {
   const t3 = await stub();
 
