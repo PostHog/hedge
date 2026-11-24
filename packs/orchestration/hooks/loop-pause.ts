@@ -13,7 +13,7 @@ type Line = { type?: string; isMeta?: boolean; message?: { content?: unknown }; 
 const startsSubthread = /(?:^|__)delegate_task$/;
 const provenance = /^\s*(?:\[[^\]\n]*\]\s*)*/;
 const runVerb = /^\W*(?:run|start)\b/i;
-const loopName = /\b(?:quality|signal)-loop\b/i;
+const loopName = /(?<![\w-])(?:quality|signal)-loop(?![\w-])/i;
 const coordinator = /\bcoordinator\b/i;
 const slashCommand = /^(?:<command-message>[^<\n]*<\/command-message>\s*)?<command-name>\/(?:[\w-]+:)?(?:quality|signal)-loop<\/command-name>/;
 

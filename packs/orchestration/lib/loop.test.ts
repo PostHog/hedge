@@ -35,7 +35,7 @@ describe("hedge loop check-pause", () => {
     expect(await loop(["check-pause", "--ledger", dir])).toMatchObject({ code: 0, out: expect.stringContaining("start lanes up to the WIP limits") });
   });
 
-  test.each(["- **Paused:** no (since the planning)\n", "Paused: no, resumed after review\n", "Paused: no - resumed\n", "Paused: no.\n", "Paused: no (since Friday)\n", "Paused: **no**\n"])("exits 0 for a no with a note after it: %p", async (limits) => {
+  test.each(["- **Paused:** no (since the planning)\n", "Paused: no, resumed after review\n", "Paused: no - resumed\n", "Paused: no.\n", "Paused: no (since Friday)\n", "Paused: **no**\n", "Paused:**no**\n"])("exits 0 for a no with a note after it: %p", async (limits) => {
     expect((await loop(["check-pause", "--ledger", ledger({ "limits.md": limits })])).code).toBe(0);
   });
 
@@ -43,6 +43,8 @@ describe("hedge loop check-pause", () => {
     ["a plain line", "Quality loop WIP: 2\nPaused: yes\n\n## Changes\n- 2026-11-14: paused: yes.\n"],
     ["a list item", "- Paused: yes (until Friday)\n"],
     ["bold", "**Paused:** yes\n"],
+    ["a bold label with the colon outside", "**Paused**: yes\n"],
+    ["a star bullet", "* Paused: yes\n"],
   ])("exits 1 and says to start no lane while the limits say the loop is paused in %s", async (_, limits) => {
     const dir = ledger({ "limits.md": limits });
     expect(await loop(["check-pause", "--ledger", dir])).toMatchObject({ code: 1, out: expect.stringContaining("start no lane") });
@@ -57,6 +59,7 @@ describe("hedge loop check-pause", () => {
     ["a no followed by another value", { "limits.md": "Paused: no: yes\n" }],
     ["a no with an unclosed bracket", { "limits.md": "Paused: no (\n" }],
     ["a no with an unmatched markup sign", { "limits.md": "Paused: *no\n" }],
+    ["a no with unmatched markup right after the colon", { "limits.md": "Paused:**no\n" }],
   ])("fails closed with exit 3 on %s", async (_, files) => {
     const result = await loop(["check-pause", "--ledger", ledger(files)]);
     expect(result).toMatchObject({ code: 3, out: expect.stringContaining("start no lane") });
@@ -139,6 +142,13 @@ describe("hedge loop next-id", () => {
     const callers = Array.from({ length: 12 }, () => Bun.spawn([process.execPath, command, "next-id", "--kind", "lane", "--ledger", dir], { env: { PATH: Bun.env.PATH, HOME: home, HEDGE_SETTINGS: "{}", BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" }, stdout: "pipe" }));
     const ids = await Promise.all(callers.map(async (caller) => (await new Response(caller.stdout).text()).trim()));
     expect(ids.toSorted()).toEqual(Array.from({ length: 12 }, (_, index) => `L0${65 + index}`));
+  });
+
+  test("refuses a flag given twice and reserves nothing", async () => {
+    const home = temp.make("home-");
+    const dir = ledger({ "lanes.md": lanes("L064") });
+    await expect(loop(["next-id", "--kind", "bogus", "--kind", "lane", "--ledger", dir], undefined, home)).rejects.toThrow("--kind given twice");
+    expect((await loop(["next-id", "--kind", "lane", "--ledger", dir], undefined, home)).out).toBe("L065");
   });
 
   test("refuses a kind it does not know", async () => {

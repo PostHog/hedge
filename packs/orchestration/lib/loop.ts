@@ -21,6 +21,7 @@ function option(args: string[], name: string, known: string[]): string | undefin
     if (!known.includes(flag)) throw new Error(`unknown argument ${arg}. ${usage}`);
     const value = inline ?? args[++at];
     if (!value || value.startsWith("--")) throw new Error(`${flag} needs a value. ${usage}`);
+    if (flag === name && found !== undefined) throw new Error(`${flag} given twice. ${usage}`);
     if (flag === name) found = value;
   }
   return found;
@@ -32,7 +33,7 @@ function ledgerDir(args: string[], io: LoopIo, known: string[]): string {
   return expandHome(dir.trim(), io.home);
 }
 
-const pauseLine = /^[ \t>*_-]*Paused[*_]*:[*_]*[ \t]*(.*)$/gim;
+const pauseLine = /^[ \t>]*(?:[-*+][ \t]+)?([*_]*)Paused(?:\1:|:\1)[ \t]*(.*)$/gim;
 const pauseValue = /^([*_`]*)(yes|no)\1(?:\.|[,;]\s.*|\s*\([^()]*\)|\s+[\u2013\u2014-]\s.*)?$/i;
 
 export function pauseState(ledger: string): PauseState {
@@ -44,7 +45,7 @@ export function pauseState(ledger: string): PauseState {
     return { state: "unreadable", why: `${file} cannot be read (${(error as NodeJS.ErrnoException).code ?? String(error)})` };
   }
   const values = new Set([...text.matchAll(pauseLine)].map((match) => {
-    const value = match[1]!.trim();
+    const value = match[2]!.trim();
     return pauseValue.exec(value)?.[2]!.toLowerCase() ?? value;
   }));
   if (values.size === 0) return { state: "unreadable", why: `${file} has no Paused line` };

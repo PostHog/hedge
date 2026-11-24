@@ -80,6 +80,7 @@ describe("the loop pause guard", () => {
 
   test.each([
     ["a thread that is no loop coordinator", [claudePrompt("Fix the login redirect and open a draft PR.")]],
+    ["a coordinator of a skill whose name only starts with a loop's", [claudePrompt("Run the signal-loop-worker as coordinator.")]],
     ["a scheduled audit of the coordinator runs", [claudePrompt(scheduled("Audit last night's quality-loop coordinator run and list its lanes."))]],
     ["a lane of the loop", [claudePrompt("You are quality-loop lane L064. Ship one PR for the cover stage of billing.")]],
     ["a Codex lane whose project instructions mention a coordinator run", [codexInstructions, codexMessage("You are signal-loop lane L070. Ship one fix PR.")]],
