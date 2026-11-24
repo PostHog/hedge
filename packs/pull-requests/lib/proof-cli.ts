@@ -5,7 +5,7 @@ import { basename, join, resolve } from "node:path";
 import { answerNumbers, askGap, savedFindings, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity } from "./proof.ts";
 import { AnswerTaken, appendOnce, decideAlone, hearUser, ledgerHolds, ledgerOf } from "./decision-cli.ts";
 import { HubUnreachable, keptOwed, refText, usersAcceptance, thisMachine, type Decision, type Ssh } from "./decision-ledger.ts";
-import { autonomyOf, gradeOf, type Autonomy, type Grade } from "./proof-autonomy.ts";
+import { autonomyOf, decidesAll, gradeOf, type Autonomy, type Grade } from "./proof-autonomy.ts";
 import { ciOf, readComment, readPullRequest, runIn } from "./pr-ci.ts";
 import { isCommitSha } from "./proof-end-table.ts";
 import { askModel, family, isQuotaExhausted, otherFamily, modelLabel, quotaExitCode, readRubric, reviewerRow, sessionFamily, skillReferences, type Family } from "./proof-models.ts";
@@ -52,7 +52,8 @@ type Subcommand = {
 };
 
 const overrideHelp = `--override takes the user's answer to the question that review-start prints when the arbiter escalates or gives no
-verdict. At the review budget hedge asks nothing, and only the user's --override runs another review or final read,
+verdict. At the review budget hedge asks nothing. With pull-requests.autonomy set to end, --agent runs up to 3 more
+reads past the budget; after them, and on ask, only the user's --override runs another review or final read,
 except a final read of a HEAD whose commits since the last read are only clean base merges and quiet commits past what
 the gate carries and change files of the PR. Ask it with your question tool, with the options "Run one more round" and "Stop
 here". Only their choice of "Run one more round" there counts, quoted with the date they gave it, for example
@@ -60,12 +61,10 @@ here". Only their choice of "Run one more round" there counts, quoted with the d
 one (T3CODE_THREAD_ID). A typed message, a refusal, or a general rule, such as "ship everything autonomously", does
 not answer a round. The question names the PR, and an answer to the question of another PR does not count. The
 answer lands in the decision ledger as a 👤 review decision; one answer records one decision and starts one round.
---agent takes your own reason for a round that the arbiter escalates; it never passes the review budget. It lands in the ledger
-as a 🤖 review decision, refused on a PR whose merge-risk callout has no Tier line at HEAD. With pull-requests.autonomy set
-to end, an escalation tells you to decide the round with --agent, unless the PR is ungraded. On a one-way door with autonomy
-end, an escalation or no verdict stops the review loop like the review budget: hedge asks nothing, --agent cannot pass it,
-only the user's --override runs another round, and a finding listed under Known issues takes a known answer. --standing is
-its old name. The round keeps the decision and the arbiter's verdict. List decisions with hedge decision list.
+--agent takes your own reason for a round that the arbiter escalates, or, on end, for one of the 3 reads past the review
+budget. It lands in the ledger as a 🤖 review decision, refused on a PR whose merge-risk callout has no Tier line at HEAD.
+With pull-requests.autonomy set to end, an escalation tells you to decide the round with --agent, one-way doors and
+critical PRs included, unless the PR is ungraded. --standing is its old name. The round keeps the decision and the arbiter's verdict. List decisions with hedge decision list.
 A round starts only once its decision is in the ledger. A round that holds a decision stays reserved until the
 ledger holds another decision for the same answer. A round of another commit whose decision is still not in the
 ledger is dropped when the next round starts: its decision never counted. It stays reserved while the hub is down or
@@ -87,10 +86,10 @@ final reads of the babysit phase count apart. Only a review that leads to fixes 
 counts when the gate asks for an answer to one of its findings, so one with only minor and nit findings spends nothing,
 and an unfinished one counts. The default budget is the panel, the fixes read, and the last read. On a PR of the Read
 tier the ceiling is two reviews that count: its one read and one final read of its fixes. At the ceiling no review or
-final read runs without the user's --override. A production fix of the PR after the last read is then reverted, and the finding
+final read runs without the user's --override, or, on end, the agent's --agent for one of its 3 reads past the budget. A production fix of the PR after the last read is then reverted, and the finding
 it fixed is listed under Known issues; the gate carries the revert. One final read still runs at the ceiling: of a
 HEAD whose commits since the last read are only clean base merges and quiet commits, past what the gate carries, that change files of the PR. Below
-the ceiling, --agent still reads a carried HEAD. The arbiter is the lookup model of your AI plan;
+the ceiling, and on end past it, --agent still reads a carried HEAD. The arbiter is the lookup model of your AI plan;
 HEDGE_REVIEW_ARBITER replaces its command.`;
 
 const subcommands: Record<string, Subcommand> = {
@@ -386,13 +385,14 @@ list the standing rules.`,
 options "Accept the gap" and "Keep the gap open". Ask it with your question tool. When the user chooses "Accept the
 gap", record their answer with hedge decision record --mark 👤 --class proof-gap --kind <kind> --pr <owner/repo#n>:
 it lands in the decision ledger and the gate counts it. A gap recorded again, such as with another reason, keeps
-its acceptance. An agent's own 🤖 decision covers a gap when the PR's tier lets it, never a panel gap. A standing
+its acceptance. An agent's own 🤖 decision covers a gap when the PR's tier lets it, never a panel gap on ask. With
+pull-requests.autonomy set to end, it covers every kind on a graded PR. A standing
 rule (hedge proof standing) covers the kinds it still takes. The user's acceptance settles the kind: the gate then
 ignores that kind's evidence, and the judge does not see it. Kind ci records that CI cannot run on HEAD, such as on
 a fork PR. Kind panel records that the PR runs no qa-swarm panel under an exception in the user's rules; once
 accepted, any finished review at HEAD covers it. A judge gap counts only decisions made after it was recorded on
 HEAD. With pull-requests.autonomy set to end, it prints the hedge decision record --mark 🤖
-command instead, unless the PR is a one-way door or its tier keeps the gap the user's.`,
+command instead for every kind, panel and critical PRs included, unless the PR is ungraded or the user keeps the gap owed.`,
     examples: ["hedge proof gap --kind prod-shape --reason 'No production read access'"],
     options: ["--kind", "--reason", "--accept", "--thread"],
     run: async ({ options }, identity, context) => {
@@ -515,7 +515,7 @@ code and the reason. The gate's lines and hedge decision report come from the sa
         gate = await gateHead();
         if (gate.code === ciRunningCode && wait) unshared = await shareGateResult(head, false, clock(), context);
         if (gate.code === ciRunningCode && wait && !unshared?.failed) {
-          await record({ code: gate.code, reason: gate.reason });
+          await record({ code: gate.code, reason: gate.reason, ...ranOnEnd(context) });
           waited = await untilCiFinishes(head, context, wait);
           gatedAt = clock();
           gate = await gateHead();
@@ -532,7 +532,7 @@ code and the reason. The gate's lines and hedge decision report come from the sa
         const reason = `${gate.reason}. --wait did not wait: the decision ledger did not take the failure (${unshared.error})`;
         gate = { ...gate, code: 1, reason, summary: { ...gate.summary, code: 1 }, verdict: `gate: fail (exit 1): ${reason}. Fix the ledger's reach, such as the hub connection, then run the gate again` };
       }
-      await record({ code: gate.code, reason: gate.reason });
+      await record({ code: gate.code, reason: gate.reason, ...ranOnEnd(context) });
       const shared = unshared?.failed ? unshared.line : (await shareGateResult(head, gate.code === 0, gatedAt, context))?.line;
       const waitLine = waited?.failedRead ? `ci: --wait stopped early at a failed read of GitHub: ${waited.failedRead}` : undefined;
       if (flags.has("--json")) print(JSON.stringify({ ...gate.summary, reason: gate.reason, ...waitLine ? { wait: waitLine } : {}, ...shared ? { ledger: shared } : {} }));
@@ -1250,10 +1250,12 @@ async function untilCiFinishes(head: ProofIdentity, context: CommandContext, min
 
 type Shared = { line: string; failed: boolean; error?: string };
 
+const ranOnEnd = ({ env }: ProofContext): { onEnd?: true } => decidesAll(env) ? { onEnd: true } : {};
+
 async function shareGateResult(head: ProofIdentity, passed: boolean, startedAt: Date, context: ProofContext): Promise<Shared | undefined> {
   const result = passed ? "pass" : "failure";
   try {
-    await ledgerOf(context).append({ type: "gate", repository: head.repository, pr: head.pr, commit: head.commit, passed, machine: thisMachine(context.env), at: startedAt.toISOString() });
+    await ledgerOf(context).append({ type: "gate", repository: head.repository, pr: head.pr, commit: head.commit, passed, machine: thisMachine(context.env), at: startedAt.toISOString(), ...passed ? ranOnEnd(context) : {} });
     return passed ? { line: "merge gate: pass recorded in the decision ledger", failed: false } : undefined;
   } catch (failure) {
     const error = String((failure as Error).message ?? failure).split(/[\r\n]/)[0]!;

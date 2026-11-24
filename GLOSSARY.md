@@ -95,7 +95,7 @@ _Avoid_: Controller, master box
 ## Threads
 
 **Question card**:
-A question a thread asks the person with the question tool: `AskUserQuestion` in Claude, `request_user_input` in Codex. T3 shows it as a card, and the thread's turn waits until the person answers. A message sent to the thread in a mode other than `queue` cancels the card. T3 queues a message with `freshContext: true` in mode `steer` or `restart`, so that message does not cancel it.
+A question a thread asks the person with the question tool: `AskUserQuestion` in Claude, `request_user_input` in Codex. T3 shows it as a card, and the thread's turn waits until the person answers. On Claude and Codex, which steer without interrupting, a message that steers the turn leaves the card open, and the agent reads it once the person answers. A message in mode `restart`, or a `/goal` command that T3 runs at once, stops the turn and cancels the card. A message in mode `queue` starts a new turn after this one ends.
 _Avoid_: Prompt, popup, dialog
 
 ## Decisions
@@ -113,7 +113,7 @@ The `Tier:` line of a pull request's merge-risk callout at HEAD: critical or non
 _Avoid_: Risk level, grade
 
 **Autonomy**:
-The setting `pull-requests.autonomy`: how often an agent asks the user about a review round or a proof gap. On `ask`, the default, `hedge proof` tells the agent to ask the user each time. On `end`, it tells the agent to decide alone as a 🤖 decision, wherever the tier lets it, and the user reads every such decision under Decisions in `hedge decision report`, beside the end table. An ungraded pull request, a panel gap, and a product gap on a critical pull request still go to the user, and so does a gap on a one-way door. On a one-way door, an escalated review round stops the review loop instead: `hedge proof` asks nothing, `--agent` cannot pass the stop, and only the user's `--override` runs another round.
+The setting `pull-requests.autonomy`: how often an agent asks the user about a review round or a proof gap. On `ask`, the default, `hedge proof` tells the agent to ask the user each time. On `end`, it tells the agent to decide alone as a 🤖 decision, and the user reads every such decision under Decisions in `hedge decision report`, beside the end table. That covers every review round, up to 3 reads past the review budget, and every proof gap, on critical pull requests and one-way doors too. Only an ungraded pull request, which the agent grades first, and a gap the user keeps owed stay with the user.
 _Avoid_: Trust level, mode
 
 **Acceptance**:
@@ -121,7 +121,7 @@ A decision that lets the gate pass over a proof gap. The user's acceptance alway
 _Avoid_: Waiver, override
 
 **Lapse**:
-The gate no longer counts an agent's acceptance, because the tier changed, CI ran on HEAD, the user keeps the gap owed, or the gap is a panel gap. The gate prints each lapsed decision of a kind that stays open.
+The gate no longer counts an agent's acceptance, because the tier changed, CI ran on HEAD, the user keeps the gap owed, or, on `ask`, the gap is a panel gap. The gate prints each lapsed decision of a kind that stays open.
 _Avoid_: Expiry, revoke
 
 **Reversal**:

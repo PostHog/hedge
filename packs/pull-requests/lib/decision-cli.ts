@@ -3,6 +3,7 @@ import { renderReport } from "./decision-report.ts";
 import { laneSecretLines } from "../../hub/lib/secret-lane-source.ts";
 import { readPullRequest, runIn } from "./pr-ci.ts";
 import { gapKind, refuseInstructionQuote, usedAnswer } from "./proof.ts";
+import { decidesAll } from "./proof-autonomy.ts";
 import {
   agentRefusal, answerUse, askClasses, gateOverride, overrideChoice, brakeDays, brakeOf, covers, decisionLine, fold, hubLedger, HubUnreachable, isUsers, liftCounted, live, messageKey, namesKind, namesPr, panelRefusal, prRef, refText, thisMachine, tierOf,
   type AnswerUse, type AskClass, type Decision, type DecisionState, type Env, type Ledger, type LedgerEvent, type Lift, type PrRef, type Reversal, type Ssh, type UsersMark,
@@ -41,7 +42,8 @@ lets the merge gate pass that one PR at that head without a hedge proof gate pas
 records it. Each option other than --pr and --kind is taken once.
 record with 🤖 records the agent's own decision with the option it rejected. Hedge reads each PR's Tier line in its
 merge-risk callout at HEAD: it refuses an ungraded PR, and on a critical PR anything but process (review and status
-asks, judge and post-deploy-watch gaps). It never takes a panel gap: ${panelRefusal}. The gate never counts a 🤖 ci
+asks, judge and post-deploy-watch gaps). On ask it never takes a panel gap: ${panelRefusal}. With pull-requests.autonomy
+set to end, it takes every review and proof-gap ask on a graded PR, panel gaps and critical PRs included. The gate never counts a 🤖 ci
 acceptance over CI that ran, nor one under the user's keep-owed, and prints each 🤖 acceptance that lapsed on a kind
 that stays open.
 list prints the decisions as decision lines with their ids. Run it before you ask.
@@ -288,9 +290,10 @@ export async function decideAlone(input: AgentDecision, context: DecisionContext
   if (input.link !== undefined && input.class !== "scope") throw new Error("--link belongs to a scope decision: the T3 thread its side fix started in");
   const brake = brakeOf(await reachHub(() => ledger.read()), input.class);
   if (brake) throw new Error(`The ${input.class} class is braked: the user reversed decisions ${brake.ids[0]} and ${brake.ids[1]} within ${brakeDays} days. An agent decides no ${input.class} ask alone until the user lifts it with hedge decision lift; ask them`);
-  if (agentRefusal("non-critical", input.class, input.kinds) === "panel") throw new Error(`${input.prs.map(refText).join(", ")}: ${panelRefusal}. Ask them with your question tool and record their answer with --mark 👤`);
+  const all = decidesAll(context.env);
+  if (agentRefusal("non-critical", input.class, input.kinds, all) === "panel") throw new Error(`${input.prs.map(refText).join(", ")}: ${panelRefusal}. Ask them with your question tool and record their answer with --mark 👤`);
   for (const ref of input.prs) {
-    const refusal = agentRefusal(tierOf(await pullBody(ref, context).catch(() => "")), input.class, input.kinds);
+    const refusal = agentRefusal(tierOf(await pullBody(ref, context).catch(() => "")), input.class, input.kinds, all);
     if (refusal === "ungraded") throw new Error(`${refText(ref)} is ungraded: its merge-risk callout has no Tier line at HEAD. An agent never decides alone on an ungraded PR; grade it with merge-risk, or ask the user`);
     if (refusal) throw new Error(`${refText(ref)} is critical at HEAD: an agent decides only process there (review and status asks, judge and post-deploy-watch gaps). Ask the user`);
   }

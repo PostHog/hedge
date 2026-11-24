@@ -18,6 +18,7 @@ export type Doc = {
 };
 
 const skippedFolders = new Set(["node_modules", "qa-ledgers", "proof", "runs"]);
+const skippedRootFolders = new Set(["memory", "packs"]);
 const stopwords = new Set(
   ("about after again also before being between both could does doing during each from have here into just more most other over same should some such than that their them then there these they this those through under until very what when where which while with would your" +
     " notes note research brief briefs draft final index readme plan plans personal context library").split(/\s+/),
@@ -55,7 +56,8 @@ export function words(text: string): string[] {
 function markdownFiles(root: string, prefix = ""): string[] {
   return readdirSync(join(root, prefix), { withFileTypes: true }).flatMap((entry) => {
     const path = prefix ? `${prefix}/${entry.name}` : entry.name;
-    if (entry.isDirectory()) return entry.name.startsWith(".") || skippedFolders.has(entry.name) ? [] : markdownFiles(root, path);
+    const skipped = entry.name.startsWith(".") || skippedFolders.has(entry.name) || (!prefix && skippedRootFolders.has(entry.name));
+    if (entry.isDirectory()) return skipped ? [] : markdownFiles(root, path);
     return entry.isFile() && entry.name.endsWith(".md") && path !== catalogName && !/^(AGENTS|CLAUDE|README)\.md$/.test(path) ? [path] : [];
   });
 }
