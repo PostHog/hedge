@@ -322,10 +322,13 @@ final read that hedge dropped unanswered, with its cause.`,
     run: async ({ options }, identity, context) => {
       const directory = await reviewDirectory(context.home, identity(), roundOption(options));
       const dropped = (await droppedFinalReads(context.home, identity())).map(({ line, cause }) => cause ? `${line}; cause: ${cause}` : line);
+      const findings = await savedFindings(directory).catch((error: unknown) => error instanceof Error ? error : new Error(String(error)));
       for (const line of await roundLines(directory, context)) context.print(line);
-      printAnswerNumbers(await savedFindings(directory) ?? "", context.print);
+      if (typeof findings === "string") printAnswerNumbers(findings, context.print);
       for (const line of dropped) context.print(line);
-      return 0;
+      if (!(findings instanceof Error)) return 0;
+      context.print(`hedge cannot read the findings of this round: ${findings.message}`);
+      return 1;
     },
   },
   "panel-lens": {
@@ -344,7 +347,8 @@ each lens's findings in order, then every TESTS item. One line each, such as "1.
 the review budget is spent, "3. known: <why>" answers a finding that the PR body lists by its file:line under Known
 issues; a known blocker holds the merge. In a review with a FINDINGS block, COVERED lists and prose outside FINDINGS
 and TESTS are no findings. An answer numbered past the last finding is refused, and so is a code fence, also one that
-opens a list item: quote an earlier answer with > and write code inline. The gate fails while a finding has no answer. A new call replaces the earlier answer. A final read takes the id that review-start printed. The judge in hedge proof gate checks
+opens a list item: quote an earlier answer with > and write code in single
+backticks. The gate fails while a finding has no answer. A new call replaces the earlier answer. A final read takes the id that review-start printed. The judge in hedge proof gate checks
 each answer against HEAD.`,
     examples: ["hedge proof respond --round 1 responses.md", "hedge proof respond --round final-1 responses.md"],
     options: ["--round"],

@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { checkout, cleanFixtures, fakeModel, type Checkout } from "./proof-testing.ts";
+import { checkout, cleanFixtures, fakeModel, graded, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
@@ -24,9 +24,22 @@ TESTS:
 - feature.test.ts:3 The LENS test waits on a real timer. Control the clock.
 `;
 
+async function receiptPage(pr: Checkout) {
+  const requests = join(pr.home, "receipt-requests");
+  const handler = join(pr.home, "publish.ts");
+  writeFileSync(handler, `require("fs").appendFileSync(${JSON.stringify(requests)}, JSON.stringify(await Bun.stdin.json()) + "\\n");\nconsole.log(JSON.stringify({ id: "receipt", url: "https://receipts.example/r/receipt" }));\n`);
+  pr.env.HEDGE_HANDLERS = JSON.stringify({ "proof-receipt": handler });
+  pr.pullRequestState({ body: `## Problem\n\nThe greeting is blank.\n\n${graded("non-critical")}` });
+  await pr.hedge("receipt");
+  return JSON.parse(readFileSync(requests, "utf8").trim().split("\n").at(-1)!).page as string;
+}
+
+const row = (number: number, text: string, answer: string) => new RegExp(`^\\| ${number} \\|[^\\n]*${text}[^\\n]*\\| ${answer} \\|$`, "m");
+
 function lensNamingReviewer(pr: Checkout) {
   const reply = join(pr.home, "lens-answer");
   writeFileSync(reply, lensAnswer);
+  pr.env.HEDGE_PROOF_REVIEWER_MODEL = "gpt-6.1-sol";
   pr.env.HEDGE_PROOF_REVIEWER = `lens=$(awk '/^Lens: / && !seen { sub(/^Lens: /, ""); print; seen = 1 }'); sed "s/LENS/$lens/g" "${reply}"`;
 }
 
@@ -65,9 +78,16 @@ test("hedge proof respond refuses answers numbered past the last finding, so the
   await expect(refused).rejects.toThrow(`Round 1 has 12 findings; answers numbered past them: 13 to ${readingOrderItems}.`);
   await expect(refused).rejects.toThrow(numbered);
 
-  const byNumbers = readingOrder.split("\n").slice(0, items.length).join("\n") + "\n";
+  const byNumbers = items.map((_, index) => `${index + 1}. rejected: answer ${index + 1}\n`).join("");
   writeFileSync(join(pr.repository, "responses.md"), byNumbers);
   expect((await pr.hedge("respond", "--round", "1", "responses.md")).code).toBe(0);
+
+  const page = await receiptPage(pr);
+  for (const [index, lens] of lenses.entries()) {
+    expect(page).toMatch(row(2 * index + 1, `major \\| ${lens} \\|`, `rejected: answer ${2 * index + 1}`));
+    expect(page).toMatch(row(2 * index + 2, `minor \\| ${lens} \\|`, `rejected: answer ${2 * index + 2}`));
+    expect(page).toMatch(row(2 * lenses.length + index + 1, `The ${lens} test waits`, `rejected: answer ${2 * lenses.length + index + 1}`));
+  }
 });
 
 test("the numbers in the list are the ones respond pairs: answering every major leaves the TESTS items, numbered last, unanswered", async () => {
@@ -122,6 +142,7 @@ async function singleFindingRound(review = "FINDINGS:\n- feature.txt:1 | major |
   await pr.commit("feature.txt", "greet the new member\n");
   await pr.hedge("require", "--none", "--reason", "docs only");
   fakeModel(pr, "REVIEWER", review);
+  pr.env.HEDGE_PROOF_REVIEWER_MODEL = "gpt-6.1-sol";
   await pr.hedge("review", "--single");
   return pr;
 }
@@ -132,7 +153,10 @@ test("hedge proof show fails on a finished round whose findings it cannot read",
   rmSync(findings);
   mkdirSync(findings);
 
-  await expect(pr.hedge("show", "--round", "1")).rejects.toThrow("EISDIR");
+  const shown = await pr.hedge("show", "--round", "1");
+
+  expect(shown.code).toBe(1);
+  expect(shown.output).toContain("hedge cannot read the findings of this round: EISDIR");
 });
 
 test("hedge proof respond refuses a code fence in any form, since every numbered line counts as an answer", async () => {
@@ -140,7 +164,7 @@ test("hedge proof respond refuses a code fence in any form, since every numbered
   const fences = ["```text", "~~~", "    ```", "\t~~~", "```first```", "````", "- ```text", "3. ~~~", "  * - ```", "\uFEFF```", "\u00a0```"];
   for (const fence of fences) {
     writeFileSync(join(pr.repository, "responses.md"), fence.startsWith("\uFEFF") ? `${fence}\n1. fixed: from an earlier round\n` : `1. fixed: the greeting guards an empty name\n${fence}\n2. rejected: from an earlier round\n`);
-    await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("responses.md holds a code fence, a line that starts with ``` or ~~~. Every numbered line counts as an answer, quoted or not. Quote an earlier answer with > and write code inline.");
+    await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("responses.md holds a code fence, a line that starts with ``` or ~~~. Every numbered line counts as an answer, quoted or not. Quote an earlier answer with > and write code in single backticks.");
   }
 });
 
@@ -151,12 +175,21 @@ test("an answer quoted with > answers nothing and is not counted past the last f
   await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("Answer findings 2 too");
   writeFileSync(join(pr.repository, "responses.md"), "1. fixed: the greeting guards an empty name\n2. rejected: a returning member is greeted once\n\n> 3. rejected: from an earlier round\n");
   expect((await pr.hedge("respond", "--round", "1", "responses.md")).code).toBe(0);
+
+  expect(await receiptPage(pr)).toContain("Other answers, as written:\n\n```text\n> 3. rejected: from an earlier round\n```");
 });
 
 test("a finding marked with a number and a nonbreaking space prints under its own number alone", async () => {
   const pr = await singleFindingRound("FINDINGS:\n7.\u00a0feature.txt:1 | major | Correctness | an empty name -> a blank greeting | anchor: greet the new member\nCOVERED: feature.txt\n");
 
   expect((await pr.hedge("show", "--round", "1")).output).toContain("Answer each finding by these numbers, in hedge proof respond:\n1. feature.txt:1 | major |");
+});
+
+test("an answer number too long for a JavaScript number is named as written", async () => {
+  const pr = await singleFindingRound();
+  writeFileSync(join(pr.repository, "responses.md"), "1. fixed: the greeting guards an empty name\n123456789012345678901234567890. rejected: no such finding\n");
+
+  await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("answers numbered past them: 123456789012345678901234567890.");
 });
 
 test("a prose finding that starts with a bare list marker keeps that line in the list", async () => {

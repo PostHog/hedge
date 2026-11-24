@@ -647,7 +647,7 @@ export async function respondToReview(home: string, identity: ProofIdentity, rou
   const directory = await roundDirectory(home, identity, round);
   const findings = await savedFindings(directory);
   if (findings === undefined) throw new Error(`Review round ${round} has no findings yet`);
-  if (fenceLine.test(bytes.toString())) throw new Error(`${responses} holds a code fence, a line that starts with \`\`\` or ~~~. Every numbered line counts as an answer, quoted or not. Quote an earlier answer with > and write code inline.`);
+  if (fenceLine.test(bytes.toString())) throw new Error(`${responses} holds a code fence, a line that starts with \`\`\` or ~~~. Every numbered line counts as an answer, quoted or not. Quote an earlier answer with > and write code in single backticks.`);
   const { count, past } = numbersPast(findings, bytes.toString());
   if (past.length && !count) throw new Error(`Round ${round} has no findings, so it needs no answers.`);
   if (past.length) throw new Error(`Round ${round} has ${count} findings; answers numbered past them: ${spans(past)}. Number your answers by this list, which hedge proof show --round ${round} prints too:\n${answerNumbers(findings)}`);
@@ -814,15 +814,15 @@ export function answerNumbers(findings: string) {
 
 function numbersPast(findings: string, responses: string) {
   const count = reviewedItems(findings).length;
-  const numbers = responses.split("\n").map((line) => Number(answerItem.exec(line)?.[1])).filter((number) => number > count);
-  return { count, past: [...new Set(numbers)].sort((a, b) => a - b) };
+  const numbers = responses.split("\n").flatMap((line) => { const digits = answerItem.exec(line)?.[1]; return digits ? [BigInt(digits)] : []; }).filter((number) => number > BigInt(count));
+  return { count, past: [...new Set(numbers)].sort((a, b) => a < b ? -1 : 1) };
 }
 
-function spans(numbers: number[]) {
-  const runs: number[][] = [];
+function spans(numbers: bigint[]) {
+  const runs: bigint[][] = [];
   for (const number of numbers) {
     const run = runs.at(-1);
-    if (run && run.at(-1) === number - 1) run.push(number);
+    if (run && run.at(-1) === number - 1n) run.push(number);
     else runs.push([number]);
   }
   return runs.map((run) => run.length > 2 ? `${run[0]} to ${run.at(-1)}` : run.join(", ")).join(", ");

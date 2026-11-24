@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, cpSync, existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanFixtures, checkout, clean, fakeModel, lockHolder, reviewHeadFixed, verdict, type Checkout } from "./proof-testing.ts";
 
@@ -96,6 +96,22 @@ test("a drop that no new read follows, as after a crash, leaves a store where th
   expect(JSON.parse(read.output.split("\n")[0]!)).toMatchObject({ id: "final-2" });
   expect(dropped(pr)).toEqual(["final-1"]);
   expect((await pr.hedge("gate")).output).toContain("review: HEAD reviewed in final read 2");
+});
+
+test("show prints the dropped final reads before it fails on findings it cannot read", async () => {
+  const { pr, reviewed, older } = await blockedFinalRead();
+  const newer = await pr.commit("feature.txt", "greet the new member\n");
+  fakeModel(pr, "REVIEWER", "No findings.");
+  await finalRead(pr, reviewed);
+  const findings = join(reviews(pr), "1/findings.md");
+  rmSync(findings);
+  mkdirSync(findings);
+
+  const shown = await pr.hedge("show", "--round", "1");
+
+  expect(shown.code).toBe(1);
+  expect(shown.output).toContain(`final read 1 on ${older.slice(0, 7)} dropped at ${newer.slice(0, 7)}: no reviewer answer was captured`);
+  expect(shown.output).toContain("hedge cannot read the findings of this round: EISDIR");
 });
 
 test("show redacts a token that crosses the cut of a long failure cause", async () => {
