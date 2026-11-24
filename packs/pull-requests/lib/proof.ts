@@ -647,6 +647,7 @@ export async function respondToReview(home: string, identity: ProofIdentity, rou
   const directory = await roundDirectory(home, identity, round);
   const findings = await savedFindings(directory);
   if (findings === undefined) throw new Error(`Review round ${round} has no findings yet`);
+  if (fenceLine.test(bytes.toString())) throw new Error(`${responses} holds a code fence, a line that starts with \`\`\` or ~~~. Every numbered line counts as an answer, quoted or not. Quote an earlier answer with > and write code inline.`);
   const { count, past } = numbersPast(findings, bytes.toString());
   if (past.length && !count) throw new Error(`Round ${round} has no findings, so it needs no answers.`);
   if (past.length) throw new Error(`Round ${round} has ${count} findings; answers numbered past them: ${spans(past)}. Number your answers by this list, which hedge proof show --round ${round} prints too:\n${answerNumbers(findings)}`);
@@ -666,6 +667,7 @@ export async function respondToReview(home: string, identity: ProofIdentity, rou
 }
 
 const findingItem = /^\s*(?:[-*]|\d+[.)])\s+\S/;
+const fenceLine = /^[ \t]*(?:`{3}|~{3})/m;
 const answerItem = /^\s*(?:[-*]\s+)?(\d+)[.):]\s+\**(fixed|rejected|known)\b/i;
 
 const noFinding = /^(?:#.*|no findings\.?|findings:?|\(none\))$/i;
@@ -810,33 +812,9 @@ export function answerNumbers(findings: string) {
   return ["Answer each finding by these numbers, in hedge proof respond:", ...lines].join("\n");
 }
 
-const fenceLine = /^[ \t]*(`{3,}|~{3,})(.*)$/;
-
-function fencedLines(lines: string[]) {
-  const fenced = lines.map(() => false);
-  let open: string | undefined;
-  for (const [index, line] of lines.entries()) {
-    const fence = fenceLine.exec(line.replace(/\r$/, ""));
-    if (open) {
-      fenced[index] = true;
-      if (fence && fence[1]![0] === open[0] && fence[1]!.length >= open.length && !fence[2]!.trim()) open = undefined;
-    } else if (fence && !(fence[1]![0] === "`" && fence[2]!.includes("`"))) {
-      fenced[index] = true;
-      open = fence[1];
-    }
-  }
-  return fenced;
-}
-
-function answerLines(responses: string) {
-  const lines = responses.split("\n");
-  const fenced = fencedLines(lines);
-  return lines.map((line, index) => ({ line, match: fenced[index] ? null : answerItem.exec(line) }));
-}
-
 function numbersPast(findings: string, responses: string) {
   const count = reviewedItems(findings).length;
-  const numbers = answerLines(responses).map(({ match }) => Number(match?.[1])).filter((number) => number > count);
+  const numbers = responses.split("\n").map((line) => Number(answerItem.exec(line)?.[1])).filter((number) => number > count);
   return { count, past: [...new Set(numbers)].sort((a, b) => a - b) };
 }
 
@@ -855,7 +833,8 @@ export function answeredFindings(findings: string, responses: string) {
   const answers = new Map<number, Answer>();
   const other: string[] = [];
   let last: Answer | undefined;
-  for (const { line, match } of answerLines(responses)) {
+  for (const line of responses.split("\n")) {
+    const match = answerItem.exec(line);
     const number = Number(match?.[1]);
     if (match && number >= 1 && number <= items.length && !answers.has(number)) answers.set(number, last = { verdict: match[2]!.toLowerCase() as Answer["verdict"], text: line.trim() });
     else if (!match && last && continued.test(line)) last.text += `\n${line.trim()}`;

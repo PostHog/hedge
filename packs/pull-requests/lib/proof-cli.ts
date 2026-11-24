@@ -343,8 +343,8 @@ answers by the list that hedge proof review and hedge proof show print under "An
 each lens's findings in order, then every TESTS item. One line each, such as "1. fixed in 1a2b3c4: <how>" or "2. rejected: <why>". Once
 the review budget is spent, "3. known: <why>" answers a finding that the PR body lists by its file:line under Known
 issues; a known blocker holds the merge. In a review with a FINDINGS block, COVERED lists and prose outside FINDINGS
-and TESTS are no findings. An answer numbered past the last finding is refused. A line in a fenced code block is a
-quote: it answers no finding. The gate fails while a finding has no answer. A new call replaces the earlier answer. A final read takes the id that review-start printed. The judge in hedge proof gate checks
+and TESTS are no findings. An answer numbered past the last finding is refused, and so is a code fence: quote an earlier
+answer with > and write code inline. The gate fails while a finding has no answer. A new call replaces the earlier answer. A final read takes the id that review-start printed. The judge in hedge proof gate checks
 each answer against HEAD.`,
     examples: ["hedge proof respond --round 1 responses.md", "hedge proof respond --round final-1 responses.md"],
     options: ["--round"],
