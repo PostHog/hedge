@@ -41,15 +41,38 @@ test("on end, an ungraded PR still sends an escalated round to the user", async 
   await expect(pr.hedge("review-finish", "--round", "3", "--reviewer", "gpt-6.1-sol", "findings.md")).rejects.toThrow();
 });
 
-test("on end, a one-way door sends an escalated round to the user and offers no agent decision", async () => {
+const oneWayDoor = () => graded("critical", "medium").replace("two-way door", "one-way door");
+
+test("on end, a one-way door stops the loop at an escalated round and asks the user nothing", async () => {
   const pr = await checkout();
   decideAtEnd(pr);
-  pr.pullRequestState({ body: graded("critical", "medium").replace("two-way door", "one-way door") });
+  pr.pullRequestState({ body: oneWayDoor() });
   const third = await escalatedRound(pr);
 
-  await expect(pr.hedge(...third)).rejects.toThrow("The arbiter escalates: Round 2 undoes the rename round 1 asked for. Ask the user with your question tool");
-  await expect(pr.hedge(...third)).rejects.toThrow("On a one-way door an agent never decides the round.");
+  await expect(pr.hedge(...third)).rejects.toThrow("The arbiter escalates: Round 2 undoes the rename round 1 asked for. On a one-way door the review loop stops here: ask the user nothing about another round.");
+  await expect(pr.hedge(...third)).rejects.toThrow("Known issues");
+  await expect(pr.hedge(...third)).rejects.not.toThrow("Ask the user with your question tool");
   await expect(pr.hedge(...third)).rejects.not.toThrow("--agent");
+  await expect(pr.hedge(...third, "--agent", "One more round")).rejects.toThrow();
+});
+
+test("on ask, a one-way door still asks the user about an escalated round", async () => {
+  const pr = await checkout();
+  pr.pullRequestState({ body: oneWayDoor() });
+  const third = await escalatedRound(pr);
+
+  await expect(pr.hedge(...third)).rejects.toThrow("Ask the user with your question tool");
+});
+
+test("on a one-way door the user's override still runs the escalated round", async () => {
+  const pr = await checkout();
+  decideAtEnd(pr);
+  pr.pullRequestState({ body: oneWayDoor() });
+  const third = await escalatedRound(pr);
+  pr.choose("Run one more round");
+
+  const round = await pr.hedge(...third, "--override", `2026-11-14 "Run one more round"`, "--thread", "thread-1");
+  expect(round.output).toContain(`"round":3`);
 });
 
 test("on ask, an escalated round asks the user as before", async () => {
