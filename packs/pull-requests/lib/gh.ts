@@ -6,3 +6,11 @@ export const runGh: Gh = async (args) => {
   if (code) throw new Error(`gh ${args[0]} failed: ${stderr.trim()}`);
   return stdout.trim();
 };
+
+type SyncRun = (command: string[]) => { code: number; stdout: string; stderr: string };
+
+export const ghThrough = (run: SyncRun): Gh => async (args) => {
+  const result = run(["gh", ...args]);
+  if (result.code) throw new Error(`gh ${args[0]} failed: ${result.stderr.trim().split("\n")[0] || "no output"}`);
+  return result.stdout.trim();
+};

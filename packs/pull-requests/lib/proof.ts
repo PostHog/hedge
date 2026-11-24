@@ -10,6 +10,7 @@ import { panelOutcome, unansweredPanelCause } from "./proof-panel.ts";
 import { redactSecrets } from "../../base/hooks/secret-guard.ts";
 import { anchorHeading } from "./finding-anchors.ts";
 import type { Growth } from "./proof-end-table.ts";
+import type { Thread } from "./pr-threads.ts";
 import type { ReadBudget, TriageMark } from "./proof-triage.ts";
 import { endTableNote, gradeOf, shellQuoted, type Autonomy } from "./proof-autonomy.ts";
 
@@ -1363,12 +1364,22 @@ function headStatus(identity: ProofIdentity, before: PushedHead, after: PushedHe
 }
 
 /** devPull reads the dev PR that a prod PR waits on (hedge proof require --after-dev). */
-export type GateOptions = { ci: () => CiResult; pushedHead: () => PushedHead; ledger: Ledger; landed?: boolean; cleanBaseMerge?: CleanBaseMerge; quietCommit?: QuietCommit; now?: Date; devPull?: (dev: DevPr) => DevPull | Promise<DevPull> };
+export type GateOptions = { ci: () => CiResult; pushedHead: () => PushedHead; openBotFindings: () => Promise<Thread[]>; ledger: Ledger; landed?: boolean; cleanBaseMerge?: CleanBaseMerge; quietCommit?: QuietCommit; now?: Date; devPull?: (dev: DevPr) => DevPull | Promise<DevPull> };
 
 // A fenced block is an example, never the section: drop it before looking for the heading.
 const unfenced = (body: string) => body.replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[^\n]*$/gm, "");
 const knownIssues = (body: string) => (/^#+\s*Known issues\b.*$([\s\S]*?)(?=^#|(?![\s\S]))/im.exec(unfenced(body))?.[1] ?? "").split("\n").filter((line) => /^\s*[-*]\s+\S/.test(line)).map((line) => line.trim());
 const knownBlocker = (body: string) => knownIssues(body).find((line) => /^[-*]\s+\**blocker\b/i.test(line));
+
+async function botFindingStatus(identity: ProofIdentity, openBotFindings: () => Promise<Thread[]>): Promise<Status | undefined> {
+  let open: Thread[];
+  try { open = await openBotFindings(); }
+  catch (error) { return { problem: "missing", line: `bot threads: cannot read the PR's review threads on GitHub (${(error as Error).message.trim().split("\n")[0]}); run the gate again` }; }
+  if (!open.length) return undefined;
+  const waiting = open.length === 1 ? "1 bot finding waits" : `${open.length} bot findings wait`;
+  const threads = open.map((thread) => `${thread.url} (${thread.location})`).join(", ");
+  return { problem: "missing", line: `bot threads: ${waiting} for an answer: ${threads}. Fix each one and run hedge pr bot-threads --repo ${identity.repository} --pr ${identity.pr} --fixed <URL>, or reply in the thread with why it does not hold, then run the gate again` };
+}
 
 function heldStatus(head: PushedHead): Status | undefined {
   const blocker = "body" in head && head.body !== undefined ? knownBlocker(head.body) : undefined;
@@ -1385,7 +1396,7 @@ export type ProofSummary = {
   head: { state: "pushed" | "missing"; line: string };
   ci: { state: CiResult["state"]; detail: string; checks?: string[]; gap?: GapProof; line: string };
   judge: JudgeSummary;
-  lapsed: string[]; lapsedLine?: string; voided: string[]; receipt?: string; held?: string; growth?: Growth;
+  lapsed: string[]; lapsedLine?: string; voided: string[]; receipt?: string; held?: string; botFindings?: string; growth?: Growth;
 };
 
 export type JudgeSummary = { state: "pass" | "fail" | "unavailable" | "skipped"; model?: string; gap?: GapProof; lines: string[] };
@@ -1400,7 +1411,7 @@ export const summaryGaps = (summary: ProofSummary): { kind: string; gap: GapProo
 
 export const summaryLines = (summary: CheckedSummary) => [
   ...summary.owed.line ? [summary.owed.line] : [], ...summary.kinds.map((kind) => kind.line), ...summary.dev ? [summary.dev.line] : [], summary.review.line, ...summary.review.dropped ?? [], ...summary.review.unanswered,
-  summary.head.line, summary.ci.line, ...summary.lapsedLine ? [summary.lapsedLine] : [], ...summary.held ? [summary.held] : [],
+  summary.head.line, summary.ci.line, ...summary.lapsedLine ? [summary.lapsedLine] : [], ...summary.held ? [summary.held] : [], ...summary.botFindings ? [summary.botFindings] : [],
 ];
 
 const owedPart = (owed: Owed | undefined): CheckedSummary["owed"] =>
@@ -1417,7 +1428,7 @@ async function readDev(dev: DevPr | undefined, devPull: GateOptions["devPull"]):
   catch (error) { return { ref: dev, error: (error as Error).message.trim().split("\n")[0] || "unknown error" }; }
 }
 
-export async function proofGate(home: string, identity: ProofIdentity, { ci, pushedHead, ledger, landed = false, cleanBaseMerge = () => undefined, quietCommit = () => undefined, now = new Date(), devPull }: GateOptions) {
+export async function proofGate(home: string, identity: ProofIdentity, { ci, pushedHead, openBotFindings, ledger, landed = false, cleanBaseMerge = () => undefined, quietCommit = () => undefined, now = new Date(), devPull }: GateOptions) {
   const before = pushedHead();
   const grade = gradeOf("error" in before ? undefined : before.body);
   const tier = grade.tier;
@@ -1434,7 +1445,8 @@ export async function proofGate(home: string, identity: ProofIdentity, { ci, pus
   const head = headStatus(identity, before, pushedHead());
   const checks = await ciStatus(weigh, ciResult);
   const knownHold = landed ? undefined : heldStatus(before);
-  const held = [{ problem: owed ? undefined : "missing", line: owedPart(owed).line }, ...kinds.map((kind) => ({ problem: kind.problem, line: kind.proof.line })), review, ...responses, head, checks, ...knownHold ? [knownHold] : []];
+  const botFindings = landed ? undefined : await botFindingStatus(identity, openBotFindings);
+  const held = [{ problem: owed ? undefined : "missing", line: owedPart(owed).line }, ...kinds.map((kind) => ({ problem: kind.problem, line: kind.proof.line })), review, ...responses, head, checks, ...knownHold ? [knownHold] : [], ...botFindings ? [botFindings] : []];
   const weighed = [...kinds, review, checks];
   const lapsed = [...new Set(weighed.flatMap((status) => status.problem && status.lapsed ? [status.lapsed] : []))];
   const conditions = weighed.flatMap((status) => status.condition ? [status.condition] : []);
@@ -1448,7 +1460,7 @@ export async function proofGate(home: string, identity: ProofIdentity, { ci, pus
     review: { state: review.problem ?? "covered", ...review.covered ? { covered: review.covered } : {}, ...review.panelGap ? { panelGap: review.panelGap } : {}, unanswered: responses.map((response) => response.line), line: review.line, ...dropped.length ? { dropped } : {} },
     head: { state: head.problem ? "missing" : "pushed", line: head.line },
     ci: { state: ciResult.state, detail: ciResult.detail, ...ciResult.checks ? { checks: ciResult.checks } : {}, ...checks.gap ? { gap: checks.gap } : {}, line: checks.line },
-    lapsed, ...lapsed.length ? { lapsedLine: lapsedLine(lapsed) } : {}, voided, ...receipt ? { receipt } : {}, ...knownHold ? { held: knownHold.line } : {},
+    lapsed, ...lapsed.length ? { lapsedLine: lapsedLine(lapsed) } : {}, voided, ...receipt ? { receipt } : {}, ...knownHold ? { held: knownHold.line } : {}, ...botFindings ? { botFindings: botFindings.line } : {},
   };
   const summary = `kinds: ${owed?.kinds.length ? owed.kinds.join(", ") : "none"}; review: ${review.covered}; CI: ${checks.covered}`;
   const evidence = kinds.map(({ proof, evidence }) => ({ kind: proof.kind, line: proof.line, directory: evidence }));

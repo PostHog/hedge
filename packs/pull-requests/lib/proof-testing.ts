@@ -48,6 +48,9 @@ base=main; [ -f "${github}/base" ] && read -r base < "${github}/base"
 if [ -f "${github}/base-sha" ]; then read -r basesha < "${github}/base-sha"; else basesha=\\"$(git -C "${repository}" rev-parse refs/remotes/origin/main 2>/dev/null)\\"; fi
 body='"Adds the greeting. Merge risk: medium."'; [ -f "${github}/body" ] && body=$(cat "${github}/body")
 case "$*" in
+  "api graphql "*)
+    [ -f "${github}/threads-error" ] && { cat "${github}/threads-error" >&2; exit 1; }
+    cat "${github}/threads" 2>/dev/null || printf '{"data":{"viewer":{"login":"%s"},"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\\n' "$(cat "${github}/user" 2>/dev/null || echo the-user)"; exit 0;;
   "api "*"/pulls/"[0-9]*" --method PATCH --input "*)
     [ -f "${github}/patch-error" ] && { cat "${github}/patch-error" >&2; exit 1; }
     all="$*"; n=\${all##*/pulls/}; n=\${n%%[!0-9]*}; target="${github}/body"; [ -f "${github}/body-$n" ] && target="${github}/body-$n"
@@ -122,6 +125,12 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
   const githubComment = (id: number, author: string, body: string, createdAt = "2026-10-25T11:00:00Z", on = 42) => writeFileSync(join(github, `comment-${id}`), JSON.stringify({ user: { login: author }, body, created_at: createdAt, issue_url: `https://api.github.com/repos/example/product/issues/${on}` }));
   const githubBody = (number = 42) => JSON.parse(readFileSync(join(github, existsSync(join(github, `body-${number}`)) ? `body-${number}` : "body"), "utf8")) as string;
   const githubFault = (fault: "patch-error" | "patch-mangle", text: string | undefined) => text === undefined ? rmSync(join(github, fault), { force: true }) : writeFileSync(join(github, fault), text);
+  const reviewThreads = (threads: ReviewThread[] | { error: string }) => {
+    rmSync(join(github, "threads-error"), { force: true });
+    if ("error" in threads) return writeFileSync(join(github, "threads-error"), threads.error);
+    const viewer = existsSync(join(github, "user")) ? readFileSync(join(github, "user"), "utf8").trim() : "the-user";
+    writeFileSync(join(github, "threads"), JSON.stringify({ data: { viewer: { login: viewer }, repository: { pullRequest: { reviewThreads: page(threads.map(threadNode)) } } } }));
+  };
   const githubCalls = () => readFileSync(join(github, "calls"), "utf8").trim().split("\n");
   ci([{ name: "test", bucket: "pass" }]);
   mkdirSync(join(home, ".agents/guides"), { recursive: true });
@@ -195,10 +204,19 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
   const decide = (...args: string[]) => decideIn(repository, ...args);
   const pullRequest = join(home, ".local/state/hedge/proof/example/product/42");
   await seedRepository(repository);
-  return { home, repository, pullRequest, env, git, commit, advanceBase, hedge, hedgeIn, hedgeAs, ci, statuses, githubApp, required, pullRequestState, githubHead, githubCalls, githubBody, githubFault, githubComment, whileGithubReadsPull, clock, say, choose, chooseGap, reader, panel, hub, pendingCards, decide, decideIn, startTimes };
+  return { home, repository, pullRequest, env, git, commit, advanceBase, hedge, hedgeIn, hedgeAs, ci, statuses, githubApp, required, pullRequestState, githubHead, githubCalls, githubBody, githubFault, githubComment, reviewThreads, whileGithubReadsPull, clock, say, choose, chooseGap, reader, panel, hub, pendingCards, decide, decideIn, startTimes };
 }
 
 export type Checkout = Awaited<ReturnType<typeof checkout>>;
+
+export type ThreadComment = { by: string; app?: boolean; url: string; thumbsUp?: string[] };
+export type ReviewThread = { path: string; line: number; comments: ThreadComment[]; resolved?: boolean };
+
+const page = (nodes: unknown[]) => ({ nodes, pageInfo: { hasNextPage: false, endCursor: null } });
+const threadNode = ({ path, line, comments, resolved = false }: ReviewThread, index: number) => ({
+  id: `thread-${index + 1}`, isResolved: resolved, path, line, originalLine: line,
+  comments: page(comments.map(({ by, app = by !== "the-user", url, thumbsUp = [] }) => ({ url, author: { __typename: app ? "Bot" : "User", login: by }, reactions: { nodes: thumbsUp.map((login) => ({ user: { login } })) } }))),
+});
 
 export async function githubRepository(pr: Checkout, user = "git") {
   const served = join(pr.repository, "../github.com");
