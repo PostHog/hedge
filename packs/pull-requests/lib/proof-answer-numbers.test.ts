@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { checkout, cleanFixtures, fakeModel, type Checkout } from "./proof-testing.ts";
 
@@ -111,4 +111,34 @@ test("hedge proof respond refuses answers to a round without findings", async ()
   writeFileSync(join(pr.repository, "responses.md"), "1. fixed: the greeting guards an empty name\n");
 
   await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("Round 1 has no findings, so it needs no answers.");
+});
+
+async function singleFindingRound() {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet the new member\n");
+  await pr.hedge("require", "--none", "--reason", "docs only");
+  fakeModel(pr, "REVIEWER", "FINDINGS:\n- feature.txt:1 | major | Correctness | an empty name -> a blank greeting | anchor: greet the new member\nCOVERED: feature.txt\n");
+  await pr.hedge("review", "--single");
+  return pr;
+}
+
+const quoted = "An earlier round read:\n\n```text\n1. fixed: the old greeting\n2. rejected: same as 1.\n```\n";
+
+test("answers quoted in a fenced block neither answer a finding nor count past the last one", async () => {
+  const pr = await singleFindingRound();
+
+  writeFileSync(join(pr.repository, "responses.md"), quoted);
+  await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("Answer findings 1 too");
+
+  writeFileSync(join(pr.repository, "responses.md"), `1. fixed: the greeting guards an empty name\n\n${quoted}`);
+  expect((await pr.hedge("respond", "--round", "1", "responses.md")).code).toBe(0);
+});
+
+test("hedge proof show fails on a finished round whose findings it cannot read", async () => {
+  const pr = await singleFindingRound();
+  const findings = join(pr.pullRequest, "reviews/1/findings.md");
+  rmSync(findings);
+  mkdirSync(findings);
+
+  await expect(pr.hedge("show", "--round", "1")).rejects.toThrow("EISDIR");
 });
