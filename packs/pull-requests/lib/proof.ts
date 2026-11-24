@@ -667,7 +667,7 @@ export async function respondToReview(home: string, identity: ProofIdentity, rou
 }
 
 const findingItem = /^\s*(?:[-*]|\d+[.)])\s+\S/;
-const fenceLine = /^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)*(?:`{3}|~{3})/m;
+const fenceLine = /^\uFEFF?[^\S\n]*(?:(?:[-*+]|\d+[.)])[^\S\n]+)*(?:`{3}|~{3})/m;
 const answerItem = /^\s*(?:[-*]\s+)?(\d+)[.):]\s+\**(fixed|rejected|known)\b/i;
 
 const noFinding = /^(?:#.*|no findings\.?|findings:?|\(none\))$/i;
@@ -803,7 +803,7 @@ function listedItems(reviewed: ReviewedLine[]): { items: ReviewedItem[]; recover
 
 export type Answer = { verdict: "fixed" | "rejected" | "known"; text: string };
 
-const listMark = /^[ \t]*(?:[-*]|\d+[.)])[ \t]+/;
+const listMark = /^[^\S\n]*(?:[-*]|\d+[.)])[^\S\n]+/;
 
 export function answerNumbers(findings: string) {
   const items = reviewedItems(findings);

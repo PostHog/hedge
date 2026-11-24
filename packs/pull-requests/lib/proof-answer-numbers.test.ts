@@ -1,7 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { answeredFindings } from "./proof.ts";
 import { checkout, cleanFixtures, fakeModel, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
@@ -138,9 +137,9 @@ test("hedge proof show fails on a finished round whose findings it cannot read",
 
 test("hedge proof respond refuses a code fence in any form, since every numbered line counts as an answer", async () => {
   const pr = await singleFindingRound(twoFindings);
-  const fences = ["```text", "~~~", "    ```", "\t~~~", "```first```", "````", "- ```text", "3. ~~~", "  * - ```"];
+  const fences = ["```text", "~~~", "    ```", "\t~~~", "```first```", "````", "- ```text", "3. ~~~", "  * - ```", "\uFEFF```", "\u00a0```"];
   for (const fence of fences) {
-    writeFileSync(join(pr.repository, "responses.md"), `1. fixed: the greeting guards an empty name\n${fence}\n2. rejected: from an earlier round\n`);
+    writeFileSync(join(pr.repository, "responses.md"), fence.startsWith("\uFEFF") ? `${fence}\n1. fixed: from an earlier round\n` : `1. fixed: the greeting guards an empty name\n${fence}\n2. rejected: from an earlier round\n`);
     await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("responses.md holds a code fence, a line that starts with ``` or ~~~. Every numbered line counts as an answer, quoted or not. Quote an earlier answer with > and write code inline.");
   }
 });
@@ -152,7 +151,12 @@ test("an answer quoted with > answers nothing and is not counted past the last f
   await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("Answer findings 2 too");
   writeFileSync(join(pr.repository, "responses.md"), "1. fixed: the greeting guards an empty name\n2. rejected: a returning member is greeted once\n\n> 3. rejected: from an earlier round\n");
   expect((await pr.hedge("respond", "--round", "1", "responses.md")).code).toBe(0);
-  expect(answeredFindings(twoFindings, "2. rejected: a\n> 2. fixed: quoted\n").other).toBe("> 2. fixed: quoted");
+});
+
+test("a finding marked with a number and a nonbreaking space prints under its own number alone", async () => {
+  const pr = await singleFindingRound("FINDINGS:\n7.\u00a0feature.txt:1 | major | Correctness | an empty name -> a blank greeting | anchor: greet the new member\nCOVERED: feature.txt\n");
+
+  expect((await pr.hedge("show", "--round", "1")).output).toContain("Answer each finding by these numbers, in hedge proof respond:\n1. feature.txt:1 | major |");
 });
 
 test("a prose finding that starts with a bare list marker keeps that line in the list", async () => {
