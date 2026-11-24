@@ -82,7 +82,7 @@ describe("resolve", () => {
 
     test("is written and reported as a to-do in any letter case", async () => {
       const home = temp.make("home-");
-      const report = await apply(repeats("My rules", "### tests\n\nWrite the test first, always.\n"), { home, run: async () => 0 });
+      const report = await apply(repeats("My rules", "### tests\n\nWrite the test first, always.\n"), { home });
       expect(report.ok).toBe(true);
       expect(readFileSync(join(home, ".agents/guides/rules.md"), "utf8")).toContain("### tests\n\nWrite the test first, always.");
       expect(report.findings.filter((finding) => finding.say.includes("repeats the heading"))).toEqual([expect.objectContaining({ pack: "mine", todo: true, say: expect.stringContaining('Section "My rules" of the mine pack repeats the heading "tests" of standards') })]);
