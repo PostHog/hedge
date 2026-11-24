@@ -18,7 +18,7 @@ export type ShellThread = {
   modelSelection?: { model: string }; lastError?: string | null;
   pendingRuntimeRequest?: unknown; latestVisibleMessage?: { updatedAt: string; text: string } | null;
   branch?: string | null; latestUserAuthoredMessageAt?: string | null;
-  lineage?: { parentThreadId?: string | null; rootThreadId?: string | null; relationshipToParent?: string | null; sideChat?: boolean }; pullRequests?: ShellPullRequest[];
+  lineage?: { parentThreadId?: string | null; rootThreadId?: string | null; relationshipToParent?: string | null; sideChat?: boolean; workflowStep?: boolean }; pullRequests?: ShellPullRequest[];
 };
 
 export type ShellProject = { id: string; title: string; workspaceRoot: string };

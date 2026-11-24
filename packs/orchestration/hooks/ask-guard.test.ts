@@ -565,8 +565,11 @@ describe("the wake guard", () => {
     expect(await ends(thread as Partial<ShellThread>)).toBeUndefined();
   });
 
-  test("lets a side chat through, which T3 keeps out of its top-level list", async () => {
-    expect(await ends({ lineage: { parentThreadId: "mcp:conductor-0", relationshipToParent: "fork", sideChat: true } })).toBeUndefined();
+  test.each([
+    ["a side chat", { parentThreadId: "mcp:conductor-0", relationshipToParent: "fork", sideChat: true }],
+    ["a workflow agent step", { parentThreadId: null, relationshipToParent: null, rootThreadId: "workflow:run-1", workflowStep: true }],
+  ])("lets %s through, which T3 keeps out of its top-level list", async (_, lineage) => {
+    expect(await ends({ lineage } as Partial<ShellThread>)).toBeUndefined();
   });
 
   test("sends back a fork, which T3 shows as a top-level thread, though it has a parent", async () => {

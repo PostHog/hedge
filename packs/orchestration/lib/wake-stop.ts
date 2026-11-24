@@ -36,7 +36,7 @@ function hasScheduledCheck(home: string, threadId: string): boolean {
   }
 }
 
-const outsideWakeCheck = (thread: ShellThread, now: number) => Boolean(subagentParent(thread) || thread.lineage?.sideChat || thread.delegatedFrom || thread.pendingRuntimeRequest || isSnoozed(thread, now));
+const outsideWakeCheck = (thread: ShellThread, now: number) => Boolean(subagentParent(thread) || thread.lineage?.sideChat || thread.lineage?.workflowStep || thread.delegatedFrom || thread.pendingRuntimeRequest || isSnoozed(thread, now));
 
 type ShellPullRequest = NonNullable<ShellThread["pullRequests"]>[number];
 

@@ -113,8 +113,8 @@ The stop passes when any of these holds:
 - an enabled scheduled task bound to the thread has a next run time in
   T3's state, a real time in the UTC form T3 writes, also one that is due
   and has not run yet;
-- the thread is snoozed, waits on a question card, is a subagent thread or a
-  side chat, or was delegated from another machine;
+- the thread is snoozed, waits on a question card, is a subagent thread, a
+  side chat or a workflow agent step, or was delegated from another machine;
 - the hook runs in a model session that another one started, as in the proof
   check below;
 - any read fails, or the proof check and this check together take longer
