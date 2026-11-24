@@ -10,7 +10,7 @@
 - Wait in one call that blocks until the event, such as `gh run watch <id> --exit-status`. Never poll across turns: every turn rereads the whole context.
 - On a devbox, run installs, builds, typechecks, and test suites with `hedge heavy -- <command>`. It checks free disk first and caps how many heavy commands run at once. A waiting command prints its place in the queue; `hedge heavy --holders` shows which jobs hold the slots and which wait.
 - Name the model and effort on every subagent or worker you start. Cast it from the model table below. An omitted model inherits mine.
-- When you send a message to another thread with `t3_thread_send`, omit `mode` so T3 steers a running turn, also one that waits on a question card: the card stays open, and the agent reads your message once the card is answered. Check `delivery` when timing matters: when it says `queued`, promote that message with `t3_queue` `promote_to_steer` instead of sending it again. Use `mode: "queue"` only when you want a separate follow-up turn.
+- When you send a message to another thread with `t3_thread_send`, omit `mode`. T3 steers a running turn when its provider takes a steer without interrupting, as Claude and Codex do: a question card or approval the turn waits on stays open, and the agent reads your message once it is answered. Otherwise T3 queues it: leave it queued, and never send it again. Use `mode: "queue"` only for a separate follow-up turn. Never send `mode: "restart"` to a thread that waits on a card: it interrupts the turn and cancels the card.
 
 ## Guides
 

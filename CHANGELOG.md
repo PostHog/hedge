@@ -10,8 +10,11 @@
   agent reads the message once the person answers.
 - The `question-guard` workflow no longer turns back a `t3_thread_send` to a
   thread that waits on a card. The prose-title card check stays.
-- The base rule tells agents to omit `mode`, and to promote a queued message
-  with `t3_queue` instead of sending it twice.
+- Hedge's own jobs that message threads, such as mail watch, review wait and
+  library shares, steer such a thread too.
+- The base rule tells agents to omit `mode`, to leave a message that T3
+  queued as it is, and never to send `restart` to a thread that waits on a
+  card.
 
 ### A one-way door stops the review loop at an escalation
 

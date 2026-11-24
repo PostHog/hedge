@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { AvailableSource } from "../../../src/pack/types.ts";
 import { tempDirs } from "../../../src/testing/git.ts";
@@ -8,7 +8,7 @@ import { dispatch } from "../../base/hooks/run.ts";
 import { asksForDecision } from "../lib/prose-question.ts";
 import type { ShellThread } from "../../base/lib/t3/index.ts";
 import { startT3Stub } from "../../../src/integrations/t3/testing.ts";
-import { guardBackground, guardCard, guardStop, hiddenIn, hook, hookWith, type IsHidden, type SendEvent, type SendGuardOptions, type StopEvent } from "./ask-guard.ts";
+import { guardBackground, guardCard, guardStop, hiddenIn, hook, hookWith, type IsHidden, type ToolEvent, type StopEvent } from "./ask-guard.ts";
 
 const temp = tempDirs();
 afterEach(() => temp.cleanup());
@@ -265,8 +265,8 @@ describe("the card guard", () => {
     AskUserQuestion: { questions: [{ question: "Roll the fix back?", header: "Rollback", multiSelect: false, options: [{ label: "Roll back", description: "Undo the deploy" }, { label: "Keep it", description: "Watch for an hour" }] }] },
     request_user_input: { questions: [{ id: "rollback", header: "Rollback", question: "Roll the fix back?", options: [{ label: "Roll back", description: "Undo the deploy" }, { label: "Keep it", description: "Watch for an hour" }] }] },
   } as Record<string, unknown>;
-  const card = (tool = "AskUserQuestion"): SendEvent => ({ session_id: "s", tool_name: tool, tool_input: (asked[tool] ?? {}) as Record<string, unknown> });
-  const guard = (event: SendEvent, where: string, threadId: string | undefined = "alert-1", shell = t3(alertThread)) => guardCard(event, { home: where, shell }, threadId);
+  const card = (tool = "AskUserQuestion"): ToolEvent => ({ session_id: "s", tool_name: tool, tool_input: (asked[tool] ?? {}) as Record<string, unknown> });
+  const guard = (event: ToolEvent, where: string, threadId: string | undefined = "alert-1", shell = t3(alertThread)) => guardCard(event, { home: where, shell }, threadId);
 
   test.each(["AskUserQuestion", "request_user_input"])("denies %s in a thread whose title starts with a prose title, and says to ask in the last message", async (tool) => {
     const answer = await guard(card(tool), home("Robin", proseTitles));

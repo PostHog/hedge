@@ -163,7 +163,7 @@ test("hedge thread send steers a running turn that waits on a question card on t
 });
 
 test("hedge thread send steers a running turn that waits on a question card on a linked machine by default", async () => {
-  const t3 = await stub(fixture([linkedEnvironment], [
+  const t3 = await stub(fixture([{ ...linkedEnvironment, access: "full-access" }], [
     ...linkedThreads,
     linkedThread("mcp:linked-card", { status: "running", pendingRequestCount: 1 }),
   ]));

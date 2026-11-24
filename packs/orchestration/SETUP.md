@@ -46,8 +46,10 @@ The `question-guard` workflow is on by default. It installs one hook file,
   with one of your prose titles is turned back. See below.
 
 A message that an agent or `hedge thread send` sends to a thread whose
-running turn waits on a question card steers that turn by default. The card
-stays open. The thread's agent reads the message when the person answers.
+running turn waits on a question card steers that turn by default, on a
+provider that steers without interrupting, such as Claude and Codex. The card
+stays open, and the thread's agent reads the message when the person answers.
+On other providers T3 queues the message.
 
 ### Threads that ask in prose
 
@@ -99,8 +101,8 @@ call. It trusts `origin/<branch>` as the pushed head.
 
 The stop passes when any of these holds:
 
-- `~/.config/hedge/ask-guard.off` exists. It turns off the send guard and this
-  check;
+- `~/.config/hedge/ask-guard.off` exists. It turns off the prose-title card
+  check and this check;
 - a stop hook already continued this turn (`stop_hook_active`), so the check
   blocks at most once per turn;
 - the thread waits on a question card, or its last line starts with

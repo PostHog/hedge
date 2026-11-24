@@ -104,10 +104,10 @@ export async function guardStop(event: StopEvent & ProofStopEvent, home: string,
   return { decision: "block", reason: questionToolReason(personName(home)) };
 }
 
-export type SendEvent = { session_id?: string; agent_id?: string; tool_name?: string; tool_input?: Record<string, unknown> };
-export type SendDenial = { hookSpecificOutput: { hookEventName: "PreToolUse"; permissionDecision: "deny"; permissionDecisionReason: string } };
+export type ToolEvent = { session_id?: string; agent_id?: string; tool_name?: string; tool_input?: Record<string, unknown> };
+export type CardDenial = { hookSpecificOutput: { hookEventName: "PreToolUse"; permissionDecision: "deny"; permissionDecisionReason: string } };
 export type ReadShell = () => Promise<{ threads: ShellThread[] }>;
-export type SendGuardOptions = { home: string; shell: ReadShell };
+export type CardGuardOptions = { home: string; shell: ReadShell };
 
 export const killSwitch = ".config/hedge/ask-guard.off";
 
@@ -122,7 +122,7 @@ async function readThreads(shell: ReadShell): Promise<ShellThread[] | undefined>
 export const proseCardReason = "Hedge blocked this card: this thread's title marks it as one that asks in prose, because a job queues messages into it, and a pending card would hold them. "
   + "Write the questions in your last message instead, numbered, each with your recommendation first.";
 
-export async function guardCard(event: SendEvent, options: SendGuardOptions, threadId: string | undefined): Promise<SendDenial | undefined> {
+export async function guardCard(event: ToolEvent, options: CardGuardOptions, threadId: string | undefined): Promise<CardDenial | undefined> {
   if (!questionTool.test(event.tool_name ?? "") || !threadId || existsSync(join(options.home, killSwitch))) return undefined;
   const starts = proseTitles(options.home);
   if (!starts.length) return undefined;
@@ -167,7 +167,7 @@ async function guardStopAndProof(event: StopEvent & ProofStopEvent, home: string
 
 export const hookWith = (shell: (home: string) => ReadShell, stop: StopDeps = {}): Hook => async (_provider, readInput, home) => {
   try {
-    const event = JSON.parse(await readInput()) as StopEvent & ProofStopEvent & SendEvent;
+    const event = JSON.parse(await readInput()) as StopEvent & ProofStopEvent & ToolEvent;
     if (event.tool_name !== undefined) {
       const options = { home, shell: shell(home) };
       return printing(await guardCard(event, options, "threadId" in stop ? stop.threadId : process.env.T3CODE_THREAD_ID));
