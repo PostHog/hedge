@@ -85,7 +85,7 @@ describe("resolve", () => {
       expect(file(result, ".agents/guides/rules.md")).toContain("### tests\n\nWrite the test first, always.");
       const report = await apply(result, { home: temp.make("home-"), dryRun: true });
       expect(report.ok).toBe(true);
-      expect(report.findings.find((finding) => finding.id === "repeats:rules:My rules:tests")).toMatchObject({ pack: "mine", todo: true, say: expect.stringContaining('Section "My rules" of the mine pack repeats the heading "tests" of standards') });
+      expect(report.findings.filter((finding) => finding.say.includes("repeats the heading"))).toEqual([expect.objectContaining({ pack: "mine", todo: true, say: expect.stringContaining('Section "My rules" of the mine pack repeats the heading "tests" of standards') })]);
     });
 
     test("is reported when its own title repeats a heading", () => {
