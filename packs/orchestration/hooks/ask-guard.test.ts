@@ -617,13 +617,14 @@ describe("the wake guard", () => {
     expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)) }), home("Robin"))).stdout).toBe("");
   });
 
-  test("gives the proof check and the wake check one shared deadline", async () => {
+  test("lets the stop through once the one deadline of the proof check and the wake check has passed", async () => {
+    const stalled = { pid: 30, table: () => new Promise<string>(() => {}) };
     let deadlines = 0;
+    const passed = Promise.resolve();
+    const later = new Promise<void>(() => {});
     const routed = hookWith(() => async () => ({ threads: [{ id: conductor, title: "Conductor", projectId: "p", status: "completed" }] as ShellThread[] }),
-      { threadId: conductor, processes: lone, deadline: () => { deadlines++; return new Promise<void>(() => {}); } });
-    const answer = await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)), cwd: "/" }), home("Robin"));
-    expect(JSON.parse(answer.stdout)).toMatchObject({ decision: "block" });
-    expect(deadlines).toBe(1);
+      { threadId: conductor, processes: stalled, deadline: () => ++deadlines === 1 ? passed : later });
+    expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)), cwd: "/" }), home("Robin"))).stdout).toBe("");
   });
 
   test("lets the stop through when the check does not answer before the deadline the hook passes on", async () => {
