@@ -244,12 +244,16 @@ export const atCeiling = `hedge proof asks nothing more. For each open blocker o
 const budgetSpent = ({ ceiling }: ReviewLimits) => `The review budget of ${ceiling} reviews is spent. ${atCeiling}`;
 const fixesUnread = ({ ceiling }: ReviewLimits, latest: string) => `The review budget of ${ceiling} reviews is spent, and no read checks the production changes since ${short(latest)}. Revert each commit of the PR since ${short(latest)} that changes production code, never a merge of the base: the gate carries a revert of a PR commit. When a merge of the base holds them, such as a conflict resolution, only the user's --override reads them. ${atCeiling}`;
 
-async function permitReview(home: string, identity: ProofIdentity, due: boolean, ceiling: string | undefined, decision: DecisionMark | undefined, { arbiter, autonomy }: Permit) {
+async function permitReview(home: string, identity: ProofIdentity, due: boolean, ceiling: string | undefined, decision: DecisionMark | undefined, { arbiter, autonomy, now }: Permit) {
   if (decision?.mark === "👤") return undefined;
   if (ceiling) throw new Error(ceiling);
   if (!due) return undefined;
   const verdict = await arbiter(await arbiterPrompt(home, identity));
-  if (verdict.verdict !== "continue" && !decision) throw new Error(askUser(identity, verdict.verdict === "escalate" ? `The arbiter escalates: ${verdict.reason}.` : `The arbiter gave no verdict: ${verdict.reason}.`, autonomy?.() ?? "ask"));
+  if (verdict.verdict === "continue") return verdict;
+  const stop = verdict.verdict === "escalate" ? `The arbiter escalates: ${verdict.reason}.` : `The arbiter gave no verdict: ${verdict.reason}.`;
+  const decides = autonomy?.() ?? "ask";
+  if (decides === "user") throw new Error(`${stop} ${await stopOneWayLoop(home, identity, verdict, now)}`);
+  if (!decision) throw new Error(askUser(identity, stop, decides));
   return verdict;
 }
 
@@ -257,10 +261,19 @@ export const roundQuestion = "Run one more review round?";
 export const runOption = "Run one more round";
 export const stopOption = "Stop here";
 
+export type OneWayStop = { commit: string; reviewed: string; reason: string; at: string };
+const oneWayStopPath = (home: string, identity: ProofIdentity) => join(pullRequestDirectory(home, identity), "reviews", "one-way-stop.json");
+export const readOneWayStop = (home: string, identity: ProofIdentity) => readJson<OneWayStop | undefined>(oneWayStopPath(home, identity), undefined);
+
+async function stopOneWayLoop(home: string, identity: ProofIdentity, verdict: ArbiterVerdict, now: () => Date) {
+  const reviewed = (await finishedReviews(home, identity)).at(-1)?.commit ?? identity.commit;
+  await writeJson(oneWayStopPath(home, identity), { commit: identity.commit, reviewed, reason: verdict.reason, at: now().toISOString() } satisfies OneWayStop);
+  return `On a one-way door the review loop stops here: ask the user nothing about another round. Revert each commit of the PR since ${short(reviewed)} that changes production code, never a merge of the base: the gate carries a revert of a PR commit. ${atCeiling}`;
+}
+
 function askUser(identity: ProofIdentity, stop: string, autonomy: Autonomy) {
   if (autonomy === "end") return `${stop} Decide the round yourself: run this command again with --agent '<your reason>'. It lands in the ledger as a 🤖 review decision, and ${endTableNote}.`;
-  const ask = `${stop} Ask the user with your question tool. Question: "${roundQuestion} ${identity.repository}#${identity.pr}: ${stop}" Options: "${runOption}", "${stopOption}". When they choose "${runOption}", run this command again with --override '<date> "${runOption}"'.`;
-  return autonomy === "user" ? `${ask} On a one-way door an agent never decides the round.` : `${ask} Or decide the round yourself with --agent '<your reason>', a 🤖 review decision in the ledger, when the PR's tier lets you.`;
+  return `${stop} Ask the user with your question tool. Question: "${roundQuestion} ${identity.repository}#${identity.pr}: ${stop}" Options: "${runOption}", "${stopOption}". When they choose "${runOption}", run this command again with --override '<date> "${runOption}"'. Or decide the round yourself with --agent '<your reason>', a 🤖 review decision in the ledger, when the PR's tier lets you.`;
 }
 
 export type CapturedBy = "hedge" | "author";
@@ -269,7 +282,7 @@ export type DropRead = (directory: string) => Promise<boolean>;
 export type OnHistory = (commit: string) => boolean;
 export type ReviewRequest = { dropUnanswered?: DropRead; onHistory?: OnHistory; autonomy?: () => Autonomy; opening?: () => Promise<boolean>; sanity?: () => Promise<void>; scope: string; base?: string; from?: string; forkBase?: string; decision?: Decision; phase?: string; arbiter: Arbiter; limits: ReviewLimits; cleanBaseMerge?: CleanBaseMerge; quietCommit?: QuietCommit; capturedBy?: CapturedBy; lock?: LockRound; lockBudget: LockBudget; now: () => Date; emptyRange?: () => boolean; triage?: TriageMark; budget?: ReadBudget };
 export type Reserved = { round: number | "final"; id: string; directory: string };
-type Permit = { arbiter: Arbiter; limits: ReviewLimits; autonomy?: () => Autonomy };
+type Permit = { arbiter: Arbiter; limits: ReviewLimits; autonomy?: () => Autonomy; now: () => Date };
 
 async function reserveDecided(reviews: string, name: string, record: object, decision: Decision | undefined, stamping: Stamping) {
   if (!await reserve(reviews, name, { ...record, ...decision ? { decision } : {} }, stamping)) throw new Error(`Review ${name} started while this one weighed the budget. ${weighAgain}`);
@@ -335,7 +348,7 @@ const coversReview = (base: string, reviewed: string, cleanBaseMerge: CleanBaseM
 export async function startReview(home: string, identity: ProofIdentity, request: ReviewRequest): Promise<Reserved> {
   const { scope, base, phase, decision, cleanBaseMerge = () => undefined, quietCommit = () => undefined, capturedBy = "author", lock, lockBudget, now } = request;
   const from = request.from ?? base;
-  const permit = { arbiter: request.arbiter, limits: request.limits, autonomy: request.autonomy };
+  const permit = { arbiter: request.arbiter, limits: request.limits, autonomy: request.autonomy, now };
   if (!["full", "fixes", "final"].includes(scope)) throw new Error("Review scope must be full, fixes, or final");
   if (phase !== undefined && scope !== "final") throw new Error("--phase applies only to final reads");
   if (base !== undefined && !sha.test(base)) throw new Error("Review base needs a full commit SHA");
@@ -623,12 +636,12 @@ export async function respondToReview(home: string, identity: ProofIdentity, rou
   const findings = await savedFindings(directory);
   if (findings === undefined) throw new Error(`Review round ${round} has no findings yet`);
   const missing = unanswered(findings, bytes.toString());
-  if (missing.length) throw new Error(`Answer findings ${missing.join(", ")} too: one line each, numbered in the order of findings.md, such as "${missing[0]}. fixed in 1a2b3c4: <how>", "${missing[0]}. rejected: <why>", or, at the review budget, "${missing[0]}. known: <why>" for a finding listed under Known issues. Minor and nit findings need no answer; a TESTS item gets a test-only rewrite or delete`);
+  if (missing.length) throw new Error(`Answer findings ${missing.join(", ")} too: one line each, numbered in the order of findings.md, such as "${missing[0]}. fixed in 1a2b3c4: <how>", "${missing[0]}. rejected: <why>", or, at the review budget or a one-way stop, "${missing[0]}. known: <why>" for a finding listed under Known issues. Minor and nit findings need no answer; a TESTS item gets a test-only rewrite or delete`);
   if (answeredFindings(findings, bytes.toString()).findings.some(({ answer }) => answer?.verdict === "known")) {
     const reviews = join(pullRequestDirectory(home, identity), "reviews");
     const phase = (await readJson<{ phase?: FinalReadPhase }>(join(directory, "round.json"), {})).phase ?? "review";
     const { spent } = await reviewsSpent(reviews, phase, "finished only");
-    if (spent < ceiling) throw new Error(`Answer a finding "known" only once the review budget of ${ceiling} reviews is spent; ${spent} ran. Fix or reject it now`);
+    if (spent < ceiling && !await readOneWayStop(home, identity)) throw new Error(`Answer a finding "known" only once the review budget of ${ceiling} reviews is spent; ${spent} ran. Fix or reject it now. A stop of the review loop at an escalation on a one-way door allows it too`);
   }
   const destination = join(directory, "responses.md");
   const temporary = `${destination}.${crypto.randomUUID()}`;

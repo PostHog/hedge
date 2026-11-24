@@ -41,15 +41,79 @@ test("on end, an ungraded PR still sends an escalated round to the user", async 
   await expect(pr.hedge("review-finish", "--round", "3", "--reviewer", "gpt-6.1-sol", "findings.md")).rejects.toThrow();
 });
 
-test("on end, a one-way door sends an escalated round to the user and offers no agent decision", async () => {
-  const pr = await checkout();
+const oneWayDoor = () => graded("critical", "medium").replace("two-way door", "one-way door");
+
+async function stoppedOneWay(pr: Checkout) {
   decideAtEnd(pr);
-  pr.pullRequestState({ body: graded("critical", "medium").replace("two-way door", "one-way door") });
+  pr.pullRequestState({ body: oneWayDoor() });
+  return escalatedRound(pr);
+}
+
+test("on end, a one-way door stops the loop at an escalated round, asks the user nothing, and says to revert the fixes since the latest review", async () => {
+  const pr = await checkout();
+  const third = await stoppedOneWay(pr);
+  const reviewed = (await pr.git("rev-parse", "HEAD")).slice(0, 7);
+
+  const stop = pr.hedge(...third);
+  await expect(stop).rejects.toThrow(`The arbiter escalates: Round 2 undoes the rename round 1 asked for. On a one-way door the review loop stops here: ask the user nothing about another round. Revert each commit of the PR since ${reviewed} that changes production code`);
+  await expect(stop).rejects.toThrow(`answer its finding "<n>. known: <why>"`);
+  await expect(stop).rejects.not.toThrow("Ask the user with your question tool");
+  await expect(stop).rejects.not.toThrow("--agent");
+});
+
+test("on end, a one-way door stops the loop when the arbiter gives no verdict", async () => {
+  const pr = await checkout();
+  const third = await stoppedOneWay(pr);
+  pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo 'Maybe.'";
+
+  await expect(pr.hedge(...third)).rejects.toThrow("The arbiter gave no verdict: unparseable answer: Maybe.. On a one-way door the review loop stops here");
+});
+
+test("on a one-way door the agent's own decision cannot pass the stop", async () => {
+  const pr = await checkout();
+  const third = await stoppedOneWay(pr);
+
+  await expect(pr.hedge(...third, "--agent", "Round 1 asked for the rename as a nit")).rejects.toThrow("On a one-way door the review loop stops here");
+  await expect(pr.hedge("review-finish", "--round", "3", "--reviewer", "gpt-6.1-sol", "findings.md")).rejects.toThrow("not reserved");
+});
+
+test("on a one-way door the user's override still runs the escalated round", async () => {
+  const pr = await checkout();
+  const third = await stoppedOneWay(pr);
+  pr.choose("Run one more round");
+
+  const round = await pr.hedge(...third, "--override", `2026-11-14 "Run one more round"`, "--thread", "thread-1");
+  expect(round.output).toContain(`"round":3`);
+});
+
+test("a finding is answered known after the one-way stop, and not before it", async () => {
+  const pr = await checkout();
+  const third = await stoppedOneWay(pr);
+  writeFileSync(join(pr.repository, "responses.md"), "1. known: listed under Known issues.\n");
+
+  await expect(pr.hedge("respond", "--round", "2", "responses.md")).rejects.toThrow(`Answer a finding "known" only once the review budget of 6 reviews is spent; 2 ran. Fix or reject it now. A stop of the review loop at an escalation on a one-way door allows it too`);
+  await expect(pr.hedge(...third)).rejects.toThrow("the review loop stops here");
+  expect((await pr.hedge("respond", "--round", "2", "responses.md")).code).toBe(0);
+});
+
+test("the end table shows the one-way stop", async () => {
+  const pr = await checkout();
+  const third = await stoppedOneWay(pr);
+  await expect(pr.hedge(...third)).rejects.toThrow("the review loop stops here");
+  const reviewed = (await pr.git("rev-parse", "HEAD")).slice(0, 7);
+  await pr.hedge("gate");
+
+  expect((await pr.decide("report", "--pr", "example/product#42")).output).toContain(`| example/product#42 | 2 rounds; stopped at an escalation on a one-way door at ${reviewed} |`);
+});
+
+test("on ask, a one-way door still asks the user about an escalated round, and a known answer waits for the budget", async () => {
+  const pr = await checkout();
+  pr.pullRequestState({ body: oneWayDoor() });
   const third = await escalatedRound(pr);
 
-  await expect(pr.hedge(...third)).rejects.toThrow("The arbiter escalates: Round 2 undoes the rename round 1 asked for. Ask the user with your question tool");
-  await expect(pr.hedge(...third)).rejects.toThrow("On a one-way door an agent never decides the round.");
-  await expect(pr.hedge(...third)).rejects.not.toThrow("--agent");
+  await expect(pr.hedge(...third)).rejects.toThrow("Ask the user with your question tool");
+  writeFileSync(join(pr.repository, "responses.md"), "1. known: listed under Known issues.\n");
+  await expect(pr.hedge("respond", "--round", "2", "responses.md")).rejects.toThrow(`Answer a finding "known" only once`);
 });
 
 test("on ask, an escalated round asks the user as before", async () => {

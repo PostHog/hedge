@@ -62,8 +62,10 @@ not answer a round. The question names the PR, and an answer to the question of 
 answer lands in the decision ledger as a 👤 review decision; one answer records one decision and starts one round.
 --agent takes your own reason for a round that the arbiter escalates; it never passes the review budget. It lands in the ledger
 as a 🤖 review decision, refused on a PR whose merge-risk callout has no Tier line at HEAD. With pull-requests.autonomy set
-to end, an escalation tells you to decide the round with --agent, unless the PR is a one-way door or ungraded. --standing is its old
-name. The round keeps the decision and the arbiter's verdict. List decisions with hedge decision list.
+to end, an escalation tells you to decide the round with --agent, unless the PR is ungraded. On a one-way door with autonomy
+end, an escalation or no verdict stops the review loop like the review budget: hedge asks nothing, --agent cannot pass it,
+only the user's --override runs another round, and a finding listed under Known issues takes a known answer. --standing is
+its old name. The round keeps the decision and the arbiter's verdict. List decisions with hedge decision list.
 A round starts only once its decision is in the ledger. A round that holds a decision stays reserved until the
 ledger holds another decision for the same answer. A round of another commit whose decision is still not in the
 ledger is dropped when the next round starts: its decision never counted. It stays reserved while the hub is down or
