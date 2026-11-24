@@ -801,21 +801,6 @@ function listedItems(reviewed: ReviewedLine[]): { items: ReviewedItem[]; recover
 
 export type Answer = { verdict: "fixed" | "rejected" | "known"; text: string };
 
-const fenceLine = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-
-function responseLines(responses: string) {
-  let open: string | undefined;
-  return responses.split("\n").map((line) => {
-    const fence = fenceLine.exec(line);
-    if (open === undefined) {
-      if (fence) open = fence[1];
-      return { line, quoted: Boolean(fence) };
-    }
-    if (fence && fence[1]![0] === open[0] && fence[1]!.length >= open.length && !fence[2]!.trim()) open = undefined;
-    return { line, quoted: true };
-  });
-}
-
 const listMark = /^\s*(?:[-*]|\d+[.)])\s+/;
 
 export function answerNumbers(findings: string) {
@@ -827,7 +812,7 @@ export function answerNumbers(findings: string) {
 
 function numbersPast(findings: string, responses: string) {
   const count = reviewedItems(findings).length;
-  const numbers = responseLines(responses).flatMap(({ line, quoted }) => quoted ? [] : [Number(answerItem.exec(line)?.[1])]).filter((number) => number > count);
+  const numbers = responses.split("\n").map((line) => Number(answerItem.exec(line)?.[1])).filter((number) => number > count);
   return { count, past: [...new Set(numbers)].sort((a, b) => a - b) };
 }
 
@@ -846,8 +831,8 @@ export function answeredFindings(findings: string, responses: string) {
   const answers = new Map<number, Answer>();
   const other: string[] = [];
   let last: Answer | undefined;
-  for (const { line, quoted } of responseLines(responses)) {
-    const match = quoted ? null : answerItem.exec(line);
+  for (const line of responses.split("\n")) {
+    const match = answerItem.exec(line);
     const number = Number(match?.[1]);
     if (match && number >= 1 && number <= items.length && !answers.has(number)) answers.set(number, last = { verdict: match[2]!.toLowerCase() as Answer["verdict"], text: line.trim() });
     else if (!match && last && continued.test(line)) last.text += `\n${line.trim()}`;

@@ -122,18 +122,6 @@ async function singleFindingRound() {
   return pr;
 }
 
-const quoted = "An earlier round read:\n\n```text\n1. fixed: the old greeting\n2. rejected: same as 1.\n```\n";
-
-test("answers quoted in a fenced block neither answer a finding nor count past the last one", async () => {
-  const pr = await singleFindingRound();
-
-  writeFileSync(join(pr.repository, "responses.md"), quoted);
-  await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("Answer findings 1 too");
-
-  writeFileSync(join(pr.repository, "responses.md"), `1. fixed: the greeting guards an empty name\n\n${quoted}`);
-  expect((await pr.hedge("respond", "--round", "1", "responses.md")).code).toBe(0);
-});
-
 test("hedge proof show fails on a finished round whose findings it cannot read", async () => {
   const pr = await singleFindingRound();
   const findings = join(pr.pullRequest, "reviews/1/findings.md");
