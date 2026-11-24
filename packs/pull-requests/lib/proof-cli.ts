@@ -998,9 +998,10 @@ async function waitForReview(options: Map<string, string>, head: ProofIdentity, 
   await startStaged(directory, context);
   const restart = (name: string) => roundStep(directory, context, async () => { if (await lensIdle(directory, name)) await startLens(directory, name, context); }).catch(unless(RoundBusy));
   const code = await waitForPanel(directory, panelIO(context), restart, waitPolls);
-  for (const line of (await roundLines(directory, context)).lines) context.print(line);
+  const round = await roundLines(directory, context);
+  for (const line of round.lines) context.print(line);
   if (code === 0) {
-    const findings = await readFile(join(directory, "findings.md"), "utf8");
+    const findings = typeof round.findings === "string" ? round.findings : await readFile(join(directory, "findings.md"), "utf8");
     context.print(findings);
     printAnswerNumbers(findings, context.print);
   }

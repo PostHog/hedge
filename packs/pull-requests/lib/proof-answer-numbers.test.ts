@@ -74,13 +74,15 @@ test("hedge proof respond refuses answers numbered past the last finding, so the
   const readingOrder = Array.from({ length: readingOrderItems }, (_, index) => `${index + 1}. rejected: answered in reading order\n`).join("");
   writeFileSync(join(pr.repository, "responses.md"), readingOrder);
 
-  const refused = pr.hedge("respond", "--round", "1", "responses.md");
-  await expect(refused).rejects.toThrow(`Round 1 has 12 findings; answers numbered past them: 13 to ${readingOrderItems}.`);
-  await expect(refused).rejects.toThrow(numbered);
-
   const byNumbers = readingOrder.split("\n").slice(0, items.length).join("\n") + "\n";
   writeFileSync(join(pr.repository, "responses.md"), byNumbers);
   expect((await pr.hedge("respond", "--round", "1", "responses.md")).code).toBe(0);
+  writeFileSync(join(pr.repository, "responses.md"), readingOrder);
+
+  const refused = pr.hedge("respond", "--round", "1", "responses.md");
+  await expect(refused).rejects.toThrow(`Round 1 has 12 findings; answers numbered past them: 13 to ${readingOrderItems}.`);
+  await expect(refused).rejects.toThrow(numbered);
+  expect(readFileSync(join(pr.pullRequest, "reviews/1/responses.md"), "utf8")).toBe(byNumbers);
 });
 
 test("the receipt shows each answer next to the finding its listed number names", async () => {
