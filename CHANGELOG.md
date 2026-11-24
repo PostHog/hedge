@@ -8,6 +8,8 @@
   says how a T3 thread waits on a pull request, a child task, another thread,
   a command, or its own schedule; who owns each open pull request and how to
   hand one over; and what Hedge's hooks check before a turn ends.
+  If one of your own packs owns a guide named `waits`, rename it before you
+  update: two packs cannot own one guide.
 - `hedge apply` and `hedge doctor` now report a pack section that repeats a
   heading of the guide it adds to, such as a second `Tests` in
   `coding-standards.md`, as a to-do. Hedge still writes the section. A
