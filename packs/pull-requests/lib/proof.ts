@@ -810,9 +810,33 @@ export function answerNumbers(findings: string) {
   return ["Answer each finding by these numbers, in hedge proof respond:", ...lines].join("\n");
 }
 
+const fenceLine = /^[ \t]*(`{3,}|~{3,})(.*)$/;
+
+function fencedLines(lines: string[]) {
+  const fenced = lines.map(() => false);
+  let open: string | undefined;
+  for (const [index, line] of lines.entries()) {
+    const fence = fenceLine.exec(line.replace(/\r$/, ""));
+    if (open) {
+      fenced[index] = true;
+      if (fence && fence[1]![0] === open[0] && fence[1]!.length >= open.length && !fence[2]!.trim()) open = undefined;
+    } else if (fence && !(fence[1]![0] === "`" && fence[2]!.includes("`"))) {
+      fenced[index] = true;
+      open = fence[1];
+    }
+  }
+  return fenced;
+}
+
+function answerLines(responses: string) {
+  const lines = responses.split("\n");
+  const fenced = fencedLines(lines);
+  return lines.map((line, index) => ({ line, match: fenced[index] ? null : answerItem.exec(line) }));
+}
+
 function numbersPast(findings: string, responses: string) {
   const count = reviewedItems(findings).length;
-  const numbers = unfenced(responses).split("\n").map((line) => Number(answerItem.exec(line)?.[1])).filter((number) => number > count);
+  const numbers = answerLines(responses).map(({ match }) => Number(match?.[1])).filter((number) => number > count);
   return { count, past: [...new Set(numbers)].sort((a, b) => a - b) };
 }
 
@@ -831,8 +855,7 @@ export function answeredFindings(findings: string, responses: string) {
   const answers = new Map<number, Answer>();
   const other: string[] = [];
   let last: Answer | undefined;
-  for (const line of responses.split("\n")) {
-    const match = answerItem.exec(line);
+  for (const { line, match } of answerLines(responses)) {
     const number = Number(match?.[1]);
     if (match && number >= 1 && number <= items.length && !answers.has(number)) answers.set(number, last = { verdict: match[2]!.toLowerCase() as Answer["verdict"], text: line.trim() });
     else if (!match && last && continued.test(line)) last.text += `\n${line.trim()}`;

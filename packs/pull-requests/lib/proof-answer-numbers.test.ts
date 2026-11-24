@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { answeredFindings } from "./proof.ts";
 import { checkout, cleanFixtures, fakeModel, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
@@ -115,11 +116,13 @@ test("hedge proof respond refuses answers to a round without findings", async ()
   await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("Round 1 has no findings, so it needs no answers.");
 });
 
-async function singleFindingRound() {
+const twoFindings = "FINDINGS:\n- feature.txt:1 | major | Correctness | an empty name -> a blank greeting | anchor: greet the new member\n- feature.txt:1 | major | Correctness | a returning member -> a second greeting | anchor: greet the new member\nCOVERED: feature.txt\n";
+
+async function singleFindingRound(review = "FINDINGS:\n- feature.txt:1 | major | Correctness | an empty name -> a blank greeting | anchor: greet the new member\nCOVERED: feature.txt\n") {
   const pr = await checkout();
   await pr.commit("feature.txt", "greet the new member\n");
   await pr.hedge("require", "--none", "--reason", "docs only");
-  fakeModel(pr, "REVIEWER", "FINDINGS:\n- feature.txt:1 | major | Correctness | an empty name -> a blank greeting | anchor: greet the new member\nCOVERED: feature.txt\n");
+  fakeModel(pr, "REVIEWER", review);
   await pr.hedge("review", "--single");
   return pr;
 }
@@ -138,6 +141,43 @@ test("an answer past the last finding quoted in a fenced block saves as other te
   writeFileSync(join(pr.repository, "responses.md"), "1. fixed: the greeting guards an empty name\n\nAn earlier round read:\n\n```text\n2. rejected: same as 1.\n```\n");
 
   expect((await pr.hedge("respond", "--round", "1", "responses.md")).code).toBe(0);
+});
+
+test("a fenced quote of an answer to a real finding answers nothing, so respond still asks for that answer", async () => {
+  const pr = await singleFindingRound(twoFindings);
+  writeFileSync(join(pr.repository, "responses.md"), "1. fixed: the greeting guards an empty name\n\n```text\n2. rejected: from an earlier round\n```\n");
+
+  await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("Answer findings 2 too");
+});
+
+test("inline code written with three backticks is no fence, so an answer past the last finding between two such labels is refused", async () => {
+  const pr = await singleFindingRound();
+  writeFileSync(join(pr.repository, "responses.md"), "```first```\n1. fixed: the greeting guards an empty name\n2. rejected: no such finding\n```second```\n");
+
+  await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("Round 1 has 1 findings; answers numbered past them: 2.");
+});
+
+const fenceCases: [string, string, number[]][] = [
+  ["a backtick fence", "1. fixed: a\n```text\n2. rejected: quoted\n```\n", [1]],
+  ["CRLF line ends", "1. fixed: a\r\n```\r\n2. rejected: quoted\r\n```\r\n", [1]],
+  ["a tilde fence", "~~~\n2. rejected: quoted\n~~~\n1. fixed: a\n", [1]],
+  ["a tilde fence whose info has backticks", "~~~ `text`\n2. rejected: quoted\n~~~\n1. fixed: a\n", [1]],
+  ["a fence line with text after it, which does not close", "```\n``` text\n2. rejected: quoted\n```\n1. fixed: a\n", [1]],
+  ["a shorter fence, which does not close", "````\n```\n2. rejected: quoted\n````\n1. fixed: a\n", [1]],
+  ["the other fence character, which does not close", "```\n~~~\n2. rejected: quoted\n```\n1. fixed: a\n", [1]],
+  ["an indented fence inside an answer", "1. fixed: a\n    ```\n    2. rejected: quoted\n    ```\n", [1]],
+  ["a fence left open, which runs to the end", "1. fixed: a\n```\n2. rejected: quoted\n", [1]],
+  ["inline code with three backticks, which is no fence", "```first```\n1. fixed: a\n2. rejected: b\n```second```\n", [1, 2]],
+];
+
+test.each(fenceCases)("answers in %s", (_, responses, answered) => {
+  const { findings } = answeredFindings(twoFindings, responses);
+
+  expect(findings.flatMap(({ answer }, index) => answer ? [index + 1] : [])).toEqual(answered);
+});
+
+test("a fenced quote stays in the other text of the answers", () => {
+  expect(answeredFindings(twoFindings, "1. fixed: a\n```text\n2. rejected: quoted\n```\n").other).toContain("2. rejected: quoted");
 });
 
 test("a prose finding that starts with a bare list marker keeps that line in the list", async () => {
