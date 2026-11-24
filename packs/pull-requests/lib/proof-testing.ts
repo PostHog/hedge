@@ -49,8 +49,10 @@ if [ -f "${github}/base-sha" ]; then read -r basesha < "${github}/base-sha"; els
 body='"Adds the greeting. Merge risk: medium."'; [ -f "${github}/body" ] && body=$(cat "${github}/body")
 case "$*" in
   "api graphql "*)
+    case "$*" in *"reviewThreads(first: 100, after: "*"-f owner=example -f repo=product -F number="[0-9]*) ;; *) echo "gh: the fake serves the review threads of example/product only" >&2; exit 1;; esac
+    all="$*"; n=\${all##*-F number=}; n=\${n%%[!0-9]*}
     [ -f "${github}/threads-error" ] && { cat "${github}/threads-error" >&2; exit 1; }
-    cat "${github}/threads" 2>/dev/null || printf '{"data":{"viewer":{"login":"%s"},"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\\n' "$(cat "${github}/user" 2>/dev/null || echo the-user)"; exit 0;;
+    cat "${github}/threads-$n" 2>/dev/null || printf '{"data":{"viewer":{"login":"%s"},"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\\n' "$(cat "${github}/user" 2>/dev/null || echo the-user)"; exit 0;;
   "api "*"/pulls/"[0-9]*" --method PATCH --input "*)
     [ -f "${github}/patch-error" ] && { cat "${github}/patch-error" >&2; exit 1; }
     all="$*"; n=\${all##*/pulls/}; n=\${n%%[!0-9]*}; target="${github}/body"; [ -f "${github}/body-$n" ] && target="${github}/body-$n"
@@ -125,11 +127,11 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
   const githubComment = (id: number, author: string, body: string, createdAt = "2026-10-25T11:00:00Z", on = 42) => writeFileSync(join(github, `comment-${id}`), JSON.stringify({ user: { login: author }, body, created_at: createdAt, issue_url: `https://api.github.com/repos/example/product/issues/${on}` }));
   const githubBody = (number = 42) => JSON.parse(readFileSync(join(github, existsSync(join(github, `body-${number}`)) ? `body-${number}` : "body"), "utf8")) as string;
   const githubFault = (fault: "patch-error" | "patch-mangle", text: string | undefined) => text === undefined ? rmSync(join(github, fault), { force: true }) : writeFileSync(join(github, fault), text);
-  const reviewThreads = (threads: ReviewThread[] | { error: string }) => {
+  const reviewThreads = (threads: ReviewThread[] | { error: string }, number = 42) => {
     rmSync(join(github, "threads-error"), { force: true });
     if ("error" in threads) return writeFileSync(join(github, "threads-error"), threads.error);
     const viewer = existsSync(join(github, "user")) ? readFileSync(join(github, "user"), "utf8").trim() : "the-user";
-    writeFileSync(join(github, "threads"), JSON.stringify({ data: { viewer: { login: viewer }, repository: { pullRequest: { reviewThreads: page(threads.map(threadNode)) } } } }));
+    writeFileSync(join(github, `threads-${number}`), JSON.stringify({ data: { viewer: { login: viewer }, repository: { pullRequest: { reviewThreads: page(threads.map(threadNode)) } } } }));
   };
   const githubCalls = () => readFileSync(join(github, "calls"), "utf8").trim().split("\n");
   ci([{ name: "test", bucket: "pass" }]);

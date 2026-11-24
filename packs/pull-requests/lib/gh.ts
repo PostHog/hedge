@@ -1,3 +1,5 @@
+import type { Run } from "./pr-ci.ts";
+
 export type Gh = (args: string[]) => Promise<string>;
 
 export const runGh: Gh = async (args) => {
@@ -7,9 +9,7 @@ export const runGh: Gh = async (args) => {
   return stdout.trim();
 };
 
-type SyncRun = (command: string[]) => { code: number; stdout: string; stderr: string };
-
-export const ghThrough = (run: SyncRun): Gh => async (args) => {
+export const ghThrough = (run: Run): Gh => async (args) => {
   const result = run(["gh", ...args]);
   if (result.code) throw new Error(`gh ${args[0]} failed: ${result.stderr.trim().split("\n")[0] || "no output"}`);
   return result.stdout.trim();

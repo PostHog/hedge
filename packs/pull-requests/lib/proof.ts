@@ -1445,7 +1445,7 @@ export async function proofGate(home: string, identity: ProofIdentity, { ci, pus
   const head = headStatus(identity, before, pushedHead());
   const checks = await ciStatus(weigh, ciResult);
   const knownHold = landed ? undefined : heldStatus(before);
-  const botFindings = landed ? undefined : await botFindingStatus(identity, openBotFindings);
+  const botFindings = await botFindingStatus(identity, openBotFindings);
   const held = [{ problem: owed ? undefined : "missing", line: owedPart(owed).line }, ...kinds.map((kind) => ({ problem: kind.problem, line: kind.proof.line })), review, ...responses, head, checks, ...knownHold ? [knownHold] : [], ...botFindings ? [botFindings] : []];
   const weighed = [...kinds, review, checks];
   const lapsed = [...new Set(weighed.flatMap((status) => status.problem && status.lapsed ? [status.lapsed] : []))];

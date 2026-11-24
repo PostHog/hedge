@@ -421,6 +421,7 @@ new pass. The end table of the receipt and of hedge decision report shows the la
 the judge weigh them. Exit 0 only on a pass: 1 means the owed proofs are not recorded, a proof is missing, the commit
 is not reviewed, a blocker or major finding has no answer, a "## Known issues" section of the PR body lists a blocker
 or misses a finding answered known,
+a review bot's thread on the PR is unresolved with no reply or 👍 of yours after its last comment,
 the commit is not the PR's head on GitHub, its checks are red,
 or the judge failed or was unavailable; 3 means only unaccepted gaps remain; 75 means only CI that is still running
 holds the gate. No gap waives the head check. The last line is the verdict: on a pass it names what it covered, and
@@ -432,8 +433,9 @@ required check that has not reported may never start. An error of that second ru
 the wait. The limit bounds the waiting; a read of GitHub that has started
 still finishes. While it waits, the gate record holds exit 75 and the decision ledger holds a failure at the head, dated
 when the gate read CI as running, so no merge gate counts a pass shared before that read. When that failure cannot be shared, the gate does not wait:
-it exits 1 and its verdict names the ledger error to fix; the result after the wait is shared with the time the wait ended. A run longer than your shell's limit belongs in the background. hedge reads the PR and its CI over GitHub's REST API. Only finding the PR of the
-checkout without --repo and --pr uses gh pr view; pass both when GraphQL is out. A check that ran more than once
+it exits 1 and its verdict names the ledger error to fix; the result after the wait is shared with the time the wait ended. A run longer than your shell's limit belongs in the background. hedge reads the PR and its CI over GitHub's REST API. Finding the PR of the
+checkout without --repo and --pr uses gh pr view; pass both when GraphQL is out. The review threads are read over
+GraphQL, and while GraphQL is out the gate fails and names the cause. A check that ran more than once
 counts with its newest run from each app, as GitHub's required checks do. The
 required checks of the base branch, from its rulesets and branch protection, decide CI; other checks print as not
 required. A required check that has not reported counts as still running, since GitHub can start it after other
