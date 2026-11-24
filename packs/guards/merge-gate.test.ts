@@ -110,7 +110,7 @@ describe("which calls enqueue or merge", () => {
   test.each([
     ["gh pr comment 7 --repo own/tooling --body '/trunk merge'", "own/tooling"],
     ["gh pr merge 7 --repo Example/Notes --squash", "Example/Notes"],
-  ])("%s in an exempt repository needs no gate pass, only the check for gaps an agent accepted", (command, repository) => {
+  ])("%s in an exempt repository parses as an exempt target, which the hook checks only for gaps an agent accepted", (command, repository) => {
     expect(bash(command)).toEqual({ targets: [], exempt: [target(repository, 7)] });
   });
 
