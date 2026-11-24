@@ -94,6 +94,11 @@ test("a gate pass with a gap the agent accepted holds the merge, own tooling inc
     expect((await mergeWord(head)).code).toBe(0);
     expect(await mergeOn("")).toBeUndefined();
     expect(await mergeOn("example/*")).toBeUndefined();
+    pr.clock.now = new Date(pr.clock.now.getTime() + 60_000);
+    await pr.hedge("require", "--kinds", "live-run");
+    await pr.hedge("gap", "--kind", "live-run", "--reason", "No sandbox");
+    await pr.decide("record", "--mark", "🤖", "--class", "proof-gap", "--kind", "live-run", "--pr", "example/product#42", "--question", "Accept the live-run gap? example/product#42: No sandbox", "--answer", "Accept the gap", "--rejected", "Keep the gap open", "--reason", "The hook runs in its own tests");
+    expect(await mergeOn("example/*")).toBeDefined();
   } finally { rmSync(other, { recursive: true, force: true }); }
 });
 

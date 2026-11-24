@@ -375,6 +375,14 @@ describe("the PreToolUse hook", () => {
     expect(await merge([agentGap("own/tooling"), pass("2026-11-16T07:30:00Z", [])])).toBeDefined();
     expect(await merge([agentGap("own/tooling"), pass("2026-11-16T08:30:00Z")])).toBeDefined();
     expect(await merge([agentGap("example/product")], false)).toBeUndefined();
+    const word = (answer: string): LedgerEvent => ({
+      type: "decide", decision: {
+        id: `w-${answer}`, at: "2026-11-16T09:00:00Z", class: "merge", mark: "👤", question: `Merge own/tooling#9 at ${head}?`, answer: `2026-11-16 "${answer}"`,
+        scope: { prs: ["own/tooling#9"], condition: `${head}: merge card` }, where: { thread: "t", message: `m-${answer}`, machine: "hub" },
+      },
+    });
+    expect(await merge([agentGap("own/tooling"), word("Merge")])).toBeUndefined();
+    expect(await merge([agentGap("own/tooling"), word("Keep it open")])).toBeDefined();
   });
 
   test("in an exempt repository, a ledger the hook cannot read refuses the merge, since a gap an agent accepted may hold it", async () => {

@@ -180,7 +180,7 @@ again after you change the repository's access.`,
 publisher. The block sits at the end of the section under the heading the setting pull-requests.receiptHeading names,
 or with that heading at the end of the body. Only a # heading that GitHub shows at the top level of the body starts
 or ends that section, never an underlined one. When the setting changes, the next run moves the block,
-unless taking it out would join the lists or code blocks around it: then it stays and takes the new heading. Once the gate ran at HEAD, it starts with a **Merge card** line: the
+unless taking it out would join the lists or code blocks around it: then it stays and takes the new heading. Once the gate passed at HEAD, it starts with a **Merge card** line: the
 merge-risk grade and door, the reads, each gap with who accepted it, the count of known issues, and the minutes from
 opened to ready, or "still a draft". It prints the full merge card line, as hedge proof gate does, before its last line. It holds a row per owed proof (what ran, the result, the commit or the commit it
 was reused from), a review row, a judge row, what was not checked, and each gap with who accepted it. It reads the

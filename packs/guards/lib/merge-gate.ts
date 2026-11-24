@@ -4,6 +4,7 @@ import { basename, join, resolve } from "node:path";
 import { fold, gateOverride, live, mergeCardChoice, mergeCardCondition, overrideChoice, hubLedger, prRef, type DecisionState, type Env, type LedgerEvent } from "../../pull-requests/lib/decision-ledger.ts";
 import { isTextList, lastGateResult, latestGateResult, type GateResult } from "../../pull-requests/lib/proof.ts";
 import { decidesAll } from "../../pull-requests/lib/proof-autonomy.ts";
+import { normalized } from "../../pull-requests/lib/proof-answers.ts";
 import { endpointOf, ghGroups, inOrder, parseGh, values, type Gh } from "./gh.ts";
 import { githubSlug } from "./git.ts";
 import { commandsIn, shellTools, type Command, type Scope } from "./shell-words.ts";
@@ -351,7 +352,9 @@ function latestPassed(results: GateResult[], decidesAllNow: boolean) {
 const namesLayer = (decision: DecisionState, layer: Layer) => decision.scope.prs.some((ref) => sameRepo(ref.replace(/#\d+$/, ""), layer.repository) && ref.endsWith(`#${layer.pr}`));
 const usersMergeAt = (decision: DecisionState, layer: Layer) => live(decision) && decision.class === "merge" && decision.mark === "👤" && namesLayer(decision, layer);
 const overrideAt = (decision: DecisionState, layer: Layer) => usersMergeAt(decision, layer) && decision.scope.kinds?.includes(gateOverride) === true && decision.scope.condition?.startsWith(`${layer.head}:`) === true;
-const mergeWordAt = (decision: DecisionState, layer: Layer) => overrideAt(decision, layer) || (usersMergeAt(decision, layer) && decision.scope.condition === mergeCardCondition(layer.head));
+const quotedChoice = (answer: string) => /["“]([^"”]*)["”]\s*$/.exec(answer)?.[1] ?? answer;
+const choseMerge = (decision: DecisionState, head: string) => decision.question.includes(head) && [mergeCardChoice, `${mergeCardChoice} (Recommended)`].map(normalized).includes(normalized(quotedChoice(decision.answer)));
+const mergeWordAt = (decision: DecisionState, layer: Layer) => overrideAt(decision, layer) || (usersMergeAt(decision, layer) && decision.scope.condition === mergeCardCondition(layer.head) && choseMerge(decision, layer.head));
 
 function overrideIn(decisions: DecisionState[], layer: Layer): boolean {
   return decisions.some((decision) => overrideAt(decision, layer));
@@ -369,7 +372,8 @@ function agentGapsAt(results: GateResult[], decisions: DecisionState[], layer: L
 
 const heldLayer = (results: GateResult[], decisions: DecisionState[], layer: Layer) => {
   const gaps = agentGapsAt(results, decisions, layer);
-  return gaps.length && !decisions.some((decision) => mergeWordAt(decision, layer)) ? [`${layer.repository}#${layer.pr} at ${layer.head.slice(0, 12)} (🤖 ${gaps.join(", ")})`] : [];
+  const lastGap = Math.max(-Infinity, ...decisions.filter((decision) => gaps.includes(decision.id)).map((decision) => Date.parse(decision.at)));
+  return gaps.length && !decisions.some((decision) => mergeWordAt(decision, layer) && Date.parse(decision.at) >= lastGap) ? [`${layer.repository}#${layer.pr} at ${layer.head.slice(0, 12)} (🤖 ${gaps.join(", ")})`] : [];
 };
 
 const gateCommand = ({ repository, pr, head }: Layer) => `hedge proof gate --repo ${repository} --pr ${pr} --commit ${head}`;
