@@ -36,6 +36,10 @@ describe("hedge loop check-pause", () => {
     expect(await loop(["check-pause", "--ledger", dir])).toMatchObject({ code: 0, out: expect.stringContaining("start lanes up to the WIP limits") });
   });
 
+  test("exits 0 for a bold no with a note after it", async () => {
+    expect((await loop(["check-pause", "--ledger", ledger({ "limits.md": "- **Paused:** no (since the planning)\n" })])).code).toBe(0);
+  });
+
   test.each([
     ["a plain line", "Quality loop WIP: 2\nPaused: yes\n\n## Changes\n- 2026-11-14: paused: yes.\n"],
     ["a list item", "- Paused: yes (until Friday)\n"],
@@ -50,6 +54,8 @@ describe("hedge loop check-pause", () => {
     ["a Paused value that is neither yes nor no", { "limits.md": "Paused: maybe\n" }],
     ["a limits file without a Paused line", { "limits.md": "Quality loop WIP: 2\n" }],
     ["Paused lines that disagree after a merge", { "limits.md": "Paused: no\nQuality loop WIP: 2\nPaused: yes\n" }],
+    ["markup inside a no", { "limits.md": "Paused: n_o\n" }],
+    ["a no followed by another value", { "limits.md": "Paused: no: yes\n" }],
   ])("fails closed with exit 3 on %s", async (_, files) => {
     const result = await loop(["check-pause", "--ledger", ledger(files)]);
     expect(result).toMatchObject({ code: 3, out: expect.stringContaining("start no lane") });
@@ -69,6 +75,10 @@ describe("hedge loop check-pause", () => {
 
   test("refuses an argument it does not know instead of ignoring it", async () => {
     await expect(loop(["check-pause", "--legder", ledger({ "limits.md": "Paused: no\n" })])).rejects.toThrow("unknown argument --legder");
+  });
+
+  test("refuses --kind, which only next-id takes", async () => {
+    await expect(loop(["check-pause", "--kind", "signal", "--ledger", ledger({ "limits.md": "Paused: no\n" })])).rejects.toThrow("unknown argument --kind");
   });
 
   test("names the setting when no ledger is given", async () => {
@@ -101,7 +111,11 @@ describe("hedge loop next-id", () => {
     expect((await loop(["next-id", "--kind", "lane", "--ledger", dir])).out).toBe("L071");
   });
 
-  test("never hands out one id to two checkouts of the same ledger repository on one machine", async () => {
+  test.each([
+    ["the same origin", "https://example.com/acme/ledger.git"],
+    ["an SSH origin", "git@example.com:acme/ledger.git"],
+    ["an ssh:// origin", "ssh://git@example.com/acme/ledger"],
+  ])("never hands out one id to two checkouts of the same ledger repository on one machine, with %s", async (_, secondOrigin) => {
     const home = temp.make("home-");
     const first = temp.make("checkout-");
     mkdirSync(join(first, "quality-loop"));
@@ -109,6 +123,7 @@ describe("hedge loop next-id", () => {
     for (const args of [["init", "-q"], ["remote", "add", "origin", "https://example.com/acme/ledger.git"]]) spawnSync("git", ["-C", first, ...args]);
     const second = temp.make("checkout-");
     cpSync(first, second, { recursive: true });
+    spawnSync("git", ["-C", second, "remote", "set-url", "origin", secondOrigin]);
     const one = await loop(["next-id", "--kind", "lane", "--ledger", join(first, "quality-loop")], undefined, home);
     const two = await loop(["next-id", "--kind", "lane", "--ledger", join(second, "quality-loop")], undefined, home);
     expect([one.out, two.out]).toEqual(["L065", "L066"]);

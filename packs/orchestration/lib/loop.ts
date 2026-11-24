@@ -14,9 +14,7 @@ const usage = "usage: hedge loop check-pause [--ledger <dir>] | hedge loop next-
 const kinds = { lane: { prefix: "L", file: "lanes.md" }, signal: { prefix: "S", file: "signals.md" } } as const;
 type Kind = keyof typeof kinds;
 
-const known = ["--ledger", "--kind"];
-
-function option(args: string[], name: string): string | undefined {
+function option(args: string[], name: string, known: string[]): string | undefined {
   let found: string | undefined;
   for (let at = 0; at < args.length; at++) {
     const arg = args[at]!;
@@ -29,17 +27,15 @@ function option(args: string[], name: string): string | undefined {
   return found;
 }
 
-function ledgerDir(args: string[], io: LoopIo): string {
-  const dir = option(args, "--ledger") ?? io.ledger();
+function ledgerDir(args: string[], io: LoopIo, known: string[]): string {
+  const dir = option(args, "--ledger", known) ?? io.ledger();
   if (!dir?.trim()) throw new Error(`name the loop ledger directory with --ledger <dir>, or set ${loopLedgerSetting}`);
   return expandHome(dir.trim(), io.home);
 }
 
 const pauseLine = /^[ \t>*_-]*Paused[*_]*:[*_]*[ \t]*(.*)$/gim;
+const pauseValue = /^[*_`]*(yes|no)[*_`]*\.?(?:\s+[(\u2013\u2014-].*)?$/i;
 
-/** Whether the loop ledger's limits.md pauses the loops. Only one or more Paused lines that all say no let them run: a
- * file that cannot be read, has no Paused line, says something other than yes or no, or says both, pauses them too, so a
- * broken ledger starts no lane. */
 export function pauseState(ledger: string): PauseState {
   const file = join(ledger, "limits.md");
   let text: string;
@@ -48,7 +44,10 @@ export function pauseState(ledger: string): PauseState {
   } catch (error) {
     return { state: "unreadable", why: `${file} cannot be read (${(error as NodeJS.ErrnoException).code ?? String(error)})` };
   }
-  const values = new Set([...text.matchAll(pauseLine)].map((match) => match[1]!.replace(/[*_`]/g, "").trim().toLowerCase().split(/[\s(,.;:]/)[0]!));
+  const values = new Set([...text.matchAll(pauseLine)].map((match) => {
+    const value = match[1]!.trim();
+    return pauseValue.exec(value)?.[1]!.toLowerCase() ?? value;
+  }));
   if (values.size === 0) return { state: "unreadable", why: `${file} has no Paused line` };
   if (values.size > 1) return { state: "unreadable", why: `${file} has Paused lines that disagree (${[...values].join(", ")})` };
   const [value] = values;
@@ -60,7 +59,7 @@ export const pausedReason = (why: string) => `The loops are paused: ${why}. `
   + "Settle the lanes that ended, keep every watch and post-deploy check, record a no-op run, and start no lane.";
 
 function checkPause(args: string[], io: LoopIo): number {
-  const pause = pauseState(ledgerDir(args, io));
+  const pause = pauseState(ledgerDir(args, io, ["--ledger"]));
   if (pause.state === "runs") {
     io.print("The loops run: start lanes up to the WIP limits.");
     return 0;
@@ -82,11 +81,22 @@ function git(ledger: string, ...args: string[]): string | undefined {
   return run.status === 0 && run.stdout.trim() ? run.stdout.trim() : undefined;
 }
 
+function repositoryOf(remote: string): string {
+  const scp = /^(?:[^@/]+@)?([^:/]+):(?!\/)(.+)$/.exec(remote);
+  let host = scp?.[1] ?? "";
+  let path = scp?.[2] ?? remote;
+  if (!scp && URL.canParse(remote)) {
+    const url = new URL(remote);
+    [host, path] = [url.hostname, url.pathname];
+  }
+  return `${host}/${path.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "")}`.toLowerCase();
+}
+
 function ledgerIdentity(ledger: string): string {
   const real = realpathSync(ledger);
   const top = git(real, "rev-parse", "--show-toplevel");
   const remote = top && git(real, "config", "--get", "remote.origin.url");
-  return remote ? `${remote.replace(/\.git$/, "")}#${relative(realpathSync(top), real)}` : real;
+  return remote ? `${repositoryOf(remote)}#${relative(realpathSync(top), real)}` : real;
 }
 
 function reservations(home: string, ledger: string): string {
@@ -108,9 +118,6 @@ function reserve(dir: string, id: string): boolean {
   }
 }
 
-/** The next lane or signal id of a loop ledger: the first id past its rows' highest that this machine has not
- * reserved yet. Each id is reserved with an exclusive create, keyed by the ledger repository's origin and the ledger's
- * place in it, so parallel callers on one machine never get the same id, from one checkout or several. */
 export function nextId(ledger: string, kind: Kind, home: string): string {
   const { prefix } = kinds[kind];
   const dir = reservations(home, ledger);
@@ -120,9 +127,10 @@ export function nextId(ledger: string, kind: Kind, home: string): string {
 }
 
 function printNextId(args: string[], io: LoopIo): number {
-  const kind = option(args, "--kind");
+  const known = ["--ledger", "--kind"];
+  const kind = option(args, "--kind", known);
   if (kind !== "lane" && kind !== "signal") throw new Error(`name the id with --kind lane or --kind signal. ${usage}`);
-  io.print(nextId(ledgerDir(args, io), kind, io.home));
+  io.print(nextId(ledgerDir(args, io, known), kind, io.home));
   return 0;
 }
 

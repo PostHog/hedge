@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { type Hook, printing, runHook } from "../../base/lib/hook.ts";
 import { expandHome } from "../lib/lessons.ts";
@@ -12,7 +12,7 @@ type Line = { type?: string; isMeta?: boolean; message?: { content?: unknown }; 
 
 const startsSubthread = /(?:^|__)delegate_task$/;
 const provenance = /^\s*(?:\[[^\]\n]*\]\s*)*/;
-const asksForRun = /^\W*(?:run|start)\b[^\n]*(?:\bcoordinator\b[^\n]*\b(?:quality|signal)-loop\b|\b(?:quality|signal)-loop\b[^\n]*\bcoordinator\b)/i;
+const asksForRun = /^\W*(?:run|start)\s+(?:(?:one|a|an|the|another|next|new)\s+)*(?:`?(?:quality|signal)-loop`?\s+coordinator\b|coordinator\b[^\n]*\b(?:quality|signal)-loop\b)/i;
 const slashCommand = /^(?:<command-message>[^<\n]*<\/command-message>\s*)?<command-name>\/(?:[\w-]+:)?(?:quality|signal)-loop<\/command-name>/;
 
 const opensCoordinatorRun = (prompt: string) => {
@@ -60,18 +60,24 @@ async function isLoopCoordinator(transcriptPath: string | undefined): Promise<bo
   }
 }
 
+function missing(path: string): boolean {
+  try {
+    statSync(path);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
+}
+
 function loopLedger(home: string): string | undefined {
   const value = readSettings(home)[loopLedgerSetting];
   return typeof value === "string" && value.trim() ? expandHome(value.trim(), home) : undefined;
 }
 
-/** Refuses a new subthread from a quality-loop or signal-loop coordinator while the loop ledger's limits.md pauses the
- * loops, or cannot be read. Settling, watches, scheduled checks and every other thread pass, and so does every thread on
- * a machine where the ledger directory does not exist, such as one whose loops keep their ledger elsewhere. */
 export async function guardLoopPause(event: DelegateEvent, home: string): Promise<LaneDenial | undefined> {
   if (!startsSubthread.test(event.tool_name ?? "")) return undefined;
   const ledger = loopLedger(home);
-  if (!ledger || !existsSync(ledger) || !(await isLoopCoordinator(event.transcript_path))) return undefined;
+  if (!ledger || missing(ledger) || !(await isLoopCoordinator(event.transcript_path))) return undefined;
   const pause = pauseState(ledger);
   if (pause.state === "runs") return undefined;
   return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: `Hedge blocked this lane. ${pausedReason(pause.why)}` } };

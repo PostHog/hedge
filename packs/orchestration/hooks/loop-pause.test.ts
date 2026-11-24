@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../../../src/testing/git.ts";
 
@@ -80,6 +80,7 @@ describe("the loop pause guard", () => {
     ["a lane of the loop", [claudePrompt("You are quality-loop lane L064. Ship one PR for the cover stage of billing.")]],
     ["a Codex lane whose project instructions mention a coordinator run", [codexInstructions, codexMessage("You are signal-loop lane L070. Ship one fix PR.")]],
     ["a thread that asks about a coordinator run instead of for one", [claudePrompt("Audit last night's quality-loop coordinator run and list its lanes.")]],
+    ["a thread that runs an audit of a coordinator round", [claudePrompt("Run an audit of last night's quality-loop coordinator round.")]],
     ["a thread that pastes a slash command below its own task", [claudePrompt("Explain why this stalled:\n<command-name>/quality-loop</command-name>")]],
     ["a thread that quotes a coordinator prompt below its own task", [claudePrompt(`Create the nightly schedules on this machine.\n\n1. Title \`Quality loop\`. Prompt:\n\n${qualityRun}`)]],
     ["a thread that mentions a coordinator only after its first prompt", [claudePrompt("Summarize last night's PRs."), claudePrompt(qualityRun)]],
@@ -89,6 +90,18 @@ describe("the loop pause guard", () => {
 
   test("leaves the loops alone on a machine where the ledger directory does not exist", () => {
     expect(answer(machine(paused, { "orchestration.loopLedger": "~/no-such-ledger" }), delegate, [claudePrompt(qualityRun)])).toBeUndefined();
+  });
+
+  test("fails closed when a parent of the ledger directory denies access", () => {
+    const home = machine(undefined, { "orchestration.loopLedger": "~/locked/ledger" });
+    mkdirSync(join(home, "locked/ledger"), { recursive: true });
+    writeFileSync(join(home, "locked/ledger/limits.md"), paused);
+    chmodSync(join(home, "locked"), 0o000);
+    try {
+      expect(answer(home, delegate, [claudePrompt(qualityRun)])).toMatchObject({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("EACCES") });
+    } finally {
+      chmodSync(join(home, "locked"), 0o755);
+    }
   });
 
   test("leaves the loops alone on a machine without a loop ledger setting", () => {
