@@ -103,9 +103,9 @@ The stop passes when any of these holds:
   awaits, as in the proof check below;
 - a PR watch of the thread runs `until: "merged"` on an open PR. T3 shows no
   task while a turn runs, so the check reads the watch on the PR itself;
-- a PR watch of the thread sees checks still run, or waits on an approval. A
-  watch whose checks finished, such as one on a PR in the merge queue, is no
-  wait unless it runs `until: "merged"`;
+- a PR watch of the thread sees checks still run on an open PR. A watch
+  whose checks finished, such as one on a PR in the merge queue or one that
+  waits on an approval, is no wait unless it runs `until: "merged"`;
 - on Claude, a subagent, a monitor, or a session cron runs;
 - an enabled scheduled task bound to the thread has a next run in T3's state,
   also one that is due and has not run yet;

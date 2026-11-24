@@ -498,8 +498,9 @@ describe("the wake guard", () => {
     db.run(scheduleTable.replace("create table", "create table if not exists"));
     db.run(`insert into scheduled_tasks (task_id, title, prompt, enabled, schedule_json, project_id, thread_id, workspace_strategy_json, model_selection_json,
         runtime_mode, interaction_mode, created_by, creation_source, created_at, updated_at, next_run_at, last_run_status, run_count, thread_mode)
-      values (?, 'check', 'check', ?, ?, 'p', ?, '{}', '{}', 'full-access', 'default', 'agent', 'mcp', '2026-11-20T00:00:00Z', '2026-11-20T00:00:00Z', ?, 'never', 0, 'continue')`,
-      [crypto.randomUUID(), enabled ? 1 : 0, JSON.stringify({ type: "once", runAt: nextRunAt ?? "2026-11-20T08:00:00.000Z" }), threadId, nextRunAt]);
+      values (?, 'check', 'check', ?, ?, 'p', ?, ?, ?, 'full-access', 'default', 'agent', 'mcp', '2026-11-20T00:00:00Z', '2026-11-20T00:00:00Z', ?, 'never', 0, 'continue')`,
+      [crypto.randomUUID(), enabled ? 1 : 0, JSON.stringify({ type: "once", runAt: nextRunAt ?? "2026-11-20T08:00:00.000Z" }), threadId, JSON.stringify({ type: "root" }),
+        JSON.stringify({ instanceId: "claudeAgent", model: "claude-opus-5-5", options: [{ id: "effort", value: "high" }] }), nextRunAt]);
     db.close();
   }
 
@@ -529,6 +530,10 @@ describe("the wake guard", () => {
     expect(await ends({ ...queuedWatch, pendingBackgroundTasks: [watchTask] })).toMatchObject({ decision: "block" });
   });
 
+  test("sends back a wait whose only PR watch waits on an approval, which T3 does not hold the thread for", async () => {
+    expect(await ends({ ...watching({ awaitingApproval: ["deploy"] }), status: "running" })).toMatchObject({ decision: "block" });
+  });
+
   test("sends back a wait whose watch until merge is on a PR that merged", async () => {
     const merged = watching({ until: "merged" });
     merged.pullRequests[0]!.snapshot.state = "merged";
@@ -538,8 +543,7 @@ describe("the wake guard", () => {
   test.each([
     ["a PR watch held until merge, while T3 shows no task of the running turn", { ...watching({ until: "merged" }), status: "running", pendingBackgroundTasks: [] }],
     ["a PR watch held until merge, which T3 awaits between turns", { ...watching({ until: "merged" }), pendingBackgroundTasks: [{ ...watchTask, awaited: true }] }],
-    ["a PR watch whose checks still run", { ...watching({ passed: false, checksPending: true }), pendingBackgroundTasks: [watchTask] }],
-    ["a PR watch that waits on an approval", { ...watching({ awaitingApproval: ["deploy"] }), pendingBackgroundTasks: [watchTask] }],
+    ["a PR watch whose checks still run, while T3 shows no task of the running turn", { ...watching({ passed: false, checksPending: true }), status: "running", pendingBackgroundTasks: [] }],
     ["a delegated lane still running", { pendingBackgroundTasks: [{ kind: "subagent", childThreadId: "thread:lane" }] }],
     ["a thread wait", { blockedOnThreadWait: true }],
     ["a snooze the person set", { snoozedUntil: "2999-01-01T00:00:00Z" }],
@@ -603,10 +607,19 @@ describe("the wake guard", () => {
     expect(await ends({}, waitLine, {}, off)).toBeUndefined();
     const down = async () => { throw new Error("T3 down"); };
     expect(await wakeStop({}, waitLine, { home: home("Robin"), threadId: conductor, shell: down, processes: lone })).toBeUndefined();
+    const routed = hookWith(() => down, { threadId: conductor, processes: lone });
+    expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)) }), home("Robin"))).stdout).toBe("");
   });
 
-  test("lets the stop through when the check does not answer before its deadline", async () => {
-    const stalled = { pid: 30, table: () => new Promise<string>(() => {}) };
-    expect(await wakeStop({}, waitLine, { home: home("Robin"), threadId: conductor, shell: async () => ({ threads: [] }), processes: stalled, deadline: async () => {} })).toBeUndefined();
+  test("lets the stop through when the check does not answer before the deadline the hook passes on", async () => {
+    let tables = 0;
+    const stallsOnWake = { pid: 30, table: () => ++tables > 1 ? new Promise<string>(() => {}) : lone.table() };
+    const threads = [{ id: conductor, title: "Conductor", projectId: "p", status: "completed" }] as ShellThread[];
+    let release = () => {};
+    const routed = hookWith(() => async () => ({ threads }), { threadId: conductor, processes: stallsOnWake, deadline: () => new Promise<void>((resolve) => { release = resolve; }) });
+    const answer = routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)), cwd: "/" }), home("Robin"));
+    while (tables < 2) await Bun.sleep(1);
+    release();
+    expect((await answer).stdout).toBe("");
   });
 });

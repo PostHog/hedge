@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { matchThread, type ShellThread, t3StatePath, t3UserData } from "../../base/lib/t3/index.ts";
 import { subagentParent } from "../../pull-requests/lib/pr-owners.ts";
-import { awaitsChecks, claudeTaskRuns, isSnoozed, nestedSession, realProcesses, waits, withinDeadline, type ProcessTable, type ProofStopEvent } from "./proof-stop.ts";
+import { checksRun, claudeTaskRuns, isSnoozed, nestedSession, realProcesses, waits, withinDeadline, type ProcessTable, type ProofStopEvent } from "./proof-stop.ts";
 import { personName } from "./prose-question.ts";
 
 export type WakeStopOptions = { home: string; threadId: string | undefined; shell: () => Promise<{ threads: ShellThread[] }>; processes?: ProcessTable; now?: () => number; deadline?: () => Promise<void> };
@@ -35,9 +35,9 @@ const outsideWakeCheck = (thread: ShellThread, now: number) => Boolean(subagentP
 
 type ShellPullRequest = NonNullable<ShellThread["pullRequests"]>[number];
 
-const heldUntilMerge = ({ snapshot, watch }: ShellPullRequest) => watch?.until === "merged" && (snapshot?.state?.toLowerCase() ?? "open") === "open";
+const watchWakes = ({ snapshot, watch }: ShellPullRequest) => Boolean(watch) && (snapshot?.state?.toLowerCase() ?? "open") === "open" && (watch!.until === "merged" || checksRun(watch!));
 
-const wakes = (threads: ShellThread[], thread: ShellThread) => waits(threads, thread) || (thread.pullRequests ?? []).some((pr) => heldUntilMerge(pr) || awaitsChecks(pr));
+const wakes = (threads: ShellThread[], thread: ShellThread) => waits(threads, thread) || (thread.pullRequests ?? []).some(watchWakes);
 
 type WakeStopBlock = { decision: "block"; reason: string };
 
