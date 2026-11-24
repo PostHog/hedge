@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### The gate holds on an unanswered bot finding
+
+- `hedge proof gate` now reads the pull request's review threads on GitHub
+  and fails while a review bot's thread is unresolved and has no answer from
+  you: no reply of yours after the bot's last comment, and no 👍 of yours on
+  it. This covers PostHog Review, the security review bot, ParameterAI, Veria,
+  CodeQL and every other GitHub App. The refusal names each open thread by its
+  URL. Fix it and resolve it with
+  `hedge pr bot-threads --repo <owner/repo> --pr <number> --fixed <URL>`, or
+  reply with why it does not hold.
+- A person's thread does not hold the gate. `--landed` checks it too, so it
+  cannot pass an open pull request past a finding.
+- When GitHub cannot list the threads, the gate fails and says why.
+- `hedge pr bot-threads` and the gate share one reader, and both now know the
+  logins of these bots.
+
 ### A one-way door stops the review loop at an escalation
 
 - With `pull-requests.autonomy` set to `end`, when the review arbiter

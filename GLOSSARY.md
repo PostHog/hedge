@@ -133,7 +133,7 @@ Two reversals of the agent's decisions in one ask class within 28 days. The brak
 _Avoid_: Lock, freeze
 
 **Proof summary**:
-The proof state of a pull request at HEAD that the gate builds: each owed kind, the review, the head, CI, the tier, the judge's verdict, and the lapsed and voided decisions. The gate prints its lines from it, and `hedge proof gate --json` prints it. Each `hedge proof gate` saves its summary for its commit, with the pull request's head, base and base SHA on GitHub, the tier, `--landed`, and a fingerprint of the pull request's proof files, the standing rules and the ledger decisions that cover it. The end-of-run report uses a saved summary for its judge's verdict only while all of these still match.
+The proof state of a pull request at HEAD that the gate builds: each owed kind, the review, the head, CI, the open bot findings, the tier, the judge's verdict, and the lapsed and voided decisions. The gate prints its lines from it, and `hedge proof gate --json` prints it. Each `hedge proof gate` saves its summary for its commit, with the pull request's head, base and base SHA on GitHub, the tier, `--landed`, and a fingerprint of the pull request's proof files, the standing rules and the ledger decisions that cover it. The end-of-run report uses a saved summary for its judge's verdict only while all of these still match.
 _Avoid_: Proof status, gate result
 
 **End-of-run report**:

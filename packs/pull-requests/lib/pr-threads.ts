@@ -1,16 +1,17 @@
 import type { Gh } from "./gh.ts";
 
-export type BotThreadOptions = { repo: string; pr: number; resolve?: boolean; fixed?: string[] };
+export type PullRequestTarget = { repo: string; pr: number };
+export type BotThreadOptions = PullRequestTarget & { resolve?: boolean; fixed?: string[] };
 export type ThreadReport = { output: string; exitCode: 0 | 1 };
 
 type Author = { __typename: string; login: string } | null;
 type Page<T> = { nodes: T[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
 type Comment = { author: Author; url: string; reactions?: { nodes: { user: { login: string } | null }[] } };
 type GraphThread = { id: string; isResolved: boolean; path: string; line: number | null; originalLine: number | null; comments: Page<Comment> };
-type Thread = { id: string; kind: "bot" | "human"; answered: boolean; location: string; url: string };
+export type Thread = { id: string; kind: "bot" | "human"; answered: boolean; location: string; url: string };
 
 const usage = "Usage: hedge pr bot-threads|blockers --repo <owner/repo> --pr <number> [--resolve] [--fixed <thread URL>]... | [--record]";
-const knownBots = new Set(["coderabbitai", "greptile-apps", "posthog-bot", "trunk-io", "github-actions", "dependabot", "renovate", "vercel", "codecov"]);
+const knownBots = new Set(["coderabbitai", "greptile-apps", "posthog", "posthog-bot", "posthog-security-review-bot", "parameterai", "veria-ai", "github-advanced-security", "stamphog", "trunk-io", "github-actions", "dependabot", "renovate", "vercel", "codecov"]);
 
 const commentFields = "pageInfo { hasNextPage endCursor } nodes { url author { __typename login } reactions(content: THUMBS_UP, first: 20) { nodes { user { login } } } }";
 const threadsQuery = `query($owner: String!, $repo: String!, $number: Int!, $after: String) {
@@ -40,9 +41,20 @@ export function parsePrArgs(args: string[]): BotThreadOptions {
   return options as BotThreadOptions;
 }
 
+export const awaitsAnswer = (thread: Thread) => thread.kind === "bot" && !thread.answered;
+
+export async function unresolvedThreads(target: PullRequestTarget, gh: Gh): Promise<{ viewer: string; threads: Thread[] }> {
+  const { viewer, threads } = await fetchThreads(target, gh);
+  return { viewer, threads: threads.filter((thread) => !thread.isResolved).map((thread) => classify(thread, viewer)) };
+}
+
+export async function openBotFindings(target: PullRequestTarget, gh: Gh): Promise<Thread[]> {
+  return (await unresolvedThreads(target, gh)).threads.filter(awaitsAnswer);
+}
+
 export async function botThreads(options: BotThreadOptions, gh: Gh): Promise<ThreadReport> {
-  const { viewer, threads } = await fetchThreads(options, gh);
-  let unresolved = threads.filter((thread) => !thread.isResolved).map((thread) => classify(thread, viewer));
+  const { viewer, threads } = await unresolvedThreads(options, gh);
+  let unresolved = threads;
   if (!unresolved.length) return { output: "No unresolved review threads.", exitCode: 0 };
   const lines = unresolved.map((thread) => `${thread.kind} ${thread.answered ? "answered" : "unanswered"} ${thread.location} ${thread.url}`);
   if (options.fixed?.length) {
@@ -51,14 +63,14 @@ export async function botThreads(options: BotThreadOptions, gh: Gh): Promise<Thr
     unresolved = unresolved.filter((thread) => !fixed.resolved.has(thread.id));
   }
   if (options.resolve) lines.push(...await resolveAnswered(unresolved, gh));
-  const unanswered = unresolved.filter((thread) => thread.kind === "bot" && !thread.answered).length;
+  const unanswered = unresolved.filter(awaitsAnswer).length;
   if (unanswered) lines.push(`${unanswered} unanswered bot thread${unanswered === 1 ? "" : "s"} remain${unanswered === 1 ? "s" : ""}.`);
   const waiting = unresolved.filter((thread) => thread.kind === "human" && !thread.answered).length;
   if (waiting) lines.push(`${waiting} human thread${waiting === 1 ? "" : "s"} wait${waiting === 1 ? "s" : ""} on ${viewer}: react 👍 to a fix, or draft the reply for ${viewer} to post.`);
   return { output: lines.join("\n"), exitCode: unanswered ? 1 : 0 };
 }
 
-async function fetchThreads(options: BotThreadOptions, gh: Gh): Promise<{ viewer: string; threads: GraphThread[] }> {
+async function fetchThreads(options: PullRequestTarget, gh: Gh): Promise<{ viewer: string; threads: GraphThread[] }> {
   const [owner, repo] = options.repo.split("/") as [string, string];
   const threads: GraphThread[] = [];
   let viewer = "";
