@@ -647,8 +647,10 @@ export async function respondToReview(home: string, identity: ProofIdentity, rou
   const directory = await roundDirectory(home, identity, round);
   const findings = await savedFindings(directory);
   if (findings === undefined) throw new Error(`Review round ${round} has no findings yet`);
+  const { count, past } = numbersPast(findings, bytes.toString());
+  if (past.length) throw new Error(`Round ${round} has ${count} findings, but answers ${spans(past)} number past them. Number your answers by this list, which hedge proof show --round ${round} prints too:\n${answerNumbers(findings)}`);
   const missing = unanswered(findings, bytes.toString());
-  if (missing.length) throw new Error(`Answer findings ${missing.join(", ")} too: one line each, numbered in the order of findings.md, such as "${missing[0]}. fixed in 1a2b3c4: <how>", "${missing[0]}. rejected: <why>", or, at the review budget or a one-way stop, "${missing[0]}. known: <why>" for a finding listed under Known issues. Minor and nit findings need no answer; a TESTS item gets a test-only rewrite or delete`);
+  if (missing.length) throw new Error(`Answer findings ${missing.join(", ")} too: one line each, numbered by the list below, such as "${missing[0]}. fixed in 1a2b3c4: <how>", "${missing[0]}. rejected: <why>", or, at the review budget or a one-way stop, "${missing[0]}. known: <why>" for a finding listed under Known issues. Minor and nit findings need no answer; a TESTS item gets a test-only rewrite or delete\n${answerNumbers(findings)}`);
   if (answeredFindings(findings, bytes.toString()).findings.some(({ answer }) => answer?.verdict === "known")) {
     const reviews = join(pullRequestDirectory(home, identity), "reviews");
     const phase = (await readJson<{ phase?: FinalReadPhase }>(join(directory, "round.json"), {})).phase ?? "review";
@@ -797,6 +799,31 @@ function listedItems(reviewed: ReviewedLine[]): { items: ReviewedItem[]; recover
 }
 
 export type Answer = { verdict: "fixed" | "rejected" | "known"; text: string };
+
+const listMark = /^\s*(?:[-*]|\d+[.)])\s+/;
+
+export function answerNumbers(findings: string) {
+  const items = reviewedItems(findings);
+  if (!items.length) return "";
+  const lines = items.map(({ text, test }, index) => `${index + 1}. ${test ? "TESTS: " : ""}${text.split("\n")[0]!.replace(listMark, "")}`);
+  return ["Answer each finding by these numbers, in hedge proof respond:", ...lines].join("\n");
+}
+
+function numbersPast(findings: string, responses: string) {
+  const count = reviewedItems(findings).length;
+  const numbers = responses.split("\n").map((line) => Number(answerItem.exec(line)?.[1])).filter((number) => number > count);
+  return { count, past: [...new Set(numbers)].sort((a, b) => a - b) };
+}
+
+function spans(numbers: number[]) {
+  const runs: number[][] = [];
+  for (const number of numbers) {
+    const run = runs.at(-1);
+    if (run && run.at(-1) === number - 1) run.push(number);
+    else runs.push([number]);
+  }
+  return runs.map((run) => run.length > 2 ? `${run[0]} to ${run.at(-1)}` : run.join(", ")).join(", ");
+}
 
 export function answeredFindings(findings: string, responses: string) {
   const items = reviewedItems(findings);

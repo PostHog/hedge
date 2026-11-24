@@ -2,7 +2,7 @@ import { closeSync, existsSync, openSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { askGap, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity } from "./proof.ts";
+import { answerNumbers, askGap, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity } from "./proof.ts";
 import { AnswerTaken, appendOnce, decideAlone, hearUser, ledgerHolds, ledgerOf } from "./decision-cli.ts";
 import { HubUnreachable, keptOwed, refText, usersAcceptance, thisMachine, type Decision, type Ssh } from "./decision-ledger.ts";
 import { autonomyOf, gradeOf, type Autonomy, type Grade } from "./proof-autonomy.ts";
@@ -322,6 +322,8 @@ its log while it runs. Then print each final read that hedge dropped unanswered,
       const directory = await reviewDirectory(context.home, identity(), roundOption(options));
       const dropped = (await droppedFinalReads(context.home, identity())).map(({ line, cause }) => cause ? `${line}; cause: ${cause}` : line);
       for (const line of [...await roundLines(directory, context), ...dropped]) context.print(line);
+      const findings = await readFile(join(directory, "findings.md"), "utf8").catch(() => "");
+      printAnswerNumbers(findings, context.print);
       return 0;
     },
   },
@@ -336,11 +338,11 @@ its log while it runs. Then print each final read that hedge dropped unanswered,
   respond: {
     usage: "respond --round <number|final-n> <responses.md>",
     summary: `Save your answer to each finding of a finished review: fixed in which commit, or rejected and why. Number the
-answers in the order of the findings, one line each, such as "1. fixed in 1a2b3c4: <how>" or "2. rejected: <why>". Once
+answers by the list that hedge proof review and hedge proof show print under "Answer each finding by these numbers":
+each lens's findings in order, then every TESTS item. One line each, such as "1. fixed in 1a2b3c4: <how>" or "2. rejected: <why>". Once
 the review budget is spent, "3. known: <why>" answers a finding that the PR body lists by its file:line under Known
-issues; a known blocker holds the merge. Each
-list item of findings.md is one finding; findings without a list are one. The gate fails while a finding has no
-answer. A new call replaces the earlier answer. A final read takes the id that review-start printed. The judge in hedge proof gate checks
+issues; a known blocker holds the merge. COVERED lists and prose outside FINDINGS and TESTS are no findings. An
+answer numbered past the last finding is refused. The gate fails while a finding has no answer. A new call replaces the earlier answer. A final read takes the id that review-start printed. The judge in hedge proof gate checks
 each answer against HEAD.`,
     examples: ["hedge proof respond --round 1 responses.md", "hedge proof respond --round final-1 responses.md"],
     options: ["--round"],
@@ -663,12 +665,19 @@ async function runReview(options: Map<string, string>, head: ProofIdentity, cont
   });
 }
 
+function printAnswerNumbers(findings: string, print: CommandContext["print"]) {
+  const numbers = answerNumbers(findings);
+  if (numbers) print(`\n${numbers}`);
+}
+
 async function printSavedReview({ round, id, directory }: SingleRound, { print }: CommandContext) {
   const reservation = await readReservation(directory);
   print(JSON.stringify({ round, id, directory, reviewer: reservation?.reviewer, ...await readTriage(directory) }));
-  print((await readFile(join(directory, "findings.md"), "utf8")).trim());
+  const findings = await readFile(join(directory, "findings.md"), "utf8");
+  print(findings.trim());
   const anchors = await readFile(join(directory, "anchors.md"), "utf8").catch(() => "");
   if (anchors) print(`\n${anchors.trim()}`);
+  printAnswerNumbers(findings, print);
   return 0;
 }
 
@@ -702,6 +711,7 @@ async function askReviewer(reserved: SingleRound, head: ProofIdentity, author: F
   print(JSON.stringify({ round: reserved.round, id: reserved.id, directory: reserved.directory, reviewer: answer.model, ...await readTriage(reserved.directory) }));
   print(answer.text.trim());
   if (anchors) print(`\n${anchors}`);
+  printAnswerNumbers(answer.text, print);
   return 0;
 }
 
@@ -983,7 +993,11 @@ async function waitForReview(options: Map<string, string>, head: ProofIdentity, 
   const restart = (name: string) => roundStep(directory, context, async () => { if (await lensIdle(directory, name)) await startLens(directory, name, context); }).catch(unless(RoundBusy));
   const code = await waitForPanel(directory, panelIO(context), restart, waitPolls);
   for (const line of await roundLines(directory, context)) context.print(line);
-  if (code === 0) context.print(await readFile(join(directory, "findings.md"), "utf8"));
+  if (code === 0) {
+    const findings = await readFile(join(directory, "findings.md"), "utf8");
+    context.print(findings);
+    printAnswerNumbers(findings, context.print);
+  }
   if (code === 1) context.print("A lens failed, and the round stays unfinished. Run the same hedge proof review --lens command to rerun the failed lenses.");
   if (code === 2) context.print("Lenses still run. Run hedge proof review --wait again.");
   if (code === quotaExitCode) context.print("A lens stopped on spent quota, and the round stays unfinished. Run the same hedge proof review --lens command once the quota is back, or move the lens to the family that is up with :same or :other.");
