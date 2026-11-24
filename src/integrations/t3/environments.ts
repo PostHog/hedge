@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { T3Client, T3HttpClient } from "./session.ts";
-import { deliveryMode, type SendMode } from "./threads.ts";
+import { isSlashCommand, type SendMode } from "./threads.ts";
 
 export type LinkedEnvironment = {
   environmentId: string; label: string; urls: string[]; access: string;
@@ -92,8 +92,14 @@ export async function readLinkedMessages(client: Pick<T3HttpClient, "callTool">,
 export type LinkedSend = { threadId: string; messageId: string; delivery: "started" | "queued" | "steered" | "restarted" };
 
 export async function sendLinkedMessage(client: Pick<T3HttpClient, "callTool">, environmentId: string, threadId: string, message: string, mode: SendMode = "auto"): Promise<LinkedSend> {
-  const sent = await client.callTool<LinkedSend>("t3_thread_send", { environmentId, threadId, message, mode: deliveryMode(mode, message), clientRequestId: `hedge-thread-send:${randomUUID()}` });
+  const queuesBehindCard = mode === "auto" && isSlashCommand(message) && await linkedMayWaitOnCard(client, environmentId, threadId);
+  const sent = await client.callTool<LinkedSend>("t3_thread_send", { environmentId, threadId, message, mode: queuesBehindCard ? "queue" : mode, clientRequestId: `hedge-thread-send:${randomUUID()}` });
   return { threadId: sent.threadId, messageId: sent.messageId, delivery: sent.delivery };
+}
+
+async function linkedMayWaitOnCard(client: Pick<T3HttpClient, "callTool">, environmentId: string, threadId: string): Promise<boolean> {
+  const detail = await readLinkedThread(client, environmentId, { threadId, limit: 1, maxCharsPerItem: 1 }).catch(() => undefined);
+  return detail?.thread?.pendingRequestCount !== 0;
 }
 
 async function pages<T>(tool: string, read: (cursor: number | null) => Promise<{ items: T[]; nextCursor: number | null }>): Promise<T[]> {

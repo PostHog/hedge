@@ -7,8 +7,8 @@
 - `hedge thread send` no longer turns `auto` into `queue` when the target
   thread waits on a question card or an approval, on this machine or a linked
   one. It passes `auto` to T3, which steers where the provider takes a steer
-  and queues otherwise. A slash command, such as `/goal`, still goes out as
-  `queue`. On Claude and Codex the card stays open, and the
+  and queues otherwise. A slash command, such as `/goal`, to a thread that
+  waits on a card still goes out as `queue`. On Claude and Codex the card stays open, and the
   agent reads the message once the person answers.
 - The `question-guard` workflow no longer turns back a `t3_thread_send` to a
   thread that waits on a card. The prose-title card check stays.

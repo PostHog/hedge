@@ -185,6 +185,29 @@ test.each([["this-box", "mcp:local-card"], ["devbox-2", "mcp:linked-card"]])("he
   expect(JSON.parse(output)).toMatchObject({ threadId: id, delivery: "queued" });
 });
 
+test.each([["this-box", "mcp:local-busy"], ["devbox-2", "mcp:linked-busy"]])("hedge thread send leaves auto to T3 for a slash command to a running turn without a card on %s", async (host, id) => {
+  const t3 = await stub(fixture([writable]));
+
+  await thread(t3, ["send", "--host", host, id, "/goal Continue the migration"]);
+
+  expect(sends(t3)).toEqual([expect.objectContaining({ threadId: id, mode: "auto" })]);
+});
+
+test("hedge thread send queues a slash command on a linked thread when checking pending requests fails", async () => {
+  const base = fixture([writable]);
+  const t3 = await stub({
+    ...base,
+    tools(name, args) {
+      if (name === "t3_thread_read") throw new ToolRefusal("orchestration_error", "timeout");
+      return base.tools!(name, args);
+    },
+  });
+
+  await thread(t3, ["send", "--host", "devbox-2", "mcp:linked-busy", "/goal Continue the migration"]);
+
+  expect(sends(t3)).toEqual([expect.objectContaining({ threadId: "mcp:linked-busy", mode: "queue" })]);
+});
+
 test("hedge thread send steers a message that starts with a path, as T3 reads it as text", async () => {
   const t3 = await stub(fixture([linkedEnvironment], linkedThreads, [localCard]));
 

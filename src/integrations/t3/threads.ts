@@ -73,17 +73,16 @@ export const sendModes = ["auto", "queue", "steer", "restart"] as const;
 export type SendMode = (typeof sendModes)[number];
 export type SentMessage = { threadId: string; messageId: string; delivery: "started" | "queued" | "steered" | "restarted" };
 
-// T3's own test for a message that only runs a slash command, such as `/goal`, not a path like `/src/a.ts`.
-const slashCommand = /^\/[\w:-]+(?:\s|$)/u;
+const slashCommandOnly = /^\/[\w:-]+(?:\s|$)/u;
 
-/** `auto` queues a slash command: T3 runs some, such as `/goal`, at once and stops the turn and its card. */
-export function deliveryMode(mode: SendMode, text: string): SendMode {
-  return mode === "auto" && slashCommand.test(text.trim()) ? "queue" : mode;
+export function isSlashCommand(text: string): boolean {
+  return slashCommandOnly.test(text.trim());
 }
 
 export async function sendMessage(client: Pick<T3HttpClient, "callTool">, thread: ShellThread, text: string, mode: SendMode = "auto"): Promise<SentMessage> {
   if (thread.archivedAt) throw new Error(`Thread ${thread.id} is archived. Unarchive it before you send it a message.`);
-  const sent = await client.callTool<SentMessage>("t3_thread_send", { threadId: thread.id, message: text, mode: deliveryMode(mode, text), clientRequestId: `hedge-thread-send:${randomUUID()}` });
+  const queuesBehindCard = mode === "auto" && Boolean(thread.activeRunId && thread.pendingRuntimeRequest) && isSlashCommand(text);
+  const sent = await client.callTool<SentMessage>("t3_thread_send", { threadId: thread.id, message: text, mode: queuesBehindCard ? "queue" : mode, clientRequestId: `hedge-thread-send:${randomUUID()}` });
   return { threadId: sent.threadId, messageId: sent.messageId, delivery: sent.delivery };
 }
 
