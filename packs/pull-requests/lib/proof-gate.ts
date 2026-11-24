@@ -5,13 +5,13 @@ import { modelFor, type ModelRow } from "../../base/lib/models.ts";
 import { numberSetting } from "../../base/lib/settings.ts";
 import { covers, hubLedger, refText, riskCalloutOf, tierOf, type Env, type Ledger, type PrRef, type Ssh } from "./decision-ledger.ts";
 import { ciOf, readPullRequest, type PullRequest, type Run } from "./pr-ci.ts";
-import { askGap, authorOf, readOneWayStop, ciRunningCode, conditionName, isStandingCondition, judgeDirectory, judgeGap, judgeGapProof, listStanding, parseVerdict, prDirectory, proofGate, pullRequestDirectory, readDecisions, readJson, receiptOf, reviewRecords, withBrokenConditions, writeJson, type Arbiter, type Decisions, type JudgeSummary, type ProofIdentity, type ProofSummary, type PushedHead } from "./proof.ts";
+import { askGap, authorOf, ciRunningCode, conditionName, isStandingCondition, judgeDirectory, judgeGap, judgeGapProof, listStanding, parseVerdict, prDirectory, proofGate, pullRequestDirectory, readDecisions, readJson, receiptOf, reviewRecords, withBrokenConditions, writeJson, type Arbiter, type Decisions, type JudgeSummary, type ProofIdentity, type ProofSummary, type PushedHead } from "./proof.ts";
 import { displayEntry } from "./proof-display.ts";
 import { receiptMarker } from "./proof-receipt.ts";
 import { baseRefs, cleanBaseMerge, devPullOf, diffOf, mergeBase, pullRequestDetails, remotesOf, topLevel } from "./proof-checkout.ts";
 import { quietCommitIn } from "./proof-delta.ts";
 import { isCommitSha, measureGrowth, type Growth } from "./proof-end-table.ts";
-import { autonomyOf } from "./proof-autonomy.ts";
+import { autonomyOf, decidesAll } from "./proof-autonomy.ts";
 import { readSanity } from "./proof-sanity.ts";
 import { inputsDigest, readBloat } from "./proof-bloat.ts";
 import { judge, readCriticalPaths, type JudgeInput } from "./proof-judge.ts";
@@ -65,7 +65,7 @@ export async function finalGate(head: ProofIdentity, context: JudgingContext, { 
   const files = await proofFiles(home, head);
   const checked = await proofGate(home, head, {
     landed, cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)), ci: () => ciOf(home, head, run, now?.() ?? new Date(), env),
-    pushedHead, ledger: hubLedger(home, env, ssh), now: now?.(), devPull: devPullOf(run),
+    pushedHead, ledger: hubLedger(home, env, ssh), now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env),
   });
   const judged: Judged = checked.code === 0 ? await judgeHead(head, checked, context) : { code: checked.code, lines: [], covered: "", judge: { state: "skipped", lines: [] }, reason: checked.failure };
   const shown = pull === undefined ? undefined : receiptMarker((pull as PullRequest).body);
@@ -118,7 +118,7 @@ export async function currentSummary(ref: PrRef, pull: PullRequest, ledger: Ledg
     landed: pull.state === "merged", cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)),
     ci: () => ciOf(home, head, run, now?.() ?? new Date(), env),
     pushedHead: pushedHeadOf(head, run, (read) => { readAsSaved &&= JSON.stringify(keyOf(read, saved.key.landed, saved.key.fingerprint)) === JSON.stringify(saved.key); }),
-    ledger, now: now?.(), devPull: devPullOf(run),
+    ledger, now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env),
   });
   const judged = readAsSaved && JSON.stringify(live.conditions) === JSON.stringify(saved.conditions) && live.proofSummary.ci.line === saved.gate.summary.ci.line && JSON.stringify(live.proofSummary.ci.checks) === JSON.stringify(saved.gate.summary.ci.checks);
   const receipt = await receiptOf(home, ref);
@@ -131,7 +131,7 @@ export async function receiptSummary(head: ProofIdentity, pull: PullRequest, led
   const { home, env, run, now } = context;
   const live = await proofGate(home, head, {
     landed: pull.state === "merged", cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)),
-    ci: () => ciOf(home, head, run, now?.() ?? new Date(), env), pushedHead: pushedHeadOf(head, run), ledger, now: now?.(), devPull: devPullOf(run),
+    ci: () => ciOf(home, head, run, now?.() ?? new Date(), env), pushedHead: pushedHeadOf(head, run), ledger, now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env),
   });
   return { summary: { ...live.proofSummary, code: live.code, judge: { state: "skipped", lines: [] } }, gated: false };
 }
@@ -149,13 +149,12 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
   const row = reviewerRow(author, env);
   const riskRubric = await readRiskRubric(home);
   const today = now?.() ?? new Date();
-  const weighedGap = await judgeGap(home, head, today, checked.decisions, checked.tier);
+  const weighedGap = await judgeGap(home, head, today, checked.decisions, checked.tier, decidesAll(env));
   const known = {
     risk: riskRubric === undefined ? undefined : { rubric: riskRubric, body: pullRequestDetails(head, run).body },
     commit: head.commit, crossFamily: otherFamily(row, author), ci: checked.ci, owed: checked.owed!, ledger: checked.lines,
     evidence: checked.evidence, reviews: await reviewRecords(home, head), rubric: await readRubric(home), references: skillReferences(home),
     conditions: [...checked.conditions, ...weighedGap?.condition ? [weighedGap.condition] : []], criticalPaths: await readCriticalPaths(home, head.repository, env),
-    oneWayStop: (await readOneWayStop(home, head))?.commit,
   };
   const outcome = await judgeDiff(head, known, row, context);
   const verdict = (lines: string[], gap?: JudgeSummary["gap"]): JudgeSummary => ({ state: outcome.state, model: outcome.model, ...gap ? { gap } : {}, lines });
@@ -184,8 +183,8 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
     const lines = [...outcome.lines, `judge gap: ${gap.line}: ${gap.reason}. ${gap.broken ? endBroken(gap.broken) : askGap(head, "judge", gap.reason, gap.kept ? "ask" : autonomyOf(context.env, () => checked.grade, "proof-gap", ["judge"]))}`];
     return { code: 3, lines, covered: "", judge: verdict(lines, judgeGapProof(head.commit, gap)), reason: `judge gap: ${gap.line}: ${gap.reason}` };
   }
-  const hint = checked.tier === "ungraded" || checked.grade.oneWay
-    ? `judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and ask the user; an agent never decides on ${checked.tier === "ungraded" ? "an ungraded PR" : "a one-way door"}`
+  const hint = checked.tier === "ungraded"
+    ? `judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why>, then grade the PR with merge-risk before you decide it: an agent never decides on an ungraded PR`
     : `judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and decide it with hedge decision record --mark 🤖 --class proof-gap --kind judge --pr ${refText(head)} --question <q> --answer <a> --rejected <option> --reason <why>, or ask the user`;
   const lines = [...outcome.lines, hint];
   return { code: 1, lines, covered: "", judge: verdict(lines), reason };

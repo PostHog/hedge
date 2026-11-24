@@ -248,7 +248,8 @@ export const processGapKinds = ["judge", "post-deploy-watch"];
 const processClasses: AskClass[] = ["review", "status"];
 export const panelRefusal = "a panel gap is the user's to accept";
 
-export function agentRefusal(tier: Tier, decisionClass: AskClass, kinds: string[] = []) {
+export function agentRefusal(tier: Tier, decisionClass: AskClass, kinds: string[] = [], decidesAll = false) {
+  if (decidesAll) return tier === "ungraded" ? "ungraded" : undefined;
   if (decisionClass === "proof-gap" && kinds.includes("panel")) return "panel";
   if (tier === "ungraded") return "ungraded";
   const process = processClasses.includes(decisionClass) || (decisionClass === "proof-gap" && kinds.length > 0 && kinds.every((kind) => processGapKinds.includes(kind)));

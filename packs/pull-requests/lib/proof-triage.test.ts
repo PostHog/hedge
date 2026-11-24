@@ -192,6 +192,23 @@ test("with triage on, a treated pull request on the standard path gets a hard bu
   expect((await pr.hedge(...third, "--override", `2026-10-25 "Run one more round"`)).code).toBe(0);
 });
 
+test("on end, the agent's own reason runs up to three reads past a spent treated budget, and then the budget holds", async () => {
+  const pr = await budgeted("on", graded("non-critical", "medium"));
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...JSON.parse(pr.env.HEDGE_SETTINGS!), "pull-requests.autonomy": "end" });
+  await firstLine(pr, "--single");
+  expect((await readAgain(pr, "1")).code).toBe(0);
+
+  const spent = await readAgain(pr, "final-1").then(() => "", (error: Error) => error.message);
+  expect(spent).toContain("The review budget of 2 reviews is spent, and no read checks the production changes since");
+  expect(spent).toContain("Decide yourself whether one more read is worth it: run this command again with --agent '<your reason>'. You may run 3 more reads past the budget this way");
+  expect(spent).not.toContain("--override");
+  const again = async () => pr.hedge("review", "--scope", "final", "--base", await latestReviewed(pr), "--agent", "The last fix changed the greeting.");
+  expect((await again()).code).toBe(0);
+  for (const answered of ["final-2", "final-3"]) expect((await readAgain(pr, answered, "--agent", "The last fix changed the greeting.")).code).toBe(0);
+
+  await expect(readAgain(pr, "final-4", "--agent", "The last fix changed the greeting.")).rejects.toThrow("The agent's 3 reads past the budget are spent too: ask the user nothing about another read");
+});
+
 test("a treated pull request on the strict path gets three reads", async () => {
   const pr = await budgeted("on", graded("critical (b)", "high"));
   expect(await firstLine(pr, "--single")).toMatchObject({ budget: 3, triage: { path: "strict" } });
