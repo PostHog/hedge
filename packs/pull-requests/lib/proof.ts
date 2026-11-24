@@ -160,7 +160,7 @@ function finalReadPhase(value: string): FinalReadPhase {
 }
 
 type Spending = "unfinished spends" | "finished only";
-type Spent = { spent: number; names: string[]; reservations: string[]; finished: string[]; round?: number; counted?: string[] };
+type Spent = { spent: number; names: string[]; reservations: string[]; finished: string[]; stopped: boolean; round?: number; counted?: string[] };
 type ReservedAs = { reservationId?: string; startedAt?: string; commit?: string; scope?: string; phase?: FinalReadPhase };
 const reservationOf = ({ reservationId, startedAt, commit, scope, phase }: ReservedAs) => JSON.stringify([reservationId, startedAt, commit, scope, phase]);
 
@@ -178,10 +178,11 @@ async function reviewsSpent(reviews: string, phase: FinalReadPhase, spending: Sp
     return { name, reservation: reservationOf(round), finished: findings !== undefined, spends: (round.phase ?? "review") === phase && leadsToFixes };
   }));
   const present = rounds.filter((round) => round !== undefined).sort((a, b) => a.name.localeCompare(b.name));
-  return { spent: present.filter(({ spends }) => spends).length, names: present.map(({ name }) => name), reservations: present.map(({ reservation }) => reservation), finished: present.filter(({ finished }) => finished).map(({ name }) => name) };
+  const stopped = await readJson<OneWayStop | undefined>(join(reviews, oneWayStopFile), undefined) !== undefined;
+  return { stopped, spent: present.filter(({ spends }) => spends).length, names: present.map(({ name }) => name), reservations: present.map(({ reservation }) => reservation), finished: present.filter(({ finished }) => finished).map(({ name }) => name) };
 }
 
-const budgetState = ({ spent, names, reservations, finished, round, counted }: Spent) => JSON.stringify([spent, names, reservations, finished, round, counted]);
+const budgetState = ({ spent, names, reservations, finished, stopped, round, counted }: Spent) => JSON.stringify([spent, names, reservations, finished, stopped, round, counted]);
 
 async function reserveWeighed<T extends Spent>(reviews: string, lockBudget: LockBudget, snapshot: () => Promise<T>, permit: (weighed: T) => Promise<ArbiterVerdict | undefined>, reserveIt: (weighed: T, verdict: ArbiterVerdict | undefined) => Promise<Reserved>) {
   const before = await lockBudget(reviews, snapshot);
@@ -267,7 +268,8 @@ export const runOption = "Run one more round";
 export const stopOption = "Stop here";
 
 export type OneWayStop = { commit: string; reason: string; at: string };
-const oneWayStopPath = (home: string, identity: ProofIdentity) => join(pullRequestDirectory(home, identity), "reviews", "one-way-stop.json");
+const oneWayStopFile = "one-way-stop.json";
+const oneWayStopPath = (home: string, identity: ProofIdentity) => join(pullRequestDirectory(home, identity), "reviews", oneWayStopFile);
 export const readOneWayStop = (home: string, identity: ProofIdentity) => readJson<OneWayStop | undefined>(oneWayStopPath(home, identity), undefined);
 
 async function oneWayStop(home: string, identity: ProofIdentity, onHistory: OnHistory | undefined) {

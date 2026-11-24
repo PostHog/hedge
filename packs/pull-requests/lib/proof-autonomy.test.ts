@@ -108,15 +108,37 @@ test("a finding is answered known after the one-way stop, and not before it", as
   expect((await pr.hedge("respond", "--round", "2", "responses.md")).code).toBe(0);
 });
 
-test("the stop names the latest review as the start of the fixes to revert, and the end table names the commit it stopped at", async () => {
-  const pr = await checkout();
+async function stoppedAfterFix(pr: Checkout) {
   const third = await stoppedOneWay(pr);
   const reviewed = (await pr.git("rev-parse", "HEAD")).slice(0, 7);
   const stopped = (await pr.commit("feature.txt", "newer\n")).slice(0, 7);
-  await expect(pr.hedge(...third)).rejects.toThrow(`Revert each commit of the PR since ${reviewed} that changes production code`);
+  return { third, reviewed, stopped, stop: pr.hedge(...third).then(() => "", (error: Error) => error.message) };
+}
+
+test("the stop names the latest review as the start of the fixes to revert", async () => {
+  const pr = await checkout();
+  const { reviewed, stop } = await stoppedAfterFix(pr);
+
+  expect(await stop).toContain(`Revert each commit of the PR since ${reviewed} that changes production code`);
+});
+
+test("the end table names the commit the loop stopped at", async () => {
+  const pr = await checkout();
+  const { stopped, stop } = await stoppedAfterFix(pr);
+  await stop;
   await pr.hedge("gate");
 
   expect((await pr.decide("report", "--pr", "example/product#42")).output).toContain(`| example/product#42 | 2 rounds; stopped at an escalation on a one-way door at ${stopped} |`);
+});
+
+test("a stop saved by another call while this one weighs the budget refuses this round", async () => {
+  const pr = await checkout();
+  const third = await stoppedOneWay(pr);
+  const stopFile = join(pr.pullRequest, "reviews", "one-way-stop.json");
+  pr.env.HEDGE_REVIEW_ARBITER = `cat >/dev/null; echo '{"commit":"${await pr.git("rev-parse", "HEAD")}","reason":"Another call escalated","at":"2026-10-25T12:00:00.000Z"}' > '${stopFile}'; echo CONTINUE`;
+
+  await expect(pr.hedge(...third)).rejects.toThrow("changed while this one weighed the budget");
+  await expect(pr.hedge(...third)).rejects.toThrow("The review loop stopped at an escalation on a one-way door: Another call escalated");
 });
 
 test("on ask, a one-way door still asks the user about an escalated round, and a known answer waits for the budget", async () => {
