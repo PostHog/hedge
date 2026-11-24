@@ -71,6 +71,26 @@ test("on ask, an escalated round asks the user as before", async () => {
   await expect(pr.hedge(...third)).rejects.toThrow("Ask the user with your question tool");
 });
 
+test("on end, fixes rounds past the budget take the agent's three reads, and then the budget holds", async () => {
+  const pr = await checkout();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.reviewCeiling": 2, "pull-requests.autonomy": "end" });
+  pr.pullRequestState({ body: graded("non-critical", "medium") });
+  let reviewed = await pr.commit("feature.txt", "new\n");
+  await pr.hedge("review-start", "--scope", "full");
+  await finishRound(pr, "1");
+  pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo CONTINUE";
+  const fixesRound = async (round: number, ...args: string[]) => {
+    const head = await pr.commit("feature.txt", `fix ${round}\n`);
+    await pr.hedge("review-start", "--scope", "fixes", "--base", reviewed, ...args);
+    await finishRound(pr, String(round));
+    reviewed = head;
+  };
+  await fixesRound(2);
+
+  for (const round of [3, 4, 5]) await fixesRound(round, "--agent", "The last fix changed the greeting.");
+  await expect(fixesRound(6, "--agent", "The last fix changed the greeting.")).rejects.toThrow("The agent's 3 reads past the budget are spent too");
+});
+
 test("on end, a gap prints the agent's own decision, and the ledger takes it", async () => {
   const pr = await checkout();
   decideAtEnd(pr);
