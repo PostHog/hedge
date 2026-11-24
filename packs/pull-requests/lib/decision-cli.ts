@@ -5,7 +5,7 @@ import { readPullRequest, runIn } from "./pr-ci.ts";
 import { gapKind, refuseInstructionQuote, usedAnswer } from "./proof.ts";
 import { decidesAll } from "./proof-autonomy.ts";
 import {
-  agentRefusal, answerUse, askClasses, gateOverride, mergeCardChoice, mergeCardCondition, overrideChoice, brakeDays, brakeOf, covers, decisionLine, fold, hubLedger, HubUnreachable, isUsers, liftCounted, live, messageKey, namesKind, namesPr, panelRefusal, prRef, refText, thisMachine, tierOf,
+  agentRefusal, answerUse, askClasses, gateOverride, mergeCardChoice, mergeCardCondition, namesHead, overrideChoice, brakeDays, brakeOf, covers, decisionLine, fold, hubLedger, HubUnreachable, isUsers, liftCounted, live, messageKey, namesKind, namesPr, panelRefusal, prRef, refText, thisMachine, tierOf,
   type AnswerUse, type AskClass, type Decision, type DecisionState, type Env, type Ledger, type LedgerEvent, type Lift, type PrRef, type Reversal, type Ssh, type UsersMark,
 } from "./decision-ledger.ts";
 
@@ -165,7 +165,7 @@ function fitsMergeCard(scope: Scope): ((heard: HeardAnswer) => void) | undefined
   const head = mergeCardHead(scope);
   if (!head) return undefined;
   return (heard) => {
-    if (!heard.answered.includes(head)) throw new Error(`The question the user answered does not name the head ${head}. A merge card covers only the head its question named; ask them again with the full head sha. The question: ${heard.answered}`);
+    if (!namesHead(heard.answered, head)) throw new Error(`The question the user answered does not name the head ${head}. A merge card covers only the head its question named; ask them again with the full head sha. The question: ${heard.answered}`);
     if (![mergeCardChoice, `${mergeCardChoice} (Recommended)`].map(normalized).includes(normalized(heard.words))) throw new Error(`The user chose "${heard.words}", not "${mergeCardChoice}". The merge stays held`);
   };
 }

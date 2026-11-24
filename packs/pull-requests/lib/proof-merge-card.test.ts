@@ -111,5 +111,9 @@ test("a gate pass that read a gap the agent accepted, and did not rely on it, me
   const head = await pr.git("rev-parse", "HEAD");
   expect((await pr.hedge("gate")).code).toBe(0);
   const github = { pull: async () => ({ head, base: "main", defaultBranch: "main", open: true }), pullFor: async () => undefined };
-  expect(await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home: pr.home, env: { HEDGE_SETTINGS: pr.env.HEDGE_SETTINGS }, github })).toBeUndefined();
+  const merge = () => mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home: pr.home, env: { HEDGE_SETTINGS: pr.env.HEDGE_SETTINGS }, github });
+  expect(await merge()).toBeUndefined();
+  const ledger = join(pr.home, ".local/state/hedge/decisions.jsonl");
+  writeFileSync(ledger, readFileSync(ledger, "utf8").split("\n").filter((line) => !line.includes('"type":"gate"')).join("\n"));
+  expect(await merge()).toBeUndefined();
 });

@@ -386,6 +386,9 @@ describe("the PreToolUse hook", () => {
     expect(await merge([agentGap("own/tooling"), word('"Merge"')])).toBeUndefined();
     expect(await merge([agentGap("own/tooling"), word("Keep it open")])).toBeDefined();
     expect(await merge([agentGap("own/tooling"), word("Merge", "d-other")])).toBeDefined();
+    const mistyped = word("Merge");
+    if (mistyped.type === "decide") mistyped.decision.question = `Merge own/tooling#9 at ${head}0? An agent accepted d-agent.`;
+    expect(await merge([agentGap("own/tooling"), mistyped])).toBeDefined();
     const incident: LedgerEvent = { type: "decide", decision: { id: "o-incident", at: "2026-11-16T09:00:00Z", class: "merge", mark: "👤", question: `Override the gate for own/tooling#9 at ${head}?`, answer: '2026-11-16 "Override the gate"', scope: { prs: ["own/tooling#9"], kinds: ["gate-override"], condition: `${head}: incident fix, the judge is down` }, where: { thread: "t", message: "m-o", machine: "hub" } } };
     expect(await merge([agentGap("own/tooling"), incident])).toBeUndefined();
   });

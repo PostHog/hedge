@@ -31,6 +31,7 @@ export const gateOverride = "gate-override";
 export const overrideChoice = "Override the gate";
 export const mergeCardChoice = "Merge";
 export const mergeCardCondition = (head: string) => `${head}: merge card`;
+export const namesHead = (text: string, head: string) => new RegExp(`(?<![0-9a-f])${head}(?![0-9a-f])`, "i").test(text);
 
 export { HubUnreachable, type Env, type Ssh, type SshResult };
 
