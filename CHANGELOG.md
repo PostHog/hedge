@@ -11,11 +11,20 @@
   an ungraded pull request and a gap the user keeps owed stay with the user.
 - A one-way door no longer stops the review loop at an escalation: it goes to
   the agent like any other round. This replaces the stop from the previous
-  release; a saved `one-way-stop.json` is ignored.
+  release. A saved `one-way-stop.json` is ignored on `ask` too, so on `ask` an
+  escalation on a one-way door goes to the user again, as before that release.
 - At the review budget, a treated budget included, `--agent` runs up to 3 more
-  reads past it, one 🤖 review decision each. After them, hedge stops the loop
-  and tells the agent to ask the user nothing about another read.
-- On `ask`, the default, nothing changes.
+  reads past it, one 🤖 review decision each, even when a read finds nothing.
+  After them, hedge stops the loop and tells the agent to ask the user nothing
+  about another read. Only review and proof-gap asks go to the agent: on a
+  critical pull request, design, scope, deploy, secret and merge asks stay
+  with the user.
+- When the judge's arbiter stops the retries, the gate tells the agent to
+  record a judge gap and decide it alone.
+- A gate pass saved on `end` marks itself, in the local run and in the shared
+  ledger. Once the profile is back on `ask`, the merge-gate hook does not count
+  it: run `hedge proof gate` again.
+- Otherwise, on `ask`, the default, nothing changes.
 
 ### A hard read budget for treated pull requests
 

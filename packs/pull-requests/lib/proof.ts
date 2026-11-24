@@ -33,7 +33,7 @@ export function proofDirectory(home: string, identity: ProofIdentity) {
   return join(pullRequestDirectory(home, identity), identity.commit);
 }
 
-export type GateRecord = { code: number; reason: string };
+export type GateRecord = { code: number; reason: string; onEnd?: true };
 
 export const gateRunDirectory = (home: string, identity: ProofIdentity) =>
   join(pullRequestDirectory(home, { ...identity, repository: identity.repository.toLowerCase() }), "gate-record", identity.commit);
@@ -64,16 +64,16 @@ export async function startGateRun(home: string, identity: ProofIdentity, starte
   }
 }
 
-export type GateResult = { passed: boolean; at: number };
+export type GateResult = { passed: boolean; at: number; onEnd?: true };
 
 export const latestGateResult = (results: GateResult[]) => results.toSorted((a, b) => a.at - b.at || Number(b.passed) - Number(a.passed)).at(-1);
 
 export async function lastGateResult(home: string, identity: ProofIdentity): Promise<GateResult | undefined> {
   const directory = gateRunDirectory(home, identity);
   const results = await Promise.all((await gateRunNames(directory)).map(async (name) => {
-    const { code, startedAt } = (await readJson<{ code?: unknown; startedAt?: unknown } | null>(join(directory, name), null)) ?? {};
+    const { code, startedAt, onEnd } = (await readJson<{ code?: unknown; startedAt?: unknown; onEnd?: unknown } | null>(join(directory, name), null)) ?? {};
     const at = typeof startedAt === "string" ? Date.parse(startedAt) : Number.NaN;
-    return Number.isNaN(at) ? { passed: false, at: -Infinity } : { passed: code === 0, at };
+    return Number.isNaN(at) ? { passed: false, at: -Infinity } : { passed: code === 0, at, ...onEnd === true ? { onEnd: true as const } : {} };
   }));
   return latestGateResult(results);
 }

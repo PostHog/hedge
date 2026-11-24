@@ -99,6 +99,28 @@ test("a gate run that throws after a pass at the same head is shared, so another
   } finally { rmSync(other, { recursive: true, force: true }); }
 });
 
+test("a gate pass from while autonomy was end lets a merge through only while it is still end, here and on another machine", async () => {
+  const pr = await checkout();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...JSON.parse(pr.env.HEDGE_SETTINGS ?? "{}"), "pull-requests.autonomy": "end" });
+  await pr.commit("feature.txt", "new\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "docs only");
+  const head = await pr.git("rev-parse", "HEAD");
+  const github = { pull: async () => ({ head, base: "main", defaultBranch: "main", open: true }), pullFor: async () => undefined };
+  const mergeOn = (home: string, autonomy: string) => mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home, env: { HEDGE_SETTINGS: JSON.stringify({ "pull-requests.autonomy": autonomy }) }, github });
+  const other = join(tmpdir(), `merge-gate-end-${process.pid}-${Date.now()}`);
+  mkdirSync(join(other, ".local/state/hedge"), { recursive: true });
+  try {
+    expect((await pr.hedge("gate")).code).toBe(0);
+    expect(events(pr.home).filter((event) => event.type === "gate").at(-1)).toEqual(expect.objectContaining({ passed: true, onEnd: true }));
+    writeFileSync(join(other, ".local/state/hedge/decisions.jsonl"), readFileSync(ledgerFile(pr.home), "utf8"));
+    for (const home of [pr.home, other]) {
+      expect(await mergeOn(home, "end")).toBeUndefined();
+      expect((await mergeOn(home, "ask"))?.hookSpecificOutput.permissionDecisionReason).toContain("nor a pass from while pull-requests.autonomy was end once it is ask again");
+    }
+  } finally { rmSync(other, { recursive: true, force: true }); }
+});
+
 test("a gate result in the ledger carries the time its run started, the order the gate runs on this machine keep", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "new\n");

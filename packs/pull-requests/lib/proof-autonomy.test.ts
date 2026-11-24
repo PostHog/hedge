@@ -71,7 +71,7 @@ test("on ask, an escalated round asks the user as before", async () => {
   await expect(pr.hedge(...third)).rejects.toThrow("Ask the user with your question tool");
 });
 
-test("on end, fixes rounds past the budget take the agent's three reads, and then the budget holds", async () => {
+test("on end, fixes rounds and final reads past the budget share the agent's three reads, and then the budget holds", async () => {
   const pr = await checkout();
   pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.reviewCeiling": 2, "pull-requests.autonomy": "end" });
   pr.pullRequestState({ body: graded("non-critical", "medium") });
@@ -87,8 +87,11 @@ test("on end, fixes rounds past the budget take the agent's three reads, and the
   };
   await fixesRound(2);
 
-  for (const round of [3, 4, 5]) await fixesRound(round, "--agent", "The last fix changed the greeting.");
-  await expect(fixesRound(6, "--agent", "The last fix changed the greeting.")).rejects.toThrow("The agent's 3 reads past the budget are spent too");
+  for (const round of [3, 4]) await fixesRound(round, "--agent", "The last fix changed the greeting.");
+  await pr.commit("feature.txt", "fix final\n");
+  expect((await pr.hedge("review-start", "--scope", "final", "--base", reviewed, "--agent", "The last fix changed the greeting.")).code).toBe(0);
+  await finishRound(pr, "final-1");
+  await expect(fixesRound(5, "--agent", "The last fix changed the greeting.")).rejects.toThrow("The agent's 3 reads past the budget are spent too");
 });
 
 test("on end, a gap prints the agent's own decision, and the ledger takes it", async () => {
@@ -196,6 +199,26 @@ test("on end, the agent still decides no design ask alone on a critical PR", asy
   await pr.commit("feature.txt", "new\n");
 
   await expect(pr.decide("record", "--mark", "🤖", "--class", "design", "--pr", "example/product#42", "--question", "Keep the greeting short?", "--answer", "Keep it short", "--rejected", "Make it long", "--reason", "Short reads better")).rejects.toThrow("example/product#42 is critical at HEAD: an agent decides only process there");
+});
+
+test("on end, a judge the arbiter stops tells the agent to decide the judge gap alone", async () => {
+  const pr = await checkout();
+  decideAtEnd(pr);
+  pr.pullRequestState({ body: graded("non-critical") });
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  fakeModel(pr, "JUDGE", verdict({ owed: { verdict: "fail", reason: "feature.txt is code, not docs", citations: ["feature.txt"] } }));
+  pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo 'ESCALATE: The judge failed the owed kinds three times.'";
+  for (const answer of ["First answer.", "Second answer.", "Third answer."]) {
+    writeFileSync(join(pr.repository, "responses.md"), `${answer}\n`);
+    await pr.hedge("respond", "--round", "1", "responses.md");
+    await pr.hedge("gate").catch(() => undefined);
+  }
+
+  const gate = (await pr.hedge("gate")).output;
+  expect(gate).toContain("judge: the arbiter stops the retries: The judge failed the owed kinds three times. First record hedge proof gap --kind judge --reason <why>, then decide the gap yourself");
+  expect(gate).not.toContain("escalate to the user");
 });
 
 test("on end, the printed decision command quotes a gap reason so the shell passes it whole", async () => {

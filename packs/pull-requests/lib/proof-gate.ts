@@ -198,7 +198,7 @@ async function judgeDiff(head: ProofIdentity, known: Omit<JudgeInput, "cwd" | "f
   const directory = judgeDirectory(home, head);
   return judge({ ...known, cwd: topLevel(run) ?? cwd, from, diff: diffOf(from, known.commit, run) }, {
     ask: (request) => askModel("judge", row, request, env, reviewLimit(env)), model: modelLabel("judge", row, env), arbiter: arbiterOf(context),
-    directory, commit: known.commit, now: now?.() ?? new Date(), failLimit: numberSetting("pull-requests.reviewCeiling", env),
+    directory, commit: known.commit, now: now?.() ?? new Date(), failLimit: numberSetting("pull-requests.reviewCeiling", env), decidesAll: decidesAll(env),
     serialize: async (step) => { await mkdir(directory, { recursive: true, mode: 0o700 }); return withRoundLock(directory, await lock(), step); },
   });
 }

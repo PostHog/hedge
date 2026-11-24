@@ -203,7 +203,7 @@ const failureReasons = (verdict: Verdict) => [
 ];
 
 export type JudgeRecord = { commit: string; model: string; verdict: Verdict; passed: boolean; escalation?: string; judgedAt: string };
-export type JudgeDeps = { ask: (request: ModelRequest) => Promise<ModelAnswer>; model: string; arbiter: Arbiter; directory: string; commit: string; now: Date; failLimit: number; serialize: <T>(step: () => Promise<T>) => Promise<T> };
+export type JudgeDeps = { ask: (request: ModelRequest) => Promise<ModelAnswer>; model: string; arbiter: Arbiter; directory: string; commit: string; now: Date; failLimit: number; decidesAll?: boolean; serialize: <T>(step: () => Promise<T>) => Promise<T> };
 export type JudgeOutcome = { state: "pass" | "fail" | "unavailable"; lines: string[]; model: string; broken: string[]; held?: true; unchecked?: string[] };
 
 const freeJudgeFails = 2;
@@ -240,7 +240,9 @@ export async function judge(input: JudgeInput, deps: JudgeDeps): Promise<JudgeOu
     return { state: "fail", lines: [judgeBudgetSpent(record.spent, unchecked)], model: deps.model, broken: [], unchecked };
   }
   if ("cause" in record) return { state: "unavailable", lines: [`judge: unavailable (${record.cause})`], model: deps.model, broken: [], ...record.held ? { held: true } : {} };
-  const escalation = record.escalation ? [`judge: escalate to the user: ${record.escalation}. First record hedge proof gap --kind judge --reason <why>, then ask them the question it prints with the question tool. When they accept, record their answer with hedge decision record --mark 👤 --class proof-gap --kind judge --pr <owner/repo#n>`] : [];
+  const escalation = !record.escalation ? []
+    : deps.decidesAll ? [`judge: the arbiter stops the retries: ${record.escalation}. First record hedge proof gap --kind judge --reason <why>, then decide the gap yourself with the hedge decision record --mark 🤖 command it prints`]
+    : [`judge: escalate to the user: ${record.escalation}. First record hedge proof gap --kind judge --reason <why>, then ask them the question it prints with the question tool. When they accept, record their answer with hedge decision record --mark 👤 --class proof-gap --kind judge --pr <owner/repo#n>`];
   return { state: record.passed ? "pass" : "fail", lines: [...verdictLines(record.verdict), ...escalation], model: record.model, broken: brokenConditions(record.verdict, input.conditions) };
 }
 

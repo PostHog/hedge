@@ -5,7 +5,7 @@ import { basename, join, resolve } from "node:path";
 import { askGap, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity } from "./proof.ts";
 import { AnswerTaken, appendOnce, decideAlone, hearUser, ledgerHolds, ledgerOf } from "./decision-cli.ts";
 import { HubUnreachable, keptOwed, refText, usersAcceptance, thisMachine, type Decision, type Ssh } from "./decision-ledger.ts";
-import { autonomyOf, gradeOf, type Autonomy, type Grade } from "./proof-autonomy.ts";
+import { autonomyOf, decidesAll, gradeOf, type Autonomy, type Grade } from "./proof-autonomy.ts";
 import { ciOf, readComment, readPullRequest, runIn } from "./pr-ci.ts";
 import { isCommitSha } from "./proof-end-table.ts";
 import { askModel, family, isQuotaExhausted, otherFamily, modelLabel, quotaExitCode, readRubric, reviewerRow, sessionFamily, skillReferences, type Family } from "./proof-models.ts";
@@ -505,7 +505,7 @@ code and the reason. The gate's lines and hedge decision report come from the sa
         gate = await gateHead();
         if (gate.code === ciRunningCode && wait) unshared = await shareGateResult(head, false, clock(), context);
         if (gate.code === ciRunningCode && wait && !unshared?.failed) {
-          await record({ code: gate.code, reason: gate.reason });
+          await record({ code: gate.code, reason: gate.reason, ...ranOnEnd(context) });
           waited = await untilCiFinishes(head, context, wait);
           gatedAt = clock();
           gate = await gateHead();
@@ -522,7 +522,7 @@ code and the reason. The gate's lines and hedge decision report come from the sa
         const reason = `${gate.reason}. --wait did not wait: the decision ledger did not take the failure (${unshared.error})`;
         gate = { ...gate, code: 1, reason, summary: { ...gate.summary, code: 1 }, verdict: `gate: fail (exit 1): ${reason}. Fix the ledger's reach, such as the hub connection, then run the gate again` };
       }
-      await record({ code: gate.code, reason: gate.reason });
+      await record({ code: gate.code, reason: gate.reason, ...ranOnEnd(context) });
       const shared = unshared?.failed ? unshared.line : (await shareGateResult(head, gate.code === 0, gatedAt, context))?.line;
       const waitLine = waited?.failedRead ? `ci: --wait stopped early at a failed read of GitHub: ${waited.failedRead}` : undefined;
       if (flags.has("--json")) print(JSON.stringify({ ...gate.summary, reason: gate.reason, ...waitLine ? { wait: waitLine } : {}, ...shared ? { ledger: shared } : {} }));
@@ -1228,10 +1228,12 @@ async function untilCiFinishes(head: ProofIdentity, context: CommandContext, min
 
 type Shared = { line: string; failed: boolean; error?: string };
 
+const ranOnEnd = ({ env }: ProofContext): { onEnd?: true } => decidesAll(env) ? { onEnd: true } : {};
+
 async function shareGateResult(head: ProofIdentity, passed: boolean, startedAt: Date, context: ProofContext): Promise<Shared | undefined> {
   const result = passed ? "pass" : "failure";
   try {
-    await ledgerOf(context).append({ type: "gate", repository: head.repository, pr: head.pr, commit: head.commit, passed, machine: thisMachine(context.env), at: startedAt.toISOString() });
+    await ledgerOf(context).append({ type: "gate", repository: head.repository, pr: head.pr, commit: head.commit, passed, machine: thisMachine(context.env), at: startedAt.toISOString(), ...passed ? ranOnEnd(context) : {} });
     return passed ? { line: "merge gate: pass recorded in the decision ledger", failed: false } : undefined;
   } catch (failure) {
     const error = String((failure as Error).message ?? failure).split(/[\r\n]/)[0]!;

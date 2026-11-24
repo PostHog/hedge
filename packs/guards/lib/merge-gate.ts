@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fold, gateOverride, overrideChoice, hubLedger, type DecisionState, type Env, type LedgerEvent } from "../../pull-requests/lib/decision-ledger.ts";
 import { lastGateResult, latestGateResult, type GateResult } from "../../pull-requests/lib/proof.ts";
+import { decidesAll } from "../../pull-requests/lib/proof-autonomy.ts";
 import { endpointOf, ghGroups, inOrder, parseGh, values, type Gh } from "./gh.ts";
 import { githubSlug } from "./git.ts";
 import { commandsIn, shellTools, type Command, type Scope } from "./shell-words.ts";
@@ -309,6 +310,7 @@ export type GateIO = {
   isIssue: (repository: string, number: number) => Promise<boolean>;
   localGate: (repository: string, pr: number, commit: string) => Promise<GateResult | undefined>;
   ledger: () => Promise<LedgerEvent[]>;
+  decidesAll?: () => boolean;
 };
 
 type Layer = { repository: string; pr: number; head: string };
@@ -336,10 +338,13 @@ async function layersOf(target: MergeTarget, io: GateIO): Promise<Layer[]> {
 const sameRepo = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 function sharedResults(events: LedgerEvent[], layer: Layer): GateResult[] {
-  return events.flatMap((event) => event.type === "gate" && sameRepo(event.repository, layer.repository) && event.pr === layer.pr && event.commit === layer.head ? [{ passed: event.passed, at: Date.parse(event.at) }] : []);
+  return events.flatMap((event) => event.type === "gate" && sameRepo(event.repository, layer.repository) && event.pr === layer.pr && event.commit === layer.head ? [{ passed: event.passed, at: Date.parse(event.at), ...event.onEnd === true ? { onEnd: true as const } : {} }] : []);
 }
 
-const latestPassed = (results: GateResult[]) => latestGateResult(results)?.passed === true;
+function latestPassed(results: GateResult[], decidesAllNow: boolean) {
+  const latest = latestGateResult(results);
+  return latest?.passed === true && (!latest.onEnd || decidesAllNow);
+}
 
 function overrideIn(decisions: DecisionState[], layer: Layer): boolean {
   return decisions.some((decision) => !decision.voided && !decision.reversed && decision.mark === "👤" && decision.class === "merge"
@@ -366,7 +371,7 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
         }
         if (overrideIn(decisions, layer)) continue;
         const local = await io.localGate(layer.repository, layer.pr, layer.head);
-        if (latestPassed([...local ? [local] : [], ...events ? sharedResults(events, layer) : []])) continue;
+        if (latestPassed([...local ? [local] : [], ...events ? sharedResults(events, layer) : []], io.decidesAll?.() ?? false)) continue;
         const top = layer.pr === target.pr ? "" : ` (a lower layer of ${target.repository}#${target.pr})`;
         missing.push(`${layer.repository}#${layer.pr}${top} at ${layer.head.slice(0, 12)}: run \`${gateCommand(layer)}\``);
       }
@@ -376,7 +381,7 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
   }
   if (!missing.length) return undefined;
   const hub = hubError ? ` The decision ledger could not be read (${hubError}), so only this machine's gate records counted.` : "";
-  return `Hedge blocked this merge: \`hedge proof gate\` has not passed at the head of ${missing.join("; ")}. A missing proof store, a pass at an older head, or a pass that a later failed run at the same head replaced does not count.${hub} `
+  return `Hedge blocked this merge: \`hedge proof gate\` has not passed at the head of ${missing.join("; ")}. A missing proof store, a pass at an older head, or a pass that a later failed run at the same head replaced does not count, nor a pass from while pull-requests.autonomy was end once it is ask again.${hub} `
     + `Run the gate on each head until it exits 0, then enqueue again. ${overrideHint(person)}${intent.targets.some((target) => target.via.endsWith(pipedVia)) ? pipedNote : ""}`;
 }
 
@@ -418,5 +423,6 @@ export function realGateIO(home: string, env: Env): GateIO {
     },
     localGate: (repository, pr, commit) => lastGateResult(home, { repository, pr, commit }).catch(() => ({ passed: false, at: Infinity })),
     ledger: () => hubLedger(home, env).read(),
+    decidesAll: () => decidesAll(env),
   };
 }
