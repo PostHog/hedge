@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { type Hook, printing, runHook } from "../../base/lib/hook.ts";
 import { matchThread, type ShellThread, t3CliRunner, withT3Session } from "../../base/lib/t3/index.ts";
 import { backgroundReason, unwaitedBackgroundTasks } from "../lib/background-stop.ts";
-import { checksRun, claudeTaskRuns, proofStop, waits, type ProofStopEvent, type ProofStopOptions } from "../lib/proof-stop.ts";
+import { awaitsChecks, claudeTaskRuns, isSnoozed, proofStop, proofStopDeadlineMs, waits, type ProofStopEvent, type ProofStopOptions } from "../lib/proof-stop.ts";
 import { asksForDecision, asksInProse, personName, proseTitles } from "../lib/prose-question.ts";
+import { wakeStop } from "../lib/wake-stop.ts";
 
 export type StopEvent = { transcript_path?: string; stop_hook_active?: boolean; last_assistant_message?: string };
 export type StopBlock = { decision: "block"; reason: string };
@@ -74,16 +75,13 @@ export function currentTurn(transcript: string): string[] {
   return lines;
 }
 
-const awaitsChecks = ({ snapshot, watch }: NonNullable<ShellThread["pullRequests"]>[number]) =>
-  Boolean(watch) && !["merged", "closed"].includes(snapshot?.state?.toLowerCase() ?? "open") && (checksRun(watch!) || Boolean(watch!.awaitingApproval?.length));
-
 export const hiddenIn = (shell: ReadShell, now = Date.now): IsHidden => async (threadId, home, event) => {
   if (!threadId) return false;
   try {
     const { threads } = await shell();
     const thread = matchThread(threads, threadId, (item) => item.id);
     if (!thread || thread.lineage?.parentThreadId || asksInProse(thread.title, proseTitles(home))) return false;
-    return (Boolean(thread.snoozedUntil) && Date.parse(thread.snoozedUntil!) > now()) || claudeTaskRuns(event)
+    return isSnoozed(thread, now()) || claudeTaskRuns(event)
       || waits(threads, thread) || (thread.pullRequests ?? []).some(awaitsChecks);
   } catch {
     return false;
@@ -148,7 +146,7 @@ const liveShell = (home: string): ReadShell => {
   return () => (snapshot ??= readShell(home));
 };
 
-export type StopDeps = Partial<Pick<ProofStopOptions, "threadId" | "git" | "processes" | "deadline">> & { hidden?: IsHidden };
+export type StopDeps = Partial<Pick<ProofStopOptions, "threadId" | "git" | "processes" | "deadline">> & { hidden?: IsHidden; now?: () => number };
 
 export async function guardBackground(event: StopEvent & ProofStopEvent, home: string, threadId: string | undefined): Promise<StopBlock | undefined> {
   if (event.stop_hook_active || !threadId || !event.transcript_path || !event.background_tasks?.length) return undefined;
@@ -162,7 +160,19 @@ async function guardStopAndProof(event: StopEvent & ProofStopEvent, home: string
   if (prose || existsSync(join(home, killSwitch))) return prose;
   const background = await guardBackground(event, home, threadId).catch(() => undefined);
   if (background) return background;
-  return proofStop({ ...event, last_assistant_message: await finalMessage(event) }, { home, shell, ...deps, threadId });
+  const last = await finalMessage(event);
+  const now = deps.now ?? Date.now;
+  const started = now();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const end = deps.deadline?.() ?? new Promise<void>((resolve) => { timer = setTimeout(resolve, proofStopDeadlineMs); });
+  const deadline = () => end;
+  try {
+    const proof = await proofStop({ ...event, last_assistant_message: last }, { home, shell, ...deps, deadline, threadId });
+    const answer = proof ?? await wakeStop(event, last, { home, threadId, shell, processes: deps.processes, deadline });
+    return now() - started < proofStopDeadlineMs ? answer : undefined;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export const hookWith = (shell: (home: string) => ReadShell, stop: StopDeps = {}): Hook => async (_provider, readInput, home) => {

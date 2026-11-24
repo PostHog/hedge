@@ -5,7 +5,7 @@ import { readLinkedItemText, readLinkedMessages, type LinkedTimelineItem } from 
 import { t3StatePath, t3UserData } from "./server.ts";
 import type { T3Client, T3HttpClient } from "./session.ts";
 
-export type PullRequestWatch = { headSha?: string; passed?: boolean; checksPending?: boolean; failedChecks?: string[]; awaitingApproval?: string[] };
+export type PullRequestWatch = { headSha?: string; passed?: boolean; checksPending?: boolean; failedChecks?: string[]; awaitingApproval?: string[]; until?: string };
 export type ShellPullRequest = { repository: string; number: number; url: string; source?: string; snapshot?: { state?: string; headBranch?: string } | null; watch?: PullRequestWatch | null };
 
 export type ShellThread = {
@@ -18,7 +18,7 @@ export type ShellThread = {
   modelSelection?: { model: string }; providerInstanceId?: string; lastError?: string | null;
   pendingRuntimeRequest?: unknown; latestVisibleMessage?: { updatedAt: string; text: string } | null;
   branch?: string | null; latestUserAuthoredMessageAt?: string | null;
-  lineage?: { parentThreadId?: string | null; rootThreadId?: string | null; relationshipToParent?: string | null }; pullRequests?: ShellPullRequest[];
+  lineage?: { parentThreadId?: string | null; rootThreadId?: string | null; relationshipToParent?: string | null; sideChat?: boolean; workflowStep?: boolean }; pullRequests?: ShellPullRequest[];
 };
 
 export type ShellProject = { id: string; title: string; workspaceRoot: string };
