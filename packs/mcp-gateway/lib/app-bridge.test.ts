@@ -200,7 +200,10 @@ for (const [runtime, command] of Object.entries(runtimes)) describe.skipIf(!node
     const bridge = upstream("", { FAKE_CODEX_REPLIES: "json-401" });
     await bridge.initialize();
     const read = await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } });
-    expect(JSON.parse((read.result as { content: Array<{ text: string }> }).content[0]!.text)).toMatchObject({ code: 401 });
+    expect(read.result).toEqual({ isError: true, content: [
+      { type: "text", text: '{"code":401,"error":"token_expired"}' },
+      { type: "text", text: "Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps." },
+    ] });
   });
 
   test("a failure that is not about the sign-in stays as Slack wrote it", async () => {
