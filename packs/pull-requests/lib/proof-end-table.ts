@@ -1,14 +1,14 @@
 import { refText, type PrRef } from "./decision-ledger.ts";
 import type { Run } from "./pr-ci.ts";
 import { diffSize, forkPoint, type DiffSize } from "./proof-checkout.ts";
-import { finishedReviews, summaryGaps, type GapProof, type ProofIdentity, type ProofSummary } from "./proof.ts";
+import { finishedReviews, readOneWayStop, summaryGaps, type GapProof, type ProofIdentity, type ProofSummary } from "./proof.ts";
 import { bloatFigure, type BloatScore } from "./proof-bloat.ts";
 import type { SanityPass } from "./proof-sanity.ts";
 
 export const isCommitSha = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
 
 export type Sized = DiffSize & { commit: string; from: string };
-export type Growth = { rounds: number; finalReads: number; first?: Sized; final?: Sized; sanity?: SanityPass; bloat?: BloatScore };
+export type Growth = { rounds: number; finalReads: number; first?: Sized; final?: Sized; sanity?: SanityPass; bloat?: BloatScore; oneWayStop?: string };
 export type EndRow = { ref: PrRef; summary: ProofSummary; reason: (kind: string, reason: string) => string };
 
 const isRound = (name: string) => /^\d+$/.test(name);
@@ -25,17 +25,22 @@ export async function measureGrowth(home: string, head: ProofIdentity, run: Run,
   const start = opening?.scope !== "full" ? undefined : isCommitSha(opening.forkBase) ? forkPoint({ ...head, commit: opening.commit }, run, opening.forkBase) : opening.from;
   const first = !opening || !start ? undefined : start === opening.commit ? { production: 0, tests: 0, docs: 0, commit: start, from: start } : sizeAt({ ...head, commit: opening.commit }, run, start);
   const final = sizeAt(head, run, isCommitSha(baseSha) ? forkPoint(head, run, baseSha) : undefined);
-  return { rounds: rounds.length, finalReads: reviews.length - rounds.length, ...first ? { first } : {}, ...final ? { final } : {} };
+  const stop = await readOneWayStop(home, head);
+  return { rounds: rounds.length, finalReads: reviews.length - rounds.length, ...first ? { first } : {}, ...final ? { final } : {}, ...stop ? { oneWayStop: stop.commit } : {} };
 }
 
 const counted = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
 const figure = (lines: number | undefined) => typeof lines === "number" ? lines.toLocaleString("en-US") : "unknown";
 const span = (from: number | undefined, to: number | undefined) => `${figure(from)} → ${figure(to)}`;
 
-function roundsCell(growth: Growth | undefined) {
-  if (!growth) return "not measured";
+function reviewsCell(growth: Growth) {
   if (!growth.rounds && !growth.finalReads) return "no review";
   return [counted(growth.rounds, "round"), ...growth.finalReads ? [counted(growth.finalReads, "final read")] : []].join(", ");
+}
+
+function roundsCell(growth: Growth | undefined) {
+  if (!growth) return "not measured";
+  return isCommitSha(growth.oneWayStop) ? `${reviewsCell(growth)}; stopped at an escalation on a one-way door at ${growth.oneWayStop.slice(0, 7)}` : reviewsCell(growth);
 }
 
 function linesCell(growth: Growth | undefined) {

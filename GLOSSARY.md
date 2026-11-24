@@ -113,7 +113,7 @@ The `Tier:` line of a pull request's merge-risk callout at HEAD: critical or non
 _Avoid_: Risk level, grade
 
 **Autonomy**:
-The setting `pull-requests.autonomy`: how often an agent asks the user about a review round or a proof gap. On `ask`, the default, `hedge proof` tells the agent to ask the user each time. On `end`, it tells the agent to decide alone as a 🤖 decision, wherever the tier lets it, and the user reads every such decision under Decisions in `hedge decision report`, beside the end table. A one-way door, an ungraded pull request, a panel gap, and a product gap on a critical pull request still go to the user.
+The setting `pull-requests.autonomy`: how often an agent asks the user about a review round or a proof gap. On `ask`, the default, `hedge proof` tells the agent to ask the user each time. On `end`, it tells the agent to decide alone as a 🤖 decision, wherever the tier lets it, and the user reads every such decision under Decisions in `hedge decision report`, beside the end table. An ungraded pull request, a panel gap, and a product gap on a critical pull request still go to the user, and so does a gap on a one-way door. On a one-way door, an escalated review round stops the review loop instead: `hedge proof` asks nothing, `--agent` cannot pass the stop, and only the user's `--override` runs another round.
 _Avoid_: Trust level, mode
 
 **Acceptance**:
