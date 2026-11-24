@@ -76,7 +76,7 @@ export async function lastGateResult(home: string, identity: ProofIdentity): Pro
   const results = await Promise.all((await gateRunNames(directory)).map(async (name) => {
     const { code, startedAt, onEnd, agentGaps } = (await readJson<{ code?: unknown; startedAt?: unknown; onEnd?: unknown; agentGaps?: unknown } | null>(join(directory, name), null)) ?? {};
     const at = typeof startedAt === "string" ? Date.parse(startedAt) : Number.NaN;
-    return Number.isNaN(at) ? { passed: false, at: -Infinity } : { passed: code === 0, at, ...onEnd === true ? { onEnd: true as const } : {}, ...isTextList(agentGaps) && agentGaps.length ? { agentGaps } : {} };
+    return Number.isNaN(at) ? { passed: false, at: -Infinity } : { passed: code === 0, at, ...onEnd === true ? { onEnd: true as const } : {}, ...isTextList(agentGaps) ? { agentGaps } : {} };
   }));
   return latestGateResult(results);
 }

@@ -369,9 +369,17 @@ describe("the PreToolUse hook", () => {
     });
     const where = (ledger: LedgerEvent[], github = true) => ({ home: homeWith({ "guards.merge-gate-exempt": "own/*" }), env: {}, gate: gate({ ledger, github }), intent: io });
     const merge = (ledger: LedgerEvent[], github = true) => mergeGate(call("gh pr merge 9 --repo own/tooling"), where(ledger, github));
+    const pass = (at: string, agentGaps?: string[]): LedgerEvent => ({ type: "gate", repository: "own/tooling", pr: 9, commit: head, passed: true, machine: "box-2", at, ...agentGaps ? { agentGaps } : {} });
     expect((await merge([agentGap("own/tooling")]))?.hookSpecificOutput.permissionDecisionReason).toContain(`an agent accepted proof gaps of own/tooling#9 at ${head.slice(0, 12)} (🤖 d-agent) itself`);
-    expect(await merge([agentGap("own/tooling"), { type: "gate", repository: "own/tooling", pr: 9, commit: head, passed: true, machine: "box-2", at: "2026-11-16T08:00:00Z" }])).toBeUndefined();
+    expect(await merge([agentGap("own/tooling"), pass("2026-11-16T08:30:00Z", [])])).toBeUndefined();
+    expect(await merge([agentGap("own/tooling"), pass("2026-11-16T07:30:00Z", [])])).toBeDefined();
+    expect(await merge([agentGap("own/tooling"), pass("2026-11-16T08:30:00Z")])).toBeDefined();
     expect(await merge([agentGap("example/product")], false)).toBeUndefined();
+  });
+
+  test("in an exempt repository, a ledger the hook cannot read refuses the merge, since a gap an agent accepted may hold it", async () => {
+    const where = { home: homeWith({ "guards.merge-gate-exempt": "own/*" }), env: {}, gate: gate({ hubDown: true }), intent: io };
+    expect((await mergeGate(call("gh pr merge 9 --repo own/tooling"), where))?.hookSpecificOutput.permissionDecisionReason).toContain("the decision ledger could not be read (hub unreachable over SSH)");
   });
 
   test("settings it cannot read refuse a merge rather than skip the gate, and leave other calls alone", async () => {

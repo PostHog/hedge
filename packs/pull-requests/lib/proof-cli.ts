@@ -429,13 +429,14 @@ a review bot's thread on the PR is unresolved with no reply or 👍 of yours aft
 the commit is not the PR's head on GitHub, its checks are red,
 or the judge failed or was unavailable; 3 means only unaccepted gaps remain; 75 means only CI that is still running
 holds the gate. No gap waives the head check. The last line is the verdict: on a pass it names what it covered, and
-on any other exit it names the check that held the gate. On a pass, the line before the verdict, or after a ledger
+on any other exit it names the check that held the gate, also when the gate itself fails with an error. On a pass, the line before the verdict, or after a ledger
 line, starts "merge card:": the merge-risk grade and door, the review rounds and final reads and how many ran past the
 review budget, each gap with who accepted it and why, each item under Known issues, and the minutes from opened to
 ready and from ready to now; --json carries it as mergeCard. A pass records the gaps that 🤖 decisions accepted, here
-and in the ledger, and the merge-gate hook then holds that head until the user's merge word for it, recorded with
+and in the ledger, and the merge-gate hook then holds that head until the user chooses "Merge" on a merge card that
+names the PR and its full head sha, recorded with
 hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full head sha>: merge card'. Own tooling
-and repositories that skip the gate are held too, also when the gate itself fails with an error. --wait
+and repositories that skip the gate are held too. --wait
 <minutes>, at most 120, waits up to that long for running CI to finish, reading CI every 30 seconds, and stops early
 when a read of GitHub fails, with a "ci: --wait stopped early" line that names the error. Then it runs the gate
 again, and still exits 75 when CI runs past the limit; then the verdict says to open the checks it waits on, since a
@@ -1241,8 +1242,7 @@ type Shared = { line: string; failed: boolean; error?: string };
 const ranOnEnd = ({ env }: ProofContext): { onEnd?: true } => decidesAll(env) ? { onEnd: true } : {};
 
 function heldGaps({ code, summary }: FinalGate): { agentGaps?: string[] } {
-  const ids = code === 0 ? summaryGaps(summary).flatMap(({ kind, gap }) => gap.accepted?.mark === "🤖" ? [gap.accepted.id ?? kind] : []) : [];
-  return ids.length ? { agentGaps: ids } : {};
+  return code === 0 ? { agentGaps: summaryGaps(summary).flatMap(({ kind, gap }) => gap.accepted?.mark === "🤖" ? [gap.accepted.id ?? kind] : []) } : {};
 }
 
 async function shareGateResult(head: ProofIdentity, passed: boolean, startedAt: Date, context: ProofContext, held: { agentGaps?: string[] } = {}): Promise<Shared | undefined> {

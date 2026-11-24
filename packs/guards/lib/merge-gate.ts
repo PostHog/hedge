@@ -1,7 +1,7 @@
 import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { fold, gateOverride, isUsers, live, overrideChoice, hubLedger, prRef, type DecisionState, type Env, type LedgerEvent } from "../../pull-requests/lib/decision-ledger.ts";
+import { fold, gateOverride, live, mergeCardChoice, mergeCardCondition, overrideChoice, hubLedger, prRef, type DecisionState, type Env, type LedgerEvent } from "../../pull-requests/lib/decision-ledger.ts";
 import { isTextList, lastGateResult, latestGateResult, type GateResult } from "../../pull-requests/lib/proof.ts";
 import { decidesAll } from "../../pull-requests/lib/proof-autonomy.ts";
 import { endpointOf, ghGroups, inOrder, parseGh, values, type Gh } from "./gh.ts";
@@ -340,7 +340,7 @@ const sameRepo = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 function sharedResults(events: LedgerEvent[], layer: Layer): GateResult[] {
   return events.flatMap((event) => event.type === "gate" && sameRepo(event.repository, layer.repository) && event.pr === layer.pr && event.commit === layer.head
-    ? [{ passed: event.passed, at: Date.parse(event.at), ...event.onEnd === true ? { onEnd: true as const } : {}, ...isTextList(event.agentGaps) && event.agentGaps.length ? { agentGaps: event.agentGaps } : {} }] : []);
+    ? [{ passed: event.passed, at: Date.parse(event.at), ...event.onEnd === true ? { onEnd: true as const } : {}, ...isTextList(event.agentGaps) ? { agentGaps: event.agentGaps } : {} }] : []);
 }
 
 function latestPassed(results: GateResult[], decidesAllNow: boolean) {
@@ -349,10 +349,12 @@ function latestPassed(results: GateResult[], decidesAllNow: boolean) {
 }
 
 const namesLayer = (decision: DecisionState, layer: Layer) => decision.scope.prs.some((ref) => sameRepo(ref.replace(/#\d+$/, ""), layer.repository) && ref.endsWith(`#${layer.pr}`));
-const mergeWordAt = (decision: DecisionState, layer: Layer) => live(decision) && decision.class === "merge" && decision.scope.condition?.startsWith(`${layer.head}:`) === true && namesLayer(decision, layer);
+const usersMergeAt = (decision: DecisionState, layer: Layer) => live(decision) && decision.class === "merge" && decision.mark === "👤" && namesLayer(decision, layer);
+const overrideAt = (decision: DecisionState, layer: Layer) => usersMergeAt(decision, layer) && decision.scope.kinds?.includes(gateOverride) === true && decision.scope.condition?.startsWith(`${layer.head}:`) === true;
+const mergeWordAt = (decision: DecisionState, layer: Layer) => overrideAt(decision, layer) || (usersMergeAt(decision, layer) && decision.scope.condition === mergeCardCondition(layer.head));
 
 function overrideIn(decisions: DecisionState[], layer: Layer): boolean {
-  return decisions.some((decision) => mergeWordAt(decision, layer) && decision.mark === "👤" && decision.scope.kinds?.includes(gateOverride) === true);
+  return decisions.some((decision) => overrideAt(decision, layer));
 }
 
 const agentGap = (decision: DecisionState) => live(decision) && decision.mark === "🤖" && decision.class === "proof-gap" && decision.effect !== "keep-owed";
@@ -360,13 +362,14 @@ const inRepository = (decision: DecisionState, repository: string) => decision.s
 
 function agentGapsAt(results: GateResult[], decisions: DecisionState[], layer: Layer): string[] {
   const latest = latestGateResult(results);
-  if (latest?.passed) return latest.agentGaps ?? [];
-  return decisions.filter((decision) => agentGap(decision) && namesLayer(decision, layer)).map((decision) => decision.id);
+  const counted = latest?.passed && latest.agentGaps ? latest : undefined;
+  const after = decisions.filter((decision) => agentGap(decision) && namesLayer(decision, layer) && !(counted && Date.parse(decision.at) <= counted.at));
+  return [...new Set([...counted?.agentGaps ?? [], ...after.map((decision) => decision.id)])];
 }
 
 const heldLayer = (results: GateResult[], decisions: DecisionState[], layer: Layer) => {
   const gaps = agentGapsAt(results, decisions, layer);
-  return gaps.length && !decisions.some((decision) => mergeWordAt(decision, layer) && isUsers(decision)) ? [`${layer.repository}#${layer.pr} at ${layer.head.slice(0, 12)} (🤖 ${gaps.join(", ")})`] : [];
+  return gaps.length && !decisions.some((decision) => mergeWordAt(decision, layer)) ? [`${layer.repository}#${layer.pr} at ${layer.head.slice(0, 12)} (🤖 ${gaps.join(", ")})`] : [];
 };
 
 const gateCommand = ({ repository, pr, head }: Layer) => `hedge proof gate --repo ${repository} --pr ${pr} --commit ${head}`;
@@ -374,7 +377,9 @@ const overrideHint = (person: string) => `For an incident fix that cannot wait f
   + `with \`hedge decision record --mark 👤 --class merge --kind ${gateOverride} --pr <owner/repo#n> --condition '<full head sha>: <incident and why>'\`.`;
 
 const heldReason = (held: string[], person: string) => `Hedge blocked this merge: an agent accepted proof gaps of ${held.join("; ")} itself, so it merges only on ${person}'s word for that head, whatever else lets it merge: own tooling, a standing merge grant, or full send. `
-  + `Show it on a merge card. When ${person} chooses to merge it, record the answer with \`hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --words '<date> "<their words>"' --condition '<full 40-character head sha>: merge card'\`, then merge again. A push leaves that answer behind; a gate pass at the new head without such a gap lifts the hold.`;
+  + `Show it on a merge card: ask ${person} with the question tool, naming the PR and its full head sha, with the options "${mergeCardChoice}" and "Keep it open". When they choose "${mergeCardChoice}", record the answer with \`hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full 40-character head sha>: merge card'\`, then merge again. A push leaves that answer behind; a gate pass at the new head that saw no such gap lifts the hold.`;
+
+const unreadReason = (repositories: string[], error: string) => `Hedge blocked this merge: the decision ledger could not be read (${error}), so the merge gate cannot tell whether an agent accepted a proof gap in ${repositories.join(", ")} itself. Those repositories skip the gate, but such a gap holds a merge until the person's word. Try again when the hub answers.`;
 
 /** Why the call may not go out, or undefined when every open layer of every target passed the gate at its head and none holds a gap an agent accepted without the person's merge word. */
 export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: string): Promise<string | undefined> {
@@ -404,6 +409,7 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
     }
     for (const target of intent.exempt ?? []) {
       await readLedger();
+      if (hubError !== undefined) return unreadReason([...new Set((intent.exempt ?? []).map((one) => one.repository))], hubError);
       if (!decisions.some((decision) => agentGap(decision) && inRepository(decision, target.repository))) continue;
       for (const layer of await layersOf(target, io)) held.push(...heldLayer(await resultsAt(layer), decisions, layer));
     }

@@ -29,6 +29,8 @@ export type LedgerEvent =
 
 export const gateOverride = "gate-override";
 export const overrideChoice = "Override the gate";
+export const mergeCardChoice = "Merge";
+export const mergeCardCondition = (head: string) => `${head}: merge card`;
 
 export { HubUnreachable, type Env, type Ssh, type SshResult };
 

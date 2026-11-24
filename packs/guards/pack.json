@@ -69,7 +69,7 @@
         "gh"
       ],
       "sentence": "An agent's Trunk enqueue or merge of a pull request waits until hedge proof gate passed at the head of each open layer of its stack, or you overrode the gate for that head. A head with a proof gap that an agent accepted waits for your merge word.",
-      "risk": "An enqueue or merge waits up to 15 seconds while the gate reads GitHub and the decision ledger, and it is refused when either cannot be read. Repositories in guards.merge-gate-exempt skip the gate pass, but a pull request there with a proof gap that an agent accepted still waits for your merge word.",
+      "risk": "An enqueue or merge waits up to 15 seconds while the gate reads GitHub and the decision ledger, and it is refused when either cannot be read. Repositories in guards.merge-gate-exempt skip the gate pass, but the hook still reads the decision ledger for them, so a merge there is refused when the ledger cannot be read, and a pull request with a proof gap that an agent accepted waits for your merge word.",
       "settings": [
         "guards.merge-gate-exempt"
       ]

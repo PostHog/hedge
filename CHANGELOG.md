@@ -15,12 +15,16 @@
 - A read past the budget now counts on the user's `--override` too. It does
   not take one of the agent's 3 reads.
 - A gate pass records the gaps that an agent accepted with 🤖 decisions. The
-  merge-gate hook refuses an enqueue or merge of that head until the person's
-  merge word for it is in the ledger:
+  merge-gate hook refuses an enqueue or merge of that head until the person
+  chooses "Merge" on a merge card that names the PR and its full head sha:
   `hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full head sha>: merge card'`.
-  This holds in repositories in `guards.merge-gate-exempt` too, which still
-  need no gate pass: there, a 🤖 gap decision of the PR holds it until a gate
-  pass at its head shows no such gap. A push leaves the merge word behind.
+  The recorder refuses any other choice, and a question without that head.
+  A push leaves the merge word behind.
+- The hold covers repositories in `guards.merge-gate-exempt` too, which still
+  need no gate pass. There, the hook reads the decision ledger on every merge,
+  and refuses it when the ledger cannot be read. A 🤖 gap decision of the PR
+  holds it until a gate pass at its head, run after that decision, shows no
+  such gap.
 
 ### A message steers a thread that waits on a question card
 

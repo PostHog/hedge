@@ -1,6 +1,5 @@
 import { refText, riskCalloutOf, type PrRef } from "./decision-ledger.ts";
 import type { PullRequest, Run } from "./pr-ci.ts";
-import { gradeOf } from "./proof-autonomy.ts";
 import { acceptor, roundsCell } from "./proof-end-table.ts";
 import { knownIssues, summaryGaps, type ProofSummary } from "./proof.ts";
 
@@ -27,8 +26,9 @@ function timesText({ opened, ready, draft }: Timeline, now?: Date) {
 function gradeText(body: string) {
   const callout = riskCalloutOf(body);
   if (callout === undefined) return "ungraded";
-  const grade = /Merge risk:\**\s*(low|medium|high)\b/i.exec(callout)?.[1]?.toLowerCase() ?? "no grade";
-  return `${grade}, ${gradeOf(body).oneWay ? "one-way door" : "two-way door"}`;
+  const declaration = callout.split("\n").find((line) => /Merge risk:/i.test(line)) ?? "";
+  const grade = /Merge risk:\**\s*(low|medium|high)\b/i.exec(declaration)?.[1]?.toLowerCase() ?? "no grade";
+  return `${grade}, ${/\bone-way door\b/i.test(declaration) ? "one-way door" : "two-way door"}`;
 }
 
 const reads = (summary: ProofSummary) => {

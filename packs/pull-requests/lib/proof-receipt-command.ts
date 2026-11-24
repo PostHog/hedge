@@ -62,9 +62,10 @@ export async function runReceipt(head: ProofIdentity, items: string[] | undefine
   const covered = decisions.filter((decision) => covers(decision, head));
   const reviews = await receiptReviews(head, home);
   const timeline = readTimeline(head, first, context.run);
-  const card = gated ? mergeCardBlock({ summary, body: first.body, timeline }) : undefined;
+  const passed = gated && summary.code === 0;
+  const card = passed ? mergeCardBlock({ summary, body: first.body, timeline }) : undefined;
   const done = (line: string) => {
-    if (gated) print(mergeCardLine({ ref: head, summary, body: first.body, timeline }, context.now?.() ?? new Date()));
+    if (passed) print(mergeCardLine({ ref: head, summary, body: first.body, timeline }, context.now?.() ?? new Date()));
     print(line);
     return 0;
   };
