@@ -219,6 +219,7 @@ test("on end, a judge the arbiter stops tells the agent to decide the judge gap 
   const gate = (await pr.hedge("gate")).output;
   expect(gate).toContain("judge: the arbiter stops the retries: The judge failed the owed kinds three times. First record hedge proof gap --kind judge --reason <why>, then do what it prints: decide the gap yourself with its hedge decision record --mark 🤖 command, or, on an ungraded PR or a gap the user keeps owed, ask the user its question");
   expect(gate).not.toContain("escalate to the user");
+  expect(gate).not.toContain("or ask the user");
 });
 
 test("on end, the printed decision command quotes a gap reason so the shell passes it whole", async () => {
