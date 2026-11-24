@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { checkout, cleanFixtures, fakeModel } from "./proof-testing.ts";
+import { checkout, cleanFixtures, fakeModel, reviewHead } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
@@ -55,9 +55,40 @@ test("hedge proof respond refuses answers numbered past the last finding, so the
   writeFileSync(join(pr.repository, "responses.md"), readingOrder);
 
   const refused = pr.hedge("respond", "--round", "1", "responses.md");
-  await expect(refused).rejects.toThrow(`Round 1 has 12 findings, but answers 13 to ${readingOrderItems} number past them`);
+  await expect(refused).rejects.toThrow(`Round 1 has 12 findings; answers numbered past them: 13 to ${readingOrderItems}.`);
   await expect(refused).rejects.toThrow(numbered);
 
   writeFileSync(join(pr.repository, "responses.md"), readingOrder.split("\n").slice(0, items.length).join("\n") + "\n");
   expect((await pr.hedge("respond", "--round", "1", "responses.md")).code).toBe(0);
+});
+
+test("a single reviewer's findings that start alike print with their whole text, so each number names one finding", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet the new member\n");
+  await pr.hedge("require", "--none", "--reason", "docs only");
+  fakeModel(pr, "REVIEWER", `FINDINGS:
+- feature.txt:1 | major | Correctness | the greeting
+  drops an empty name | anchor: greet the new member
+- feature.txt:1 | major | Correctness | the greeting
+  repeats for a returning member | anchor: greet the new member
+COVERED: feature.txt
+`);
+
+  const reviewed = await pr.hedge("review", "--single");
+
+  expect(reviewed.output).toContain([
+    "Answer each finding by these numbers, in hedge proof respond:",
+    "1. feature.txt:1 | major | Correctness | the greeting drops an empty name | anchor: greet the new member",
+    "2. feature.txt:1 | major | Correctness | the greeting repeats for a returning member | anchor: greet the new member",
+  ].join("\n"));
+});
+
+test("hedge proof respond refuses answers to a round without findings", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet the new member\n");
+  await pr.hedge("require", "--none", "--reason", "docs only");
+  await reviewHead(pr, "No findings.\n");
+  writeFileSync(join(pr.repository, "responses.md"), "1. fixed: the greeting guards an empty name\n");
+
+  await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("Round 1 has no findings, so it needs no answers.");
 });

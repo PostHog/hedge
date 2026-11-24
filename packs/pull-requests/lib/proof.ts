@@ -648,7 +648,8 @@ export async function respondToReview(home: string, identity: ProofIdentity, rou
   const findings = await savedFindings(directory);
   if (findings === undefined) throw new Error(`Review round ${round} has no findings yet`);
   const { count, past } = numbersPast(findings, bytes.toString());
-  if (past.length) throw new Error(`Round ${round} has ${count} findings, but answers ${spans(past)} number past them. Number your answers by this list, which hedge proof show --round ${round} prints too:\n${answerNumbers(findings)}`);
+  if (past.length && !count) throw new Error(`Round ${round} has no findings, so it needs no answers.`);
+  if (past.length) throw new Error(`Round ${round} has ${count} findings; answers numbered past them: ${spans(past)}. Number your answers by this list, which hedge proof show --round ${round} prints too:\n${answerNumbers(findings)}`);
   const missing = unanswered(findings, bytes.toString());
   if (missing.length) throw new Error(`Answer findings ${missing.join(", ")} too: one line each, numbered by the list below, such as "${missing[0]}. fixed in 1a2b3c4: <how>", "${missing[0]}. rejected: <why>", or, at the review budget or a one-way stop, "${missing[0]}. known: <why>" for a finding listed under Known issues. Minor and nit findings need no answer; a TESTS item gets a test-only rewrite or delete\n${answerNumbers(findings)}`);
   if (answeredFindings(findings, bytes.toString()).findings.some(({ answer }) => answer?.verdict === "known")) {
@@ -805,7 +806,7 @@ const listMark = /^\s*(?:[-*]|\d+[.)])\s+/;
 export function answerNumbers(findings: string) {
   const items = reviewedItems(findings);
   if (!items.length) return "";
-  const lines = items.map(({ text, test }, index) => `${index + 1}. ${test ? "TESTS: " : ""}${text.split("\n")[0]!.replace(listMark, "")}`);
+  const lines = items.map(({ text, test }, index) => `${index + 1}. ${test ? "TESTS: " : ""}${text.replace(listMark, "").split("\n").join(" ")}`);
   return ["Answer each finding by these numbers, in hedge proof respond:", ...lines].join("\n");
 }
 
