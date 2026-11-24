@@ -9,7 +9,9 @@
   a command, or its own schedule; who owns each open pull request and how to
   hand one over; and what Hedge's hooks check before a turn ends.
   If one of your own packs owns a guide named `waits`, rename it before you
-  update: two packs cannot own one guide.
+  update, together with every section and reference that names it: two packs
+  cannot own one guide, and a section that still names `waits` lands in the
+  new guide.
 - `hedge apply` and `hedge doctor` now report a pack section that repeats a
   heading of the guide it adds to, such as a second `Tests` in
   `coding-standards.md`, as a to-do. Hedge still writes the section. A
