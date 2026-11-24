@@ -34,6 +34,7 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
   if (scripted === "slack-auth") return reply({ isError: true, content: [{ type: "text", text: '{"ok":false,"error":"invalid_auth"}' }] });
   if (scripted === "revoked-data") return send({ id: message.id, error: { code: -32603, message: "Unauthorized", data: { detail: "HTTP 401\ftoken_revoked" } } });
   if (scripted === "structured-auth") return reply({ isError: true, content: [{ type: "text", text: "Unauthorized" }], structuredContent: { error: "invalid_auth" } });
+  if (scripted === "json-401") return reply({ isError: true, content: [{ type: "text", text: '{"code":401,"error":"token_expired"}' }] });
   if (scripted === "plain") return reply({ isError: true, content: [{ type: "text", text: "channel_not_found" }] });
   if (args.ask) {
     const answer = await new Promise((resolve) => {

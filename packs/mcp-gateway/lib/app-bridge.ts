@@ -108,7 +108,7 @@ async function invoke(id: Id, params: { name: string; arguments?: Record<string,
     thread ??= call("thread/start", { cwd: "/app/data", ephemeral: true }).then((started) => started.thread.id as string, (error) => { thread = undefined; throw error; });
     const args = params.arguments ?? {};
     const { structuredContent, ...answered } = await call("mcpServer/tool/call", { threadId: await thread, server: "codex_apps", tool: `${app.prefix}${params.name}`, arguments: app.skinTones ? withUnicodeSkinTones(args) : args });
-    const result = answered.isError && signInLost([answered.content, structuredContent]) ? { ...answered, content: [{ type: "text", text: reAuth }, ...(answered.content ?? [])] } : answered;
+    const result = answered.isError && signInLost([answered.content, structuredContent]) ? { ...answered, content: [...(answered.content ?? []), { type: "text", text: reAuth }] } : answered;
     return structuredContent == null ? result : { ...result, structuredContent };
   } finally { active = undefined; }
 }

@@ -177,23 +177,30 @@ for (const [runtime, command] of Object.entries(runtimes)) describe.skipIf(!node
     expect(read.error!.message).toEndWith("Apps. Cause: Unauthorized (token_revoked)");
   });
 
-  test("a failed result whose only auth code is in its structured content leads with the re-auth step", async () => {
+  test("a failed result whose only auth code is in its structured content ends with the re-auth step", async () => {
     const bridge = upstream("", { FAKE_CODEX_REPLIES: "structured-auth" });
     await bridge.initialize();
     const read = await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } });
-    expect((read.result as { content: Array<{ text: string }> }).content.map((item) => item.text)).toEqual([
-      "Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps.",
-      "Unauthorized",
-    ]);
+    expect(read.result).toEqual({ isError: true, structuredContent: { error: "invalid_auth" }, content: [
+      { type: "text", text: "Unauthorized" },
+      { type: "text", text: "Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps." },
+    ] });
   });
 
-  test("Slack refusing the app's own grant leads the failed result with the re-auth step", async () => {
+  test("Slack refusing the app's own grant ends the failed result with the re-auth step", async () => {
     const bridge = upstream("", { FAKE_CODEX_REPLIES: "slack-auth" });
     await bridge.initialize();
     expect((await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } })).result).toEqual({ isError: true, content: [
-      { type: "text", text: "Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps." },
       { type: "text", text: '{"ok":false,"error":"invalid_auth"}' },
+      { type: "text", text: "Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps." },
     ] });
+  });
+
+  test("a failed result that opens with a JSON 401 keeps it first, so the gateway still reconnects and retries the call", async () => {
+    const bridge = upstream("", { FAKE_CODEX_REPLIES: "json-401" });
+    await bridge.initialize();
+    const read = await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } });
+    expect(JSON.parse((read.result as { content: Array<{ text: string }> }).content[0]!.text)).toMatchObject({ code: 401 });
   });
 
   test("a failure that is not about the sign-in stays as Slack wrote it", async () => {
