@@ -209,6 +209,24 @@ test("on end, the agent's own reason runs up to three reads past a spent treated
   await expect(readAgain(pr, "final-4", "--agent", "The last fix changed the greeting.")).rejects.toThrow("The agent's 3 reads past the budget are spent too: ask the user nothing about another read");
 });
 
+test("on end, a read past the budget that finds nothing still takes one of the agent's three reads", async () => {
+  const pr = await budgeted("on", graded("non-critical", "medium"));
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...JSON.parse(pr.env.HEDGE_SETTINGS!), "pull-requests.autonomy": "end" });
+  await firstLine(pr, "--single");
+  expect((await readAgain(pr, "1")).code).toBe(0);
+  await answerFixed(pr, "final-1");
+  fakeModel(pr, "REVIEWER", noFindings("feature.ts"));
+  const quietRead = async (line: number) => {
+    const base = await pr.git("rev-parse", "HEAD");
+    await pr.commit("feature.ts", `export const greet = (name: string) => \`${line} \${name}\`;\n`);
+    return pr.hedge("review", "--scope", "final", "--base", base, "--agent", "The last fix changed the greeting.");
+  };
+
+  for (const line of [1, 2, 3]) expect((await quietRead(line)).code).toBe(0);
+  expect(roundRecord(pr, "final-2")).toMatchObject({ pastBudget: true });
+  await expect(quietRead(4)).rejects.toThrow("The agent's 3 reads past the budget are spent too");
+});
+
 test("a treated pull request on the strict path gets three reads", async () => {
   const pr = await budgeted("on", graded("critical (b)", "high"));
   expect(await firstLine(pr, "--single")).toMatchObject({ budget: 3, triage: { path: "strict" } });

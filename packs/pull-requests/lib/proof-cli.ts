@@ -86,10 +86,10 @@ final reads of the babysit phase count apart. Only a review that leads to fixes 
 counts when the gate asks for an answer to one of its findings, so one with only minor and nit findings spends nothing,
 and an unfinished one counts. The default budget is the panel, the fixes read, and the last read. On a PR of the Read
 tier the ceiling is two reviews that count: its one read and one final read of its fixes. At the ceiling no review or
-final read runs without the user's --override. A production fix of the PR after the last read is then reverted, and the finding
+final read runs without the user's --override, or, on end, the agent's --agent for one of its 3 reads past the budget. A production fix of the PR after the last read is then reverted, and the finding
 it fixed is listed under Known issues; the gate carries the revert. One final read still runs at the ceiling: of a
 HEAD whose commits since the last read are only clean base merges and quiet commits, past what the gate carries, that change files of the PR. Below
-the ceiling, --agent still reads a carried HEAD. The arbiter is the lookup model of your AI plan;
+the ceiling, and on end past it, --agent still reads a carried HEAD. The arbiter is the lookup model of your AI plan;
 HEDGE_REVIEW_ARBITER replaces its command.`;
 
 const subcommands: Record<string, Subcommand> = {
@@ -377,7 +377,8 @@ list the standing rules.`,
 options "Accept the gap" and "Keep the gap open". Ask it with your question tool. When the user chooses "Accept the
 gap", record their answer with hedge decision record --mark 👤 --class proof-gap --kind <kind> --pr <owner/repo#n>:
 it lands in the decision ledger and the gate counts it. A gap recorded again, such as with another reason, keeps
-its acceptance. An agent's own 🤖 decision covers a gap when the PR's tier lets it, never a panel gap. A standing
+its acceptance. An agent's own 🤖 decision covers a gap when the PR's tier lets it, never a panel gap on ask. With
+pull-requests.autonomy set to end, it covers every kind on a graded PR. A standing
 rule (hedge proof standing) covers the kinds it still takes. The user's acceptance settles the kind: the gate then
 ignores that kind's evidence, and the judge does not see it. Kind ci records that CI cannot run on HEAD, such as on
 a fork PR. Kind panel records that the PR runs no qa-swarm panel under an exception in the user's rules; once

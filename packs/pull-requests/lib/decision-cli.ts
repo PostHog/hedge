@@ -41,9 +41,9 @@ With --class merge --kind ${gateOverride} and --condition '<full head sha>: <inc
 lets the merge gate pass that one PR at that head without a hedge proof gate pass; a push leaves it behind. Only 👤
 records it. Each option other than --pr and --kind is taken once.
 record with 🤖 records the agent's own decision with the option it rejected. Hedge reads each PR's Tier line in its
-merge-risk callout at HEAD: it refuses an ungraded PR. With pull-requests.autonomy set to end, it takes every other
-ask. On ask, it also refuses anything but process on a critical PR (review and status asks, judge and post-deploy-watch
-gaps), and a panel gap: ${panelRefusal}. The gate never counts a 🤖 ci
+merge-risk callout at HEAD: it refuses an ungraded PR, and on a critical PR anything but process (review and status
+asks, judge and post-deploy-watch gaps). On ask it never takes a panel gap: ${panelRefusal}. With pull-requests.autonomy
+set to end, it takes every review and proof-gap ask on a graded PR, panel gaps and critical PRs included. The gate never counts a 🤖 ci
 acceptance over CI that ran, nor one under the user's keep-owed, and prints each 🤖 acceptance that lapsed on a kind
 that stays open.
 list prints the decisions as decision lines with their ids. Run it before you ask.

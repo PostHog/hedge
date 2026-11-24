@@ -156,6 +156,28 @@ test("on end, the gate's first judge failure on a one-way door tells the agent t
   expect(gate.output).toContain("judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and decide it with hedge decision record --mark 🤖");
 });
 
+test("on ask, the gate's first judge failure on a one-way door tells the agent to ask the user", async () => {
+  const pr = await checkout();
+  pr.pullRequestState({ body: oneWayDoor() });
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  fakeModel(pr, "JUDGE", verdict({ owed: { verdict: "fail", reason: "feature.txt is code, not docs", citations: ["feature.txt"] } }));
+
+  const gate = await pr.hedge("gate");
+  expect(gate.output).toContain("judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and ask the user; on ask an agent never decides on a one-way door");
+  expect(gate.output).not.toContain("--mark 🤖");
+});
+
+test("on end, the agent still decides no design ask alone on a critical PR", async () => {
+  const pr = await checkout();
+  decideAtEnd(pr);
+  pr.pullRequestState({ body: graded("critical", "medium") });
+  await pr.commit("feature.txt", "new\n");
+
+  await expect(pr.decide("record", "--mark", "🤖", "--class", "design", "--pr", "example/product#42", "--question", "Keep the greeting short?", "--answer", "Keep it short", "--rejected", "Make it long", "--reason", "Short reads better")).rejects.toThrow("example/product#42 is critical at HEAD: an agent decides only process there");
+});
+
 test("on end, the printed decision command quotes a gap reason so the shell passes it whole", async () => {
   const pr = await checkout();
   decideAtEnd(pr);
