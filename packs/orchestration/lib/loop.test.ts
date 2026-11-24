@@ -35,7 +35,7 @@ describe("hedge loop check-pause", () => {
     expect(await loop(["check-pause", "--ledger", dir])).toMatchObject({ code: 0, out: expect.stringContaining("start lanes up to the WIP limits") });
   });
 
-  test.each(["- **Paused:** no (since the planning)\n", "Paused: no, resumed after review\n", "Paused: no - resumed\n", "Paused: no.\n", "Paused: no (since Friday)\n"])("exits 0 for a no with a note after it: %p", async (limits) => {
+  test.each(["- **Paused:** no (since the planning)\n", "Paused: no, resumed after review\n", "Paused: no - resumed\n", "Paused: no.\n", "Paused: no (since Friday)\n", "Paused: **no**\n"])("exits 0 for a no with a note after it: %p", async (limits) => {
     expect((await loop(["check-pause", "--ledger", ledger({ "limits.md": limits })])).code).toBe(0);
   });
 
@@ -56,6 +56,7 @@ describe("hedge loop check-pause", () => {
     ["markup inside a no", { "limits.md": "Paused: n_o\n" }],
     ["a no followed by another value", { "limits.md": "Paused: no: yes\n" }],
     ["a no with an unclosed bracket", { "limits.md": "Paused: no (\n" }],
+    ["a no with an unmatched markup sign", { "limits.md": "Paused: *no\n" }],
   ])("fails closed with exit 3 on %s", async (_, files) => {
     const result = await loop(["check-pause", "--ledger", ledger(files)]);
     expect(result).toMatchObject({ code: 3, out: expect.stringContaining("start no lane") });

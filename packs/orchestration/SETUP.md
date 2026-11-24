@@ -141,16 +141,18 @@ does not exist, such as on a machine whose loops keep their ledger in
 reading the directory denies. Set it to that
 ledger's checkout to turn the hook on there.
 
-A thread that a T3 scheduled task started, whose first line after T3's note
-starts with "Run" or "Start" and names a coordinator and the `quality-loop` or
-`signal-loop` skill, is a loop coordinator. A coordinator run a person starts
-by hand is not: the skill's own `hedge loop check-pause` step covers it. A
-scheduled prompt that opens with "Run" and names both, such as a scheduled
-audit of coordinator runs, counts as a coordinator. When such a thread calls
+A thread whose first prompt opens, after any bracketed note on who sent it
+(as T3's scheduled tasks add), with a line that starts with "Run" or "Start"
+and names a coordinator and the `quality-loop` or `signal-loop` skill, or with
+the skill's slash command, is a loop coordinator, whether a schedule or a
+person started it. A prompt that asks about a coordinator run, or quotes one
+further down, is not. A prompt that opens with "Run" and names both, such as
+"Run the quality-loop coordinator audit", counts: while the loops are paused,
+start such an audit with "Audit" instead. When such a thread calls
 `delegate_task` while `limits.md` says `Paused: yes`, or while the file cannot
 be read, has no `Paused:` line, says anything but a plain `yes` or `no` (a
 note may follow after a comma, a semicolon, a spaced dash, or in closed
-brackets), or has `Paused:` lines that disagree, the call is denied: the coordinator settles the lanes that ended, keeps
+brackets, and any markup around the word must match), or has `Paused:` lines that disagree, the call is denied: the coordinator settles the lanes that ended, keeps
 its watches and post-deploy checks, records a no-op run, and starts no lane.
 Settling, `watch_pull_request`, `schedule_task`, `t3_thread_send`, and every
 other thread pass.

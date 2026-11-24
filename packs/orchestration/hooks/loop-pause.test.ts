@@ -51,6 +51,8 @@ describe("the loop pause guard", () => {
     ["a scheduled coordinator asked for a fresh round", [claudePrompt(scheduled("Start a fresh signal-loop coordinator round."))], "claude"],
     ["a scheduled coordinator asked to run the skill as coordinator", [claudePrompt(scheduled("Run the quality-loop skill as coordinator."))], "claude"],
     ["a scheduled coordinator asked for one round of the coordinator", [claudePrompt(scheduled("Run one round of the coordinator for the quality-loop skill."))], "claude"],
+    ["a coordinator a person starts by hand", [claudePrompt(qualityRun)], "claude"],
+    ["a coordinator a person starts with the slash command", [claudePrompt("<command-message>quality-loop is running…</command-message>\n<command-name>/quality-loop</command-name>\n<command-args></command-args>")], "claude"],
     ["a scheduled coordinator woken later by a lane's end", [claudePrompt(scheduled(qualityRun)), claudeSays("Lanes started."), claudePrompt("Lane L064 ended.")], "claude"],
   ])("refuses a new lane from %s while the ledger pauses the loops", (_, lines, provider) => {
     expect(answer(machine(paused), delegate, lines, provider)).toEqual({
@@ -78,8 +80,6 @@ describe("the loop pause guard", () => {
 
   test.each([
     ["a thread that is no loop coordinator", [claudePrompt("Fix the login redirect and open a draft PR.")]],
-    ["a coordinator run a person starts by hand", [claudePrompt(qualityRun)]],
-    ["a coordinator a person starts with the slash command", [claudePrompt("<command-message>quality-loop is running…</command-message>\n<command-name>/quality-loop</command-name>\n<command-args></command-args>")]],
     ["a scheduled audit of the coordinator runs", [claudePrompt(scheduled("Audit last night's quality-loop coordinator run and list its lanes."))]],
     ["a lane of the loop", [claudePrompt("You are quality-loop lane L064. Ship one PR for the cover stage of billing.")]],
     ["a Codex lane whose project instructions mention a coordinator run", [codexInstructions, codexMessage("You are signal-loop lane L070. Ship one fix PR.")]],

@@ -11,16 +11,16 @@ export type LaneDenial = { hookSpecificOutput: { hookEventName: "PreToolUse"; pe
 type Line = { type?: string; isMeta?: boolean; message?: { content?: unknown }; payload?: { type?: string; role?: string; message?: unknown; content?: unknown } };
 
 const startsSubthread = /(?:^|__)delegate_task$/;
-const scheduledTask = /^\s*\[T3 Code: scheduled task "[^"\n]*"[^\]\n]*\]\s*/;
+const provenance = /^\s*(?:\[[^\]\n]*\]\s*)*/;
 const runVerb = /^\W*(?:run|start)\b/i;
 const loopName = /\b(?:quality|signal)-loop\b/i;
 const coordinator = /\bcoordinator\b/i;
+const slashCommand = /^(?:<command-message>[^<\n]*<\/command-message>\s*)?<command-name>\/(?:[\w-]+:)?(?:quality|signal)-loop<\/command-name>/;
 
 function opensCoordinatorRun(prompt: string): boolean {
-  const sent = scheduledTask.exec(prompt);
-  if (!sent) return false;
-  const line = prompt.slice(sent[0].length).split("\n")[0]!;
-  return runVerb.test(line) && loopName.test(line) && coordinator.test(line);
+  const opening = prompt.replace(provenance, "");
+  const line = opening.split("\n")[0]!;
+  return (runVerb.test(line) && loopName.test(line) && coordinator.test(line)) || slashCommand.test(opening);
 }
 
 const codexContext = /^\s*(?:# AGENTS\.md instructions|<environment_context>|<user_instructions>)/;

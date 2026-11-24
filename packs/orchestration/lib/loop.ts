@@ -33,7 +33,7 @@ function ledgerDir(args: string[], io: LoopIo, known: string[]): string {
 }
 
 const pauseLine = /^[ \t>*_-]*Paused[*_]*:[*_]*[ \t]*(.*)$/gim;
-const pauseValue = /^[*_`]*(yes|no)[*_`]*(?:\.|[,;]\s.*|\s*\([^()]*\)|\s+[\u2013\u2014-]\s.*)?$/i;
+const pauseValue = /^([*_`]*)(yes|no)\1(?:\.|[,;]\s.*|\s*\([^()]*\)|\s+[\u2013\u2014-]\s.*)?$/i;
 
 export function pauseState(ledger: string): PauseState {
   const file = join(ledger, "limits.md");
@@ -45,7 +45,7 @@ export function pauseState(ledger: string): PauseState {
   }
   const values = new Set([...text.matchAll(pauseLine)].map((match) => {
     const value = match[1]!.trim();
-    return pauseValue.exec(value)?.[1]!.toLowerCase() ?? value;
+    return pauseValue.exec(value)?.[2]!.toLowerCase() ?? value;
   }));
   if (values.size === 0) return { state: "unreadable", why: `${file} has no Paused line` };
   if (values.size > 1) return { state: "unreadable", why: `${file} has Paused lines that disagree (${[...values].join(", ")})` };
