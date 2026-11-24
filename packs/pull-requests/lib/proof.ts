@@ -1227,19 +1227,23 @@ async function devObservedStatus(weigh: Weigh, cleanBaseMerge: CleanBaseMerge, q
   if (acceptance?.by === "the user") return { ...status(undefined, gapState()), ...countedGap(weighed) };
   const proved = await provedCommits(home, identity, kind);
   const savedAt = new Map(await Promise.all([...proved].map(async ([commit, proof]) => [commit, await newestFile(evidenceDirectory(home, identity, kind, proof))] as const)));
-  const afterMerge = new Set([...savedAt].filter(([, saved]) => dev?.mergedAt && saved !== undefined && saved >= nanosOf(dev.mergedAt)).map(([commit]) => commit));
-  const candidates = afterMerge.size ? afterMerge : new Set(proved.keys());
-  const head = candidates.has(identity.commit) ? proved.get(identity.commit) : undefined;
-  const carried = head ? undefined : reviewedThrough(identity.commit, candidates, cleanBaseMerge, quietCommit);
-  const found = head ?? (carried && proved.get(carried.from));
+  const mergedAt = dev?.mergedAt !== undefined && !Number.isNaN(Date.parse(dev.mergedAt)) ? nanosOf(dev.mergedAt) : undefined;
+  const afterMerge = new Set([...savedAt].filter(([, saved]) => mergedAt !== undefined && saved !== undefined && saved >= mergedAt).map(([commit]) => commit));
+  const locate = (commits: Set<string>) => {
+    if (commits.has(identity.commit)) return { from: identity.commit, carried: undefined };
+    const carried = reviewedThrough(identity.commit, commits, cleanBaseMerge, quietCommit);
+    return carried && { from: carried.from, carried };
+  };
+  const located = locate(afterMerge) ?? locate(new Set(proved.keys()));
+  const found = located && proved.get(located.from);
   const directory = found && evidenceDirectory(home, identity, kind, found);
-  const saved = found ? savedAt.get(head ? identity.commit : carried!.from) : undefined;
-  if (dev?.mergedAt && found && directory && saved !== undefined && saved >= nanosOf(dev.mergedAt)) {
+  const saved = located && savedAt.get(located.from);
+  if (dev?.mergedAt && mergedAt !== undefined && found && directory && saved !== undefined && saved >= mergedAt) {
     const result: DevResult = {
       pr: devText(dev.ref), mergedAt: dev.mergedAt, ...dev.mergeCommit ? { mergeCommit: dev.mergeCommit } : {}, savedAt: isoOf(saved),
       line: `dev result: ${devText(dev.ref)} merged at ${dev.mergedAt}${dev.mergeCommit ? ` as ${short(dev.mergeCommit)}` : ""}; the dev-observed evidence was saved at ${isoOf(saved)}, after the merge`,
     };
-    const state: KindState = head ? await evidenceState(identity, head, directory) : await carriedState(carried!, found, directory);
+    const state: KindState = located.carried ? await carriedState(located.carried, found, directory) : await evidenceState(identity, found, directory);
     return { ...status(undefined, state, directory), dev: result };
   }
   if (gap) return { ...status(acceptance ? undefined : "gap", gapState()), ...countedGap(weighed) };

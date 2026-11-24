@@ -140,6 +140,37 @@ test("dev-observed carries the nearest observation saved after the dev merge, pa
   expect(gate.output).toContain(`dev-observed: evidence of ${observed.slice(0, 7)} carried across 2 quiet commit(s) (test-only delta)`);
 });
 
+test("a dev merge time the gate cannot read leaves dev-observed waiting with its reason, not an error", async () => {
+  const pr = await checkout();
+  fakeModel(pr, "JUDGE", verdict());
+  pr.pullRequestState({ number: 11, merged: true, mergedAt: "not a time" });
+  await pr.hedge("require", "--after-dev", "example/product#11");
+  await ranLiveRun(pr, undefined, "dev-observed");
+
+  const gate = await pr.hedge("gate");
+
+  expect(gate.code).toBe(1);
+  expect(gate.output).not.toContain("RangeError");
+  expect(gate.output).toContain("dev-observed: waiting on the dev result of example/product#11");
+});
+
+test("dev-observed at HEAD saved before the dev merge names its time, though another commit holds an observation saved after it", async () => {
+  const pr = await checkout();
+  fakeModel(pr, "JUDGE", verdict());
+  pr.pullRequestState({ number: 11, merged: true });
+  await pr.hedge("require", "--after-dev", "example/product#11");
+  await ranLiveRun(pr, undefined, "dev-observed");
+  await pr.git("reset", "-q", "--hard", "HEAD~1");
+  const head = await pr.commit("feature.ts", "export const greet = (name: string) => `hello ${name}`;\n");
+  expect((await pr.hedge("run", "--kind", "dev-observed", "--", "echo", "hello ada")).code).toBe(0);
+  const directory = join(pr.pullRequest, head, "dev-observed");
+  for (const name of readdirSync(directory)) utimesSync(join(directory, name), new Date("2026-10-25T08:00:00Z"), new Date("2026-10-25T08:00:00Z"));
+
+  const gate = await pr.hedge("gate");
+
+  expect(gate.output).toContain("after the newest dev-observed evidence, saved at 2026-10-25T08:00:00.000Z");
+});
+
 test("evidence at a commit carries to HEAD across commits that change only tests, verified by code, and stops at a production change", async () => {
   const pr = await checkout();
   const judge = fakeModel(pr, "JUDGE", verdict());
