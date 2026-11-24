@@ -14,7 +14,7 @@ const usage = `Usage: hedge thread list [host] [--limit count] [--json]
        hedge thread read [--host host] <id> [--words]
        hedge thread send [--host host] [--mode auto|queue|steer|restart] <id> [message]
 Without --host, Hedge finds the machine that has the thread. find names that machine and reads nothing of the thread.
---mode defaults to auto, which starts an idle thread or steers a running turn when it can. On Claude and Codex a steer leaves a pending question card open; on other providers, and for a slash command, auto queues behind it.
+--mode defaults to auto, which starts an idle thread or steers a running turn when it can. T3 queues where the provider cannot take a steer, and for a slash command. On Claude and Codex a steer leaves a pending question card open.
 --words prints only the messages a person typed; on a linked machine it leaves out answers to question tools.
 The message comes from stdin when you leave it out.`;
 const threadIdPattern = /^[a-zA-Z0-9][a-zA-Z0-9:._%-]{0,511}$/;

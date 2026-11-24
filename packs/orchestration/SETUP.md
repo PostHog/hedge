@@ -49,10 +49,8 @@ A message that an agent or `hedge thread send` sends to a thread whose
 running turn waits on a question card steers that turn by default on Claude
 and Codex, which steer without interrupting. The card stays open, and the
 thread's agent reads the message when the person answers. `hedge thread send`
-in mode `auto` queues the message instead when the thread runs on another
-provider, such as Antigravity, or the message is a slash command, since T3
-would restart the turn and cancel the card. It also queues when it cannot
-read a linked thread.
+passes mode `auto` to T3 as it is: T3 queues for a provider that cannot take
+a steer, and queues a slash command itself.
 
 ### Threads that ask in prose
 
