@@ -128,7 +128,7 @@ test("on a graded PR the agent's own judge decision accepts a judge gap on HEAD,
   fakeModel(pr, "JUDGE", verdict({ owed: { verdict: "fail", reason: "feature.txt is code, not docs", citations: ["feature.txt"] } }));
   const decide = () => pr.decide("record", "--mark", "🤖", "--class", "proof-gap", "--kind", "judge", "--pr", "example/product#42", "--question", "Accept the judge gap?", "--answer", "Accept it", "--rejected", "Ask the user", "--reason", "feature.txt is the greeting copy, not code");
 
-  expect((await pr.hedge("gate")).output).toContain("judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and ask the user; an agent never decides on an ungraded PR");
+  expect((await pr.hedge("gate")).output).toContain("judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why>, then grade the PR with merge-risk before you decide it: an agent never decides on an ungraded PR");
   await expect(decide()).rejects.toThrow("example/product#42 is ungraded");
   pr.pullRequestState({ body: graded("critical") });
   expect((await pr.hedge("gate")).output).toContain("decide it with hedge decision record --mark 🤖 --class proof-gap --kind judge --pr example/product#42");

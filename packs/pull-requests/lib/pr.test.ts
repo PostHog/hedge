@@ -216,6 +216,28 @@ test("--fixed that resolves the last waiting bot thread passes, and --resolve th
   expect(box.calls().filter((call) => call.includes("resolveReviewThread")).map((call) => call.match(/id=(\w+)/)![1])).toEqual(["F6", "F5"]);
 });
 
+test("--fixed and --resolve treat the review bots Hedge names as bots when GitHub reports them as user accounts", () => {
+  const box = sandbox();
+  box.reply("threads", threads("me", [
+    thread("K1", "src/a.ts", 1, [comment(user("posthog-security-review-bot"), "https://example.test/k1")]),
+    thread("K2", "src/b.ts", 2, [comment(user("posthog"), "https://example.test/k2"), comment(user("me"), "https://example.test/k2r")]),
+    thread("K3", "src/c.ts", 3, [comment(user("veria-ai"), "https://example.test/k3"), comment(user("reviewer"), "https://example.test/k3b")]),
+  ]));
+  box.reply("resolve", { data: {} });
+  const result = box.run("bot-threads", "--repo", "acme/widgets", "--pr", "12", "--resolve", "--fixed", "https://example.test/k1", "--fixed", "https://example.test/k3");
+  expect(result.out).toBe([
+    "bot unanswered src/a.ts:1 https://example.test/k1",
+    "bot answered src/b.ts:2 https://example.test/k2",
+    "human unanswered src/c.ts:3 https://example.test/k3",
+    "resolved fixed src/a.ts:1 https://example.test/k1",
+    "skipped human thread, the person resolves it: https://example.test/k3",
+    "resolved src/b.ts:2 https://example.test/k2",
+    "1 human thread waits on me: react 👍 to a fix, or draft the reply for me to post.",
+  ].join("\n"));
+  expect(result.code).toBe(0);
+  expect(box.calls().filter((call) => call.includes("resolveReviewThread")).map((call) => call.match(/id=(\w+)/)![1])).toEqual(["K1", "K2"]);
+});
+
 test("bot-threads reads every page of threads and of each thread's comments", () => {
   const box = sandbox();
   const resolved = Array.from({ length: 100 }, (_, index) => thread(`R${index}`, "src/old.ts", index, [comment(bot("codecov"), `https://example.test/r${index}`)], true));

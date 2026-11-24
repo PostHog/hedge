@@ -95,7 +95,7 @@ _Avoid_: Controller, master box
 ## Threads
 
 **Question card**:
-A question a thread asks the person with the question tool: `AskUserQuestion` in Claude, `request_user_input` in Codex. T3 shows it as a card, and the thread's turn waits until the person answers. A message sent to the thread in a mode other than `queue` cancels the card. T3 queues a message with `freshContext: true` in mode `steer` or `restart`, so that message does not cancel it.
+A question a thread asks the person with the question tool: `AskUserQuestion` in Claude, `request_user_input` in Codex. T3 shows it as a card, and the thread's turn waits until the person answers. On Claude and Codex, which steer without interrupting, a message that steers the turn leaves the card open, and the agent reads it once the person answers. A message in mode `restart`, or a `/goal` command that T3 runs at once, stops the turn and cancels the card. A message in mode `queue` starts a new turn after this one ends.
 _Avoid_: Prompt, popup, dialog
 
 ## Decisions
@@ -113,7 +113,7 @@ The `Tier:` line of a pull request's merge-risk callout at HEAD: critical or non
 _Avoid_: Risk level, grade
 
 **Autonomy**:
-The setting `pull-requests.autonomy`: how often an agent asks the user about a review round or a proof gap. On `ask`, the default, `hedge proof` tells the agent to ask the user each time. On `end`, it tells the agent to decide alone as a 🤖 decision, wherever the tier lets it, and the user reads every such decision under Decisions in `hedge decision report`, beside the end table. A one-way door, an ungraded pull request, a panel gap, and a product gap on a critical pull request still go to the user.
+The setting `pull-requests.autonomy`: how often an agent asks the user about a review round or a proof gap. On `ask`, the default, `hedge proof` tells the agent to ask the user each time. On `end`, it tells the agent to decide alone as a 🤖 decision, and the user reads every such decision under Decisions in `hedge decision report`, beside the end table. That covers every review round, up to 3 reads past the review budget, and every proof gap, on critical pull requests and one-way doors too. Only an ungraded pull request, which the agent grades first, and a gap the user keeps owed stay with the user.
 _Avoid_: Trust level, mode
 
 **Acceptance**:
@@ -121,7 +121,7 @@ A decision that lets the gate pass over a proof gap. The user's acceptance alway
 _Avoid_: Waiver, override
 
 **Lapse**:
-The gate no longer counts an agent's acceptance, because the tier changed, CI ran on HEAD, the user keeps the gap owed, or the gap is a panel gap. The gate prints each lapsed decision of a kind that stays open.
+The gate no longer counts an agent's acceptance, because the tier changed, CI ran on HEAD, the user keeps the gap owed, or, on `ask`, the gap is a panel gap. The gate prints each lapsed decision of a kind that stays open.
 _Avoid_: Expiry, revoke
 
 **Reversal**:
@@ -133,7 +133,7 @@ Two reversals of the agent's decisions in one ask class within 28 days. The brak
 _Avoid_: Lock, freeze
 
 **Proof summary**:
-The proof state of a pull request at HEAD that the gate builds: each owed kind, the review, the head, CI, the tier, the judge's verdict, and the lapsed and voided decisions. The gate prints its lines from it, and `hedge proof gate --json` prints it. Each `hedge proof gate` saves its summary for its commit, with the pull request's head, base and base SHA on GitHub, the tier, `--landed`, and a fingerprint of the pull request's proof files, the standing rules and the ledger decisions that cover it. The end-of-run report uses a saved summary for its judge's verdict only while all of these still match.
+The proof state of a pull request at HEAD that the gate builds: each owed kind, the review, the head, CI, the open bot findings, the tier, the judge's verdict, and the lapsed and voided decisions. The gate prints its lines from it, and `hedge proof gate --json` prints it. Each `hedge proof gate` saves its summary for its commit, with the pull request's head, base and base SHA on GitHub, the tier, `--landed`, and a fingerprint of the pull request's proof files, the standing rules and the ledger decisions that cover it. The end-of-run report uses a saved summary for its judge's verdict only while all of these still match.
 _Avoid_: Proof status, gate result
 
 **End-of-run report**:
