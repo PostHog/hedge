@@ -19,11 +19,11 @@ Keep the thread Working with something that wakes it, then end the turn and say 
   - A watch ends after many comment-only wakes. When a wake says the watch ended, and the pull request is still open, call `watch_pull_request` again.
 - **A child task**: its completion wakes you. Do not poll it.
 - **Another thread**: call `t3_thread_wait`. When it returns a finished run, act on it in the same turn. When it times out with `next`, end the turn. When it times out without `next`, read its status: while it runs, call it again; when it waits on a question or an approval, answer it or ask me.
-- **A command**, such as a deploy or a CI run: wait in one call that blocks until it ends. When it outlasts the shell's foreground limit on Claude, run it in the background and pass its task id to `t3_background_wait`. T3 takes only Claude's own background tasks there; on another provider, wait in blocking calls that each end within the limit.
+- **A command**, such as a deploy or a CI run: wait in one call that blocks until it ends. When it outlasts the shell's foreground limit, run it in the background and pass its task id to `t3_background_wait`. When T3 refuses the task id, as it does for Codex, wait in blocking calls that each end within the limit.
 
 ## Nothing to wake it
 
-When the answer comes by email, from a person on Slack, or from another place T3 does not watch, bind a `schedule_task` to the thread for a re-check, or not, and end the turn on my move with what you wait for. Never snooze a thread to hide a wait.
+When the answer comes by email, from a person on Slack, or from another place T3 does not watch, end the turn on my move with what you wait for. To check again at a set time instead, follow the next section. Never snooze a thread to hide a wait.
 
 ## Waiting on its own schedule
 
