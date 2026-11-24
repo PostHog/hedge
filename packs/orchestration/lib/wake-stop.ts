@@ -40,10 +40,10 @@ const outsideWakeCheck = (thread: ShellThread, now: number) => Boolean(subagentP
 
 type ShellPullRequest = NonNullable<ShellThread["pullRequests"]>[number];
 
-const watchWakes = ({ snapshot, watch }: ShellPullRequest) => Boolean(watch) && (snapshot?.state?.toLowerCase() ?? "open") === "open"
-  && (watch!.until === "merged" || watch!.checksPending !== false);
+const awaitedByT3 = ({ source, snapshot, watch }: ShellPullRequest) => Boolean(watch) && source !== "stack-dismissed"
+  && (watch!.checksPending !== false || watch!.until === "merged" || snapshot?.state?.toLowerCase() === "merged");
 
-const wakes = (threads: ShellThread[], thread: ShellThread) => waits(threads, thread) || (thread.pullRequests ?? []).some(watchWakes);
+const wakes = (threads: ShellThread[], thread: ShellThread) => waits(threads, thread) || (thread.pullRequests ?? []).some(awaitedByT3);
 
 type WakeStopBlock = { decision: "block"; reason: string };
 

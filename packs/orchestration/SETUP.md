@@ -101,13 +101,13 @@ The stop passes when any of these holds:
 - the kill switch file exists, or a stop hook already continued this turn;
 - the thread waits on a child task, a thread wait, or a command or monitor it
   awaits, as in the proof check below;
-- a PR watch of the thread on an open PR runs `until: "merged"`, or its
-  checks still run or are not read yet after a push. T3 shows no task while
-  a turn runs, so the check reads the watch on the PR itself. A watch on a
-  merged or closed PR is no wait, because T3 drops it without a wake when
-  the agent merged or closed the PR. A watch whose checks finished, such as
-  one on a PR in the merge queue or one that waits on an approval, is no
-  wait unless it runs `until: "merged"`;
+- T3 awaits a PR watch of the thread: the watch runs `until: "merged"`,
+  its checks still run or are not read yet after a push, or its PR merged,
+  and the PR's stack did not dismiss it. This is T3's own rule for an
+  awaited watch task. T3 shows no task while a turn runs, so the check
+  reads the watch on the PR itself. A watch whose checks finished, such as
+  one on a PR in the merge queue, one that waits on an approval, or one on
+  a closed PR, is no wait unless it runs `until: "merged"`;
 - on Claude, a subagent, a monitor, a background shell, or a session cron
   runs;
 - an enabled scheduled task bound to the thread has a next run time in

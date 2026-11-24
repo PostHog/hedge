@@ -535,14 +535,24 @@ describe("the wake guard", () => {
   });
 
   test.each([
-    ["held until merge", "merged"],
-    ["held until merge", "closed"],
-    ["by default", "merged"],
-    ["by default", "closed"],
-  ])("sends back a wait whose only watch, %s, is on a PR that was %s, which T3 drops without a wake when the agent ended the PR itself", async (until, state) => {
-    const ended = watching(until === "by default" ? {} : { until: "merged" });
+    ["held until merge, on a merged PR", { until: "merged" }, "merged"],
+    ["held until merge, on a closed PR", { until: "merged" }, "closed"],
+    ["by default with its checks done, on a merged PR", {}, "merged"],
+  ])("lets a wait through whose watch, %s, T3 still awaits", async (_, watch, state) => {
+    const ended = watching(watch);
     ended.pullRequests[0]!.snapshot.state = state;
-    expect(await ends({ ...ended, status: "running" })).toMatchObject({ decision: "block" });
+    expect(await ends({ ...ended, status: "running" })).toBeUndefined();
+  });
+
+  test("sends back a wait whose only watch, by default with its checks done, is on a closed PR, which T3 no longer awaits", async () => {
+    const closed = watching({});
+    closed.pullRequests[0]!.snapshot.state = "closed";
+    expect(await ends({ ...closed, status: "running" })).toMatchObject({ decision: "block" });
+  });
+
+  test("sends back a wait whose only watch until merge is on a PR its stack dismissed, which T3 no longer awaits", async () => {
+    const dismissed = watching({ until: "merged" });
+    expect(await ends({ pullRequests: [{ ...dismissed.pullRequests[0]!, source: "stack-dismissed" }], status: "running" })).toMatchObject({ decision: "block" });
   });
 
   test("lets a wait through after a push, when T3 cleared checksPending and kept the old result", async () => {
@@ -641,12 +651,12 @@ describe("the wake guard", () => {
     expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)) }), home("Robin"))).stdout).toBe("");
   });
 
-  test("lets the stop through when a read that does not yield runs past the deadline", async () => {
+  test("lets the stop through when reads that do not yield in the proof check and the wake check together run past the one deadline", async () => {
     let clock = 0;
-    const slowRead = { pid: 30, table: async () => { clock += 10_001; return lone.table(); } };
+    const slowRead = { pid: 30, table: async () => { clock += 6_000; return lone.table(); } };
     const threads = [{ id: conductor, title: "Conductor", projectId: "p", status: "completed" }] as ShellThread[];
     const routed = hookWith(() => async () => ({ threads }), { threadId: conductor, processes: slowRead, deadline: () => new Promise<void>(() => {}), now: () => clock });
-    expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)) }), home("Robin"))).stdout).toBe("");
+    expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)), cwd: "/" }), home("Robin"))).stdout).toBe("");
   });
 
   test("lets the stop through when the check does not answer before the deadline the hook passes on", async () => {
