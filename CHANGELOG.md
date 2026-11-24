@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### A message steers a thread that waits on a question card
+
+- `hedge thread send` no longer turns `auto` into `queue` when the target
+  thread waits on a question card or an approval, on this machine or a
+  linked one. T3 steers the running turn, the card stays open, and the
+  agent reads the message once the person answers.
+- The `question-guard` workflow no longer turns back a `t3_thread_send` to a
+  thread that waits on a card. The prose-title card check stays.
+- The base rule tells agents to omit `mode`, and to promote a queued message
+  with `t3_queue` instead of sending it twice.
+
 ### A one-way door stops the review loop at an escalation
 
 - With `pull-requests.autonomy` set to `end`, when the review arbiter

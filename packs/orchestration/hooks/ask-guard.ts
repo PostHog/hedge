@@ -1,9 +1,8 @@
-import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type Hook, printing, runHook } from "../../base/lib/hook.ts";
-import { matchThread, questionCard, type ShellThread, t3CliRunner, t3UserData, withT3Session } from "../../base/lib/t3/index.ts";
+import { matchThread, type ShellThread, t3CliRunner, withT3Session } from "../../base/lib/t3/index.ts";
 import { backgroundReason, unwaitedBackgroundTasks } from "../lib/background-stop.ts";
 import { checksRun, claudeTaskRuns, proofStop, waits, type ProofStopEvent, type ProofStopOptions } from "../lib/proof-stop.ts";
 import { asksForDecision, asksInProse, personName, proseTitles } from "../lib/prose-question.ts";
@@ -110,24 +109,7 @@ export type SendDenial = { hookSpecificOutput: { hookEventName: "PreToolUse"; pe
 export type ReadShell = () => Promise<{ threads: ShellThread[] }>;
 export type SendGuardOptions = { home: string; shell: ReadShell };
 
-export const pendingCardReason = (threadId: string, person: string) => `Hedge blocked this send: thread ${threadId} waits on a pending question card. `
-  + `A send in mode auto, steer or restart interrupts its turn, and T3 cancels the card, so its lane asks ${person} again or the card is lost. `
-  + `Send again with mode: "queue": the lane reads your message once ${person} answers. `
-  + "Only when your message changes what the card asks, send the same message to the same thread once more to replace the card. A different message is denied again.";
-
 export const killSwitch = ".config/hedge/ask-guard.off";
-
-const isThreadSend = (name = "") => /^mcp__t3[-_]code__t3_thread_send$/.test(name);
-
-const waitingCardKey = (thread: ShellThread | undefined) => thread?.activeRunId ? questionCard(thread) : undefined;
-
-const interruptsTurn = (mode: unknown, freshContext: unknown) => mode !== "queue" && !(freshContext && (mode === "steer" || mode === "restart"));
-
-async function isThisMachine(environmentId: unknown, home: string): Promise<boolean> {
-  if (environmentId === undefined || environmentId === null || environmentId === "") return true;
-  const here = await readFile(join(t3UserData(home), "environment-id"), "utf8").catch(() => "");
-  return here.trim() === environmentId;
-}
 
 async function readThreads(shell: ReadShell): Promise<ShellThread[] | undefined> {
   try {
@@ -135,43 +117,6 @@ async function readThreads(shell: ReadShell): Promise<ShellThread[] | undefined>
   } catch {
     return undefined;
   }
-}
-
-const denialLifetimeMs = 24 * 60 * 60 * 1000;
-
-async function forgetOldDenials(denials: string): Promise<void> {
-  const oldest = Date.now() - denialLifetimeMs;
-  for (const record of await readdir(denials).catch(() => [])) {
-    const path = join(denials, record);
-    const written = (await stat(path).catch(() => undefined))?.mtimeMs;
-    if (written !== undefined && written < oldest) await rm(path, { force: true }).catch(() => {});
-  }
-}
-
-async function firstDenial(home: string, event: SendEvent, thread: string, card: string): Promise<boolean> {
-  const denials = join(home, ".local/state/hedge/ask-guard");
-  const message = typeof event.tool_input?.message === "string" ? event.tool_input.message : "";
-  const key = createHash("sha256").update(JSON.stringify([event.session_id ?? "", event.agent_id ?? "", thread, card, message])).digest("hex").slice(0, 32);
-  try {
-    await mkdir(denials, { recursive: true });
-    await writeFile(join(denials, key), "", { flag: "wx" });
-  } catch {
-    return false;
-  }
-  await forgetOldDenials(denials);
-  return true;
-}
-
-export async function guardSend(event: SendEvent, options: SendGuardOptions): Promise<SendDenial | undefined> {
-  const { threadId, mode, freshContext, environmentId } = event.tool_input ?? {};
-  if (!isThreadSend(event.tool_name) || typeof threadId !== "string" || !interruptsTurn(mode, freshContext) || existsSync(join(options.home, killSwitch))) return undefined;
-  if (!(await isThisMachine(environmentId, options.home))) return undefined;
-  const threads = await readThreads(options.shell);
-  if (!threads) return undefined;
-  const target = matchThread(threads, threadId, (thread) => thread.id);
-  const card = waitingCardKey(target);
-  if (!target || !card || !(await firstDenial(options.home, event, target.id, card))) return undefined;
-  return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: pendingCardReason(threadId, personName(options.home)) } };
 }
 
 export const proseCardReason = "Hedge blocked this card: this thread's title marks it as one that asks in prose, because a job queues messages into it, and a pending card would hold them. "
@@ -225,7 +170,7 @@ export const hookWith = (shell: (home: string) => ReadShell, stop: StopDeps = {}
     const event = JSON.parse(await readInput()) as StopEvent & ProofStopEvent & SendEvent;
     if (event.tool_name !== undefined) {
       const options = { home, shell: shell(home) };
-      return printing((await guardSend(event, options)) ?? (await guardCard(event, options, "threadId" in stop ? stop.threadId : process.env.T3CODE_THREAD_ID)));
+      return printing(await guardCard(event, options, "threadId" in stop ? stop.threadId : process.env.T3CODE_THREAD_ID));
     }
     return printing(await guardStopAndProof(event, home, shell(home), stop));
   } catch {

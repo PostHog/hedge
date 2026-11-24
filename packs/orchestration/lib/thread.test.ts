@@ -152,33 +152,17 @@ test("hedge thread read refuses --mode", async () => {
   await expect(thread(t3, ["read", "--mode", "queue", "mcp:local-idle"])).rejects.toThrow("Usage: hedge thread list");
 });
 
-test("hedge thread send queues behind a local question card by default", async () => {
+test("hedge thread send steers a running turn that waits on a question card on this machine by default", async () => {
   const t3 = await stub(fixture([linkedEnvironment], linkedThreads, [
     shellThread("mcp:local-card", { status: "running", activeRunId: "run-2", pendingRuntimeRequest: { id: "card-1", kind: "user_input" } }),
   ]));
 
   const { output } = await thread(t3, ["send", "--host", "this-box", "mcp:local-card", "FYI"]);
 
-  expect(JSON.parse(output)).toMatchObject({ threadId: "mcp:local-card", delivery: "queued" });
-  expect(sends(t3)).toEqual([
-    expect.objectContaining({ threadId: "mcp:local-card", message: "FYI", mode: "queue" }),
-  ]);
-});
-
-test("hedge thread send passes --mode steer through on a local question card", async () => {
-  const t3 = await stub(fixture([linkedEnvironment], linkedThreads, [
-    shellThread("mcp:local-card", { status: "running", activeRunId: "run-2", pendingRuntimeRequest: { id: "card-1", kind: "user_input" } }),
-  ]));
-
-  const { output } = await thread(t3, ["send", "--host", "this-box", "--mode", "steer", "mcp:local-card", "Replace card"]);
-
   expect(JSON.parse(output)).toMatchObject({ threadId: "mcp:local-card", delivery: "steered" });
-  expect(sends(t3)).toEqual([
-    expect.objectContaining({ threadId: "mcp:local-card", message: "Replace card", mode: "steer" }),
-  ]);
 });
 
-test("hedge thread send queues behind a linked pending request by default", async () => {
+test("hedge thread send steers a running turn that waits on a question card on a linked machine by default", async () => {
   const t3 = await stub(fixture([linkedEnvironment], [
     ...linkedThreads,
     linkedThread("mcp:linked-card", { status: "running", pendingRequestCount: 1 }),
@@ -186,42 +170,7 @@ test("hedge thread send queues behind a linked pending request by default", asyn
 
   const { output } = await thread(t3, ["send", "--host", "devbox-2", "mcp:linked-card", "FYI"]);
 
-  expect(JSON.parse(output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-card", delivery: "queued" });
-  expect(sends(t3)).toEqual([
-    expect.objectContaining({ environmentId: "env-linked", threadId: "mcp:linked-card", message: "FYI", mode: "queue" }),
-  ]);
-});
-
-test("hedge thread send passes --mode steer through on a linked pending request", async () => {
-  const t3 = await stub(fixture([linkedEnvironment], [
-    ...linkedThreads,
-    linkedThread("mcp:linked-card", { status: "running", pendingRequestCount: 1 }),
-  ]));
-
-  const { output } = await thread(t3, ["send", "--host", "devbox-2", "--mode", "steer", "mcp:linked-card", "Replace card"]);
-
   expect(JSON.parse(output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-card", delivery: "steered" });
-  expect(sends(t3)).toEqual([
-    expect.objectContaining({ environmentId: "env-linked", threadId: "mcp:linked-card", message: "Replace card", mode: "steer" }),
-  ]);
-});
-
-test("hedge thread send fails closed to queue on a linked thread when checking pending requests fails", async () => {
-  const base = fixture();
-  const t3 = await stub({
-    ...base,
-    tools(name, args) {
-      if (name === "t3_thread_read") throw new ToolRefusal("orchestration_error", "timeout");
-      return base.tools!(name, args);
-    },
-  });
-
-  const result = await thread(t3, ["send", "--host", "devbox-2", "mcp:linked-busy", "FYI"]);
-
-  expect(JSON.parse(result.output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-busy", delivery: "queued" });
-  expect(sends(t3)).toEqual([
-    expect.objectContaining({ environmentId: "env-linked", threadId: "mcp:linked-busy", message: "FYI", mode: "queue" }),
-  ]);
 });
 
 test("hedge thread send refuses an archived thread, an empty message, and a thread it cannot place, and sends nothing", async () => {

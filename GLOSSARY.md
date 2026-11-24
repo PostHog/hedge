@@ -95,7 +95,7 @@ _Avoid_: Controller, master box
 ## Threads
 
 **Question card**:
-A question a thread asks the person with the question tool: `AskUserQuestion` in Claude, `request_user_input` in Codex. T3 shows it as a card, and the thread's turn waits until the person answers. A message sent to the thread in a mode other than `queue` cancels the card. T3 queues a message with `freshContext: true` in mode `steer` or `restart`, so that message does not cancel it.
+A question a thread asks the person with the question tool: `AskUserQuestion` in Claude, `request_user_input` in Codex. T3 shows it as a card, and the thread's turn waits until the person answers. A message that steers the turn leaves the card open, and the agent reads it once the person answers. A message in mode `queue` starts a new turn after this one ends.
 _Avoid_: Prompt, popup, dialog
 
 ## Decisions

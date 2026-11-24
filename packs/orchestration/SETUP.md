@@ -42,31 +42,12 @@ The `question-guard` workflow is on by default. It installs one hook file,
 - **Stop.** A top-level T3 thread that ends its turn with a decision in prose
   is stopped once and told to ask with the question tool. When that check lets
   the stop pass, the proof check below runs.
-- **PreToolUse on `t3_thread_send`.** An agent sends to a thread on this
-  machine whose running turn waits on a question card. When the send's mode is
-  `auto`, `steer` or `restart`, or has no mode, it interrupts that turn, and T3
-  cancels the card. The hook denies such a send and tells the agent to send
-  again with `mode: "queue"`. The queued message reaches the thread after the
-  person answers. A send in mode `queue`, or to an idle thread, passes. T3
-  queues a send with `freshContext: true` in mode `steer` or `restart`, so it
-  passes too. With `freshContext: true` in mode `auto`, T3 still steers, so it
-  is denied. The hook reads the card from `pendingRuntimeRequest` in T3's shell
-  snapshot. A card without an id counts as one card for each running turn.
+- **PreToolUse on the question tool.** A card in a thread whose title starts
+  with one of your prose titles is turned back. See below.
 
-The send guard never traps an agent:
-
-- It denies a send once for each session, card, thread and message. Only the
-  same message to the same thread again passes, for an agent whose message
-  replaces what the card asks. A different message is denied again. It keeps
-  these records in `~/.local/state/hedge/ask-guard/`, and removes records
-  older than one day when it writes a new one.
-- It lets the send pass on any error: when T3 cannot be read, when a T3 call
-  does not answer within 3 seconds, when it cannot write its record, and when
-  the send names another machine's `environmentId`. The hook makes three T3
-  calls: it opens a session, reads the shell snapshot, and closes the session.
-  So a send waits at most about 9 seconds.
-- While `~/.config/hedge/ask-guard.off` exists, every send passes. The prose
-  Stop check stays on.
+A message that an agent or `hedge thread send` sends to a thread whose
+running turn waits on a question card steers that turn by default. The card
+stays open. The thread's agent reads the message when the person answers.
 
 ### Threads that ask in prose
 

@@ -75,8 +75,7 @@ export type SentMessage = { threadId: string; messageId: string; delivery: "star
 
 export async function sendMessage(client: Pick<T3HttpClient, "callTool">, thread: ShellThread, text: string, mode: SendMode = "auto"): Promise<SentMessage> {
   if (thread.archivedAt) throw new Error(`Thread ${thread.id} is archived. Unarchive it before you send it a message.`);
-  const resolvedMode: SendMode = mode === "auto" && thread.activeRunId && Boolean(thread.pendingRuntimeRequest) ? "queue" : mode;
-  const sent = await client.callTool<SentMessage>("t3_thread_send", { threadId: thread.id, message: text, mode: resolvedMode, clientRequestId: `hedge-thread-send:${randomUUID()}` });
+  const sent = await client.callTool<SentMessage>("t3_thread_send", { threadId: thread.id, message: text, mode, clientRequestId: `hedge-thread-send:${randomUUID()}` });
   return { threadId: sent.threadId, messageId: sent.messageId, delivery: sent.delivery };
 }
 
