@@ -179,21 +179,27 @@ function waitsOnSubagent(threads: ShellThread[], parent: ShellThread, depth = 0)
       || awaitsWork(child) || waitsOnSubagent(threads, child, depth + 1)));
 }
 
-const isSnoozed = (thread: ShellThread) => Boolean(thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now());
+export const isSnoozed = (thread: ShellThread, now = Date.now()) => Boolean(thread.snoozedUntil && Date.parse(thread.snoozedUntil) > now);
+
+export const awaitsChecks = ({ snapshot, watch }: NonNullable<ShellThread["pullRequests"]>[number]) =>
+  Boolean(watch) && !["merged", "closed"].includes(snapshot?.state?.toLowerCase() ?? "open") && (checksRun(watch!) || Boolean(watch!.awaitingApproval?.length));
 
 export const waits = (threads: ShellThread[], thread: ShellThread) => awaitsWork(thread) || waitsOnSubagent(threads, thread);
 
-export async function proofStop(event: ProofStopEvent, options: ProofStopOptions): Promise<ProofStopBlock | undefined> {
+export async function withinDeadline<T>(run: (signal: AbortSignal) => Promise<T | undefined>, deadline?: () => Promise<void>): Promise<T | undefined> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const cancel = new AbortController();
-  const deadline = options.deadline?.() ?? new Promise<void>((resolve) => { timer = setTimeout(resolve, proofStopDeadlineMs); });
+  const end = deadline?.() ?? new Promise<void>((resolve) => { timer = setTimeout(resolve, proofStopDeadlineMs); });
   try {
-    return await Promise.race([check(event, options, cancel.signal).catch(() => undefined), deadline.then(() => undefined)]);
+    return await Promise.race([run(cancel.signal).catch(() => undefined), end.then(() => undefined)]);
   } finally {
     clearTimeout(timer);
     cancel.abort();
   }
 }
+
+export const proofStop = (event: ProofStopEvent, options: ProofStopOptions): Promise<ProofStopBlock | undefined> =>
+  withinDeadline((signal) => check(event, options, signal), options.deadline);
 
 async function check(event: ProofStopEvent, options: ProofStopOptions, signal: AbortSignal): Promise<ProofStopBlock | undefined> {
   const { threadId, home } = options;

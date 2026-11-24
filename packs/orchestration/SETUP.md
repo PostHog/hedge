@@ -41,7 +41,7 @@ The `question-guard` workflow is on by default. It installs one hook file,
 
 - **Stop.** A top-level T3 thread that ends its turn with a decision in prose
   is stopped once and told to ask with the question tool. When that check lets
-  the stop pass, the proof check below runs.
+  the stop pass, the proof check and then the wake check below run.
 - **PreToolUse on the question tool.** A card in a thread whose title starts
   with one of your prose titles is turned back. See below.
 
@@ -69,6 +69,43 @@ empty by default. A thread whose title starts with one of them:
 The match ignores the emoji variation selector, so `⚠️` also matches `⚠`. The
 card check lets a card pass on any error, and while
 `~/.config/hedge/ask-guard.off` exists.
+
+### Wake check at Stop
+
+A top-level T3 thread whose last line starts with ⏳ (it waits on someone
+else) or 🔕 (it waits on its own scheduled check) is stopped once when nothing
+can wake it. A fork counts as top-level. It runs after the proof check, so a
+thread that owes a proof step hears that step first. Hedge never snoozes or
+settles the thread. A thread that waits
+belongs in T3's waiting state, so the reply tells the agent to give the wait
+something that wakes it: `watch_pull_request` with `until: "merged"` for a PR,
+including one in the merge queue; the lane's `delegate_task` child or
+`t3_thread_wait`; or `schedule_task` bound to the thread for a check at a time.
+
+The stop passes when any of these holds:
+
+- the kill switch file exists, or a stop hook already continued this turn;
+- the thread waits on a child task, a thread wait, or a command or monitor it
+  awaits, as in the proof check below;
+- T3 awaits a PR watch of the thread: the watch runs `until: "merged"`,
+  its checks still run or are not read yet after a push, or its PR merged,
+  and the PR's stack did not dismiss it. This is T3's own rule for an
+  awaited watch task. T3 shows no task while a turn runs, so the check
+  reads the watch on the PR itself. A watch whose checks finished, such as
+  one on a PR in the merge queue, one that waits on an approval, or one on
+  a closed PR, is no wait unless it runs `until: "merged"`;
+- on Claude, a subagent, a monitor, a background shell, or a session cron
+  runs;
+- an enabled scheduled task bound to the thread has a next run time in
+  T3's state, a real time in the UTC form T3 writes, also one that is due
+  and has not run yet;
+- the thread is snoozed, waits on a question card, is a subagent thread, a
+  side chat or a workflow agent step, or was delegated from another machine;
+- the hook runs in a model session that another one started, as in the proof
+  check below;
+- any read fails, or the proof check and this check together take longer
+  than 10 seconds. The two share one deadline, and a check that answers
+  after it lets the stop pass.
 
 ### Proof check at Stop
 
