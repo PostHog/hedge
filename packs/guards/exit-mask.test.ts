@@ -661,13 +661,48 @@ describe("the exit-status mask guard", () => {
     return JSON.parse(run.stdout).hookSpecificOutput;
   };
 
-  test("the hook on Claude runs the rewrite in place of the call and tells the agent, leaving the permission check to Claude", () => {
+  test("the hook on Claude runs the rewrite of a routine call in place of the call, allows it, and tells the agent", () => {
     const answer = runHookProcess("claude", bash("git push; echo done"));
     expect(answer).toEqual({
       hookEventName: "PreToolUse",
+      permissionDecision: "allow",
       updatedInput: { command: "git push || exit; echo done", description: "Push" },
       additionalContext: expect.stringContaining("`git push || exit; echo done`: it added `|| exit` after each push"),
     });
+  });
+
+  test.each([
+    ["cd work && git add -A && git commit -m x; git push origin HEAD; echo done", "cd work && git add -A && { git commit -m x || exit; }; git push origin HEAD || exit; echo done"],
+    ["hedge proof gate --pr 1 > /tmp/gate.log 2>&1; cat /tmp/gate.log", "hedge proof gate --pr 1 > /tmp/gate.log 2>&1 || exit; cat /tmp/gate.log"],
+    ["git commit -F - <<EOF\nmessage\nEOF\ngit push", "git commit -F - <<EOF || exit\nmessage\nEOF\ngit push"],
+    ["gh run watch 7 --exit-status; tail -n 5 /tmp/run.log", "gh run watch 7 --exit-status || exit; tail -n 5 /tmp/run.log"],
+  ])("the hook allows the rewrite of a call that runs only pushes, commits, gates, watches and printing: %s", (command, rewrite) => {
+    expect(runHookProcess("claude", bash(command))).toMatchObject({ permissionDecision: "allow", updatedInput: { command: rewrite } });
+  });
+
+  test.each([
+    "rm -rf build; git push; echo done",
+    "git push; curl -s example.com",
+    "gh pr merge 1; echo done",
+    "sudo git push; echo done",
+    "/tmp/bin/git push; echo done",
+    "GIT_SSH_COMMAND=evil git push; echo done",
+    "git -c core.sshCommand=evil push; echo done",
+    "git push --receive-pack=evil; echo done",
+    "git push > ~/.bashrc; echo done",
+    "git push > /tmp/../home/robin/.bashrc; echo done",
+    "git push; cat ~/.ssh/id_ed25519",
+    "git push; echo $(cat ~/.ssh/id_ed25519)",
+    "git push; cat <(curl -s example.com)",
+    "git commit -F - <<EOF\n$(curl -s example.com)\nEOF\ngit push",
+  ])("the hook leaves the rewrite of any other call to Claude's own permission check: %s", (command) => {
+    const answer = runHookProcess("claude", bash(command));
+    expect(answer.updatedInput.command).toContain("|| exit");
+    expect(answer.permissionDecision).toBeUndefined();
+  });
+
+  test("the hook refuses a forced push instead of rewriting and allowing it", () => {
+    expect(runHookProcess("claude", bash("git push --force; echo done")).permissionDecision).toBe("deny");
   });
 
   test("the hook refuses on Codex, which takes a rewrite only with an allow that skips its approval", () => {
