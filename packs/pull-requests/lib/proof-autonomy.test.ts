@@ -1,7 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
+import { spawnAsync } from "../../../src/testing/spawn.ts";
 import { join } from "node:path";
-import { acceptGap, checkout, cleanFixtures, fakeModel, finishRound, graded, reviewHead, settings, verdict, type Checkout } from "./proof-testing.ts";
+import { acceptGap, checkout, cleanFixtures, fakeModel, finishRound, graded, markPanel, reviewHead, settings, verdict, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
@@ -131,14 +133,50 @@ test("the end table names the commit the loop stopped at", async () => {
   expect((await pr.decide("report", "--pr", "example/product#42")).output).toContain(`| example/product#42 | 2 rounds; stopped at an escalation on a one-way door at ${stopped} |`);
 });
 
-test("a stop saved by another call while this one weighs the budget refuses this round", async () => {
+test("a round that weighs the budget while another call stops the loop is refused", async () => {
   const pr = await checkout();
   const third = await stoppedOneWay(pr);
-  const stopFile = join(pr.pullRequest, "reviews", "one-way-stop.json");
-  pr.env.HEDGE_REVIEW_ARBITER = `cat >/dev/null; echo '{"commit":"${await pr.git("rev-parse", "HEAD")}","reason":"Another call escalated","at":"2026-10-25T12:00:00.000Z"}' > '${stopFile}'; echo CONTINUE`;
+  const [started, go] = ["started", "go"].map((name) => join(pr.home, name));
+  await spawnAsync(["mkfifo", started, go]);
+  pr.env.HEDGE_REVIEW_ARBITER = `cat >/dev/null; if mkdir "${pr.home}/first" 2>/dev/null; then echo > "${started}"; read line < "${go}"; echo CONTINUE; else echo 'ESCALATE: Round 2 undoes the rename round 1 asked for.'; fi`;
 
-  await expect(pr.hedge(...third)).rejects.toThrow("changed while this one weighed the budget");
-  await expect(pr.hedge(...third)).rejects.toThrow("The review loop stopped at an escalation on a one-way door: Another call escalated");
+  const slow = pr.hedge(...third);
+  await readFile(started, "utf8");
+  await expect(pr.hedge(...third)).rejects.toThrow("the review loop stops here");
+  await writeFile(go, "go\n");
+
+  await expect(slow).rejects.toThrow("The reviews changed while this one weighed the budget");
+  await expect(pr.hedge("show", "--round", "3")).rejects.toThrow("has no reservation");
+});
+
+test("when no review is on HEAD's history, the stop names no commit to revert", async () => {
+  const pr = await checkout();
+  const third = await stoppedOneWay(pr);
+  const reviewed = (await pr.git("rev-parse", "HEAD")).slice(0, 7);
+  await pr.git("reset", "-q", "--hard", "main");
+  await pr.commit("feature.txt", "rebased\n");
+
+  const stop = await pr.hedge(...third).then(() => "", (error: Error) => error.message);
+
+  expect(stop).toContain("On a one-way door the review loop stops here: ask the user nothing about another round. No finished review of this PR is on HEAD's history, so hedge names no commit to revert: only the user's --override reads HEAD.");
+  expect(stop).not.toContain(reviewed);
+});
+
+test("the gate's judge reads that hedge stopped the review loop", async () => {
+  const pr = await checkout();
+  const third = await stoppedOneWay(pr);
+  const stopped = (await pr.git("rev-parse", "HEAD")).slice(0, 7);
+  await expect(pr.hedge(...third)).rejects.toThrow("the review loop stops here");
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  markPanel(pr, "1");
+  for (const round of ["1", "2"]) {
+    writeFileSync(join(pr.repository, "responses.md"), "1. rejected: the fixture finding names no line.\n");
+    await pr.hedge("respond", "--round", round, "responses.md");
+  }
+  const judge = fakeModel(pr, "JUDGE", verdict());
+  await pr.hedge("gate");
+
+  expect(judge.prompts().at(-1)).toContain(`Hedge stopped the review loop at an escalation on a one-way door at ${stopped}`);
 });
 
 test("on ask, a one-way door still asks the user about an escalated round, and a known answer waits for the budget", async () => {

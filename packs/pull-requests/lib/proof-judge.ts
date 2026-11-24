@@ -13,7 +13,7 @@ export type JudgeInput = {
   evidence: { kind: string; line: string; directory?: string }[];
   reviews: { label: string; commit: string; reviewer?: string; capturedBy: string; findings: string; responses?: string }[];
   rubric: string; references: string[]; risk?: RiskCheck;
-  conditions?: { id: string; kind: string; condition: string }[]; criticalPaths?: string;
+  conditions?: { id: string; kind: string; condition: string }[]; criticalPaths?: string; oneWayStop?: string;
 };
 export type RiskCheck = { rubric: string; body: string };
 
@@ -141,7 +141,7 @@ ${evidence.text || "No evidence is counted."}
 ## Reviews
 
 ${reviewSection(input.reviews)}
-
+${input.oneWayStop ? `\nHedge stopped the review loop at an escalation on a one-way door at ${input.oneWayStop.slice(0, 7)}.\n` : ""}
 ## Diff ${input.from}..${input.commit}
 
 ${untrusted("diff", capped(input.diff, diffCap))}

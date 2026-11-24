@@ -256,7 +256,8 @@ async function permitReview(home: string, identity: ProofIdentity, due: boolean,
   const stop = verdict.verdict === "escalate" ? `The arbiter escalates: ${verdict.reason}.` : `The arbiter gave no verdict: ${verdict.reason}.`;
   const decides = permit.autonomy?.() ?? "ask";
   if (decides === "user") {
-    await writeJson(oneWayStopPath(home, identity), { commit: identity.commit, reason: verdict.reason, at: permit.now().toISOString() } satisfies OneWayStop);
+    const saved: OneWayStop = { commit: identity.commit, reason: verdict.reason, at: permit.now().toISOString() };
+    await permit.lockBudget(join(pullRequestDirectory(home, identity), "reviews"), () => writeJson(oneWayStopPath(home, identity), saved));
     throw new Error(`${stop} ${await oneWayStop(home, identity, permit.onHistory)}`);
   }
   if (!decision) throw new Error(askUser(identity, stop, decides));
@@ -274,8 +275,11 @@ export const readOneWayStop = (home: string, identity: ProofIdentity) => readJso
 
 async function oneWayStop(home: string, identity: ProofIdentity, onHistory: OnHistory | undefined) {
   const finished = await finishedReviews(home, identity);
-  const reviewed = (finished.findLast((review) => onHistory?.(review.commit)) ?? finished.at(-1))?.commit ?? identity.commit;
-  return `On a one-way door the review loop stops here: ask the user nothing about another round. Revert each commit of the PR since ${short(reviewed)} that changes production code, never a merge of the base: the gate carries a revert of a PR commit. ${atCeiling}`;
+  const reviewed = onHistory ? finished.findLast((review) => onHistory(review.commit)) : finished.at(-1);
+  const revert = reviewed
+    ? `Revert each commit of the PR since ${short(reviewed.commit)} that changes production code, never a merge of the base: the gate carries a revert of a PR commit.`
+    : "No finished review of this PR is on HEAD's history, so hedge names no commit to revert: only the user's --override reads HEAD.";
+  return `On a one-way door the review loop stops here: ask the user nothing about another round. ${revert} ${atCeiling}`;
 }
 
 function askUser(identity: ProofIdentity, stop: string, autonomy: Autonomy) {
@@ -289,7 +293,7 @@ export type DropRead = (directory: string) => Promise<boolean>;
 export type OnHistory = (commit: string) => boolean;
 export type ReviewRequest = { dropUnanswered?: DropRead; onHistory?: OnHistory; autonomy?: () => Autonomy; opening?: () => Promise<boolean>; sanity?: () => Promise<void>; scope: string; base?: string; from?: string; forkBase?: string; decision?: Decision; phase?: string; arbiter: Arbiter; limits: ReviewLimits; cleanBaseMerge?: CleanBaseMerge; quietCommit?: QuietCommit; capturedBy?: CapturedBy; lock?: LockRound; lockBudget: LockBudget; now: () => Date; emptyRange?: () => boolean; triage?: TriageMark; budget?: ReadBudget };
 export type Reserved = { round: number | "final"; id: string; directory: string };
-type Permit = { arbiter: Arbiter; limits: ReviewLimits; autonomy?: () => Autonomy; now: () => Date; onHistory?: OnHistory };
+type Permit = { arbiter: Arbiter; limits: ReviewLimits; autonomy?: () => Autonomy; now: () => Date; onHistory?: OnHistory; lockBudget: LockBudget };
 
 async function reserveDecided(reviews: string, name: string, record: object, decision: Decision | undefined, stamping: Stamping) {
   if (!await reserve(reviews, name, { ...record, ...decision ? { decision } : {} }, stamping)) throw new Error(`Review ${name} started while this one weighed the budget. ${weighAgain}`);
@@ -355,7 +359,7 @@ const coversReview = (base: string, reviewed: string, cleanBaseMerge: CleanBaseM
 export async function startReview(home: string, identity: ProofIdentity, request: ReviewRequest): Promise<Reserved> {
   const { scope, base, phase, decision, cleanBaseMerge = () => undefined, quietCommit = () => undefined, capturedBy = "author", lock, lockBudget, now } = request;
   const from = request.from ?? base;
-  const permit = { arbiter: request.arbiter, limits: request.limits, autonomy: request.autonomy, now, onHistory: request.onHistory };
+  const permit = { arbiter: request.arbiter, limits: request.limits, autonomy: request.autonomy, now, onHistory: request.onHistory, lockBudget };
   if (!["full", "fixes", "final"].includes(scope)) throw new Error("Review scope must be full, fixes, or final");
   if (phase !== undefined && scope !== "final") throw new Error("--phase applies only to final reads");
   if (base !== undefined && !sha.test(base)) throw new Error("Review base needs a full commit SHA");

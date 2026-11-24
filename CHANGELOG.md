@@ -10,10 +10,12 @@
   revert each production commit since the latest review, and revert or list
   each open blocker or major under Known issues, as at the review budget.
 - `--agent` cannot pass the stop. The user's `--override` still runs a round.
-- `hedge proof` records the stop in the pull request's reviews, so
-  `hedge proof respond` takes a `known` answer after it, and the end table in
-  `hedge decision report` shows it.
-- On `ask`, nothing changes.
+- `hedge proof` records the stop in the pull request's reviews. While it
+  stands, every later round and final read refuses until the user's
+  `--override`, also after a switch to `ask`. `hedge proof respond` takes a
+  `known` answer after it, the gate's judge reads the stop, and the end table
+  in `hedge decision report` shows it.
+- On `ask`, a pull request that never stopped on `end` runs as before.
 
 ### A hard read budget for treated pull requests
 
