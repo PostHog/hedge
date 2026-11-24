@@ -110,8 +110,9 @@ test("show prints the dropped final reads before it fails on findings it cannot 
   const shown = await pr.hedge("show", "--round", "1");
 
   expect(shown.code).toBe(1);
-  expect(shown.output).toContain(`final read 1 on ${older.slice(0, 7)} dropped at ${newer.slice(0, 7)}: no reviewer answer was captured`);
-  expect(shown.output).toContain("hedge cannot read the findings of this round: EISDIR");
+  const droppedAt = shown.output.indexOf(`final read 1 on ${older.slice(0, 7)} dropped at ${newer.slice(0, 7)}: no reviewer answer was captured`);
+  expect(droppedAt).toBeGreaterThan(-1);
+  expect(shown.output.indexOf("hedge cannot read the findings of this round: EISDIR")).toBeGreaterThan(droppedAt);
 });
 
 test("show redacts a token that crosses the cut of a long failure cause", async () => {

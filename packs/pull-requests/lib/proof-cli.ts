@@ -322,8 +322,8 @@ final read that hedge dropped unanswered, with its cause.`,
     run: async ({ options }, identity, context) => {
       const directory = await reviewDirectory(context.home, identity(), roundOption(options));
       const dropped = (await droppedFinalReads(context.home, identity())).map(({ line, cause }) => cause ? `${line}; cause: ${cause}` : line);
-      const findings = await savedFindings(directory).catch((error: unknown) => error instanceof Error ? error : new Error(String(error)));
       for (const line of await roundLines(directory, context)) context.print(line);
+      const findings = await savedFindings(directory).catch((error: unknown) => error instanceof Error ? error : new Error(String(error)));
       if (typeof findings === "string") printAnswerNumbers(findings, context.print);
       for (const line of dropped) context.print(line);
       if (!(findings instanceof Error)) return 0;
