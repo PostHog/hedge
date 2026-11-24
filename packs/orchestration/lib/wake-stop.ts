@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { matchThread, type ShellThread, t3StatePath, t3UserData } from "../../base/lib/t3/index.ts";
 import { subagentParent } from "../../pull-requests/lib/pr-owners.ts";
-import { claudeTaskRuns, isSnoozed, nestedSession, realProcesses, waits, withinDeadline, type ProcessTable, type ProofStopEvent } from "./proof-stop.ts";
+import { isSnoozed, nestedSession, realProcesses, waits, withinDeadline, type ProcessTable, type ProofStopEvent } from "./proof-stop.ts";
 import { personName } from "./prose-question.ts";
 
 export type WakeStopOptions = { home: string; threadId: string | undefined; shell: () => Promise<{ threads: ShellThread[] }>; processes?: ProcessTable; now?: () => number; deadline?: () => Promise<void> };
@@ -20,7 +20,9 @@ export const noWakeReason = (person: string) => `Hedge blocked this stop: your c
   + "for a lane, keep its delegate_task child or call t3_thread_wait; for a check at a time, call schedule_task bound to this thread. "
   + `If nothing can wake it, such as a reply by email, say so and end on the line for ${person}'s move instead. Do not snooze the thread to hide it.`;
 
-const t3Time = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+const writtenByT3 = (time: string) => Number.isFinite(Date.parse(time)) && new Date(time).toISOString() === time;
+
+const claudeWakesOnEnd = (event: ProofStopEvent) => Boolean(event.background_tasks?.some((task) => ["running", "pending"].includes(task.status ?? "")));
 
 function hasScheduledCheck(home: string, threadId: string): boolean {
   const path = t3StatePath(t3UserData(home));
@@ -28,7 +30,7 @@ function hasScheduledCheck(home: string, threadId: string): boolean {
   const db = new Database(path, { readonly: true });
   try {
     return db.query<{ next: string }, [string]>("select next_run_at next from scheduled_tasks where thread_id = ? and enabled = 1 and next_run_at is not null")
-      .all(threadId).some(({ next }) => t3Time.test(next));
+      .all(threadId).some(({ next }) => writtenByT3(next));
   } finally {
     db.close();
   }
@@ -38,8 +40,8 @@ const outsideWakeCheck = (thread: ShellThread, now: number) => Boolean(subagentP
 
 type ShellPullRequest = NonNullable<ShellThread["pullRequests"]>[number];
 
-const watchWakes = ({ snapshot, watch }: ShellPullRequest) => Boolean(watch)
-  && (watch!.until === "merged" || watch!.checksPending !== false || (snapshot?.state?.toLowerCase() ?? "open") !== "open");
+const watchWakes = ({ snapshot, watch }: ShellPullRequest) => Boolean(watch) && (snapshot?.state?.toLowerCase() ?? "open") === "open"
+  && (watch!.until === "merged" || watch!.checksPending !== false);
 
 const wakes = (threads: ShellThread[], thread: ShellThread) => waits(threads, thread) || (thread.pullRequests ?? []).some(watchWakes);
 
@@ -51,7 +53,7 @@ export const wakeStop = (event: ProofStopEvent, message: string | undefined, opt
 async function check(event: ProofStopEvent, message: string | undefined, options: WakeStopOptions, signal: AbortSignal): Promise<WakeStopBlock | undefined> {
   const { home, threadId } = options;
   if (event.stop_hook_active || !threadId || !message || !closesOnWait(message)) return undefined;
-  if (claudeTaskRuns(event) || event.session_crons?.length) return undefined;
+  if (claudeWakesOnEnd(event) || event.session_crons?.length) return undefined;
   const processes = options.processes ?? realProcesses;
   if (nestedSession(await processes.table(signal), processes.pid)) return undefined;
   const { threads } = await options.shell();

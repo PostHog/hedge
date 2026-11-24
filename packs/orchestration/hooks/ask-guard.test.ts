@@ -534,16 +534,15 @@ describe("the wake guard", () => {
     expect(await ends({ ...watching({ awaitingApproval: ["deploy"] }), status: "running" })).toMatchObject({ decision: "block" });
   });
 
-  test("lets a wait through whose watch until merge is on a PR that merged, while T3 still owes its notification", async () => {
-    const merged = watching({ until: "merged" });
-    merged.pullRequests[0]!.snapshot.state = "merged";
-    expect(await ends({ ...merged, status: "running" })).toBeUndefined();
-  });
-
-  test.each(["merged", "closed"])("lets a wait through whose default watch is still on a PR that was %s, while T3 owes its last wake", async (state) => {
-    const ended = watching({});
+  test.each([
+    ["held until merge", "merged"],
+    ["held until merge", "closed"],
+    ["by default", "merged"],
+    ["by default", "closed"],
+  ])("sends back a wait whose only watch, %s, is on a PR that was %s, which T3 drops without a wake when the agent ended the PR itself", async (until, state) => {
+    const ended = watching(until === "by default" ? {} : { until: "merged" });
     ended.pullRequests[0]!.snapshot.state = state;
-    expect(await ends({ ...ended, status: "running" })).toBeUndefined();
+    expect(await ends({ ...ended, status: "running" })).toMatchObject({ decision: "block" });
   });
 
   test("lets a wait through after a push, when T3 cleared checksPending and kept the old result", async () => {
@@ -583,8 +582,9 @@ describe("the wake guard", () => {
     expect(await ends({}, waitLine, {}, home("Robin"), [{ id: "thread:lane", title: "Lane", projectId: "p", status: "running", lineage: { parentThreadId: conductor, relationshipToParent: "subagent" } }])).toBeUndefined();
   });
 
-  test("lets a wait line through while Claude runs a background agent or a session cron", async () => {
+  test("lets a wait line through while Claude runs a background agent or shell, which wakes it when it ends, or a session cron", async () => {
     expect(await ends({}, waitLine, { background_tasks: [{ id: "a1", type: "local_agent", status: "running" }] })).toBeUndefined();
+    expect(await ends({}, waitLine, { background_tasks: [{ id: "b1", type: "shell", status: "running" }] })).toBeUndefined();
     expect(await ends({}, waitLine, { session_crons: [{ id: "c1" }] })).toBeUndefined();
   });
 
@@ -599,11 +599,12 @@ describe("the wake guard", () => {
   });
 
   test.each([
-    ["is turned off", (where: string) => scheduled(where, conductor, "2999-01-01T00:00:00Z", false)],
+    ["is turned off", (where: string) => scheduled(where, conductor, "2999-01-01T00:00:00.000Z", false)],
     ["ran for the last time", (where: string) => scheduled(where, conductor, null)],
-    ["is bound to another thread", (where: string) => scheduled(where, "mcp:other", "2999-01-01T00:00:00Z")],
+    ["is bound to another thread", (where: string) => scheduled(where, "mcp:other", "2999-01-01T00:00:00.000Z")],
     ["has a next run that is no time", (where: string) => scheduled(where, conductor, "soon")],
     ["has a next run in a form T3 does not write", (where: string) => scheduled(where, conductor, "Sat, 21 Nov 2026 08:00:00 GMT")],
+    ["has a next run at a time that does not exist", (where: string) => scheduled(where, conductor, "2026-11-24T00:99:00.000Z")],
   ])("sends back a check line whose scheduled task %s", async (_, arrange) => {
     const where = home("Robin");
     arrange(where);
@@ -631,11 +632,10 @@ describe("the wake guard", () => {
   test("lets the stop through when the deadline the proof check started ends during the wake check", async () => {
     const ends: (() => void)[] = [];
     const deadline = () => new Promise<void>((resolve) => { ends.push(resolve); });
-    let reads = 0;
-    const wakeStalls = { pid: 30, table: () => ++reads === 1 ? lone.table() : new Promise<string>(() => { ends[0]?.(); }) };
+    const wakeStalls = { pid: 30, table: () => new Promise<string>(() => { ends[0]?.(); }) };
     const threads = [{ id: conductor, title: "Conductor", projectId: "p", status: "completed" }] as ShellThread[];
     const routed = hookWith(() => async () => ({ threads }), { threadId: conductor, processes: wakeStalls, deadline });
-    expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)), cwd: "/" }), home("Robin"))).stdout).toBe("");
+    expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)) }), home("Robin"))).stdout).toBe("");
   });
 
   test("lets the stop through when a read that does not yield runs past the deadline", async () => {
