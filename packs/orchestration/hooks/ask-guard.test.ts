@@ -393,7 +393,7 @@ describe("the wake guard", () => {
   });
 
   test("sends back a wait whose only PR watch waits on an approval, which T3 does not hold the thread for", async () => {
-    expect(await ends({ ...watching({ awaitingApproval: ["deploy"] }), status: "running" })).toMatchObject({ decision: "block" });
+    expect(await ends({ ...watching({ passed: false, awaitingApproval: ["deploy"] }), status: "running" })).toMatchObject({ decision: "block" });
   });
 
   test.each([
