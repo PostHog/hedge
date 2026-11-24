@@ -110,7 +110,7 @@ describe("resolve", () => {
     });
 
     test("is matched in letters whose lower case depends on their place", async () => {
-      expect(await todos(repeats("My rules", "### Λόγος\n", "# Rules\n\n## ΛΌΓΟΣ\n"))).toEqual(["Λόγος"]);
+      expect(await todos(repeats("My rules", "### ς\n", "# Rules\n\n## Σ\n"))).toEqual(["ς"]);
     });
 
     test("is not looked for on a Bun without a Markdown parser, and the section is still written", async () => {
