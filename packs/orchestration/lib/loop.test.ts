@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { cpSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../../../src/testing/git.ts";
 import { runLoop, type LoopIo } from "./loop.ts";
@@ -17,6 +18,11 @@ function ledger(files: Record<string, string>) {
   return dir;
 }
 
+async function runCommand(args: string[], home: string, settings: Record<string, unknown>) {
+  const child = Bun.spawn([process.execPath, command, ...args], { env: { PATH: Bun.env.PATH, HOME: home, HEDGE_SETTINGS: JSON.stringify(settings), BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" }, stdout: "pipe", stderr: "pipe" });
+  return { code: await child.exited, out: (await new Response(child.stdout).text()).trim() };
+}
+
 async function loop(args: string[], setting?: string, home = temp.make("home-")) {
   const out: string[] = [];
   const io: LoopIo = { home, ledger: () => setting, print: (line) => out.push(line) };
@@ -30,24 +36,39 @@ describe("hedge loop check-pause", () => {
     expect(await loop(["check-pause", "--ledger", dir])).toMatchObject({ code: 0, out: expect.stringContaining("start lanes up to the WIP limits") });
   });
 
-  test("exits 1 and says to start no lane while the limits say the loop is paused", async () => {
-    const dir = ledger({ "limits.md": "Quality loop WIP: 2\nPaused: yes\n\n## Changes\n- 2026-11-14: paused: yes.\n" });
+  test.each([
+    ["a plain line", "Quality loop WIP: 2\nPaused: yes\n\n## Changes\n- 2026-11-14: paused: yes.\n"],
+    ["a list item", "- Paused: yes (until Friday)\n"],
+    ["bold", "**Paused:** yes\n"],
+  ])("exits 1 and says to start no lane while the limits say the loop is paused in %s", async (_, limits) => {
+    const dir = ledger({ "limits.md": limits });
     expect(await loop(["check-pause", "--ledger", dir])).toMatchObject({ code: 1, out: expect.stringContaining("start no lane") });
   });
 
   test.each([
     ["a missing limits file", {}],
     ["a Paused value that is neither yes nor no", { "limits.md": "Paused: maybe\n" }],
+    ["a limits file without a Paused line", { "limits.md": "Quality loop WIP: 2\n" }],
+    ["Paused lines that disagree after a merge", { "limits.md": "Paused: no\nQuality loop WIP: 2\nPaused: yes\n" }],
   ])("fails closed with exit 3 on %s", async (_, files) => {
     const result = await loop(["check-pause", "--ledger", ledger(files)]);
     expect(result).toMatchObject({ code: 3, out: expect.stringContaining("start no lane") });
   });
 
-  test("reads the ledger from the orchestration.loopLedger setting, with ~/ for the home directory", async () => {
+  test("the command reads the ledger from the orchestration.loopLedger setting, with ~/ for the home directory", async () => {
     const home = temp.make("home-");
     mkdirSync(join(home, "ledger"));
     writeFileSync(join(home, "ledger/limits.md"), "Paused: yes\n");
-    expect((await loop(["check-pause"], "~/ledger", home)).code).toBe(1);
+    expect(await runCommand(["check-pause"], home, { "orchestration.loopLedger": "~/ledger" })).toMatchObject({ code: 1, out: expect.stringContaining(join(home, "ledger/limits.md")) });
+  });
+
+  test("takes --ledger=<dir> as well as --ledger <dir>", async () => {
+    const dir = ledger({ "limits.md": "Paused: no\n" });
+    expect((await loop(["check-pause", `--ledger=${dir}`], ledger({ "limits.md": "Paused: yes\n" }))).code).toBe(0);
+  });
+
+  test("refuses an argument it does not know instead of ignoring it", async () => {
+    await expect(loop(["check-pause", "--legder", ledger({ "limits.md": "Paused: no\n" })])).rejects.toThrow("unknown argument --legder");
   });
 
   test("names the setting when no ledger is given", async () => {
@@ -73,6 +94,24 @@ describe("hedge loop next-id", () => {
     const first = await loop(["next-id", "--kind", "lane", "--ledger", dir], undefined, home);
     const second = await loop(["next-id", "--kind", "lane", "--ledger", dir], undefined, home);
     expect([first.out, second.out]).toEqual(["L065", "L066"]);
+  });
+
+  test("counts a row written with a space before its first pipe", async () => {
+    const dir = ledger({ "lanes.md": `${lanes("L064")}\n  | L070 | signal | S231 | running |` });
+    expect((await loop(["next-id", "--kind", "lane", "--ledger", dir])).out).toBe("L071");
+  });
+
+  test("never hands out one id to two checkouts of the same ledger repository on one machine", async () => {
+    const home = temp.make("home-");
+    const first = temp.make("checkout-");
+    mkdirSync(join(first, "quality-loop"));
+    writeFileSync(join(first, "quality-loop/lanes.md"), lanes("L064"));
+    for (const args of [["init", "-q"], ["remote", "add", "origin", "https://example.com/acme/ledger.git"]]) spawnSync("git", ["-C", first, ...args]);
+    const second = temp.make("checkout-");
+    cpSync(first, second, { recursive: true });
+    const one = await loop(["next-id", "--kind", "lane", "--ledger", join(first, "quality-loop")], undefined, home);
+    const two = await loop(["next-id", "--kind", "lane", "--ledger", join(second, "quality-loop")], undefined, home);
+    expect([one.out, two.out]).toEqual(["L065", "L066"]);
   });
 
   test("starts at 001 in an empty ledger", async () => {

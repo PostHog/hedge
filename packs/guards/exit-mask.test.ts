@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../../src/testing/git.ts";
 import { guard } from "./hooks/guards.ts";
@@ -653,7 +653,7 @@ describe("the exit-status mask guard", () => {
     expect(exitMaskRewrite("git log | head -3")).toBeUndefined();
   });
 
-  const bash = (command: string) => ({ tool_name: "Bash", tool_input: { command, description: "Push" }, cwd: "/" });
+  const bash = (command: string, mode = "auto") => ({ tool_name: "Bash", tool_input: { command, description: "Push" }, cwd: "/", permission_mode: mode });
   const runHookProcess = (provider: string, call: object, env: Record<string, string> = {}) => {
     const home = temp.make("home-");
     const run = spawnSync(process.execPath, [join(import.meta.dir, "hooks/guards.ts"), provider], { input: JSON.stringify(call), env: { PATH: process.env.PATH, HOME: home, ...env }, encoding: "utf8" });
@@ -661,7 +661,7 @@ describe("the exit-status mask guard", () => {
     return JSON.parse(run.stdout).hookSpecificOutput;
   };
 
-  test("the hook on Claude runs the rewrite of a routine call in place of the call, allows it, and tells the agent", () => {
+  test("the hook on Claude in auto mode runs the rewrite of a routine call in place of the call, allows it, and tells the agent", () => {
     const answer = runHookProcess("claude", bash("git push; echo done"));
     expect(answer).toEqual({
       hookEventName: "PreToolUse",
@@ -675,6 +675,9 @@ describe("the exit-status mask guard", () => {
     ["cd work && git add -A && git commit -m x; git push origin HEAD; echo done", "cd work && git add -A && { git commit -m x || exit; }; git push origin HEAD || exit; echo done"],
     ["hedge proof gate --pr 1 > /tmp/gate.log 2>&1; cat /tmp/gate.log", "hedge proof gate --pr 1 > /tmp/gate.log 2>&1 || exit; cat /tmp/gate.log"],
     ["git commit -F - <<EOF\nmessage\nEOF\ngit push", "git commit -F - <<EOF || exit\nmessage\nEOF\ngit push"],
+    ["git commit -m \"$(cat <<'EOF'\nfix: keep $HOME\nEOF\n)\"; git push -u origin fix/x", "git commit -m \"$(cat <<'EOF'\nfix: keep $HOME\nEOF\n)\" || exit; git push -u origin fix/x"],
+    ["hedge proof gate > \"/tmp/gate.log\" 2>&1; cat /tmp/gate.log", "hedge proof gate > \"/tmp/gate.log\" 2>&1 || exit; cat /tmp/gate.log"],
+    ["git -C /work fetch origin && git push --force-with-lease=main:abc1234 origin main; echo done", "git -C /work fetch origin && { git push --force-with-lease=main:abc1234 origin main || exit; }; echo done"],
     ["gh run watch 7 --exit-status; tail -n 5 /tmp/run.log", "gh run watch 7 --exit-status || exit; tail -n 5 /tmp/run.log"],
   ])("the hook allows the rewrite of a call that runs only pushes, commits, gates, watches and printing: %s", (command, rewrite) => {
     expect(runHookProcess("claude", bash(command))).toMatchObject({ permissionDecision: "allow", updatedInput: { command: rewrite } });
@@ -695,9 +698,46 @@ describe("the exit-status mask guard", () => {
     "git push; echo $(cat ~/.ssh/id_ed25519)",
     "git push; cat <(curl -s example.com)",
     "git commit -F - <<EOF\n$(curl -s example.com)\nEOF\ngit push",
+    "git push --rece='sh -c x' . HEAD; echo done",
+    "git fetch --upload-p=evil origin; git push; echo done",
+    "git push https://example.com/x.git HEAD; echo done",
+    "git push ../other HEAD; echo done",
+    "git -C ../other push origin HEAD; echo done",
+    "git pull origin main && git commit -m x; echo done",
+    "git diff --no-index /dev/null ~/.ssh/id_ed25519; git push; echo done",
+    "git commit -F ~/.ssh/id_ed25519; git push origin HEAD",
+    "git commit -m \"$GH_TOKEN\"; git push",
+    "git commit -F - <<EOF\n$GH_TOKEN\nEOF\ngit push",
+    "git push; cat 0123",
+    "git push; tail -n 5 -- run.log",
+    "git push; hedge proof save --kind live-run ~/.ssh/id_ed25519",
   ])("the hook leaves the rewrite of any other call to Claude's own permission check: %s", (command) => {
     const answer = runHookProcess("claude", bash(command));
     expect(answer.updatedInput.command).toContain("|| exit");
+    expect(answer.permissionDecision).toBeUndefined();
+  });
+
+  test("the hook leaves a read or write through a /tmp symlink that leads outside /tmp to Claude's own permission check", () => {
+    const outside = temp.make("outside-");
+    writeFileSync(join(outside, "secret"), "key");
+    const tmp = mkdtempSync("/tmp/routine-");
+    try {
+      symlinkSync(join(outside, "secret"), join(tmp, "file"));
+      symlinkSync(outside, join(tmp, "dir"));
+      symlinkSync(join(outside, "missing"), join(tmp, "dangling"));
+      writeFileSync(join(tmp, "plain.log"), "ok");
+      for (const command of [`git push; cat ${tmp}/file`, `git push; tail -n 3 ${tmp}/dir/secret`, `git push > ${tmp}/dir/new.log 2>&1; echo done`, `git push > ${tmp}/dangling 2>&1; echo done`]) {
+        expect(runHookProcess("claude", bash(command)).permissionDecision).toBeUndefined();
+      }
+      expect(runHookProcess("claude", bash(`git push > ${tmp}/new.log 2>&1; cat ${tmp}/plain.log`)).permissionDecision).toBe("allow");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test.each(["default", "acceptEdits", "plan", "bypassPermissions"])("the hook leaves a routine rewrite to Claude's own check in %s mode", (mode) => {
+    const answer = runHookProcess("claude", bash("git push; echo done", mode));
+    expect(answer.updatedInput.command).toBe("git push || exit; echo done");
     expect(answer.permissionDecision).toBeUndefined();
   });
 

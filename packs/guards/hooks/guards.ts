@@ -11,7 +11,7 @@ import { onlyRoutineSteps } from "../lib/routine.ts";
 import { shellTools } from "../lib/shell-words.ts";
 import { backgroundWaitRisk, isBackgroundWait, isSleepPoll, isTaskStatus, repeatedStatusReason, repeatsTaskStatus, sleepPollReason } from "../lib/wait.ts";
 
-export type ToolCall = { tool_name?: string; tool_input?: Record<string, unknown>; cwd?: string; tool_use_id?: string; transcript_path?: string };
+export type ToolCall = { tool_name?: string; tool_input?: Record<string, unknown>; cwd?: string; tool_use_id?: string; transcript_path?: string; permission_mode?: string };
 export type Answer = {
   hookSpecificOutput: { hookEventName: "PreToolUse"; permissionDecision?: "allow" | "deny"; permissionDecisionReason?: string; updatedInput?: Record<string, unknown>; additionalContext?: string };
 };
@@ -72,13 +72,14 @@ function rewritten(call: ToolCall, settings: Settings, provider: string): Answer
   if (command === undefined) return undefined;
   const updatedInput = { ...input, command };
   if (check({ ...call, tool_input: updatedInput }, settings)) return undefined;
-  const allowed = onlyRoutineSteps(command) ? { permissionDecision: "allow" as const } : {};
+  const allowed = call.permission_mode === "auto" && onlyRoutineSteps(command) ? { permissionDecision: "allow" as const } : {};
   return { hookSpecificOutput: { hookEventName: "PreToolUse", ...allowed, updatedInput, additionalContext: rewriteNote(command) } };
 }
 
 /** The answer for a tool call that a shell guard stops, naming the person the settings give. On Claude, a call whose only
- * fault is a hidden exit status runs rewritten into a form that shows it. The rewrite is allowed when it runs only routine
- * steps, since auto mode reviewed the call before the rewrite; any other rewrite goes to Claude's own permission check.
+ * fault is a hidden exit status runs rewritten into a form that shows it. In auto mode, which holds a rewritten call, the
+ * rewrite is allowed when it runs only routine steps, so this list is the only review those calls get; any other rewrite,
+ * and every rewrite in another mode, goes to Claude's own permission check.
  * Any other such call is refused, and so is a call the guards cannot check. An installed signed allowlist under the
  * system root wins over guards.owners. */
 export function guard(call: ToolCall, home: string, root = "/", provider = ""): Answer | undefined {
