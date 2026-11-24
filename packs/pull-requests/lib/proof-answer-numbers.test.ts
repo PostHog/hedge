@@ -70,12 +70,14 @@ test("hedge proof respond refuses answers numbered past the last finding, so the
   expect((await pr.hedge("respond", "--round", "1", "responses.md")).code).toBe(0);
 });
 
-test("an answer missing from a responses file is refused with the list to number by", async () => {
+test("the numbers in the list are the ones respond pairs: answering every major leaves the TESTS items, numbered last, unanswered", async () => {
   const { pr } = await panelRound();
-  const allButLast = items.slice(0, -1).map((_, index) => `${index + 1}. rejected: answered by hedge's numbers\n`).join("");
-  writeFileSync(join(pr.repository, "responses.md"), allButLast);
+  const majors = items.flatMap((item, index) => item.includes("| major |") ? [`${index + 1}. fixed: the greeting guards an empty name\n`] : []).join("");
+  writeFileSync(join(pr.repository, "responses.md"), majors);
 
-  await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow(numbered);
+  const refused = pr.hedge("respond", "--round", "1", "responses.md");
+  await expect(refused).rejects.toThrow("Answer findings 9, 10, 11, 12 too");
+  await expect(refused).rejects.toThrow(numbered);
 });
 
 test("a single reviewer's findings that start alike print with their whole text, so each number names one finding", async () => {
