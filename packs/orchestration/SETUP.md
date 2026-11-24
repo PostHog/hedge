@@ -137,9 +137,10 @@ The `loop-pause` workflow is on by default. It installs
 `limits.md`, `lanes.md` and `signals.md`. With a context library, it defaults
 to its `quality-loop` directory. Without the setting, the hook does nothing.
 
-A thread whose first prompt asks for a coordinator run or round of the
-`quality-loop` or `signal-loop` skill, or starts with its slash command, is a
-loop coordinator. When such a thread calls `delegate_task` while `limits.md`
+A thread whose first prompt opens with a line that asks for a coordinator run
+or round of the `quality-loop` or `signal-loop` skill, after any bracketed note
+on who sent it, or runs its slash command, is a loop coordinator. A prompt that
+quotes such a line further down is not. When such a thread calls `delegate_task` while `limits.md`
 says `Paused: yes`, or while the file cannot be read or says neither `yes` nor
 `no`, the call is denied: the coordinator settles the lanes that ended, keeps
 its watches and post-deploy checks, records a no-op run, and starts no lane.

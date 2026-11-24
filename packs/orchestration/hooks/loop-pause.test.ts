@@ -43,6 +43,7 @@ describe("the loop pause guard", () => {
   test.each([
     ["a scheduled quality-loop coordinator", [claudeMeta, claudePrompt(qualityRun), claudeSays("Loading the ledger.")], "claude"],
     ["a signal-loop coordinator in Codex", [codexPrompt(signalRound)], "codex"],
+    ["a scheduled coordinator whose prompt opens with T3's note on who sent it", [claudePrompt(`[T3 Code: scheduled task "nightly-quality-loop" sent this prompt, not the user typing in this chat.]\n\n${qualityRun}`)], "claude"],
     ["a coordinator started with the skill's slash command", [claudePrompt("<command-name>/quality-loop</command-name>")], "claude"],
     ["a coordinator woken later by a lane's end", [claudePrompt(qualityRun), claudeSays("Lanes started."), claudePrompt("Lane L064 ended.")], "claude"],
   ])("refuses a new lane from %s while the ledger pauses the loops", (_, lines, provider) => {
@@ -72,6 +73,7 @@ describe("the loop pause guard", () => {
   test.each([
     ["a thread that is no loop coordinator", [claudePrompt("Fix the login redirect and open a draft PR.")]],
     ["a lane of the loop", [claudePrompt("You are quality-loop lane L064. Ship one PR for the cover stage of billing.")]],
+    ["a thread that quotes a coordinator prompt below its own task", [claudePrompt(`Create the nightly schedules on this machine.\n\n1. Title \`Quality loop\`. Prompt:\n\n${qualityRun}`)]],
     ["a thread that mentions a coordinator only after its first prompt", [claudePrompt("Summarize last night's PRs."), claudePrompt(qualityRun)]],
   ])("lets %s start subthreads while the loops are paused", (_, lines) => {
     expect(answer(machine(paused), delegate, lines)).toBeUndefined();

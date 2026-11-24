@@ -10,7 +10,11 @@ export type LaneDenial = { hookSpecificOutput: { hookEventName: "PreToolUse"; pe
 type Line = { type?: string; isMeta?: boolean; message?: { content?: unknown }; payload?: { type?: string; message?: unknown } };
 
 const startsSubthread = /(?:^|__)delegate_task$/;
-const coordinatorRun = /\bcoordinator\b[^\n]*\b(?:quality|signal)-loop\b|<command-name>\/(?:[\w-]+:)?(?:quality|signal)-loop<\/command-name>/i;
+const provenance = /^\s*(?:\[[^\]\n]*\]\s*)*/;
+const asksForRun = /^[^\n]*\bcoordinator\b[^\n]*\b(?:quality|signal)-loop\b/i;
+const slashCommand = /<command-name>\/(?:[\w-]+:)?(?:quality|signal)-loop<\/command-name>/;
+
+const opensCoordinatorRun = (prompt: string) => asksForRun.test(prompt.replace(provenance, "")) || slashCommand.test(prompt);
 
 function promptText(line: Line): string | undefined {
   if (line.type === "event_msg" && line.payload?.type === "user_message") return typeof line.payload.message === "string" ? line.payload.message : undefined;
@@ -37,7 +41,7 @@ function firstPrompt(transcript: string): string | undefined {
 async function isLoopCoordinator(transcriptPath: string | undefined): Promise<boolean> {
   if (!transcriptPath) return false;
   try {
-    return coordinatorRun.test(firstPrompt(await readFile(transcriptPath, "utf8")) ?? "");
+    return opensCoordinatorRun(firstPrompt(await readFile(transcriptPath, "utf8")) ?? "");
   } catch {
     return false;
   }
