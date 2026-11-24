@@ -498,7 +498,7 @@ describe("the wake guard", () => {
     db.run(`insert into scheduled_tasks (task_id, title, prompt, enabled, schedule_json, project_id, thread_id, workspace_strategy_json, model_selection_json,
         runtime_mode, interaction_mode, created_by, creation_source, created_at, updated_at, next_run_at, last_run_at, last_run_status, run_count, thread_mode)
       values (?, 'check', 'check', ?, ?, 'p', ?, ?, ?, 'full-access', 'default', 'agent', 'mcp', '2026-11-20T00:00:00Z', '2026-11-20T00:00:00Z', ?, ?, ?, ?, 'continue')`,
-      [crypto.randomUUID(), enabled ? 1 : 0, JSON.stringify({ type: "once", runAt: "2026-11-20T08:00:00.000Z" }), threadId, JSON.stringify({ type: "root" }),
+      [crypto.randomUUID(), enabled ? 1 : 0, JSON.stringify({ type: "once", runAt: nextRunAt && Number.isFinite(Date.parse(nextRunAt)) && new Date(nextRunAt).toISOString() === nextRunAt ? nextRunAt : "2026-11-20T08:00:00.000Z" }), threadId, JSON.stringify({ type: "root" }),
         JSON.stringify({ instanceId: "claudeAgent", model: "claude-opus-5-5", options: [{ id: "effort", value: "high" }] }), nextRunAt,
         ran ? "2026-11-20T08:00:00.000Z" : null, ran ? "succeeded" : "never", ran ? 1 : 0]);
     db.close();
