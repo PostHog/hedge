@@ -34,7 +34,7 @@ export function proofDirectory(home: string, identity: ProofIdentity) {
   return join(pullRequestDirectory(home, identity), identity.commit);
 }
 
-export type GateRecord = { code: number; reason: string; onEnd?: true };
+export type GateRecord = { code: number; reason: string; onEnd?: true; agentGaps?: string[] };
 
 export const gateRunDirectory = (home: string, identity: ProofIdentity) =>
   join(pullRequestDirectory(home, { ...identity, repository: identity.repository.toLowerCase() }), "gate-record", identity.commit);
@@ -65,16 +65,18 @@ export async function startGateRun(home: string, identity: ProofIdentity, starte
   }
 }
 
-export type GateResult = { passed: boolean; at: number; onEnd?: true };
+export type GateResult = { passed: boolean; at: number; onEnd?: true; agentGaps?: string[] };
+
+export const isTextList = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === "string");
 
 export const latestGateResult = (results: GateResult[]) => results.toSorted((a, b) => a.at - b.at || Number(b.passed) - Number(a.passed)).at(-1);
 
 export async function lastGateResult(home: string, identity: ProofIdentity): Promise<GateResult | undefined> {
   const directory = gateRunDirectory(home, identity);
   const results = await Promise.all((await gateRunNames(directory)).map(async (name) => {
-    const { code, startedAt, onEnd } = (await readJson<{ code?: unknown; startedAt?: unknown; onEnd?: unknown } | null>(join(directory, name), null)) ?? {};
+    const { code, startedAt, onEnd, agentGaps } = (await readJson<{ code?: unknown; startedAt?: unknown; onEnd?: unknown; agentGaps?: unknown } | null>(join(directory, name), null)) ?? {};
     const at = typeof startedAt === "string" ? Date.parse(startedAt) : Number.NaN;
-    return Number.isNaN(at) ? { passed: false, at: -Infinity } : { passed: code === 0, at, ...onEnd === true ? { onEnd: true as const } : {} };
+    return Number.isNaN(at) ? { passed: false, at: -Infinity } : { passed: code === 0, at, ...onEnd === true ? { onEnd: true as const } : {}, ...isTextList(agentGaps) && agentGaps.length ? { agentGaps } : {} };
   }));
   return latestGateResult(results);
 }
@@ -258,7 +260,7 @@ type Budget = { stop?: Stop; pastBudget: number };
 type Permitted = { arbiter?: ArbiterVerdict; pastBudget?: true };
 
 async function permitReview(home: string, identity: ProofIdentity, due: boolean, budget: Budget, decision: DecisionMark | undefined, { arbiter, autonomy }: Permit): Promise<Permitted> {
-  if (decision?.mark === "👤") return {};
+  if (decision?.mark === "👤") return budget.stop ? { pastBudget: true } : {};
   const decides = autonomy?.() ?? "ask";
   if (budget.stop) {
     const left = agentExtraReads - budget.pastBudget;
@@ -1235,17 +1237,17 @@ async function devObservedStatus(weigh: Weigh, cleanBaseMerge: CleanBaseMerge, d
   return { ...status("missing", { state: "waiting", dev: dev ? devText(dev.ref) : "an unrecorded dev PR", reason }), ...lapseOf(weighed) };
 }
 
-type FinishedReview = { name: string; commit: string; reviewer?: string; finishedAt: bigint; panel: boolean; scope?: string; from?: string; forkBase?: string };
+type FinishedReview = { name: string; commit: string; reviewer?: string; finishedAt: bigint; panel: boolean; scope?: string; from?: string; forkBase?: string; pastBudget: boolean };
 
 export async function finishedReviews(home: string, identity: ProofIdentity) {
   const reviews = join(pullRequestDirectory(home, identity), "reviews");
   const finished: FinishedReview[] = [];
   for (const name of await reviewNames(reviews)) {
-    const reservation = await readJson<(ProofIdentity & { reviewer?: string; capturedBy?: CapturedBy; scope?: string; from?: string; forkBase?: string }) | undefined>(join(reviews, name, "round.json"), undefined);
+    const reservation = await readJson<(ProofIdentity & { reviewer?: string; capturedBy?: CapturedBy; scope?: string; from?: string; forkBase?: string; pastBudget?: unknown }) | undefined>(join(reviews, name, "round.json"), undefined);
     const findings = await stat(join(reviews, name, "findings.md"), { bigint: true }).catch(() => undefined);
     const panel = await panelOutcome(join(reviews, name));
     const counted = panel === "none" || (panel === "finished" && reservation?.capturedBy === "hedge");
-    if (reservation && findings && counted) finished.push({ name, commit: reservation.commit, reviewer: reservation.reviewer, finishedAt: findings.mtimeNs, panel: panel === "finished", scope: reservation.scope, from: reservation.from, forkBase: reservation.forkBase });
+    if (reservation && findings && counted) finished.push({ name, commit: reservation.commit, reviewer: reservation.reviewer, finishedAt: findings.mtimeNs, panel: panel === "finished", scope: reservation.scope, from: reservation.from, forkBase: reservation.forkBase, pastBudget: reservation.pastBudget === true });
   }
   return finished.sort((a, b) => (a.finishedAt < b.finishedAt ? -1 : a.finishedAt > b.finishedAt ? 1 : 0));
 }
@@ -1387,7 +1389,7 @@ export type GateOptions = { ci: () => CiResult; pushedHead: () => PushedHead; op
 
 // A fenced block is an example, never the section: drop it before looking for the heading.
 const unfenced = (body: string) => body.replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[^\n]*$/gm, "");
-const knownIssues = (body: string) => (/^#+\s*Known issues\b.*$([\s\S]*?)(?=^#|(?![\s\S]))/im.exec(unfenced(body))?.[1] ?? "").split("\n").filter((line) => /^\s*[-*]\s+\S/.test(line)).map((line) => line.trim());
+export const knownIssues = (body: string) => (/^#+\s*Known issues\b.*$([\s\S]*?)(?=^#|(?![\s\S]))/im.exec(unfenced(body))?.[1] ?? "").split("\n").filter((line) => /^\s*[-*]\s+\S/.test(line)).map((line) => line.trim());
 const knownBlocker = (body: string) => knownIssues(body).find((line) => /^[-*]\s+\**blocker\b/i.test(line));
 
 async function botFindingStatus(identity: ProofIdentity, openBotFindings: () => Promise<Thread[]>): Promise<Status | undefined> {

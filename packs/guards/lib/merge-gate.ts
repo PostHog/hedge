@@ -1,15 +1,15 @@
 import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { fold, gateOverride, overrideChoice, hubLedger, type DecisionState, type Env, type LedgerEvent } from "../../pull-requests/lib/decision-ledger.ts";
-import { lastGateResult, latestGateResult, type GateResult } from "../../pull-requests/lib/proof.ts";
+import { fold, gateOverride, isUsers, live, overrideChoice, hubLedger, prRef, type DecisionState, type Env, type LedgerEvent } from "../../pull-requests/lib/decision-ledger.ts";
+import { isTextList, lastGateResult, latestGateResult, type GateResult } from "../../pull-requests/lib/proof.ts";
 import { decidesAll } from "../../pull-requests/lib/proof-autonomy.ts";
 import { endpointOf, ghGroups, inOrder, parseGh, values, type Gh } from "./gh.ts";
 import { githubSlug } from "./git.ts";
 import { commandsIn, shellTools, type Command, type Scope } from "./shell-words.ts";
 
 export type MergeTarget = { repository: string; pr: number; via: string };
-export type MergeIntent = { targets: MergeTarget[]; refusal?: string };
+export type MergeIntent = { targets: MergeTarget[]; exempt?: MergeTarget[]; refusal?: string };
 
 const enqueueLine = /(?:^|\n)[ \t]*\/trunk[ \t]+merge\b/i;
 const mentionsEnqueue = /\/trunk\s+merge\b/i;
@@ -273,7 +273,7 @@ function mcpIntent(tool: string, input: Record<string, unknown>): MergeIntent {
 
 export type ToolCall = { tool_name?: string; tool_input?: Record<string, unknown>; cwd?: string };
 
-/** What a tool call would enqueue in the Trunk merge queue or merge, with exempt repositories left out. */
+/** What a tool call would enqueue in the Trunk merge queue or merge; targets in exempt repositories skip the gate pass and keep only the hold on gaps an agent accepted. */
 export function mergeIntent(call: ToolCall, command: string, exempt: string[], io: IntentIO = realIntentIO): MergeIntent {
   const tool = call.tool_name ?? "";
   let intent: MergeIntent = { targets: [] };
@@ -300,7 +300,8 @@ export function mergeIntent(call: ToolCall, command: string, exempt: string[], i
       intent = { targets: [...intent.targets, ...one.targets], refusal: intent.refusal ?? one.refusal };
     }
   } else if (/github/i.test(tool)) intent = mcpIntent(tool, call.tool_input ?? {});
-  return { ...intent, targets: intent.targets.filter((target) => !isExempt(target.repository, exempt)) };
+  const skipping = intent.targets.filter((target) => isExempt(target.repository, exempt));
+  return { ...intent, targets: intent.targets.filter((target) => !skipping.includes(target)), ...skipping.length ? { exempt: skipping } : {} };
 }
 
 export type Pull = { head: string; base: string; defaultBranch: string; open: boolean };
@@ -338,7 +339,8 @@ async function layersOf(target: MergeTarget, io: GateIO): Promise<Layer[]> {
 const sameRepo = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 function sharedResults(events: LedgerEvent[], layer: Layer): GateResult[] {
-  return events.flatMap((event) => event.type === "gate" && sameRepo(event.repository, layer.repository) && event.pr === layer.pr && event.commit === layer.head ? [{ passed: event.passed, at: Date.parse(event.at), ...event.onEnd === true ? { onEnd: true as const } : {} }] : []);
+  return events.flatMap((event) => event.type === "gate" && sameRepo(event.repository, layer.repository) && event.pr === layer.pr && event.commit === layer.head
+    ? [{ passed: event.passed, at: Date.parse(event.at), ...event.onEnd === true ? { onEnd: true as const } : {}, ...isTextList(event.agentGaps) && event.agentGaps.length ? { agentGaps: event.agentGaps } : {} }] : []);
 }
 
 function latestPassed(results: GateResult[], decidesAllNow: boolean) {
@@ -346,40 +348,69 @@ function latestPassed(results: GateResult[], decidesAllNow: boolean) {
   return latest?.passed === true && (!latest.onEnd || decidesAllNow);
 }
 
+const namesLayer = (decision: DecisionState, layer: Layer) => decision.scope.prs.some((ref) => sameRepo(ref.replace(/#\d+$/, ""), layer.repository) && ref.endsWith(`#${layer.pr}`));
+const mergeWordAt = (decision: DecisionState, layer: Layer) => live(decision) && decision.class === "merge" && decision.scope.condition?.startsWith(`${layer.head}:`) === true && namesLayer(decision, layer);
+
 function overrideIn(decisions: DecisionState[], layer: Layer): boolean {
-  return decisions.some((decision) => !decision.voided && !decision.reversed && decision.mark === "👤" && decision.class === "merge"
-    && decision.scope.kinds?.includes(gateOverride) && decision.scope.condition?.startsWith(`${layer.head}:`)
-    && decision.scope.prs.some((ref) => sameRepo(ref.replace(/#\d+$/, ""), layer.repository) && ref.endsWith(`#${layer.pr}`)));
+  return decisions.some((decision) => mergeWordAt(decision, layer) && decision.mark === "👤" && decision.scope.kinds?.includes(gateOverride) === true);
 }
+
+const agentGap = (decision: DecisionState) => live(decision) && decision.mark === "🤖" && decision.class === "proof-gap" && decision.effect !== "keep-owed";
+const inRepository = (decision: DecisionState, repository: string) => decision.scope.prs.some((ref) => sameRepo(prRef(ref).repository, repository));
+
+function agentGapsAt(results: GateResult[], decisions: DecisionState[], layer: Layer): string[] {
+  const latest = latestGateResult(results);
+  if (latest?.passed) return latest.agentGaps ?? [];
+  return decisions.filter((decision) => agentGap(decision) && namesLayer(decision, layer)).map((decision) => decision.id);
+}
+
+const heldLayer = (results: GateResult[], decisions: DecisionState[], layer: Layer) => {
+  const gaps = agentGapsAt(results, decisions, layer);
+  return gaps.length && !decisions.some((decision) => mergeWordAt(decision, layer) && isUsers(decision)) ? [`${layer.repository}#${layer.pr} at ${layer.head.slice(0, 12)} (🤖 ${gaps.join(", ")})`] : [];
+};
 
 const gateCommand = ({ repository, pr, head }: Layer) => `hedge proof gate --repo ${repository} --pr ${pr} --commit ${head}`;
 const overrideHint = (person: string) => `For an incident fix that cannot wait for the gate, ask ${person} with the question tool, naming the PR and its full head sha, with the options "${overrideChoice}" and "Keep the gate closed", and record the answer `
   + `with \`hedge decision record --mark 👤 --class merge --kind ${gateOverride} --pr <owner/repo#n> --condition '<full head sha>: <incident and why>'\`.`;
 
-/** Why the call may not go out, or undefined when every open layer of every target passed the gate at its head. */
+const heldReason = (held: string[], person: string) => `Hedge blocked this merge: an agent accepted proof gaps of ${held.join("; ")} itself, so it merges only on ${person}'s word for that head, whatever else lets it merge: own tooling, a standing merge grant, or full send. `
+  + `Show it on a merge card. When ${person} chooses to merge it, record the answer with \`hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --words '<date> "<their words>"' --condition '<full 40-character head sha>: merge card'\`, then merge again. A push leaves that answer behind; a gate pass at the new head without such a gap lifts the hold.`;
+
+/** Why the call may not go out, or undefined when every open layer of every target passed the gate at its head and none holds a gap an agent accepted without the person's merge word. */
 export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: string): Promise<string | undefined> {
   if (intent.refusal) return intent.refusal;
   let events: LedgerEvent[] | undefined;
   let decisions: DecisionState[] = [];
   let hubError: string | undefined;
   const missing: string[] = [];
+  const held: string[] = [];
+  const readLedger = async () => {
+    if (events !== undefined || hubError !== undefined) return;
+    try { events = await io.ledger(); decisions = fold(events); } catch (error) { hubError = (error as Error).message; }
+  };
+  const resultsAt = async (layer: Layer) => {
+    const local = await io.localGate(layer.repository, layer.pr, layer.head);
+    return [...local ? [local] : [], ...events ? sharedResults(events, layer) : []];
+  };
   try {
     for (const target of intent.targets) {
       for (const layer of await layersOf(target, io)) {
-        if (events === undefined && hubError === undefined) {
-          try { events = await io.ledger(); decisions = fold(events); } catch (error) { hubError = (error as Error).message; }
-        }
-        if (overrideIn(decisions, layer)) continue;
-        const local = await io.localGate(layer.repository, layer.pr, layer.head);
-        if (latestPassed([...local ? [local] : [], ...events ? sharedResults(events, layer) : []], io.decidesAll?.() ?? false)) continue;
+        await readLedger();
+        const results = await resultsAt(layer);
+        if (overrideIn(decisions, layer) || latestPassed(results, io.decidesAll?.() ?? false)) { held.push(...heldLayer(results, decisions, layer)); continue; }
         const top = layer.pr === target.pr ? "" : ` (a lower layer of ${target.repository}#${target.pr})`;
         missing.push(`${layer.repository}#${layer.pr}${top} at ${layer.head.slice(0, 12)}: run \`${gateCommand(layer)}\``);
       }
     }
+    for (const target of intent.exempt ?? []) {
+      await readLedger();
+      if (!decisions.some((decision) => agentGap(decision) && inRepository(decision, target.repository))) continue;
+      for (const layer of await layersOf(target, io)) held.push(...heldLayer(await resultsAt(layer), decisions, layer));
+    }
   } catch (error) {
     return `Hedge blocked this merge: the merge gate could not check it (${(error as Error).message}). A merge needs a \`hedge proof gate\` pass at each PR's head on GitHub; try again when GitHub answers.`;
   }
-  if (!missing.length) return undefined;
+  if (!missing.length) return held.length ? heldReason(held, person) : undefined;
   const hub = hubError ? ` The decision ledger could not be read (${hubError}), so only this machine's gate records counted.` : "";
   return `Hedge blocked this merge: \`hedge proof gate\` has not passed at the head of ${missing.join("; ")}. A missing proof store, a pass at an older head, or a pass that a later failed run at the same head replaced does not count, nor a pass from while pull-requests.autonomy was end once it is ask again.${hub} `
     + `Run the gate on each head until it exits 0, then enqueue again. ${overrideHint(person)}${intent.targets.some((target) => target.via.endsWith(pipedVia)) ? pipedNote : ""}`;

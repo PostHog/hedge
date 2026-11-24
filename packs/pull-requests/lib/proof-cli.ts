@@ -2,7 +2,7 @@ import { closeSync, existsSync, openSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { askGap, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity } from "./proof.ts";
+import { askGap, summaryGaps, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity } from "./proof.ts";
 import { AnswerTaken, appendOnce, decideAlone, hearUser, ledgerHolds, ledgerOf } from "./decision-cli.ts";
 import { HubUnreachable, keptOwed, refText, usersAcceptance, thisMachine, type Decision, type Ssh } from "./decision-ledger.ts";
 import { autonomyOf, decidesAll, gradeOf, type Autonomy, type Grade } from "./proof-autonomy.ts";
@@ -180,7 +180,9 @@ again after you change the repository's access.`,
 publisher. The block sits at the end of the section under the heading the setting pull-requests.receiptHeading names,
 or with that heading at the end of the body. Only a # heading that GitHub shows at the top level of the body starts
 or ends that section, never an underlined one. When the setting changes, the next run moves the block,
-unless taking it out would join the lists or code blocks around it: then it stays and takes the new heading. It holds a row per owed proof (what ran, the result, the commit or the commit it
+unless taking it out would join the lists or code blocks around it: then it stays and takes the new heading. Once the gate ran at HEAD, it starts with a **Merge card** line: the
+merge-risk grade and door, the reads, each gap with who accepted it, the count of known issues, and the minutes from
+opened to ready, or "still a draft". It prints the full merge card line, as hedge proof gate does, before its last line. It holds a row per owed proof (what ran, the result, the commit or the commit it
 was reused from), a review row, a judge row, what was not checked, and each gap with who accepted it. It reads the
 proof summary the gate saved at HEAD and the decision ledger, never a proof's pass or fail itself. The block sits
 between ${receiptOpen} head=<sha> hash=<hex> --> and ${receiptClose}; the rest of the body stays as it is, and the
@@ -427,7 +429,13 @@ a review bot's thread on the PR is unresolved with no reply or 👍 of yours aft
 the commit is not the PR's head on GitHub, its checks are red,
 or the judge failed or was unavailable; 3 means only unaccepted gaps remain; 75 means only CI that is still running
 holds the gate. No gap waives the head check. The last line is the verdict: on a pass it names what it covered, and
-on any other exit it names the check that held the gate, also when the gate itself fails with an error. --wait
+on any other exit it names the check that held the gate. On a pass, the line before the verdict, or after a ledger
+line, starts "merge card:": the merge-risk grade and door, the review rounds and final reads and how many ran past the
+review budget, each gap with who accepted it and why, each item under Known issues, and the minutes from opened to
+ready and from ready to now; --json carries it as mergeCard. A pass records the gaps that 🤖 decisions accepted, here
+and in the ledger, and the merge-gate hook then holds that head until the user's merge word for it, recorded with
+hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full head sha>: merge card'. Own tooling
+and repositories that skip the gate are held too, also when the gate itself fails with an error. --wait
 <minutes>, at most 120, waits up to that long for running CI to finish, reading CI every 30 seconds, and stops early
 when a read of GitHub fails, with a "ci: --wait stopped early" line that names the error. Then it runs the gate
 again, and still exits 75 when CI runs past the limit; then the verdict says to open the checks it waits on, since a
@@ -524,11 +532,11 @@ code and the reason. The gate's lines and hedge decision report come from the sa
         const reason = `${gate.reason}. --wait did not wait: the decision ledger did not take the failure (${unshared.error})`;
         gate = { ...gate, code: 1, reason, summary: { ...gate.summary, code: 1 }, verdict: `gate: fail (exit 1): ${reason}. Fix the ledger's reach, such as the hub connection, then run the gate again` };
       }
-      await record({ code: gate.code, reason: gate.reason, ...ranOnEnd(context) });
-      const shared = unshared?.failed ? unshared.line : (await shareGateResult(head, gate.code === 0, gatedAt, context))?.line;
+      await record({ code: gate.code, reason: gate.reason, ...ranOnEnd(context), ...heldGaps(gate) });
+      const shared = unshared?.failed ? unshared.line : (await shareGateResult(head, gate.code === 0, gatedAt, context, heldGaps(gate)))?.line;
       const waitLine = waited?.failedRead ? `ci: --wait stopped early at a failed read of GitHub: ${waited.failedRead}` : undefined;
-      if (flags.has("--json")) print(JSON.stringify({ ...gate.summary, reason: gate.reason, ...waitLine ? { wait: waitLine } : {}, ...shared ? { ledger: shared } : {} }));
-      else for (const line of [...gate.lines, ...waitLine ? [waitLine] : [], ...shared ? [shared] : [], gate.verdict]) print(line);
+      if (flags.has("--json")) print(JSON.stringify({ ...gate.summary, reason: gate.reason, ...waitLine ? { wait: waitLine } : {}, ...shared ? { ledger: shared } : {}, ...gate.card ? { mergeCard: gate.card } : {} }));
+      else for (const line of [...gate.lines, ...waitLine ? [waitLine] : [], ...shared ? [shared] : [], ...gate.card ? [gate.card] : [], gate.verdict]) print(line);
       return gate.code;
     },
   },
@@ -1232,10 +1240,15 @@ type Shared = { line: string; failed: boolean; error?: string };
 
 const ranOnEnd = ({ env }: ProofContext): { onEnd?: true } => decidesAll(env) ? { onEnd: true } : {};
 
-async function shareGateResult(head: ProofIdentity, passed: boolean, startedAt: Date, context: ProofContext): Promise<Shared | undefined> {
+function heldGaps({ code, summary }: FinalGate): { agentGaps?: string[] } {
+  const ids = code === 0 ? summaryGaps(summary).flatMap(({ kind, gap }) => gap.accepted?.mark === "🤖" ? [gap.accepted.id ?? kind] : []) : [];
+  return ids.length ? { agentGaps: ids } : {};
+}
+
+async function shareGateResult(head: ProofIdentity, passed: boolean, startedAt: Date, context: ProofContext, held: { agentGaps?: string[] } = {}): Promise<Shared | undefined> {
   const result = passed ? "pass" : "failure";
   try {
-    await ledgerOf(context).append({ type: "gate", repository: head.repository, pr: head.pr, commit: head.commit, passed, machine: thisMachine(context.env), at: startedAt.toISOString(), ...passed ? ranOnEnd(context) : {} });
+    await ledgerOf(context).append({ type: "gate", repository: head.repository, pr: head.pr, commit: head.commit, passed, machine: thisMachine(context.env), at: startedAt.toISOString(), ...passed ? { ...ranOnEnd(context), ...held } : {} });
     return passed ? { line: "merge gate: pass recorded in the decision ledger", failed: false } : undefined;
   } catch (failure) {
     const error = String((failure as Error).message ?? failure).split(/[\r\n]/)[0]!;

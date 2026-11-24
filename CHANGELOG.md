@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### The merge card line, and a hold on gaps the agent accepted
+
+- A passing `hedge proof gate` prints one `merge card:` line, and
+  `hedge proof receipt` prints it too: the merge-risk grade and door, with
+  "one-way door" spelled out, the review rounds and final reads and how many
+  ran past the review budget, each gap with who accepted it and why, each item
+  under Known issues, and the minutes from opened to ready and from ready to
+  this line. Copy it onto the merge card.
+- The receipt writes the same summary at the top of its section of the PR
+  body, as a **Merge card** line without the minutes to the card.
+- A read past the budget now counts on the user's `--override` too. It does
+  not take one of the agent's 3 reads.
+- A gate pass records the gaps that an agent accepted with 🤖 decisions. The
+  merge-gate hook refuses an enqueue or merge of that head until the person's
+  merge word for it is in the ledger:
+  `hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full head sha>: merge card'`.
+  This holds in repositories in `guards.merge-gate-exempt` too, which still
+  need no gate pass: there, a 🤖 gap decision of the PR holds it until a gate
+  pass at its head shows no such gap. A push leaves the merge word behind.
+
 ### A message steers a thread that waits on a question card
 
 - `hedge thread send` no longer turns `auto` into `queue` when the target

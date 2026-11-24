@@ -92,8 +92,6 @@ describe("which calls enqueue or merge", () => {
     ["gh api repos/example/product/pulls/7/merge"],
     ["gh api repos/example/product/issues/7/comments"],
     ["gh pr view 7 --repo example/product"],
-    ["gh pr comment 7 --repo own/tooling --body '/trunk merge'"],
-    ["gh pr merge 7 --repo Example/Notes --squash"],
     ["curl -s https://api.github.com/repos/example/product/pulls/7/merge"],
     ["curl -fsSL -H 'Accept: application/json' -o out.json https://api.github.com/repos/example/product/pulls/7/merge"],
     ["curl -X GET https://api.github.com/repos/example/product/pulls/7/merge"],
@@ -107,6 +105,13 @@ describe("which calls enqueue or merge", () => {
     ["echo done"],
   ])("%s enqueues nothing the gate checks", (command) => {
     expect(bash(command)).toEqual({ targets: [] });
+  });
+
+  test.each([
+    ["gh pr comment 7 --repo own/tooling --body '/trunk merge'", "own/tooling"],
+    ["gh pr merge 7 --repo Example/Notes --squash", "Example/Notes"],
+  ])("%s in an exempt repository needs no gate pass, only the check for gaps an agent accepted", (command, repository) => {
+    expect(bash(command)).toEqual({ targets: [], exempt: [target(repository, 7)] });
   });
 
   test.each([
@@ -148,7 +153,7 @@ describe("which calls enqueue or merge", () => {
 
   test("a cd before the call moves it to that checkout's repository, out of an exempt one", () => {
     expect(bash("cd /work/product && gh pr merge 7 --squash", "/tooling")).toEqual({ targets: [target("example/product", 7)] });
-    expect(bash("cd /tooling && gh pr merge 7 --squash", "/work")).toEqual({ targets: [] });
+    expect(bash("cd /tooling && gh pr merge 7 --squash", "/work")).toEqual({ targets: [], exempt: [target("own/tooling", 7)] });
     expect(bash("(cd /tooling) && gh pr merge 7 --squash", "/work")).toEqual({ targets: [target("example/product", 7)] });
     expect(bash("(cd /tooling; true); gh pr merge 7", "/work")).toEqual({ targets: [target("example/product", 7)] });
     expect(bash("pushd /work/product && gh pr merge 7", "/tooling")).toEqual({ targets: [target("example/product", 7)] });
@@ -353,6 +358,20 @@ describe("the PreToolUse hook", () => {
     const where = (settings: unknown) => ({ home: homeWith(settings), env: {}, gate: gate(), intent: io });
     expect(await mergeGate(call("gh pr merge 9 --repo own/tooling"), where({ "guards.merge-gate-exempt": "own/*" }))).toBeUndefined();
     expect(await mergeGate(call("gh pr merge 9 --repo own/tooling"), where({}))).toBeDefined();
+  });
+
+  test("in an exempt repository, a gap an agent accepted holds the merge until a gate pass at the head shows it gone, and a gap elsewhere reads nothing", async () => {
+    const agentGap = (repository: string): LedgerEvent => ({
+      type: "decide", decision: {
+        id: "d-agent", at: "2026-11-16T08:00:00Z", class: "proof-gap", mark: "🤖", question: `Accept the live-run gap? ${repository}#9: no sandbox`, answer: "Accept the gap", rejected: "Keep the gap open", reason: "x",
+        scope: { prs: [`${repository}#9`], kinds: ["live-run"] }, effect: "accept", where: { thread: "t", machine: "hub" },
+      },
+    });
+    const where = (ledger: LedgerEvent[], github = true) => ({ home: homeWith({ "guards.merge-gate-exempt": "own/*" }), env: {}, gate: gate({ ledger, github }), intent: io });
+    const merge = (ledger: LedgerEvent[], github = true) => mergeGate(call("gh pr merge 9 --repo own/tooling"), where(ledger, github));
+    expect((await merge([agentGap("own/tooling")]))?.hookSpecificOutput.permissionDecisionReason).toContain(`an agent accepted proof gaps of own/tooling#9 at ${head.slice(0, 12)} (🤖 d-agent) itself`);
+    expect(await merge([agentGap("own/tooling"), { type: "gate", repository: "own/tooling", pr: 9, commit: head, passed: true, machine: "box-2", at: "2026-11-16T08:00:00Z" }])).toBeUndefined();
+    expect(await merge([agentGap("example/product")], false)).toBeUndefined();
   });
 
   test("settings it cannot read refuse a merge rather than skip the gate, and leave other calls alone", async () => {

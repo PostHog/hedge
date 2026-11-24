@@ -66,7 +66,14 @@ case "$*" in
     [ -f "${github}/pull-error-$n" ] && { cat "${github}/pull-error-$n" >&2; exit 1; }
     [ -f "${github}/body-$n" ] && body=$(cat "${github}/body-$n")
     state=open; merged=null; [ -f "${github}/merged-$n" ] && { state=closed; merged='"2026-10-25T09:00:00Z"'; }; [ -f "${github}/closed-$n" ] && state=closed
-    printf '{"number":%s,"title":"Greet new members","body":%s,"draft":%s,"state":"%s","merged_at":%s,"head":{"sha":"%s"},"base":{"ref":"%s","sha":%s,"repo":{"default_branch":"main"}}}\\n' "$n" "$body" "$draft" "$state" "$merged" "$head" "$base" "$basesha"; exit 0;;
+    created=null; [ -f "${github}/created" ] && created=$(cat "${github}/created")
+    printf '{"number":%s,"title":"Greet new members","body":%s,"draft":%s,"state":"%s","created_at":%s,"merged_at":%s,"head":{"sha":"%s"},"base":{"ref":"%s","sha":%s,"repo":{"default_branch":"main"}}}\\n' "$n" "$body" "$draft" "$state" "$created" "$merged" "$head" "$base" "$basesha"; exit 0;;
+  "api --paginate "*"/issues/"[0-9]*"/events "*)
+    filter=; previous=
+    for arg in "$@"; do [ "$previous" = "--jq" ] && filter=$arg; previous=$arg; done
+    [ -f "${github}/events-error" ] && { cat "${github}/events-error" >&2; exit 1; }
+    [ -f "${github}/events" ] || exit 0
+    jq -r "$filter" "${github}/events"; exit $?;;
   "api "*"/rules/branches/"*)
     all="$*"; branch=\${all##*/rules/branches/}; page=\${all##*page=}; branch=\${branch%%\\?*}
     [ -f "${github}/rules-error-$branch" ] && { cat "${github}/rules-error-$branch" >&2; exit 1; }
@@ -125,6 +132,10 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
   };
   const whileGithubReadsPull = (script: string) => writeFileSync(join(github, "while-reading"), script);
   const githubComment = (id: number, author: string, body: string, createdAt = "2026-10-25T11:00:00Z", on = 42) => writeFileSync(join(github, `comment-${id}`), JSON.stringify({ user: { login: author }, body, created_at: createdAt, issue_url: `https://api.github.com/repos/example/product/issues/${on}` }));
+  const timeline = (opened: string, ready: string[] = []) => {
+    writeFileSync(join(github, "created"), JSON.stringify(opened));
+    writeFileSync(join(github, "events"), JSON.stringify([{ event: "labeled", created_at: opened }, ...ready.map((at) => ({ event: "ready_for_review", created_at: at }))]));
+  };
   const githubBody = (number = 42) => JSON.parse(readFileSync(join(github, existsSync(join(github, `body-${number}`)) ? `body-${number}` : "body"), "utf8")) as string;
   const githubFault = (fault: "patch-error" | "patch-mangle", text: string | undefined) => text === undefined ? rmSync(join(github, fault), { force: true }) : writeFileSync(join(github, fault), text);
   const reviewThreads = (threads: ReviewThread[] | { error: string }, number = 42) => {
@@ -206,7 +217,7 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
   const decide = (...args: string[]) => decideIn(repository, ...args);
   const pullRequest = join(home, ".local/state/hedge/proof/example/product/42");
   await seedRepository(repository);
-  return { home, repository, pullRequest, env, git, commit, advanceBase, hedge, hedgeIn, hedgeAs, ci, statuses, githubApp, required, pullRequestState, githubHead, githubCalls, githubBody, githubFault, githubComment, reviewThreads, whileGithubReadsPull, clock, say, choose, chooseGap, reader, panel, hub, pendingCards, decide, decideIn, startTimes };
+  return { home, repository, pullRequest, env, git, commit, advanceBase, hedge, hedgeIn, hedgeAs, ci, statuses, githubApp, required, pullRequestState, timeline, githubHead, githubCalls, githubBody, githubFault, githubComment, reviewThreads, whileGithubReadsPull, clock, say, choose, chooseGap, reader, panel, hub, pendingCards, decide, decideIn, startTimes };
 }
 
 export type Checkout = Awaited<ReturnType<typeof checkout>>;

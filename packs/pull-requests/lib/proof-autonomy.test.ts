@@ -92,6 +92,12 @@ test("on end, fixes rounds and final reads past the budget share the agent's thr
   expect((await pr.hedge("review-start", "--scope", "final", "--base", reviewed, "--agent", "The last fix changed the greeting.")).code).toBe(0);
   await finishRound(pr, "final-1");
   await expect(fixesRound(5, "--agent", "The last fix changed the greeting.")).rejects.toThrow("The agent's 3 reads past the budget are spent too");
+
+  pr.choose("Run one more round", "Run one more review round? example/product#42: the review budget is spent.");
+  expect((await pr.hedge("review-start", "--scope", "fixes", "--base", reviewed, "--override", `2026-10-25 "Run one more round"`)).code).toBe(0);
+  await finishRound(pr, "5");
+  await pr.hedge("gate");
+  expect((await pr.decide("report", "--pr", "example/product#42")).output).toContain("| example/product#42 | 5 rounds, 1 final read, 4 past the budget |");
 });
 
 test("on end, a gap prints the agent's own decision, and the ledger takes it", async () => {

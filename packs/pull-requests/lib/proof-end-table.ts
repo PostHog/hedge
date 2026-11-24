@@ -8,7 +8,7 @@ import type { SanityPass } from "./proof-sanity.ts";
 export const isCommitSha = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
 
 export type Sized = DiffSize & { commit: string; from: string };
-export type Growth = { rounds: number; finalReads: number; first?: Sized; final?: Sized; sanity?: SanityPass; bloat?: BloatScore };
+export type Growth = { rounds: number; finalReads: number; pastBudget?: number; first?: Sized; final?: Sized; sanity?: SanityPass; bloat?: BloatScore };
 export type EndRow = { ref: PrRef; summary: ProofSummary; reason: (kind: string, reason: string) => string };
 
 const isRound = (name: string) => /^\d+$/.test(name);
@@ -25,17 +25,18 @@ export async function measureGrowth(home: string, head: ProofIdentity, run: Run,
   const start = opening?.scope !== "full" ? undefined : isCommitSha(opening.forkBase) ? forkPoint({ ...head, commit: opening.commit }, run, opening.forkBase) : opening.from;
   const first = !opening || !start ? undefined : start === opening.commit ? { production: 0, tests: 0, docs: 0, commit: start, from: start } : sizeAt({ ...head, commit: opening.commit }, run, start);
   const final = sizeAt(head, run, isCommitSha(baseSha) ? forkPoint(head, run, baseSha) : undefined);
-  return { rounds: rounds.length, finalReads: reviews.length - rounds.length, ...first ? { first } : {}, ...final ? { final } : {} };
+  const pastBudget = reviews.filter((review) => review.pastBudget).length;
+  return { rounds: rounds.length, finalReads: reviews.length - rounds.length, ...pastBudget ? { pastBudget } : {}, ...first ? { first } : {}, ...final ? { final } : {} };
 }
 
 const counted = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
 const figure = (lines: number | undefined) => typeof lines === "number" ? lines.toLocaleString("en-US") : "unknown";
 const span = (from: number | undefined, to: number | undefined) => `${figure(from)} → ${figure(to)}`;
 
-function roundsCell(growth: Growth | undefined) {
+export function roundsCell(growth: Growth | undefined) {
   if (!growth) return "not measured";
   if (!growth.rounds && !growth.finalReads) return "no review";
-  return [counted(growth.rounds, "round"), ...growth.finalReads ? [counted(growth.finalReads, "final read")] : []].join(", ");
+  return [counted(growth.rounds, "round"), ...growth.finalReads ? [counted(growth.finalReads, "final read")] : [], ...growth.pastBudget ? [`${growth.pastBudget} past the budget`] : []].join(", ");
 }
 
 function linesCell(growth: Growth | undefined) {
@@ -53,7 +54,7 @@ function sanityCell({ summary, reason }: EndRow) {
   return bloat ? `${bloatFigure(bloat, summary.commit)}; ${verdict}` : verdict;
 }
 
-function acceptor(gap: GapProof) {
+export function acceptor(gap: GapProof) {
   const by = gap.accepted;
   if (!by) return "not accepted";
   if (by.by === "standing rule") return "a standing rule";

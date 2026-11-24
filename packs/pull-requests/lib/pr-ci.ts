@@ -13,7 +13,7 @@ export const runIn = (cwd: string, env: Record<string, string | undefined>): Run
     return { code: 127, stdout: "", stderr: `${command[0]}: ${(error as Error).message}` };
   }
 };
-export type PullRequest = { title: string; body: string; draft: boolean; state: "open" | "closed" | "merged"; head: string; base: string; baseSha: string; defaultBranch?: string; mergedAt?: string; mergeCommit?: string };
+export type PullRequest = { title: string; body: string; draft: boolean; state: "open" | "closed" | "merged"; head: string; base: string; baseSha: string; defaultBranch?: string; createdAt?: string; mergedAt?: string; mergeCommit?: string };
 
 type CheckRun = { id: number; name: string; status: string; conclusion: string | null; app?: number | null };
 type CommitStatus = { context: string; state: string; creator?: { login?: string; type?: string } | null };
@@ -34,10 +34,10 @@ export function restJson<T>(path: string, run: Run): T {
 }
 
 export function readPullRequest(identity: ProofIdentity, run: Run): PullRequest {
-  type Raw = { title?: string; body?: string | null; draft?: boolean; state?: string; merged_at?: string | null; merge_commit_sha?: string | null; head?: { sha?: string }; base?: { ref?: string; sha?: string; repo?: { default_branch?: string } } };
+  type Raw = { title?: string; body?: string | null; draft?: boolean; state?: string; created_at?: string; merged_at?: string | null; merge_commit_sha?: string | null; head?: { sha?: string }; base?: { ref?: string; sha?: string; repo?: { default_branch?: string } } };
   const raw = restJson<Raw>(`repos/${identity.repository}/pulls/${identity.pr}`, run);
   const state = raw.merged_at ? "merged" : raw.state === "closed" ? "closed" : "open";
-  return { title: raw.title ?? "", body: raw.body ?? "", draft: raw.draft === true, state, head: raw.head?.sha ?? "", base: raw.base?.ref ?? "", baseSha: raw.base?.sha ?? "", defaultBranch: raw.base?.repo?.default_branch, ...raw.merged_at ? { mergedAt: raw.merged_at } : {}, ...raw.merged_at && raw.merge_commit_sha ? { mergeCommit: raw.merge_commit_sha } : {} };
+  return { title: raw.title ?? "", body: raw.body ?? "", draft: raw.draft === true, state, head: raw.head?.sha ?? "", base: raw.base?.ref ?? "", baseSha: raw.base?.sha ?? "", defaultBranch: raw.base?.repo?.default_branch, ...raw.created_at ? { createdAt: raw.created_at } : {}, ...raw.merged_at ? { mergedAt: raw.merged_at } : {}, ...raw.merged_at && raw.merge_commit_sha ? { mergeCommit: raw.merge_commit_sha } : {} };
 }
 
 const commentPattern = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/(?:issues|pull)\/([1-9]\d*)#issuecomment-(\d+)$/;
