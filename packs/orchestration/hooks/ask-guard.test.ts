@@ -7,7 +7,6 @@ import { tempDirs } from "../../../src/testing/git.ts";
 import { devbox, engineSource, resolveEngine, skillSources } from "../../../src/testing/packs.ts";
 import { dispatch } from "../../base/hooks/run.ts";
 import { asksForDecision } from "../lib/prose-question.ts";
-import { wakeStop } from "../lib/wake-stop.ts";
 import type { ShellThread } from "../../base/lib/t3/index.ts";
 import { startT3Stub } from "../../../src/integrations/t3/testing.ts";
 import { guardBackground, guardCard, guardSend, guardStop, hiddenIn, hook, hookWith, killSwitch, type IsHidden, type SendEvent, type SendGuardOptions, type StopEvent } from "./ask-guard.ts";
@@ -574,7 +573,7 @@ describe("the wake guard", () => {
 
   test.each([
     ["runs later", "2999-01-01T00:00:00.000Z"],
-    ["is due and T3 has not run it yet", "2020-01-01T00:00:00.000Z"],
+    ["is due and T3 has not run it yet", "2026-11-21T08:00:00.000Z"],
   ])("lets a wait or check line through when an enabled scheduled task bound to the thread %s", async (_, nextRunAt) => {
     const where = home("Robin");
     scheduled(where, conductor, nextRunAt);
@@ -606,20 +605,14 @@ describe("the wake guard", () => {
     writeFileSync(join(off, killSwitch), "");
     expect(await ends({}, waitLine, {}, off)).toBeUndefined();
     const down = async () => { throw new Error("T3 down"); };
-    expect(await wakeStop({}, waitLine, { home: home("Robin"), threadId: conductor, shell: down, processes: lone })).toBeUndefined();
     const routed = hookWith(() => down, { threadId: conductor, processes: lone });
     expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)) }), home("Robin"))).stdout).toBe("");
   });
 
   test("lets the stop through when the check does not answer before the deadline the hook passes on", async () => {
-    let tables = 0;
-    const stallsOnWake = { pid: 30, table: () => ++tables > 1 ? new Promise<string>(() => {}) : lone.table() };
+    const stalled = { pid: 30, table: () => new Promise<string>(() => {}) };
     const threads = [{ id: conductor, title: "Conductor", projectId: "p", status: "completed" }] as ShellThread[];
-    let release = () => {};
-    const routed = hookWith(() => async () => ({ threads }), { threadId: conductor, processes: stallsOnWake, deadline: () => new Promise<void>((resolve) => { release = resolve; }) });
-    const answer = routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)), cwd: "/" }), home("Robin"));
-    while (tables < 2) await Bun.sleep(1);
-    release();
-    expect((await answer).stdout).toBe("");
+    const routed = hookWith(() => async () => ({ threads }), { threadId: conductor, processes: stalled, deadline: async () => {} });
+    expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)), cwd: "/" }), home("Robin"))).stdout).toBe("");
   });
 });
