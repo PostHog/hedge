@@ -235,6 +235,24 @@ describe("finding documents", () => {
     expect((await hedgeContext(machine, ["topics"])).out).toContain("transactional-email: 3 documents, hub missing");
   });
 
+  test("search and catalog leave out the memory and packs folders at the library's root, but not a folder deeper down with the same name", async () => {
+    const machine = await library({
+      "memory/quokka-feedback.md": "---\nname: quokka-feedback\ntype: feedback\n---\n\nQuokka rule.\n",
+      "packs/michael/rules/quokka-rules.md": "# Quokka rules\n",
+      "research/agents/memory/quokka-recall.md": "# Quokka recall\n",
+      "research/hedge/packs/quokka-packs.md": "# Quokka packs\n",
+    });
+    await hedgeContext(machine, ["sync"]);
+    await hedgeContext(machine, ["catalog"]);
+    const listed = [(await hedgeContext(machine, ["search", "quokka"])).out, readFileSync(join(machine.checkout, "CATALOG.md"), "utf8")];
+    for (const out of listed) {
+      expect(out).toContain("research/agents/memory/quokka-recall.md");
+      expect(out).toContain("research/hedge/packs/quokka-packs.md");
+      expect(out).not.toContain("quokka-feedback");
+      expect(out).not.toContain("quokka-rules");
+    }
+  });
+
   test("the prompt hook points a session at a document its prompt names, once, from the owner's library", async () => {
     const machine = await library(docs);
     await hedgeContext(machine, ["sync"]);
