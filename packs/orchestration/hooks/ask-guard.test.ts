@@ -529,8 +529,15 @@ describe("the wake guard", () => {
     expect(await ends({ ...queuedWatch, pendingBackgroundTasks: [watchTask] })).toMatchObject({ decision: "block" });
   });
 
+  test("sends back a wait whose watch until merge is on a PR that merged", async () => {
+    const merged = watching({ until: "merged" });
+    merged.pullRequests[0]!.snapshot.state = "merged";
+    expect(await ends({ ...merged, status: "running" })).toMatchObject({ decision: "block" });
+  });
+
   test.each([
-    ["a PR watch held until merge", { ...watching({ until: "merged" }), pendingBackgroundTasks: [{ ...watchTask, awaited: true }] }],
+    ["a PR watch held until merge, while T3 shows no task of the running turn", { ...watching({ until: "merged" }), status: "running", pendingBackgroundTasks: [] }],
+    ["a PR watch held until merge, which T3 awaits between turns", { ...watching({ until: "merged" }), pendingBackgroundTasks: [{ ...watchTask, awaited: true }] }],
     ["a PR watch whose checks still run", { ...watching({ passed: false, checksPending: true }), pendingBackgroundTasks: [watchTask] }],
     ["a PR watch that waits on an approval", { ...watching({ awaitingApproval: ["deploy"] }), pendingBackgroundTasks: [watchTask] }],
     ["a delegated lane still running", { pendingBackgroundTasks: [{ kind: "subagent", childThreadId: "thread:lane" }] }],

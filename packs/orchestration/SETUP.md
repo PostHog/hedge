@@ -100,8 +100,9 @@ The stop passes when any of these holds:
 
 - the kill switch file exists, or a stop hook already continued this turn;
 - the thread waits on a child task, a thread wait, or a command or monitor it
-  awaits, as in the proof check below. T3 awaits a PR watch that runs
-  `until: "merged"`;
+  awaits, as in the proof check below;
+- a PR watch of the thread runs `until: "merged"` on an open PR. T3 shows no
+  task while a turn runs, so the check reads the watch on the PR itself;
 - a PR watch of the thread sees checks still run, or waits on an approval. A
   watch whose checks finished, such as one on a PR in the merge queue, is no
   wait unless it runs `until: "merged"`;
