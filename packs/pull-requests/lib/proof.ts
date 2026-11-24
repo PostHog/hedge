@@ -1353,7 +1353,7 @@ async function ciStatus(weigh: Weigh, ci: CiResult): Promise<CiStatus> {
 export const ciRunningCode = 75;
 const gateCodes = { missing: 1, gap: 3, pending: ciRunningCode } as const;
 
-export type PushedHead = { commit: string; body?: string } | { error: string };
+export type PushedHead = { commit: string; body?: string; merged?: boolean } | { error: string };
 
 function headStatus(identity: ProofIdentity, before: PushedHead, after: PushedHead): Status {
   if ("error" in before) return { problem: "missing", line: `head: cannot read the PR head on GitHub (${before.error})` };
@@ -1445,7 +1445,7 @@ export async function proofGate(home: string, identity: ProofIdentity, { ci, pus
   const head = headStatus(identity, before, pushedHead());
   const checks = await ciStatus(weigh, ciResult);
   const knownHold = landed ? undefined : heldStatus(before);
-  const botFindings = await botFindingStatus(identity, openBotFindings);
+  const botFindings = landed && "merged" in before && before.merged ? undefined : await botFindingStatus(identity, openBotFindings);
   const held = [{ problem: owed ? undefined : "missing", line: owedPart(owed).line }, ...kinds.map((kind) => ({ problem: kind.problem, line: kind.proof.line })), review, ...responses, head, checks, ...knownHold ? [knownHold] : [], ...botFindings ? [botFindings] : []];
   const weighed = [...kinds, review, checks];
   const lapsed = [...new Set(weighed.flatMap((status) => status.problem && status.lapsed ? [status.lapsed] : []))];

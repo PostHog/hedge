@@ -12,8 +12,9 @@
   URL. Fix it and resolve it with
   `hedge pr bot-threads --repo <owner/repo> --pr <number> --fixed <URL>`, or
   reply with why it does not hold.
-- A person's thread does not hold the gate. `--landed` checks it too, so it
-  cannot pass an open pull request past a finding.
+- A person's thread does not hold the gate. `--landed` skips the check only
+  when GitHub reports the pull request merged, so it cannot pass an open one
+  past a finding.
 - When GitHub cannot list the threads, the gate fails and says why.
 - `hedge pr bot-threads` and the gate share one reader, and both now know the
   logins of these bots.
