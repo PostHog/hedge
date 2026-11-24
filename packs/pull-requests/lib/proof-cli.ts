@@ -99,8 +99,9 @@ const subcommands: Record<string, Subcommand> = {
   },
   save: {
     usage: "save [--kind <kind> [--ran <what ran> --result <what it showed>]] <file>... | save --kind <kind> --ran <what ran> --result <what it showed> | save --kind ui-walk --caption <caption> <screenshot> | save --kind <kind> --reuse-from <sha> --reason <why>",
-    summary: `Save evidence files for the commit. With --kind, the files prove that owed kind. Evidence counts for HEAD
-and for clean merges of the base on top of it. When the evidence of an earlier commit still proves HEAD, record
+    summary: `Save evidence files for the commit. With --kind, the files prove that owed kind. Evidence counts for HEAD,
+for clean merges of the base on top of it, and for commits on top of it that change only test files no production
+file names. When the evidence of an earlier commit still proves HEAD, record
 that with --reuse-from and the reason; the gate prints it.
 --ran and --result give one line each of what ran and what it showed, for the proof receipt. Without files they
 record only the lines, such as for evidence that hedge proof run saved. A later save of the kind at the commit with
@@ -144,11 +145,14 @@ captions live in the PR's display/ directory, outside the evidence: the gate and
 output passes through to the terminal, and stdout and stderr go together into one private spool. hedge reads HEAD
 and the status before and after the run: a tree with modified or untracked files refuses with exit 2, so commit
 first. Only a run that exits 0 with text output, with HEAD unchanged and the tree clean at both checks, saves: the
-output, with known secrets redacted, as <kind> evidence of the HEAD read before the run, and a run record of the
-redacted command in runs/<commit>/<kind>/. Every other run saves nothing, says why, and exits with the command's
-status: 128 + n when signal n stopped it, 127 when it cannot start, and 1 when it printed nothing, printed a null
-byte, or HEAD or the tree changed. The judge marks runner files as captured by the Hedge runner. --commit is not
-taken; ui-walk takes screenshots, so save them with hedge proof save.`,
+output, with known secrets redacted, as <kind> evidence of the HEAD read before the run, and a run record in
+runs/<commit>/<kind>/: the redacted command, the commit, exit 0, when the run started and finished, and the directory
+it ran in. Every other run saves nothing, says why, and exits with the command's status: 128 + n when signal n
+stopped it, 127 when it cannot start, and 1 when it printed nothing, printed a null byte, or HEAD or the tree
+changed. The judge marks runner files as captured by the Hedge runner. When every file of a kind has a run record of
+the commit the gate counts, the gate prints that capture and tells the judge its provenance is verified by code, so
+the judge asks only whether the evidence shows the changed behavior. --commit is not taken; ui-walk takes
+screenshots, so save them with hedge proof save.`,
     examples: ["hedge proof run --kind live-run -- bun test src/send.test.ts", "hedge proof run --kind live-run -- sh -c 'curl -s localhost:8000/health | jq .status'"],
     options: ["--kind"], takesCommand: true,
     run: async ({ options, command }, _, context) => {
@@ -156,7 +160,7 @@ taken; ui-walk takes screenshots, so save them with hedge proof save.`,
       if (!command?.length) throw usageError("run", "Pass the command after --");
       const kind = required(options, "--kind", "run");
       const pr = resolvePullRequest(options.get("--repo"), options.get("--pr"), context.run);
-      return runProof({ home: context.home, pr, kind, command, cwd: context.cwd, env: context.env, print: context.print, io: context.runIO });
+      return runProof({ home: context.home, pr, kind, command, cwd: context.cwd, env: context.env, print: context.print, io: context.runIO, now: context.now });
     },
   },
   publish: {
@@ -456,7 +460,11 @@ panel gap (gap --kind panel) stands in for the panel. The review also carries ac
 an earlier commit of the PR, and single-parent commits that only change, add, or delete test files, named *.test.*, *.spec.*, *_test.go, *_test.py or test_*.py, or snapshots in __snapshots__, as regular
 files with an unchanged mode. A mode change, a symlink, a comment, a file in a test folder, or a test
 file whose name other code holds, such as an import of limits.test.ts, needs a review. The gate then prints "final read carried from <sha>: test-only delta" or "revert of a PR commit", and the receipt in
-carried/<HEAD>.json names the quiet commits and the reason. Evidence does not carry across quiet commits.
+carried/<HEAD>.json names the quiet commits and the reason. Evidence carries across the same quiet commits and clean
+base merges, and the gate line names them; the judge reads that carry as checked by code. When every file of this diff
+is such a test file, the judge learns the diff is test-only, so a critical path that only test files match does not
+make the Tier critical. A judge answer that fails a question without a reason shows "the judge gave no reason", and
+every failing gate names a reason on its last line.
 When those checks pass, the judge runs on the reviewer's row of the model table, with that reviewer's tools, as hedge proof review
 picks it. hedge hands it the diff from the merge base, CI, the owed kinds, the counted evidence, every review's
 findings and responses, and the coding standards in ~/.agents/guides/coding-standards.md. It answers four questions:
@@ -1195,7 +1203,7 @@ export async function proofCommand(args: string[], context: ProofContext): Promi
 
 async function gateReporting(json: boolean, { print }: ProofContext, gate: () => Promise<number>) {
   try { return await gate(); } catch (error) {
-    const reason = String((error as Error).message ?? error).replace(/\s*[\r\n]+\s*/g, " ");
+    const reason = String((error as Error)?.message ?? error).replace(/\s*[\r\n]+\s*/g, " ").trim() || `the gate stopped on ${(error as Error)?.name ?? "an error"} without a message`;
     print(json ? JSON.stringify({ code: 1, reason }) : `gate: fail (exit 1): ${reason}`);
     return 1;
   }

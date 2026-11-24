@@ -67,6 +67,11 @@ export function quietStep(reader: CommitReader, commit: string): QuietStep | und
   return { parent, kinds: ["test"] };
 }
 
+export function testOnlyRange(reader: CommitReader, from: string, to: string) {
+  const changes = reader.changes(from, to);
+  return Boolean(changes?.length) && changes!.every(quietChange) && !changes!.some((change) => importedByCode(reader, to, change.path));
+}
+
 const kindReasons: Record<DeltaKind, string> = { test: "test-only delta", revert: "revert of a PR commit" };
 export const quietReason = (kinds: Iterable<DeltaKind>) => [...new Set(kinds)].map((kind) => kindReasons[kind]).join(" and ");
 
