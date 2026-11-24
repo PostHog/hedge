@@ -143,6 +143,20 @@ test("hedge proof respond refuses answers to a round without findings", async ()
 
 const twoFindings = "FINDINGS:\n- feature.txt:1 | major | Correctness | an empty name -> a blank greeting | anchor: greet the new member\n- feature.txt:1 | major | Correctness | a returning member -> a second greeting | anchor: greet the new member\nCOVERED: feature.txt\n";
 
+test("hedge proof show prints no list for a round it reads as reserved, even when findings land on disk after that read", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet the new member\n");
+  await pr.hedge("require", "--none", "--reason", "docs only");
+  await pr.hedge("review-start", "--scope", "full");
+  writeFileSync(join(pr.pullRequest, "reviews/1/findings.md"), twoFindings);
+
+  const shown = await pr.hedge("show", "--round", "1");
+
+  expect(shown.code).toBe(0);
+  expect(shown.output).toContain("reserved, no findings yet");
+  expect(shown.output).not.toContain("Answer each finding by these numbers");
+});
+
 async function singleFindingRound(review = "FINDINGS:\n- feature.txt:1 | major | Correctness | an empty name -> a blank greeting | anchor: greet the new member\nCOVERED: feature.txt\n") {
   const pr = await checkout();
   await pr.commit("feature.txt", "greet the new member\n");
@@ -179,8 +193,12 @@ test("an answer quoted with > answers nothing and is not counted past the last f
   writeFileSync(join(pr.repository, "responses.md"), "1. fixed: the greeting guards an empty name\n\nAn earlier receipt read:\n\n> 2. rejected: from an earlier round\n> 3. rejected: from an earlier round\n");
 
   await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("Answer findings 2 too");
+});
+
+test("an answer quoted with > shows on the receipt as other text, as written", async () => {
+  const pr = await singleFindingRound(twoFindings);
   writeFileSync(join(pr.repository, "responses.md"), "1. fixed: the greeting guards an empty name\n2. rejected: a returning member is greeted once\n\n> 3. rejected: from an earlier round\n");
-  expect((await pr.hedge("respond", "--round", "1", "responses.md")).code).toBe(0);
+  await pr.hedge("respond", "--round", "1", "responses.md");
 
   expect(await receiptPage(pr)).toContain("Other answers, as written:\n\n```text\n> 3. rejected: from an earlier round\n```");
 });

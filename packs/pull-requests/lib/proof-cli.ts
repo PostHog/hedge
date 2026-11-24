@@ -321,8 +321,9 @@ final read that hedge dropped unanswered, with its cause.`,
     run: async ({ options }, identity, context) => {
       const directory = await reviewDirectory(context.home, identity(), roundOption(options));
       const dropped = (await droppedFinalReads(context.home, identity())).map(({ line, cause }) => cause ? `${line}; cause: ${cause}` : line);
-      for (const line of await roundLines(directory, context)) context.print(line);
-      const findings = await savedFindings(directory).catch((error: unknown) => error instanceof Error ? error : new Error(String(error)));
+      const { lines, finished } = await roundLines(directory, context);
+      for (const line of lines) context.print(line);
+      const findings = finished ? await savedFindings(directory).catch((error: unknown) => error instanceof Error ? error : new Error(String(error))) : undefined;
       if (typeof findings === "string") printAnswerNumbers(findings, context.print);
       for (const line of dropped) context.print(line);
       if (!(findings instanceof Error)) return 0;
@@ -998,7 +999,7 @@ async function waitForReview(options: Map<string, string>, head: ProofIdentity, 
   await startStaged(directory, context);
   const restart = (name: string) => roundStep(directory, context, async () => { if (await lensIdle(directory, name)) await startLens(directory, name, context); }).catch(unless(RoundBusy));
   const code = await waitForPanel(directory, panelIO(context), restart, waitPolls);
-  for (const line of await roundLines(directory, context)) context.print(line);
+  for (const line of (await roundLines(directory, context)).lines) context.print(line);
   if (code === 0) {
     const findings = await readFile(join(directory, "findings.md"), "utf8");
     context.print(findings);
@@ -1082,7 +1083,7 @@ async function roundLines(directory: string, { now }: CommandContext) {
   if (round.decision) standing.push(`decided by ${round.decision.mark} decision ${round.decision.id}`);
   const plan = await readPlan(directory);
   const panel = plan ? [...plan.tier ? [tierLine(plan.tier)] : [], ...await panelLines(directory, now?.() ?? new Date())] : [];
-  return [header, ...(existsSync(anchors) ? [`anchor check by hedge: ${anchors}`] : []), ...standing, ...panel];
+  return { lines: [header, ...(existsSync(anchors) ? [`anchor check by hedge: ${anchors}`] : []), ...standing, ...panel], finished: Boolean(round.reviewer) };
 }
 
 const tierLine = ({ name, why }: ReviewTier) => `review tier: ${name}: ${why}`;
