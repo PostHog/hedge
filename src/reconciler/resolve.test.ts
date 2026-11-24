@@ -109,8 +109,15 @@ describe("resolve", () => {
       expect(await todos(repeats("Tests", "### tests\n"))).toEqual(["Tests"]);
     });
 
-    test("is matched in letters whose lower case depends on their place", async () => {
-      expect(await todos(repeats("My rules", "### ς\n", "# Rules\n\n## Σ\n"))).toEqual(["ς"]);
+    test.each([
+      ["a final sigma", "Σ", "ς"],
+      ["a capital sharp s", "Maße", "MAẞE"],
+    ])("is matched with %s in another case", async (_, ownerHeading, heading) => {
+      expect(await todos(repeats("My rules", `### ${heading}\n`, `# Rules\n\n## ${ownerHeading}\n`))).toEqual([heading]);
+    });
+
+    test("is not matched with a different letter, such as a dotless i", async () => {
+      expect(await todos(repeats("My rules", "### Codıng preferences\n", "# Rules\n\n## Coding preferences\n"))).toEqual([]);
     });
 
     test("is not looked for on a Bun without a Markdown parser, and the section is still written", async () => {

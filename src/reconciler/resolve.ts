@@ -529,15 +529,15 @@ function headings(text: string): string[] {
   return found;
 }
 
-const caseless = (heading: string) => heading.toUpperCase().toLowerCase();
+const sameHeading = (one: string, other: string) => headingCollator.compare(one, other) === 0;
+const headingCollator = new Intl.Collator("und", { sensitivity: "accent" });
 
 function noteRepeatedHeadings(plan: Plan, guide: string, owner: { pack: string; text: string }, section: GuideSection) {
-  const owned = new Set(headings(owner.text).map(caseless));
-  const reported = new Set<string>();
+  const owned = headings(owner.text);
+  const reported: string[] = [];
   for (const heading of [...headings(`## ${section.title}`), ...headings(section.text)]) {
-    const key = caseless(heading);
-    if (!owned.has(key) || reported.has(key)) continue;
-    reported.add(key);
+    if (!owned.some((ownedHeading) => sameHeading(ownedHeading, heading)) || reported.some((done) => sameHeading(done, heading))) continue;
+    reported.push(heading);
     (plan.repeatedHeadings ??= []).push({ pack: section.pack, guide, section: section.title, heading, owner: owner.pack });
   }
 }
