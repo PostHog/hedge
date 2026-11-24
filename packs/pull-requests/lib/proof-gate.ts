@@ -108,7 +108,7 @@ const pushedHeadOf = (head: ProofIdentity, run: Run, seen: (pull: PullRequest) =
   try {
     const read = readPullRequest(head, run);
     seen(read);
-    return { commit: read.head, body: read.body, merged: read.state === "merged" };
+    return { commit: read.head, body: read.body };
   } catch (error) { return { error: (error as Error).message }; }
 };
 

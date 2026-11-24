@@ -79,19 +79,10 @@ test("a gate that cannot read the review threads fails closed and names the caus
   expect(lastLine(gate.output)).toBe("gate: fail (exit 1): bot threads: cannot read the PR's review threads on GitHub (gh api failed: gh: API rate limit already exceeded); run the gate again");
 });
 
-test("--landed on a PR GitHub reports open still holds on an open bot finding", async () => {
+test("--landed does not skip an open bot finding, so it cannot pass an open PR past one", async () => {
   const pr = await reviewed();
   pr.reviewThreads([finding("posthog", "https://github.com/example/product/pull/42#discussion_r1")]);
   const gate = await pr.hedge("gate", "--landed");
   expect(gate.code).toBe(1);
   expect(lastLine(gate.output)).toStartWith("gate: fail (exit 1): bot threads: 1 bot finding waits for an answer: https://github.com/example/product/pull/42#discussion_r1 (feature.txt:1). ");
-});
-
-test("--landed on a PR GitHub reports merged records the merge without reading the bot threads", async () => {
-  const pr = await reviewed();
-  pr.pullRequestState({ merged: true });
-  pr.reviewThreads({ error: "gh: API rate limit already exceeded" });
-  const gate = await pr.hedge("gate", "--landed");
-  expect(gate.code).toBe(0);
-  expect(gate.output).not.toContain("bot threads:");
 });
