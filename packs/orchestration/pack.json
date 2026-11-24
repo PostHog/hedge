@@ -9,6 +9,12 @@
     "pull-requests"
   ],
   "instructions": "AGENTS.md",
+  "guides": [
+    {
+      "guide": "waits",
+      "path": "waits.md"
+    }
+  ],
   "skills": [
     "agent-skills:orchestration/architecture",
     "agent-skills:orchestration/build",

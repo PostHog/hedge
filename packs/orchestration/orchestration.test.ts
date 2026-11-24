@@ -22,6 +22,10 @@ describe("the Orchestration pack", () => {
     expect(agents.slice(agents.indexOf("# Orchestration"))).toMatchSnapshot();
   });
 
+  test("writes the Waits guide", () => {
+    expect(fileContent(withPack(), ".agents/guides/waits.md")).toContain("## Owning thread");
+  });
+
   test("needs the Pull requests pack", () => {
     const result = resolveEngine([engine, ...skillSources(temp.make("skills-"), engine)], { packs: ["orchestration"] });
     expect(result.packs.find((pack) => pack.name === "orchestration")).toMatchObject({ available: false, reason: "requires pull-requests" });
