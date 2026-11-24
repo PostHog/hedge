@@ -101,12 +101,13 @@ test("a gate pass with a gap the agent accepted holds the merge, own tooling inc
   } finally { rmSync(other, { recursive: true, force: true }); }
 });
 
-test("a gate pass without a gap the agent accepted merges without the user's word", async () => {
+test("a gate pass that read a gap the agent accepted, and did not rely on it, merges without the user's word", async () => {
   const pr: Checkout = await checkout();
   pr.pullRequestState({ body: graded("non-critical", "medium") });
   await pr.commit("feature.txt", "new\n");
   await reviewHead(pr);
   await pr.hedge("require", "--none", "--reason", "docs only");
+  await pr.decide("record", "--mark", "🤖", "--class", "proof-gap", "--kind", "live-run", "--pr", "example/product#42", "--question", "Accept the live-run gap? example/product#42: no sandbox", "--answer", "Accept the gap", "--rejected", "Keep the gap open", "--reason", "Nothing runs");
   const head = await pr.git("rev-parse", "HEAD");
   expect((await pr.hedge("gate")).code).toBe(0);
   const github = { pull: async () => ({ head, base: "main", defaultBranch: "main", open: true }), pullFor: async () => undefined };

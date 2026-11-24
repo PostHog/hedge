@@ -21,7 +21,7 @@
   `hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full head sha>: merge card'`.
   The recorder refuses any other choice, and a question without that head.
   The answer lifts only the gaps its question named, and a push leaves it
-  behind.
+  behind. A gate override for the head lifts the hold too.
 - The hold covers repositories in `guards.merge-gate-exempt` too, which still
   need no gate pass. There, the hook reads the decision ledger on every merge,
   and refuses it when the ledger cannot be read. A 🤖 gap decision of the PR

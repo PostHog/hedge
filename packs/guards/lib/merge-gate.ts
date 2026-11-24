@@ -371,6 +371,7 @@ function agentGapsAt(results: GateResult[], decisions: DecisionState[], layer: L
 }
 
 const heldLayer = (results: GateResult[], decisions: DecisionState[], layer: Layer) => {
+  if (decisions.some((decision) => overrideAt(decision, layer))) return [];
   const gaps = agentGapsAt(results, decisions, layer).filter((id) => !decisions.some((decision) => mergeWordAt(decision, layer) && decision.question.includes(id)));
   return gaps.length ? [`${layer.repository}#${layer.pr} at ${layer.head.slice(0, 12)} (🤖 ${gaps.join(", ")})`] : [];
 };
