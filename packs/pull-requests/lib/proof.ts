@@ -161,7 +161,7 @@ function finalReadPhase(value: string): FinalReadPhase {
 
 type Spending = "unfinished spends" | "finished only";
 type Spent = { spent: number; pastBudget: number; names: string[]; reservations: string[]; finished: string[]; round?: number; counted?: string[] };
-type ReservedAs = { reservationId?: string; startedAt?: string; commit?: string; scope?: string; phase?: FinalReadPhase; pastBudget?: true };
+type ReservedAs = { reservationId?: string; startedAt?: string; commit?: string; scope?: string; phase?: FinalReadPhase; pastBudget?: true; decision?: DecisionMark };
 const reservationOf = ({ reservationId, startedAt, commit, scope, phase }: ReservedAs) => JSON.stringify([reservationId, startedAt, commit, scope, phase]);
 
 async function savedFindings(directory: string) {
@@ -175,7 +175,8 @@ async function reviewsSpent(reviews: string, phase: FinalReadPhase, spending: Sp
     if (!round) return undefined;
     const findings = await savedFindings(join(reviews, name));
     const leadsToFixes = findings === undefined ? spending === "unfinished spends" : unanswered(findings, "").length > 0;
-    return { name, reservation: reservationOf(round), finished: findings !== undefined, spends: (round.phase ?? "review") === phase && leadsToFixes, pastBudget: round.pastBudget === true };
+    const inPhase = (round.phase ?? "review") === phase;
+    return { name, reservation: reservationOf(round), finished: findings !== undefined, spends: inPhase && leadsToFixes, pastBudget: inPhase && round.pastBudget === true && round.decision?.mark === "🤖" };
   }));
   const present = rounds.filter((round) => round !== undefined).sort((a, b) => a.name.localeCompare(b.name));
   return { spent: present.filter(({ spends }) => spends).length, pastBudget: present.filter(({ pastBudget }) => pastBudget).length, names: present.map(({ name }) => name), reservations: present.map(({ reservation }) => reservation), finished: present.filter(({ finished }) => finished).map(({ name }) => name) };
@@ -246,7 +247,7 @@ type Stop = { lead: string; text: string; agentNext: string };
 const stopWith = (lead: string, rest: string, agentNext: string): Stop => ({ lead, text: `${lead} ${rest}`, agentNext });
 const budgetSpent = ({ ceiling }: ReviewLimits) => stopWith(`The review budget of ${ceiling} reviews is spent.`, atCeiling, knownIssuesStep);
 const revertSince = (latest: string) => `Revert each commit of the PR since ${short(latest)} that changes production code, never a merge of the base: the gate carries a revert of a PR commit.`;
-const fixesUnread = ({ ceiling }: ReviewLimits, latest: string) => stopWith(`The review budget of ${ceiling} reviews is spent, and no read checks the production changes since ${short(latest)}.`, `${revertSince(latest)} When a merge of the base holds them, such as a conflict resolution, only the user's --override reads them. ${atCeiling}`, `${revertSince(latest)} ${knownIssuesStep}`);
+const fixesUnread = ({ ceiling }: ReviewLimits, latest: string) => stopWith(`The review budget of ${ceiling} reviews is spent, and no read checks the production changes since ${short(latest)}.`, `${revertSince(latest)} When a merge of the base holds them, such as a conflict resolution, only the user's --override reads them. ${atCeiling}`, `${revertSince(latest)} When a merge of the base holds them, such as a conflict resolution, a revert cannot reach them, and the PR stays held until a read checks them. ${knownIssuesStep}`);
 
 export const agentExtraReads = 3;
 
