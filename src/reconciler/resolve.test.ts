@@ -72,6 +72,20 @@ describe("resolve", () => {
     expect(file(plan(), ".agents/guides/coding-standards.md")).toBe("# Coding standards\n\nKeep it simple.\n\n## Pull requests\n\nKeep each pull request under 400 lines.\n");
   });
 
+  test("throws when a section repeats a heading of the guide it adds to", () => {
+    const owner = "# Coding standards\n\n## Tests\n\nWrite the test first.\n";
+    const base = withPack({ schema: 1, name: "standards", summary: "Standards.", guides: [{ guide: "rules", path: "rules.md" }] }, { "rules.md": owner });
+    const copy = withPack({ schema: 1, name: "mine", summary: "Mine.", guides: [{ guide: "rules", section: "My rules", path: "mine.md" }] }, { "mine.md": "### Tests\n\nWrite the test first, always.\n" });
+    expect(() => plan({ packs: ["standards", "mine"] }, mac, [engine, base, copy])).toThrow('mine: section "My rules" of guide rules repeats the heading "Tests" of standards');
+  });
+
+  test("allows a section heading that the guide only shows inside a code block", () => {
+    const owner = "# Coding standards\n\n```md\n## Tests\n```\n";
+    const base = withPack({ schema: 1, name: "standards", summary: "Standards.", guides: [{ guide: "rules", path: "rules.md" }] }, { "rules.md": owner });
+    const extra = withPack({ schema: 1, name: "mine", summary: "Mine.", guides: [{ guide: "rules", section: "My rules", path: "mine.md" }] }, { "mine.md": "### Tests\n\nName each test after its behaviour.\n" });
+    expect(file(plan({ packs: ["standards", "mine"] }, mac, [engine, base, extra]), ".agents/guides/rules.md")).toContain("### Tests\n\nName each test after its behaviour.");
+  });
+
   test("throws when two packs own the same guide", () => {
     const rival = withPack({ schema: 1, name: "rival", summary: "Rival.", guides: [{ guide: "coding-standards", path: "g.md" }] }, { "g.md": "x" });
     expect(() => plan({ packs: ["rival"] }, mac, [engine, rival])).toThrow("guide coding-standards is owned by both base and rival");

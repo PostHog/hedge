@@ -492,13 +492,13 @@ function instructionFiles(order: Candidate[], profile: Profile, models: ModelRow
 
 function guideFiles(order: Candidate[], settings: Array<PackSetting & { pack: string }>, values: Record<string, SettingValue>): DesiredFile[] {
   const owners = new Map<string, { pack: string; text: string }>();
-  const sections = new Map<string, string[]>();
+  const sections = new Map<string, GuideSection[]>();
   for (const { manifest, dir } of order) {
     for (const guide of manifest.guides ?? []) {
       if (engineGuides.includes(guide.guide)) throw new ResolveError(`${manifest.name}: guide ${guide.guide} is written by the engine`);
       const text = read(dir, guide.path, manifest.name).trim();
       if (guide.section) {
-        sections.set(guide.guide, [...(sections.get(guide.guide) ?? []), `## ${guide.section}\n\n${text}`]);
+        sections.set(guide.guide, [...(sections.get(guide.guide) ?? []), { pack: manifest.name, title: guide.section, text }]);
         continue;
       }
       const owner = owners.get(guide.guide);
@@ -506,13 +506,35 @@ function guideFiles(order: Candidate[], settings: Array<PackSetting & { pack: st
       owners.set(guide.guide, { pack: manifest.name, text });
     }
   }
-  for (const guide of sections.keys()) if (!owners.has(guide)) throw new ResolveError(`guide ${guide} has sections but no owning pack`);
+  for (const [guide, added] of sections) {
+    const owner = owners.get(guide);
+    if (!owner) throw new ResolveError(`guide ${guide} has sections but no owning pack`);
+    for (const section of added) refuseRepeatedHeading(guide, owner, section);
+  }
   const files: DesiredFile[] = [...owners].map(([guide, owner]) => ({
     target: `.agents/guides/${guide}.md`,
-    content: [owner.text, ...(sections.get(guide) ?? [])].join("\n\n") + "\n",
+    content: [owner.text, ...(sections.get(guide) ?? []).map((section) => `## ${section.title}\n\n${section.text}`)].join("\n\n") + "\n",
   }));
   files.push({ target: ".agents/guides/skill-settings.md", content: skillSettings(settings, values) });
   return files;
+}
+
+type GuideSection = { pack: string; title: string; text: string };
+
+function headings(text: string): string[] {
+  let fenced = false;
+  return text.split("\n").flatMap((line) => {
+    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    const heading = fenced ? undefined : line.match(/^#{1,6}\s+(.+?)\s*#*\s*$/)?.[1];
+    return heading ? [heading] : [];
+  });
+}
+
+function refuseRepeatedHeading(guide: string, owner: { pack: string; text: string }, section: GuideSection) {
+  const owned = new Set(headings(owner.text).map((heading) => heading.toLowerCase()));
+  const repeated = headings(section.text).find((heading) => owned.has(heading.toLowerCase()));
+  if (repeated === undefined) return;
+  throw new ResolveError(`${section.pack}: section "${section.title}" of guide ${guide} repeats the heading "${repeated}" of ${owner.pack}. Add only what the guide does not say, under a heading of its own, or change the rule with a setting.`);
 }
 
 function skillSettings(settings: Array<PackSetting & { pack: string }>, values: Record<string, SettingValue>) {

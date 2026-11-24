@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### A Waits guide, and no repeated guide headings
+
+- The Orchestration pack writes a new guide, `~/.agents/guides/waits.md`. It
+  says how a T3 thread waits on a pull request, a child task, another thread,
+  a command, or its own schedule; who owns each open pull request; and what
+  Hedge's hooks check before a turn ends. Before, only a private profile
+  explained these hooks.
+- `hedge apply` now refuses a pack section that repeats a heading of the
+  guide it adds to, such as a second `Tests` in `coding-standards.md`. A
+  section adds what the guide does not say, under a heading of its own, and a
+  setting changes a rule. Headings inside a code block do not count. Before
+  you update, rename or remove each repeated heading in your profile's guides.
+- The Pull requests pack's rules no longer contradict **Ready on green**: when
+  your agent instructions turn it on, the agent marks a pull request ready
+  once it passes your gate.
+
 ### A message steers a thread that waits on a question card
 
 - `hedge thread send` no longer turns `auto` into `queue` when the target
