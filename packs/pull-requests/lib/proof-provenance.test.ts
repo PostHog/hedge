@@ -151,7 +151,7 @@ test("a dev merge time the gate cannot read leaves dev-observed waiting with its
 
   expect(gate.code).toBe(1);
   expect(gate.output).not.toContain("RangeError");
-  expect(gate.output).toContain("dev-observed: waiting on the dev result of example/product#11");
+  expect(gate.output).toContain("dev-observed: waiting on the dev result of example/product#11: cannot read the dev PR's merge time (not a time)\n");
 });
 
 test("dev-observed at HEAD saved before the dev merge names its time, though another commit holds an observation saved after it", async () => {

@@ -1234,7 +1234,7 @@ async function devObservedStatus(weigh: Weigh, cleanBaseMerge: CleanBaseMerge, q
     const carried = reviewedThrough(identity.commit, commits, cleanBaseMerge, quietCommit);
     return carried && { from: carried.from, carried };
   };
-  const located = locate(afterMerge) ?? locate(new Set(proved.keys()));
+  const located = (afterMerge.size ? locate(afterMerge) : undefined) ?? locate(new Set(proved.keys()));
   const found = located && proved.get(located.from);
   const directory = found && evidenceDirectory(home, identity, kind, found);
   const saved = located && savedAt.get(located.from);
@@ -1250,6 +1250,7 @@ async function devObservedStatus(weigh: Weigh, cleanBaseMerge: CleanBaseMerge, q
   const merged = dev?.mergedAt && `the dev PR merged at ${dev.mergedAt}${dev.mergeCommit ? ` as ${short(dev.mergeCommit)}` : ""}`;
   const reason = !dev ? "no dev PR is recorded; run hedge proof require --after-dev <owner/name>#<number>"
     : dev.error ? `cannot read the dev PR (${dev.error})`
+    : dev.mergedAt !== undefined && mergedAt === undefined ? `cannot read the dev PR's merge time (${dev.mergedAt})`
     : !merged ? "the dev PR is not merged yet"
     : saved !== undefined ? `${merged}, after the newest dev-observed evidence, saved at ${isoOf(saved)}. Observe dev again and save the result with hedge proof run --kind dev-observed -- <command>`
     : `${merged}. Observe dev and save the result with hedge proof run --kind dev-observed -- <command>`;
