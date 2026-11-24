@@ -1,7 +1,7 @@
 import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { fold, gateOverride, live, mergeCardChoice, mergeCardCondition, namesHead, overrideChoice, hubLedger, prRef, type DecisionState, type Env, type LedgerEvent } from "../../pull-requests/lib/decision-ledger.ts";
+import { fold, gateOverride, live, mergeCardChoice, mergeCardCondition, namesHead, namesId, overrideChoice, hubLedger, prRef, type DecisionState, type Env, type LedgerEvent } from "../../pull-requests/lib/decision-ledger.ts";
 import { isTextList, lastGateResult, latestGateResult, type GateResult } from "../../pull-requests/lib/proof.ts";
 import { decidesAll } from "../../pull-requests/lib/proof-autonomy.ts";
 import { normalized } from "../../pull-requests/lib/proof-answers.ts";
@@ -372,7 +372,7 @@ function agentGapsAt(results: GateResult[], decisions: DecisionState[], layer: L
 
 const heldLayer = (results: GateResult[], decisions: DecisionState[], layer: Layer) => {
   if (decisions.some((decision) => overrideAt(decision, layer))) return [];
-  const gaps = agentGapsAt(results, decisions, layer).filter((id) => !decisions.some((decision) => mergeWordAt(decision, layer) && decision.question.includes(id)));
+  const gaps = agentGapsAt(results, decisions, layer).filter((id) => !decisions.some((decision) => mergeWordAt(decision, layer) && namesId(decision.question, id)));
   return gaps.length ? [`${layer.repository}#${layer.pr} at ${layer.head.slice(0, 12)} (🤖 ${gaps.join(", ")})`] : [];
 };
 
@@ -383,7 +383,7 @@ const overrideHint = (person: string) => `For an incident fix that cannot wait f
 const heldReason = (held: string[], person: string) => `Hedge blocked this merge: an agent accepted proof gaps of ${held.join("; ")} itself, so it merges only on ${person}'s word for that head, whatever else lets it merge: own tooling, a standing merge grant, or full send. `
   + `Show it on a merge card: ask ${person} with the question tool, naming the PR, its full head sha and each held decision id, with the options "${mergeCardChoice}" and "Keep it open". When they choose "${mergeCardChoice}", record the answer with \`hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full 40-character head sha>: merge card'\`, then merge again. The answer lifts only the gaps its question named, and a push leaves it behind; a gate pass at the new head that saw no such gap lifts the hold.`;
 
-const unreadReason = (repositories: string[], error: string) => `Hedge blocked this merge: the decision ledger could not be read (${error}), so the merge gate cannot tell whether an agent accepted a proof gap in ${repositories.join(", ")} itself. Those repositories skip the gate, but such a gap holds a merge until the person's word. Try again when the hub answers.`;
+const unreadReason = (repositories: string[]) => `Hedge blocked this merge: the decision ledger could not be read, so the merge gate cannot tell whether an agent accepted a proof gap in ${repositories.join(", ")} itself. Those repositories skip the gate, but such a gap holds a merge until the person's word. Try again when the hub answers.`;
 
 /** Why the call may not go out, or undefined when every open layer of every target passed the gate at its head and none holds a gap an agent accepted without the person's merge word. */
 export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: string): Promise<string | undefined> {
@@ -413,7 +413,7 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
     }
     for (const target of intent.exempt ?? []) {
       await readLedger();
-      if (hubError !== undefined) return unreadReason([...new Set((intent.exempt ?? []).map((one) => one.repository))], hubError);
+      if (hubError !== undefined) return unreadReason([...new Set((intent.exempt ?? []).map((one) => one.repository))]);
       if (!decisions.some((decision) => agentGap(decision) && inRepository(decision, target.repository))) continue;
       for (const layer of await layersOf(target, io)) held.push(...heldLayer(await resultsAt(layer), decisions, layer));
     }

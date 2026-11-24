@@ -89,6 +89,7 @@ test("a gate pass with a gap the agent accepted holds the merge, own tooling inc
     }
     await expect(mergeWord(head, "Keep it open")).rejects.toThrow('The user chose "Keep it open", not "Merge"');
     await expect(mergeWord(head, "Merge", "Merge example/product#42?")).rejects.toThrow(`does not name the head ${head}`);
+    await expect(mergeWord(head.toUpperCase(), "Keep it open")).rejects.toThrow("A merge card answer needs --condition '<full 40-character lowercase head sha>: merge card'");
     expect((await mergeWord("c".repeat(40))).code).toBe(0);
     expect(await mergeOn("example/*")).toBeDefined();
     expect((await mergeWord(head)).code).toBe(0);

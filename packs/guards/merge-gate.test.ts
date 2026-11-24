@@ -389,13 +389,20 @@ describe("the PreToolUse hook", () => {
     const mistyped = word("Merge");
     if (mistyped.type === "decide") mistyped.decision.question = `Merge own/tooling#9 at ${head}0? An agent accepted d-agent.`;
     expect(await merge([agentGap("own/tooling"), mistyped])).toBeDefined();
+    expect(await merge([agentGap("own/tooling"), word("Merge", "d-agent2")])).toBeDefined();
+  });
+
+  test("the person's gate override for the head lifts the hold on a gap an agent accepted, though its card names no gap", async () => {
+    const gap: LedgerEvent = { type: "decide", decision: { id: "d-agent", at: "2026-11-16T08:00:00Z", class: "proof-gap", mark: "🤖", question: "Accept the live-run gap? own/tooling#9: no sandbox", answer: "Accept the gap", rejected: "Keep the gap open", reason: "x", scope: { prs: ["own/tooling#9"], kinds: ["live-run"] }, effect: "accept", where: { thread: "t", machine: "hub" } } };
     const incident: LedgerEvent = { type: "decide", decision: { id: "o-incident", at: "2026-11-16T09:00:00Z", class: "merge", mark: "👤", question: `Override the gate for own/tooling#9 at ${head}?`, answer: '2026-11-16 "Override the gate"', scope: { prs: ["own/tooling#9"], kinds: ["gate-override"], condition: `${head}: incident fix, the judge is down` }, where: { thread: "t", message: "m-o", machine: "hub" } } };
-    expect(await merge([agentGap("own/tooling"), incident])).toBeUndefined();
+    const merge = (ledger: LedgerEvent[]) => mergeGate(call("gh pr merge 9 --repo own/tooling"), { home: homeWith({ "guards.merge-gate-exempt": "own/*" }), env: {}, gate: gate({ ledger }), intent: io });
+    expect(await merge([gap])).toBeDefined();
+    expect(await merge([gap, incident])).toBeUndefined();
   });
 
   test("in an exempt repository, a ledger the hook cannot read refuses the merge, since a gap an agent accepted may hold it", async () => {
     const where = { home: homeWith({ "guards.merge-gate-exempt": "own/*" }), env: {}, gate: gate({ hubDown: true }), intent: io };
-    expect((await mergeGate(call("gh pr merge 9 --repo own/tooling"), where))?.hookSpecificOutput.permissionDecisionReason).toContain("the decision ledger could not be read (hub unreachable over SSH)");
+    expect((await mergeGate(call("gh pr merge 9 --repo own/tooling"), where))?.hookSpecificOutput.permissionDecisionReason).toContain("the decision ledger could not be read, so the merge gate cannot tell");
   });
 
   test("settings it cannot read refuse a merge rather than skip the gate, and leave other calls alone", async () => {

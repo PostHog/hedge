@@ -171,7 +171,10 @@ function fitsMergeCard(scope: Scope): ((heard: HeardAnswer) => void) | undefined
 }
 
 function checkMergeCard(scope: Scope, mark: string) {
-  if (!mergeCardHead(scope)) return;
+  if (!mergeCardHead(scope)) {
+    if (scope.class === "merge" && /:\s*merge card\s*$/i.test(scope.condition ?? "")) throw new Error("A merge card answer needs --condition '<full 40-character lowercase head sha>: merge card' and no --kind");
+    return;
+  }
   if (mark !== "👤") throw new Error("A merge card answer is the user's own choice on a question card: record it with --mark 👤");
   if (scope.prs.length !== 1) throw new Error("A merge card covers one PR at one head: pass one --pr");
 }
