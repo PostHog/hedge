@@ -34,7 +34,7 @@ function ledgerDir(args: string[], io: LoopIo, known: string[]): string {
 }
 
 const pauseLine = /^[ \t>*_-]*Paused[*_]*:[*_]*[ \t]*(.*)$/gim;
-const pauseValue = /^[*_`]*(yes|no)[*_`]*\.?(?:\s+[(\u2013\u2014-].*)?$/i;
+const pauseValue = /^[*_`]*(yes|no)[*_`]*(?:\.|[,;]\s.*|\s*\(.*|\s+[\u2013\u2014-]\s.*)?$/i;
 
 export function pauseState(ledger: string): PauseState {
   const file = join(ledger, "limits.md");
@@ -87,9 +87,9 @@ function repositoryOf(remote: string): string {
   let path = scp?.[2] ?? remote;
   if (!scp && URL.canParse(remote)) {
     const url = new URL(remote);
-    [host, path] = [url.hostname, url.pathname];
+    [host, path] = [url.host, url.pathname];
   }
-  return `${host}/${path.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "")}`.toLowerCase();
+  return `${host.toLowerCase()}/${path.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "")}`;
 }
 
 function ledgerIdentity(ledger: string): string {

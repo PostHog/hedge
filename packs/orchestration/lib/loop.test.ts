@@ -36,8 +36,8 @@ describe("hedge loop check-pause", () => {
     expect(await loop(["check-pause", "--ledger", dir])).toMatchObject({ code: 0, out: expect.stringContaining("start lanes up to the WIP limits") });
   });
 
-  test("exits 0 for a bold no with a note after it", async () => {
-    expect((await loop(["check-pause", "--ledger", ledger({ "limits.md": "- **Paused:** no (since the planning)\n" })])).code).toBe(0);
+  test.each(["- **Paused:** no (since the planning)\n", "Paused: no, resumed after review\n", "Paused: no - resumed\n", "Paused: no.\n"])("exits 0 for a no with a note after it: %p", async (limits) => {
+    expect((await loop(["check-pause", "--ledger", ledger({ "limits.md": limits })])).code).toBe(0);
   });
 
   test.each([
@@ -127,6 +127,22 @@ describe("hedge loop next-id", () => {
     const one = await loop(["next-id", "--kind", "lane", "--ledger", join(first, "quality-loop")], undefined, home);
     const two = await loop(["next-id", "--kind", "lane", "--ledger", join(second, "quality-loop")], undefined, home);
     expect([one.out, two.out]).toEqual(["L065", "L066"]);
+  });
+
+  test.each([
+    ["paths that differ only in case", "/srv/git/Origin.git", "/srv/git/origin.git"],
+    ["SSH hosts on different ports", "ssh://git@example.com:2222/acme/ledger.git", "ssh://git@example.com:2200/acme/ledger.git"],
+  ])("keeps the ids of two different ledger repositories apart: %s", async (_, firstOrigin, secondOrigin) => {
+    const home = temp.make("home-");
+    const checkouts = [firstOrigin, secondOrigin].map((origin) => {
+      const checkout = temp.make("checkout-");
+      writeFileSync(join(checkout, "lanes.md"), lanes("L064"));
+      for (const args of [["init", "-q"], ["remote", "add", "origin", origin]]) spawnSync("git", ["-C", checkout, ...args]);
+      return checkout;
+    });
+    const ids = [];
+    for (const checkout of checkouts) ids.push((await loop(["next-id", "--kind", "lane", "--ledger", checkout], undefined, home)).out);
+    expect(ids).toEqual(["L065", "L065"]);
   });
 
   test("starts at 001 in an empty ledger", async () => {

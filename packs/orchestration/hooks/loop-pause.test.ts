@@ -50,6 +50,8 @@ describe("the loop pause guard", () => {
     ["a coordinator started with the skill's slash command", [claudePrompt("<command-name>/quality-loop</command-name>")], "claude"],
     ["a coordinator started with the slash command as Claude logs it", [claudePrompt("<command-message>quality-loop is running…</command-message>\n<command-name>/quality-loop</command-name>\n<command-args></command-args>")], "claude"],
     ["a coordinator asked with the loop named first", [claudePrompt("Run a quality-loop coordinator round for Payments.")], "claude"],
+    ["a coordinator asked for a fresh round", [claudePrompt("Start a fresh signal-loop coordinator round.")], "claude"],
+    ["a coordinator asked to run the skill as coordinator", [claudePrompt("Run the quality-loop skill as coordinator.")], "claude"],
     ["a coordinator woken later by a lane's end", [claudePrompt(qualityRun), claudeSays("Lanes started."), claudePrompt("Lane L064 ended.")], "claude"],
   ])("refuses a new lane from %s while the ledger pauses the loops", (_, lines, provider) => {
     expect(answer(machine(paused), delegate, lines, provider)).toEqual({
@@ -81,6 +83,7 @@ describe("the loop pause guard", () => {
     ["a Codex lane whose project instructions mention a coordinator run", [codexInstructions, codexMessage("You are signal-loop lane L070. Ship one fix PR.")]],
     ["a thread that asks about a coordinator run instead of for one", [claudePrompt("Audit last night's quality-loop coordinator run and list its lanes.")]],
     ["a thread that runs an audit of a coordinator round", [claudePrompt("Run an audit of last night's quality-loop coordinator round.")]],
+    ["a thread whose audit request wraps after its verb", [claudePrompt("Run the\nquality-loop coordinator audit for last night.")]],
     ["a thread that pastes a slash command below its own task", [claudePrompt("Explain why this stalled:\n<command-name>/quality-loop</command-name>")]],
     ["a thread that quotes a coordinator prompt below its own task", [claudePrompt(`Create the nightly schedules on this machine.\n\n1. Title \`Quality loop\`. Prompt:\n\n${qualityRun}`)]],
     ["a thread that mentions a coordinator only after its first prompt", [claudePrompt("Summarize last night's PRs."), claudePrompt(qualityRun)]],
@@ -92,7 +95,7 @@ describe("the loop pause guard", () => {
     expect(answer(machine(paused, { "orchestration.loopLedger": "~/no-such-ledger" }), delegate, [claudePrompt(qualityRun)])).toBeUndefined();
   });
 
-  test("fails closed when a parent of the ledger directory denies access", () => {
+  test.skipIf(process.getuid?.() === 0)("fails closed when a parent of the ledger directory denies access", () => {
     const home = machine(undefined, { "orchestration.loopLedger": "~/locked/ledger" });
     mkdirSync(join(home, "locked/ledger"), { recursive: true });
     writeFileSync(join(home, "locked/ledger/limits.md"), paused);
