@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { backendArguments, describe, parseUpstream, slack, toolAllowed, type CodexApp } from "./apps.ts";
+import { lostCode, reAuthLine, signInLost } from "./sign-in-lost.ts";
 import { withUnicodeSkinTones } from "./skin-tones.ts";
 
 type Id = number | string;
@@ -29,6 +30,14 @@ let queue: Promise<unknown> = Promise.resolve();
 let catalog = new Map<string, Tool>();
 let thread: Promise<string> | undefined;
 
+const reAuth = reAuthLine(app);
+type Failure = Error & { code?: number; data?: unknown };
+const detail = (error: Failure) => [error.message, error.data];
+const explained = (error: Failure) => {
+  const code = lostCode(detail(error))!;
+  return Object.assign(new Error(`${reAuth} Cause: ${error.message}${error.message.includes(code) ? "" : ` (${code})`}`), { code: error.code });
+};
+const flagged = (error: Failure) => (signInLost(detail(error)) ? explained(error) : error);
 const reply = (message: Record<string, unknown>) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 const tell = (message: Record<string, unknown>) => backend.stdin.write(`${JSON.stringify(message)}\n`);
 const stop = (error: Error, code = 1) => {
@@ -70,7 +79,7 @@ createInterface({ input: backend.stdout }).on("line", (line) => {
   const waiter = message.id === undefined ? undefined : toBackend.get(message.id);
   if (!waiter) return;
   toBackend.delete(message.id!), clearTimeout(waiter.timer);
-  if (message.error) waiter.reject(Object.assign(new Error(message.error.message), { code: message.error.code }));
+  if (message.error) waiter.reject(Object.assign(new Error(message.error.message), { code: message.error.code, data: message.error.data }));
   else waiter.resolve(message.result);
 });
 backend.on("error", stop);
@@ -79,7 +88,7 @@ backend.on("exit", () => stop(new Error("The Codex app backend exited.")));
 async function discover() {
   const found = new Map<string, Tool>();
   for (const server of (await call("mcpServerStatus/list", { serverName: "codex_apps", limit: 100 })).data as Array<{ tools: Record<string, Tool>; toolsError?: unknown }>) {
-    if (server.toolsError) throw new Error(`The Codex app backend could not list the ${app.title} tools.`);
+    if (server.toolsError) throw Object.assign(new Error(`The Codex app backend could not list the ${app.title} tools.`), { data: server.toolsError });
     for (const tool of Object.values(server.tools)) {
       const name = tool.name.slice(app.prefix.length);
       if (!tool.name.startsWith(app.prefix) || !toolAllowed(app, name)) continue;
@@ -98,7 +107,8 @@ async function invoke(id: Id, params: { name: string; arguments?: Record<string,
   try {
     thread ??= call("thread/start", { cwd: "/app/data", ephemeral: true }).then((started) => started.thread.id as string, (error) => { thread = undefined; throw error; });
     const args = params.arguments ?? {};
-    const { structuredContent, ...result } = await call("mcpServer/tool/call", { threadId: await thread, server: "codex_apps", tool: `${app.prefix}${params.name}`, arguments: app.skinTones ? withUnicodeSkinTones(args) : args });
+    const { structuredContent, ...answered } = await call("mcpServer/tool/call", { threadId: await thread, server: "codex_apps", tool: `${app.prefix}${params.name}`, arguments: app.skinTones ? withUnicodeSkinTones(args) : args });
+    const result = answered.isError && signInLost([answered.content, structuredContent]) ? { ...answered, content: [...(answered.content ?? []), { type: "text", text: reAuth }] } : answered;
     return structuredContent == null ? result : { ...result, structuredContent };
   } finally { active = undefined; }
 }
@@ -108,9 +118,9 @@ async function handle(message: Message) {
   const params = message.params ?? {};
   if (message.method === "initialize") return { protocolVersion: versions.includes(params.protocolVersion) ? params.protocolVersion : versions[0], capabilities: { tools: {} }, serverInfo: { name: `hedge-${app.name}`, version: "1" } };
   if (message.method === "ping") return {};
-  if (message.method === "tools/list") return { tools: [...(await discover()).values()] };
+  if (message.method === "tools/list") return { tools: [...(await discover().catch((error: Failure) => { throw flagged(error); })).values()] };
   if (message.method === "tools/call") {
-    const turn = queue.then(() => invoke(message.id!, params as { name: string }));
+    const turn = queue.then(() => invoke(message.id!, params as { name: string })).catch((error: Failure) => { throw flagged(error); });
     queue = turn.catch(() => {});
     return turn;
   }

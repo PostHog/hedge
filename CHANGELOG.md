@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### A revoked app sign-in on the MCP gateway asks for a re-auth
+
+- When ChatGPT revokes the sign-in of a Codex app on the MCP gateway, such as
+  the Slack bridge, a call that fails with `token_revoked`, `invalid_auth` or a
+  like auth error now answers the agent with one line, such as `Slack needs
+  re-auth: on the hub, run: hedge mcp-gateway sign-in slack`, in place of a
+  bare 401. A tool list that fails this way gets the same line. MCPHub can
+  still answer with its own error instead: when a JSON 401 stays after its
+  retry, or when no tools were ever listed.
+
 ### A message steers a thread that waits on a question card
 
 - `hedge thread send` no longer turns `auto` into `queue` when the target
