@@ -404,7 +404,7 @@ function packFindings(plan: Plan): Finding[] {
 
 function repeatFindings(plan: Plan): Finding[] {
   return (plan.repeatedHeadings ?? []).map((entry) => ({
-    id: `repeats:${entry.guide}:${entry.section}`,
+    id: `repeats:${entry.guide}:${entry.section}:${entry.heading}`,
     pack: entry.pack,
     say: `Section "${entry.section}" of the ${entry.pack} pack repeats the heading "${entry.heading}" of ${entry.owner} in ~/.agents/guides/${entry.guide}.md. Agents then read two versions of one rule. Keep only what the guide does not say, under a heading of its own, or change the rule with a setting.`,
     todo: true as const,

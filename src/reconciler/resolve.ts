@@ -509,7 +509,7 @@ function guideFiles(order: Candidate[], settings: Array<PackSetting & { pack: st
   for (const [guide, added] of sections) {
     const owner = owners.get(guide);
     if (!owner) throw new ResolveError(`guide ${guide} has sections but no owning pack`);
-    for (const section of added) noteRepeatedHeading(plan, guide, owner, section);
+    for (const section of added) noteRepeatedHeadings(plan, guide, owner, section);
   }
   const files: DesiredFile[] = [...owners].map(([guide, owner]) => ({
     target: `.agents/guides/${guide}.md`,
@@ -523,16 +523,20 @@ type GuideSection = { pack: string; title: string; text: string };
 
 const rendered = (section: GuideSection) => `## ${section.title}\n\n${section.text}`;
 
+const frontMatter = /^---\n(?:(?:[\w-]+:|[ \t#]|- ).*\n)*---\n/;
+
 function headings(text: string): string[] {
   const found: string[] = [];
-  Bun.markdown.render(text.replace(/^---\n[\s\S]*?\n---\n/, ""), { heading: (children: string) => (found.push(children.trim()), "") });
+  const markdown = text.replace(/\r\n?/g, "\n").replace(frontMatter, "");
+  if (typeof Bun.markdown?.render === "function") Bun.markdown.render(markdown, { heading: (children: string) => (found.push(children.trim()), "") });
   return found;
 }
 
-function noteRepeatedHeading(plan: Plan, guide: string, owner: { pack: string; text: string }, section: GuideSection) {
+function noteRepeatedHeadings(plan: Plan, guide: string, owner: { pack: string; text: string }, section: GuideSection) {
   const owned = new Set(headings(owner.text).map((heading) => heading.toLowerCase()));
-  const heading = headings(rendered(section)).find((candidate) => owned.has(candidate.toLowerCase()));
-  if (heading !== undefined) (plan.repeatedHeadings ??= []).push({ pack: section.pack, guide, section: section.title, heading, owner: owner.pack });
+  for (const heading of [...headings(`## ${section.title}`), ...headings(section.text)].filter((candidate) => owned.has(candidate.toLowerCase()))) {
+    (plan.repeatedHeadings ??= []).push({ pack: section.pack, guide, section: section.title, heading, owner: owner.pack });
+  }
 }
 
 function skillSettings(settings: Array<PackSetting & { pack: string }>, values: Record<string, SettingValue>) {

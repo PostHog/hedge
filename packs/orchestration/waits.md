@@ -18,7 +18,7 @@ Keep the thread Working with something that wakes it, then end the turn and say 
   - With `until: "checks"`, the thread comes to me once the checks finish. Use it for a pull request you hand to me. When I hand it back, such as with a merge word, watch it again with `until: "merged"`.
   - A watch ends after many comment-only wakes. When a wake says the watch ended, and the pull request is still open, call `watch_pull_request` again.
 - **A child task**: its completion wakes you. Do not poll it.
-- **Another thread**: call `t3_thread_wait`. When it returns a finished run, act on it in the same turn. When it times out with `next`, end the turn. When it times out without `next`, call it again.
+- **Another thread**: call `t3_thread_wait`. When it returns a finished run, act on it in the same turn. When it times out with `next`, end the turn. When it times out without `next`, read its status: while it runs, call it again; when it waits on a question or an approval, answer it or ask me.
 - **A command**, such as a deploy or a CI run: wait in one call that blocks until it ends. When it outlasts the shell's foreground limit, run it in the background and pass its task id to `t3_background_wait`.
 
 ## Nothing to wake it
@@ -52,11 +52,11 @@ Every open pull request you open for me, each layer of a stack included, has exa
 
 ## What Hedge checks
 
-With the `question-guard` workflow on, the `orchestration` pack checks these when a turn ends. Each check sends a turn back once; when you end the turn again, it ends. Child threads skip the prose and proof checks.
+With the `question-guard` workflow on, the `orchestration` pack checks the first three when a turn ends, and the fourth when you call the question tool. A turn-end check sends a turn back once; when you end the turn again, it ends. Child threads, and threads whose title starts with a mark in `orchestration.proseTitles`, skip the prose check. Child threads skip the proof check.
 
 - **A decision in prose in a hidden thread.** When your last message asks me a decision in prose, and the thread stays out of my inbox after the turn because it is snoozed, waits on a task or a thread, or watches checks or an approval, Hedge sends the turn back. Ask with the question tool. When you cannot, because a skill asks in prose or I turned the card down, end the turn with your complete reply again: T3 shows only the last message.
 - **A background command left running.** When a Claude background shell that this turn started still runs and no `t3_background_wait` waits on it, Hedge sends the turn back. Pass it to `t3_background_wait`, or end the turn again when it is a server meant to outlive the turn.
-- **An unproven pull request.** When the thread owns a pull request and waits on nothing, Hedge sends the turn back until `hedge proof gate` passed on its pushed head. It skips the check while a layer of the stack waits on CI or an approval. To park for me, ask with the question tool or end with a `NEEDS_HUMAN:` line.
+- **An unproven pull request.** When the thread waits on nothing and owns a pull request in its checkout's `origin` repository whose branch this checkout has fetched, Hedge sends the turn back when the branch has unpushed commits, the checked-out branch has edits to tracked files, or `hedge proof gate` has not passed on the pushed head. It skips the check while a layer of the stack waits on CI or an approval. To park for me, ask with the question tool or end with a `NEEDS_HUMAN:` line.
 - **A card in a prose thread.** Hedge denies the question tool in a thread whose title starts with a mark in `orchestration.proseTitles`.
 
 With the `pr-owners` workflow on, the `pull-requests` pack refuses to settle or archive a thread with `t3_thread_organize` while it owns an open pull request that no other open thread links. Hand it over first, or close or merge it. It also refuses to settle or snooze a thread I pinned.

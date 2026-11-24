@@ -85,11 +85,33 @@ describe("resolve", () => {
       expect(file(result, ".agents/guides/rules.md")).toContain("### tests\n\nWrite the test first, always.");
       const report = await apply(result, { home: temp.make("home-"), dryRun: true });
       expect(report.ok).toBe(true);
-      expect(report.findings.find((finding) => finding.id === "repeats:rules:My rules")).toMatchObject({ pack: "mine", todo: true, say: expect.stringContaining('Section "My rules" of the mine pack repeats the heading "tests" of standards') });
+      expect(report.findings.find((finding) => finding.id === "repeats:rules:My rules:tests")).toMatchObject({ pack: "mine", todo: true, say: expect.stringContaining('Section "My rules" of the mine pack repeats the heading "tests" of standards') });
     });
 
     test("is reported when its own title repeats a heading", () => {
       expect(repeats("tEsTs", "Name each test after its behaviour.\n").repeatedHeadings).toEqual([{ pack: "mine", guide: "rules", section: "tEsTs", heading: "tEsTs", owner: "standards" }]);
+    });
+
+    test("is reported once for each heading it repeats", () => {
+      const ownerText = "# Coding standards\n\n## Tests\n\n## Naming\n";
+      expect(repeats("My rules", "### Tests\n\n### Naming\n", ownerText).repeatedHeadings?.map((entry) => entry.heading)).toEqual(["Tests", "Naming"]);
+    });
+
+    test("is found between two horizontal rules at the top of the guide", () => {
+      expect(repeats("My rules", "### Tests\n", "---\n\n# Coding standards\n\n## Tests\n\n---\n\nMore\n").repeatedHeadings).toHaveLength(1);
+    });
+
+    test("is not looked for on a Bun without a Markdown parser, and the section is still written", () => {
+      const bun = Bun as { markdown?: unknown };
+      const parser = bun.markdown;
+      bun.markdown = undefined;
+      try {
+        const result = repeats("My rules", "### Tests\n");
+        expect(result.repeatedHeadings).toBeUndefined();
+        expect(file(result, ".agents/guides/rules.md")).toContain("## My rules\n\n### Tests");
+      } finally {
+        bun.markdown = parser;
+      }
     });
 
     test("is found in setext and indented headings", () => {
@@ -102,6 +124,7 @@ describe("resolve", () => {
       ["a code block of the section", "My rules", "````md\n```\n## Tests\n````\n", owner],
       ["an HTML comment", "My rules", "<!--\n## Tests\n-->\n", owner],
       ["front matter", "My rules", "---\ntitle: x\n---\n## Notes\n", "---\ntitle: x\n---\n# Coding standards\n"],
+      ["a comment in front matter with Windows line ends", "My rules", "---\r\ntitle: x\r\n## Tests\r\n---\r\nMore\r\n", owner],
       ["a closing hash that is part of the text", "My rules", "## Tests#\n", owner],
     ])("is not found in %s", (_, section, text, ownerText) => {
       expect(repeats(section, text, ownerText).repeatedHeadings).toBeUndefined();
