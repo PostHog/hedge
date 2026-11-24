@@ -114,6 +114,7 @@ test("a gate pass from while autonomy was end lets a merge through only while it
     expect((await pr.hedge("gate")).code).toBe(0);
     expect(events(pr.home).filter((event) => event.type === "gate").at(-1)).toEqual(expect.objectContaining({ passed: true, onEnd: true }));
     writeFileSync(join(other, ".local/state/hedge/decisions.jsonl"), readFileSync(ledgerFile(pr.home), "utf8"));
+    writeFileSync(ledgerFile(pr.home), "");
     for (const home of [pr.home, other]) {
       expect(await mergeOn(home, "end")).toBeUndefined();
       expect((await mergeOn(home, "ask"))?.hookSpecificOutput.permissionDecisionReason).toContain("nor a pass from while pull-requests.autonomy was end once it is ask again");

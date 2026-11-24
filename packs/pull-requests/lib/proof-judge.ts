@@ -241,7 +241,7 @@ export async function judge(input: JudgeInput, deps: JudgeDeps): Promise<JudgeOu
   }
   if ("cause" in record) return { state: "unavailable", lines: [`judge: unavailable (${record.cause})`], model: deps.model, broken: [], ...record.held ? { held: true } : {} };
   const escalation = !record.escalation ? []
-    : deps.decidesAll ? [`judge: the arbiter stops the retries: ${record.escalation}. First record hedge proof gap --kind judge --reason <why>, then decide the gap yourself with the hedge decision record --mark 🤖 command it prints`]
+    : deps.decidesAll ? [`judge: the arbiter stops the retries: ${record.escalation}. First record hedge proof gap --kind judge --reason <why>, then do what it prints: decide the gap yourself with its hedge decision record --mark 🤖 command, or, on an ungraded PR or a gap the user keeps owed, ask the user its question`]
     : [`judge: escalate to the user: ${record.escalation}. First record hedge proof gap --kind judge --reason <why>, then ask them the question it prints with the question tool. When they accept, record their answer with hedge decision record --mark 👤 --class proof-gap --kind judge --pr <owner/repo#n>`];
   return { state: record.passed ? "pass" : "fail", lines: [...verdictLines(record.verdict), ...escalation], model: record.model, broken: brokenConditions(record.verdict, input.conditions) };
 }
