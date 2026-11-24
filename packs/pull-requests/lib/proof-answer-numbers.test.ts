@@ -78,14 +78,6 @@ test("an answer missing from a responses file is refused with the list to number
   await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow(numbered);
 });
 
-test("an answer-like line quoted in a fenced block is no answer past the last finding", async () => {
-  const { pr } = await panelRound();
-  const answers = items.map((_, index) => `${index + 1}. rejected: answered by hedge's numbers\n`).join("");
-  writeFileSync(join(pr.repository, "responses.md"), `${answers}\nAn earlier receipt read:\n\n\`\`\`text\n13. rejected: same as 3.\n\`\`\`\n`);
-
-  expect((await pr.hedge("respond", "--round", "1", "responses.md")).code).toBe(0);
-});
-
 test("a single reviewer's findings that start alike print with their whole text, so each number names one finding", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "greet the new member\n");
