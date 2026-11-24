@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { type Hook, printing, runHook } from "../../base/lib/hook.ts";
 import { matchThread, questionCard, type ShellThread, t3CliRunner, t3UserData, withT3Session } from "../../base/lib/t3/index.ts";
 import { backgroundReason, unwaitedBackgroundTasks } from "../lib/background-stop.ts";
-import { awaitsChecks, claudeTaskRuns, isSnoozed, proofStop, waits, type ProofStopEvent, type ProofStopOptions } from "../lib/proof-stop.ts";
+import { awaitsChecks, claudeTaskRuns, isSnoozed, proofStop, proofStopDeadlineMs, waits, type ProofStopEvent, type ProofStopOptions } from "../lib/proof-stop.ts";
 import { asksForDecision, asksInProse, personName, proseTitles } from "../lib/prose-question.ts";
 import { wakeStop } from "../lib/wake-stop.ts";
 
@@ -216,8 +216,15 @@ async function guardStopAndProof(event: StopEvent & ProofStopEvent, home: string
   const background = await guardBackground(event, home, threadId).catch(() => undefined);
   if (background) return background;
   const last = await finalMessage(event);
-  const proof = await proofStop({ ...event, last_assistant_message: last }, { home, shell, ...deps, threadId });
-  return proof ?? wakeStop(event, last, { home, threadId, shell, processes: deps.processes, deadline: deps.deadline });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const end = deps.deadline?.() ?? new Promise<void>((resolve) => { timer = setTimeout(resolve, proofStopDeadlineMs); });
+  const deadline = () => end;
+  try {
+    const proof = await proofStop({ ...event, last_assistant_message: last }, { home, shell, ...deps, deadline, threadId });
+    return proof ?? await wakeStop(event, last, { home, threadId, shell, processes: deps.processes, deadline });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export const hookWith = (shell: (home: string) => ReadShell, stop: StopDeps = {}): Hook => async (_provider, readInput, home) => {

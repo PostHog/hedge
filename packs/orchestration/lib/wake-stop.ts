@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { matchThread, type ShellThread, t3StatePath, t3UserData } from "../../base/lib/t3/index.ts";
 import { subagentParent } from "../../pull-requests/lib/pr-owners.ts";
-import { checksRun, claudeTaskRuns, isSnoozed, nestedSession, realProcesses, waits, withinDeadline, type ProcessTable, type ProofStopEvent } from "./proof-stop.ts";
+import { claudeTaskRuns, isSnoozed, nestedSession, realProcesses, waits, withinDeadline, type ProcessTable, type ProofStopEvent } from "./proof-stop.ts";
 import { personName } from "./prose-question.ts";
 
 export type WakeStopOptions = { home: string; threadId: string | undefined; shell: () => Promise<{ threads: ShellThread[] }>; processes?: ProcessTable; now?: () => number; deadline?: () => Promise<void> };
@@ -25,7 +25,8 @@ function hasScheduledCheck(home: string, threadId: string): boolean {
   if (!existsSync(path)) return false;
   const db = new Database(path, { readonly: true });
   try {
-    return Boolean(db.query("select 1 from scheduled_tasks where thread_id = ? and enabled = 1 and next_run_at is not null limit 1").get(threadId));
+    return db.query<{ next: string }, [string]>("select next_run_at next from scheduled_tasks where thread_id = ? and enabled = 1 and next_run_at is not null")
+      .all(threadId).some(({ next }) => Number.isFinite(Date.parse(next)));
   } finally {
     db.close();
   }
@@ -35,7 +36,7 @@ const outsideWakeCheck = (thread: ShellThread, now: number) => Boolean(subagentP
 
 type ShellPullRequest = NonNullable<ShellThread["pullRequests"]>[number];
 
-const watchWakes = ({ snapshot, watch }: ShellPullRequest) => Boolean(watch) && (snapshot?.state?.toLowerCase() ?? "open") === "open" && (watch!.until === "merged" || checksRun(watch!));
+const watchWakes = ({ watch }: ShellPullRequest) => Boolean(watch) && (watch!.until === "merged" || watch!.checksPending !== false);
 
 const wakes = (threads: ShellThread[], thread: ShellThread) => waits(threads, thread) || (thread.pullRequests ?? []).some(watchWakes);
 
