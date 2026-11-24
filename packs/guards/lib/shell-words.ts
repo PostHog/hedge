@@ -9,7 +9,7 @@ export type Command = {
   substitutions: string[];
   leadingSubstitutions: string[];
   argSubstitutions: string[][];
-  stdin?: { body: string; substitutions: string[]; literal?: boolean };
+  stdin?: { body: string; substitutions: string[] };
   outputs: string[];
   writes: string[];
   redirects: string[];
@@ -500,7 +500,7 @@ export function parse(program: string, context: Context = { env: new Map(), inLo
       hereString = false;
     } else if ("word" in token) words.push(token.word);
     else if ("herestring" in token) hereString = true;
-    else if ("heredoc" in token) stdin = { body: token.heredoc.body, substitutions: [...(stdin?.substitutions ?? []), ...token.heredoc.substitutions], literal: token.heredoc.literal };
+    else if ("heredoc" in token) stdin = { body: token.heredoc.body, substitutions: [...(stdin?.substitutions ?? []), ...token.heredoc.substitutions] };
     else if (token.operator === "|" || token.operator === "|&") finishCommand("|");
     else {
       finishPipeline(token.operator === "(" || token.operator === ")" ? undefined : token.operator, token.at);
