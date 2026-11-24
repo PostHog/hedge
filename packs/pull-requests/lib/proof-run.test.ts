@@ -292,7 +292,7 @@ test("evidence reused from a commit with runner files keeps that commit's mark",
   const identity = { ...pr, commit: second };
   await requireProofs(run.home, identity, ["live-run"], "claude");
   await reuseProof(run.home, identity, "live-run", first, "only a comment changed");
-  const gate = await proofGate(run.home, identity, { ci: () => ({ state: "green", detail: "all pass" }), pushedHead: () => ({ commit: second }), ledger: localLedger(run.home) });
+  const gate = await proofGate(run.home, identity, { ci: () => ({ state: "green", detail: "all pass" }), pushedHead: () => ({ commit: second }), openBotFindings: async () => [], ledger: localLedger(run.home) });
   const { prompt } = await judgePrompt(judgeInput(run.repo, gate.evidence));
   expect(prompt).toContain(mark(first));
   expect(prompt).not.toContain(mark(second));

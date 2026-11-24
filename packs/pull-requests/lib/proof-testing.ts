@@ -48,6 +48,11 @@ base=main; [ -f "${github}/base" ] && read -r base < "${github}/base"
 if [ -f "${github}/base-sha" ]; then read -r basesha < "${github}/base-sha"; else basesha=\\"$(git -C "${repository}" rev-parse refs/remotes/origin/main 2>/dev/null)\\"; fi
 body='"Adds the greeting. Merge risk: medium."'; [ -f "${github}/body" ] && body=$(cat "${github}/body")
 case "$*" in
+  "api graphql "*)
+    case "$*" in *"reviewThreads(first: 100, after: "*"-f owner=example -f repo=product -F number="[0-9]*) ;; *) echo "gh: the fake serves the review threads of example/product only" >&2; exit 1;; esac
+    all="$*"; n=\${all##*-F number=}; n=\${n%%[!0-9]*}
+    [ -f "${github}/threads-error" ] && { cat "${github}/threads-error" >&2; exit 1; }
+    cat "${github}/threads-$n" 2>/dev/null || printf '{"data":{"viewer":{"login":"%s"},"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\\n' "$(cat "${github}/user" 2>/dev/null || echo the-user)"; exit 0;;
   "api "*"/pulls/"[0-9]*" --method PATCH --input "*)
     [ -f "${github}/patch-error" ] && { cat "${github}/patch-error" >&2; exit 1; }
     all="$*"; n=\${all##*/pulls/}; n=\${n%%[!0-9]*}; target="${github}/body"; [ -f "${github}/body-$n" ] && target="${github}/body-$n"
@@ -75,6 +80,16 @@ case "$*" in
   "api "*"/branches/"*)
     all="$*"; branch=\${all##*/branches/}; branch=\${branch%% *}
     cat "${github}/branch-$branch" 2>/dev/null || echo '{"protected":false}'; exit 0;;
+  "api apps/"*)
+    all="$*"; slug=\${all#api apps/}; slug=\${slug%% *}
+    [ -f "${github}/app-error-$slug" ] && { cat "${github}/app-error-$slug" >&2; exit 1; }
+    cat "${github}/app-$slug" 2>/dev/null || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }; exit 0;;
+  "api "*"/statuses"*)
+    all="$*"; sha=\${all#*/commits/}; sha=\${sha%%/*}; filter=; previous=
+    for arg in "$@"; do [ "$previous" = "--jq" ] && filter=$arg; previous=$arg; done
+    file="${github}/statuses-$sha"; [ -f "$file" ] || file="${github}/statuses-any"
+    [ -f "$file" ] || exit 0
+    jq -c "\${filter:-.}" "$file"; exit $?;;
   "api "*)
     all="$*"; sha=; case "$all" in */commits/*/*) sha=\${all#*/commits/}; sha=\${sha%%/*};; esac
     case "$*" in *"/check-runs"*) kind=check-runs;; *) kind=statuses;; esac
@@ -102,7 +117,8 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
     if (base !== undefined) writeFileSync(join(github, "base"), base);
     if (baseSha !== undefined) writeFileSync(join(github, "base-sha"), JSON.stringify(baseSha));
   };
-  const statuses = (list: { context: string; state: string }[], commit = "any") => writeFileSync(join(github, `statuses-${commit}`), lines(list));
+  const statuses = (list: { context: string; state: string; by?: string }[], commit = "any") => writeFileSync(join(github, `statuses-${commit}`), JSON.stringify(list.map(({ context, state, by = "the-user" }) => ({ context, state, creator: { login: by, type: by.endsWith("[bot]") ? "Bot" : "User" } }))));
+  const githubApp = (slug: string, app: number | { error: string } | { answer: string }) => typeof app === "number" ? writeFileSync(join(github, `app-${slug}`), JSON.stringify({ id: app, slug, name: slug })) : "answer" in app ? writeFileSync(join(github, `app-${slug}`), app.answer) : writeFileSync(join(github, `app-error-${slug}`), app.error);
   const githubHead = (commit: string | undefined, next?: string) => {
     if (commit) writeFileSync(join(github, "head"), commit); else rmSync(join(github, "head"), { force: true });
     if (next) writeFileSync(join(github, "next-head"), next);
@@ -111,6 +127,12 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
   const githubComment = (id: number, author: string, body: string, createdAt = "2026-10-25T11:00:00Z", on = 42) => writeFileSync(join(github, `comment-${id}`), JSON.stringify({ user: { login: author }, body, created_at: createdAt, issue_url: `https://api.github.com/repos/example/product/issues/${on}` }));
   const githubBody = (number = 42) => JSON.parse(readFileSync(join(github, existsSync(join(github, `body-${number}`)) ? `body-${number}` : "body"), "utf8")) as string;
   const githubFault = (fault: "patch-error" | "patch-mangle", text: string | undefined) => text === undefined ? rmSync(join(github, fault), { force: true }) : writeFileSync(join(github, fault), text);
+  const reviewThreads = (threads: ReviewThread[] | { error: string }, number = 42) => {
+    rmSync(join(github, "threads-error"), { force: true });
+    if ("error" in threads) return writeFileSync(join(github, "threads-error"), threads.error);
+    const viewer = existsSync(join(github, "user")) ? readFileSync(join(github, "user"), "utf8").trim() : "the-user";
+    writeFileSync(join(github, `threads-${number}`), JSON.stringify({ data: { viewer: { login: viewer }, repository: { pullRequest: { reviewThreads: page(threads.map(threadNode)) } } } }));
+  };
   const githubCalls = () => readFileSync(join(github, "calls"), "utf8").trim().split("\n");
   ci([{ name: "test", bucket: "pass" }]);
   mkdirSync(join(home, ".agents/guides"), { recursive: true });
@@ -184,10 +206,19 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
   const decide = (...args: string[]) => decideIn(repository, ...args);
   const pullRequest = join(home, ".local/state/hedge/proof/example/product/42");
   await seedRepository(repository);
-  return { home, repository, pullRequest, env, git, commit, advanceBase, hedge, hedgeIn, hedgeAs, ci, statuses, required, pullRequestState, githubHead, githubCalls, githubBody, githubFault, githubComment, whileGithubReadsPull, clock, say, choose, chooseGap, reader, panel, hub, pendingCards, decide, decideIn, startTimes };
+  return { home, repository, pullRequest, env, git, commit, advanceBase, hedge, hedgeIn, hedgeAs, ci, statuses, githubApp, required, pullRequestState, githubHead, githubCalls, githubBody, githubFault, githubComment, reviewThreads, whileGithubReadsPull, clock, say, choose, chooseGap, reader, panel, hub, pendingCards, decide, decideIn, startTimes };
 }
 
 export type Checkout = Awaited<ReturnType<typeof checkout>>;
+
+export type ThreadComment = { by: string; app?: boolean; url: string; thumbsUp?: string[] };
+export type ReviewThread = { path: string; line: number; comments: ThreadComment[]; resolved?: boolean };
+
+const page = (nodes: unknown[]) => ({ nodes, pageInfo: { hasNextPage: false, endCursor: null } });
+const threadNode = ({ path, line, comments, resolved = false }: ReviewThread, index: number) => ({
+  id: `thread-${index + 1}`, isResolved: resolved, path, line, originalLine: line,
+  comments: page(comments.map(({ by, app = by !== "the-user", url, thumbsUp = [] }) => ({ url, author: { __typename: app ? "Bot" : "User", login: by }, reactions: { nodes: thumbsUp.map((login) => ({ user: { login } })) } }))),
+});
 
 export async function githubRepository(pr: Checkout, user = "git") {
   const served = join(pr.repository, "../github.com");

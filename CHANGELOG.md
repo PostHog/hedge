@@ -10,6 +10,78 @@
   re-auth: on the hub, run: hedge mcp-gateway sign-in slack`, in place of a
   bare 401. A tool list that fails this way gets the same line.
 
+### A message steers a thread that waits on a question card
+
+- `hedge thread send` no longer turns `auto` into `queue` when the target
+  thread waits on a question card or an approval, on this machine or a linked
+  one, when the thread runs on Claude or Codex: T3 steers the turn, the card
+  stays open, and the agent reads the message once the person answers. A
+  slash command, such as `/goal`, and a message to a card thread on any other
+  provider still go out as `queue`.
+- The `question-guard` workflow no longer turns back a `t3_thread_send` to a
+  thread that waits on a card. The prose-title card check stays.
+- Hedge's own jobs that message threads, such as mail watch, review wait and
+  library shares, follow the same rule.
+- The base rule tells agents to omit `mode`, to leave a message that T3
+  queued as it is, to queue a slash command and a card thread on another
+  provider, and never to send `restart` to a thread that waits on a card.
+
+### The gate holds on an unanswered bot finding
+
+- `hedge proof gate` now reads the pull request's review threads on GitHub
+  and fails while a review bot's thread is unresolved and has no answer from
+  you: no reply of yours after the bot's last comment, and no 👍 of yours on
+  it. This covers PostHog Review, the security review bot, ParameterAI, Veria,
+  CodeQL and every other GitHub App. The refusal names each open thread by its
+  URL. Fix it and resolve it with
+  `hedge pr bot-threads --repo <owner/repo> --pr <number> --fixed <URL>`, or
+  reply with why it does not hold.
+- A person's thread does not hold the gate. `--landed` checks it too, so it
+  cannot pass an open pull request past a finding.
+- When GitHub cannot list the threads, the gate fails and says why.
+- `hedge pr bot-threads` and the gate share one reader, and both now know the
+  logins of these bots.
+
+### On `end`, the agent decides every round and gap
+
+- With `pull-requests.autonomy` set to `end`, `hedge proof` tells the agent to
+  decide every review round and every proof gap alone, as a 🤖 decision: panel
+  gaps, every gap kind on a critical pull request, and one-way doors included.
+  `hedge decision record --mark 🤖` takes them, and the gate counts them. Only
+  an ungraded pull request and a gap the user keeps owed stay with the user.
+- A one-way door no longer stops the review loop at an escalation: it goes to
+  the agent like any other round. This replaces the stop from the previous
+  release. A saved `one-way-stop.json` is ignored on `ask` too, so on `ask` an
+  escalation on a one-way door goes to the user again, as before that release.
+- At the review budget, a treated budget included, `--agent` runs up to 3 more
+  reads past it, one 🤖 review decision each, even when a read finds nothing.
+  After them, hedge stops the loop and tells the agent to ask the user nothing
+  about another read. Only review and proof-gap asks go to the agent: on a
+  critical pull request, design, scope, deploy, secret and merge asks stay
+  with the user.
+- When the judge's arbiter stops the retries, the gate tells the agent to
+  record a judge gap and decide it alone.
+- A gate pass saved on `end` marks itself, in the local run and in the shared
+  ledger. Once the profile is back on `ask`, the merge-gate hook does not count
+  it: run `hedge proof gate` again.
+- Otherwise, on `ask`, the default, nothing changes.
+
+### A hard read budget for treated pull requests
+
+- With `pull-requests.triage` on or `split`, a treated pull request gets a
+  hard read budget: two reads on the standard path, on every tier, and three
+  reads on the strict path. As with today's ceiling, a read that finds
+  nothing to fix spends none of it. A control or excluded pull request keeps
+  the profile's `pull-requests.reviewCeiling`. The profile's ceiling can lower a
+  treated budget, never raise it.
+- At the budget the usual stop holds: on `ask`, `--agent` cannot pass it, and only the
+  user's `--override` runs another read. A finding listed under Known issues
+  takes a `known` answer once the same budget is spent; `hedge proof respond`
+  works the budget out at the current head, as the review does.
+- `hedge proof review` prints the budget that applies as `budget` and stores
+  it in `round.json` beside `triage`.
+- With the setting `off`, the default, nothing changes.
+
 ### Conductor-managed lanes default to T3 subthreads
 
 - The `base` T3 guide, `orchestration` pack rules and docs, and the pinned

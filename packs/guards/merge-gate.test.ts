@@ -234,6 +234,17 @@ describe("the gate pass each layer needs", () => {
     expect(await risk(one(9), gate({ ledger: [gatePass(9, head, false), gatePass(9, head)] }))).toContain("has not passed");
   });
 
+  test("a pass from while autonomy was end counts only while it is still end, wherever it was recorded", async () => {
+    const onEnd: LedgerEvent = { ...gatePass(9, head), onEnd: true } as LedgerEvent;
+    const localOnEnd = (decidesAll: boolean): GateIO => ({ ...gate(), localGate: async () => ({ passed: true, at: localAt, onEnd: true }), decidesAll: () => decidesAll });
+    expect(await risk(one(9), { ...gate({ ledger: [onEnd] }), decidesAll: () => true })).toBeUndefined();
+    expect(await risk(one(9), localOnEnd(true))).toBeUndefined();
+    for (const io of [{ ...gate({ ledger: [onEnd] }), decidesAll: () => false }, gate({ ledger: [onEnd] }), localOnEnd(false)]) {
+      expect(await risk(one(9), io)).toContain("nor a pass from while pull-requests.autonomy was end once it is ask again");
+    }
+    expect(await risk(one(9), { ...gate({ ledger: [onEnd, gatePass(9, head, true, "2026-11-16T09:00:00Z")] }), decidesAll: () => false })).toBeUndefined();
+  });
+
   test("the top layer of a stack needs every open layer below it to pass at its own head", async () => {
     const refusal = await risk(one(7), gate({ local: [`7@${head}`] }));
     expect(refusal).toContain("example/product#6 (a lower layer of example/product#7)");

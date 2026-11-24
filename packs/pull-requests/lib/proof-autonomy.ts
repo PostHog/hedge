@@ -1,7 +1,7 @@
 import { optionalStringSetting } from "../../base/lib/settings.ts";
 import { agentRefusal, riskCalloutOf, tierOf, type AskClass, type Env, type Tier } from "./decision-ledger.ts";
 
-export type Autonomy = "ask" | "end" | "user";
+export type Autonomy = "ask" | "end";
 export type Grade = { tier: Tier; oneWay: boolean };
 
 export const endTableNote = "the user reads it in hedge decision report, under Decisions";
@@ -11,9 +11,9 @@ export const shellQuoted = (text: string) => `'${text.replace(/'/g, "'\\''")}'`;
 export const gradeOf = (body: string | undefined): Grade =>
   body === undefined ? { tier: "ungraded", oneWay: false } : { tier: tierOf(body), oneWay: /\bone-way door\b/i.test(riskCalloutOf(body) ?? "") };
 
+export const decidesAll = (env: Env) => optionalStringSetting("pull-requests.autonomy", env) === "end";
+
 export function autonomyOf(env: Env, gradeAt: () => Grade, decisionClass: AskClass, kinds?: string[]): Autonomy {
-  if (optionalStringSetting("pull-requests.autonomy", env) !== "end") return "ask";
-  const { tier, oneWay } = gradeAt();
-  if (oneWay) return "user";
-  return agentRefusal(tier, decisionClass, kinds) ? "ask" : "end";
+  if (!decidesAll(env)) return "ask";
+  return agentRefusal(gradeAt().tier, decisionClass, kinds, true) ? "ask" : "end";
 }
