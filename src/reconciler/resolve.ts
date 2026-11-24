@@ -523,18 +523,16 @@ type GuideSection = { pack: string; title: string; text: string };
 
 const rendered = (section: GuideSection) => `## ${section.title}\n\n${section.text}`;
 
-const frontMatter = /^---\n(?:(?:[\w-]+:|[ \t#]|- ).*\n)*---\n/;
-
 function headings(text: string): string[] {
   const found: string[] = [];
-  const markdown = text.replace(/\r\n?/g, "\n").replace(frontMatter, "");
-  if (typeof Bun.markdown?.render === "function") Bun.markdown.render(markdown, { heading: (children: string) => (found.push(children.trim()), "") });
+  if (typeof Bun.markdown?.render === "function") Bun.markdown.render(text, { heading: (children: string) => (found.push(children.trim()), "") });
   return found;
 }
 
 function noteRepeatedHeadings(plan: Plan, guide: string, owner: { pack: string; text: string }, section: GuideSection) {
   const owned = new Set(headings(owner.text).map((heading) => heading.toLowerCase()));
-  for (const heading of [...headings(`## ${section.title}`), ...headings(section.text)].filter((candidate) => owned.has(candidate.toLowerCase()))) {
+  const added = new Set([...headings(`## ${section.title}`), ...headings(section.text)]);
+  for (const heading of [...added].filter((candidate) => owned.has(candidate.toLowerCase()))) {
     (plan.repeatedHeadings ??= []).push({ pack: section.pack, guide, section: section.title, heading, owner: owner.pack });
   }
 }

@@ -98,7 +98,12 @@ describe("resolve", () => {
     });
 
     test("is found between two horizontal rules at the top of the guide", () => {
-      expect(repeats("My rules", "### Tests\n", "---\n\n# Coding standards\n\n## Tests\n\n---\n\nMore\n").repeatedHeadings).toHaveLength(1);
+      expect(repeats("My rules", "### Tests\n", "---\n## Tests\n---\n\nMore\n").repeatedHeadings).toHaveLength(1);
+    });
+
+    test("is reported once when its title and its text repeat the same heading", async () => {
+      const report = await apply(repeats("Tests", "### Tests\n"), { home: temp.make("home-"), dryRun: true });
+      expect(report.findings.filter((finding) => finding.id.startsWith("repeats:"))).toHaveLength(1);
     });
 
     test("is not looked for on a Bun without a Markdown parser, and the section is still written", () => {
@@ -123,8 +128,6 @@ describe("resolve", () => {
       ["a code block of the guide", "My rules", "### Tests\n", "# Coding standards\n\n````md\n```\n## Tests\n````\n"],
       ["a code block of the section", "My rules", "````md\n```\n## Tests\n````\n", owner],
       ["an HTML comment", "My rules", "<!--\n## Tests\n-->\n", owner],
-      ["front matter", "My rules", "---\ntitle: x\n---\n## Notes\n", "---\ntitle: x\n---\n# Coding standards\n"],
-      ["a comment in front matter with Windows line ends", "My rules", "---\r\ntitle: x\r\n## Tests\r\n---\r\nMore\r\n", owner],
       ["a closing hash that is part of the text", "My rules", "## Tests#\n", owner],
     ])("is not found in %s", (_, section, text, ownerText) => {
       expect(repeats(section, text, ownerText).repeatedHeadings).toBeUndefined();
