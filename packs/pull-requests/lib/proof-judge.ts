@@ -6,7 +6,7 @@ import type { Arbiter, CiResult, Owed } from "./proof.ts";
 import type { ModelAnswer, ModelRequest } from "./proof-models.ts";
 import { capped, diffCap } from "./proof-review.ts";
 import { withoutReceipt } from "./proof-receipt.ts";
-import { captureText, runnerCapture, runRecordOf } from "./proof-provenance.ts";
+import { captureOf, captureText, runRecordOf, type RunRecord } from "./proof-provenance.ts";
 
 export type JudgeInput = {
   cwd: string; from: string; commit: string; diff: string; crossFamily: boolean; ci: CiResult; owed: Owed; ledger: string[];
@@ -79,18 +79,22 @@ async function evidenceSection({ evidence, commit, owed }: JudgeInput) {
     parts.push(`### ${kind}`, untrusted(`the gate's line for ${kind}`, line));
     if (!directory) continue;
     readable.push(directory);
-    const capture = await runnerCapture(directory);
+    const files = await Promise.all((await readdir(directory).catch(() => [])).sort().map(async (name) => {
+      const path = join(directory, name);
+      const extension = extname(name).toLowerCase();
+      const media = imageExtensions.has(extension) ? "image" : videoExtensions.has(extension) ? "video" : undefined;
+      const bytes = media ? undefined : await readFile(path);
+      return { path, media, bytes, record: bytes && await runRecordOf(path, bytes) };
+    }));
+    const capture = captureOf(files.map((file) => file.record));
     if (capture && (capture.commit === commit || capture.commit === carriedFrom)) {
       verified.add(kind);
       parts.push(`Provenance verified by code: ${captureText(capture)}${capture.commit === commit ? ", at HEAD" : "; hedge carried it to HEAD across clean merges of the base and commits that change only test files no production file names"}.`);
     }
-    for (const name of (await readdir(directory).catch(() => [])).sort()) {
-      const path = join(directory, name);
-      const extension = extname(name).toLowerCase();
-      if (imageExtensions.has(extension)) { images.push(path); parts.push(untrusted(`${kind} evidence file`, `Image: ${path} (attached)`)); continue; }
-      if (videoExtensions.has(extension)) { parts.push(untrusted(`${kind} evidence file`, `Video: ${path} (not shown; judge it by the other evidence)`)); continue; }
-      const bytes = await readFile(path);
-      parts.push(...await runnerMark(directory, path, kind));
+    for (const { path, media, bytes, record } of files) {
+      if (media === "image") { images.push(path); parts.push(untrusted(`${kind} evidence file`, `Image: ${path} (attached)`)); continue; }
+      if (media === "video" || !bytes) { parts.push(untrusted(`${kind} evidence file`, `Video: ${path} (not shown; judge it by the other evidence)`)); continue; }
+      parts.push(...runnerMark(directory, record, path, kind));
       parts.push(bytes.includes(0) ? untrusted(`${kind} evidence file`, `Binary file: ${path}`) : untrusted(`${kind} evidence ${basename(path)}`, capped(bytes.toString(), evidenceCap)));
     }
   }
@@ -99,8 +103,7 @@ async function evidenceSection({ evidence, commit, owed }: JudgeInput) {
   return { images, readable, text: parts.join("\n\n"), verified: verified.size > 0 };
 }
 
-async function runnerMark(directory: string, path: string, kind: string) {
-  const record = await runRecordOf(path);
+function runnerMark(directory: string, record: RunRecord | undefined, path: string, kind: string) {
   if (!record) return [];
   const commit = basename(dirname(directory));
   const ran = record.provenance ? `, ran from ${record.provenance.startedAt} to ${record.provenance.finishedAt}` : "";
@@ -201,11 +204,12 @@ const highFindings = (verdict: Verdict) => verdict.quality.findings.filter((find
 const passes = (verdict: Verdict) => answeredQuestions(verdict).every((name) => verdict[name]!.verdict === "pass") && !highFindings(verdict).length;
 
 const reasonOf = (question: Question) => question.reason.trim() || "the judge gave no reason";
+const findingText = ({ problem, citation }: Finding) => `${problem.trim() || "the judge named no problem"}${citation.trim() ? ` (${citation.trim()})` : ""}`;
 
 export function verdictLines(verdict: Verdict) {
   const cited = (citations: string[]) => citations.length ? ` (${citations.join(", ")})` : "";
   const findings = [...verdict.quality.findings].sort((a, b) => ratings.indexOf(a.rating) - ratings.indexOf(b.rating));
-  const quality = findings.length ? `, ${findings.map((finding) => `${finding.rating}: ${finding.problem} (${finding.citation})`).join("; ")}` : `: ${verdict.quality.reason}`;
+  const quality = findings.length ? `, ${findings.map((finding) => `${finding.rating}: ${findingText(finding)}`).join("; ")}` : `: ${verdict.quality.reason}`;
   return [
     ...answeredQuestions(verdict).map((name) => `judge ${name}: ${verdict[name]!.verdict}: ${reasonOf(verdict[name]!)}${cited(verdict[name]!.citations)}`),
     `judge quality: ${highFindings(verdict).length ? "fail" : "pass"}${quality}`,
@@ -214,7 +218,7 @@ export function verdictLines(verdict: Verdict) {
 
 const failureReasons = (verdict: Verdict) => [
   ...answeredQuestions(verdict).filter((name) => verdict[name]!.verdict === "fail").map((name) => `${name}: ${reasonOf(verdict[name]!)}`),
-  ...highFindings(verdict).map((finding) => `quality: ${finding.problem} (${finding.citation})`),
+  ...highFindings(verdict).map((finding) => `quality: ${findingText(finding)}`),
 ];
 
 export type JudgeRecord = { commit: string; model: string; verdict: Verdict; passed: boolean; escalation?: string; judgedAt: string };

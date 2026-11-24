@@ -1180,7 +1180,7 @@ const kindStatusOf = (kind: ProofKind, problem: Status["problem"], state: KindSt
   ({ problem, proof: { kind, line: kindLine(kind, state), ...state } as KindProof, evidence });
 
 async function kindStatus(weigh: Weigh, kind: ProofKind, landed: boolean, cleanBaseMerge: CleanBaseMerge, quietCommit: QuietCommit, dev?: DevState): Promise<KindStatus> {
-  if (kind === "dev-observed") return devObservedStatus(weigh, cleanBaseMerge, dev);
+  if (kind === "dev-observed") return devObservedStatus(weigh, cleanBaseMerge, quietCommit, dev);
   const { home, identity, decisions } = weigh;
   const status = (problem: Status["problem"], state: KindState, evidence?: string) => kindStatusOf(kind, problem, state, evidence);
   if (kind === "post-deploy-watch" && !landed) return status(undefined, { state: "pending" });
@@ -1216,7 +1216,7 @@ const isoOf = (nanos: bigint) => new Date(Number(nanos / 1_000_000n)).toISOStrin
  * dev-observed counts only evidence saved after the dev PR merged: an observation before the merge saw the old dev.
  * Until then the kind waits on the dev result, and a gap stands in as for any kind.
  */
-async function devObservedStatus(weigh: Weigh, cleanBaseMerge: CleanBaseMerge, dev: DevState | undefined): Promise<KindStatus> {
+async function devObservedStatus(weigh: Weigh, cleanBaseMerge: CleanBaseMerge, quietCommit: QuietCommit, dev: DevState | undefined): Promise<KindStatus> {
   const { home, identity, decisions } = weigh;
   const kind = "dev-observed";
   const status = (problem: Status["problem"], state: KindState, evidence?: string) => kindStatusOf(kind, problem, state, evidence);
@@ -1227,7 +1227,7 @@ async function devObservedStatus(weigh: Weigh, cleanBaseMerge: CleanBaseMerge, d
   if (acceptance?.by === "the user") return { ...status(undefined, gapState()), ...countedGap(weighed) };
   const proved = await provedCommits(home, identity, kind);
   const head = proved.get(identity.commit);
-  const carried = head ? undefined : reviewedThroughMerges(identity.commit, new Set(proved.keys()), cleanBaseMerge);
+  const carried = head ? undefined : reviewedThrough(identity.commit, new Set(proved.keys()), cleanBaseMerge, quietCommit);
   const found = head ?? (carried && proved.get(carried.from));
   const directory = found && evidenceDirectory(home, identity, kind, found);
   const saved = directory ? await newestFile(directory) : undefined;
@@ -1236,7 +1236,7 @@ async function devObservedStatus(weigh: Weigh, cleanBaseMerge: CleanBaseMerge, d
       pr: devText(dev.ref), mergedAt: dev.mergedAt, ...dev.mergeCommit ? { mergeCommit: dev.mergeCommit } : {}, savedAt: isoOf(saved),
       line: `dev result: ${devText(dev.ref)} merged at ${dev.mergedAt}${dev.mergeCommit ? ` as ${short(dev.mergeCommit)}` : ""}; the dev-observed evidence was saved at ${isoOf(saved)}, after the merge`,
     };
-    const state: KindState = head ? await evidenceState(identity, head, directory) : { state: "carried", from: carried!.from, origin: found.reuse?.from ?? carried!.from, merges: carried!.merges.length, directory };
+    const state: KindState = head ? await evidenceState(identity, head, directory) : await carriedState(carried!, found, directory);
     return { ...status(undefined, state, directory), dev: result };
   }
   if (gap) return { ...status(acceptance ? undefined : "gap", gapState()), ...countedGap(weighed) };

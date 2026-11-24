@@ -12,13 +12,15 @@
   provenance is verified by code, and no longer fails it as typed by hand, as
   evidence of an earlier commit, or for how it was captured.
 - Evidence now carries to HEAD across commits that change only test files no
-  production file names, as the review already did. The gate line names the
-  quiet commits.
+  production file names, as the review already did, dev-observed evidence
+  included. The gate line names the quiet commits. A changed snapshot that a
+  production file names is not such a test file.
 - When every file of the diff is such a test file, the judge learns the diff
   is test-only, so a critical path that only test files match does not make
   the Tier critical.
-- A judge answer that fails a question without a reason, and an error without
-  a message, still give the gate's last line a reason.
+- A judge answer that fails a question without a reason, a high quality
+  finding without a problem, and an error without a message still give the
+  gate's last line a reason.
 
 ### A message steers a thread that waits on a question card
 

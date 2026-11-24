@@ -25,7 +25,7 @@ export type CommitReader = {
   isAncestor(ancestor: string, commit: string): boolean;
 };
 
-const importName = (path: string) => /_test\.go$/.test(path) || path.endsWith(".snap") ? undefined : path.split("/").at(-1)!.replace(/\.[cm]?[jt]sx?$|\.py$/, "");
+const importName = (path: string) => /_test\.go$/.test(path) ? undefined : path.endsWith(".snap") ? path.split("/").at(-1)! : path.split("/").at(-1)!.replace(/\.[cm]?[jt]sx?$|\.py$/, "");
 
 function importedByCode(reader: CommitReader, commit: string, path: string) {
   const seen = new Set([path]);

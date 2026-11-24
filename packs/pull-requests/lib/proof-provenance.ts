@@ -10,7 +10,7 @@ const sha = /^[0-9a-f]{40}$/;
 export const runRecordPath = (pullRequest: string, commit: string, kind: string, digest: string) => join(pullRequest, "runs", commit, kind, `${digest}.json`);
 
 const isCommand = (value: unknown): value is string[] => Array.isArray(value) && value.length > 0 && value.every((part) => typeof part === "string");
-const isInstant = (value: unknown): value is string => typeof value === "string" && !Number.isNaN(Date.parse(value));
+const isInstant = (value: unknown): value is string => typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) && !Number.isNaN(Date.parse(value));
 const provenanceFields = ["commit", "exitCode", "startedAt", "finishedAt", "cwd"] as const;
 
 function provenanceOf(record: Record<string, unknown>, commit: string): Provenance | undefined | false {
@@ -20,7 +20,7 @@ function provenanceOf(record: Record<string, unknown>, commit: string): Provenan
   return valid ? { commit, exitCode: 0, startedAt, finishedAt, cwd } : false;
 }
 
-export async function runRecordOf(evidence: string): Promise<RunRecord | undefined> {
+export async function runRecordOf(evidence: string, bytes?: Buffer): Promise<RunRecord | undefined> {
   const match = /^([0-9a-f]{64})\.log$/.exec(basename(evidence));
   const kindDirectory = dirname(evidence);
   const commit = basename(dirname(kindDirectory));
@@ -30,7 +30,7 @@ export async function runRecordOf(evidence: string): Promise<RunRecord | undefin
     if (!isCommand(record?.command)) return undefined;
     const provenance = provenanceOf(record, commit);
     if (provenance === false) return undefined;
-    if (createHash("sha256").update(await readFile(evidence)).digest("hex") !== match[1]) return undefined;
+    if (createHash("sha256").update(bytes ?? await readFile(evidence)).digest("hex") !== match[1]) return undefined;
     return { command: record.command, ...provenance ? { provenance } : {} };
   } catch { return undefined; }
 }
@@ -39,7 +39,11 @@ export type Capture = { commit: string; runs: number; startedAt: string; finishe
 
 export async function runnerCapture(directory: string): Promise<Capture | undefined> {
   const names = await readdir(directory).catch(() => []);
-  const provenances = await Promise.all(names.map(async (name) => (await runRecordOf(join(directory, name)))?.provenance));
+  return captureOf(await Promise.all(names.map((name) => runRecordOf(join(directory, name)))));
+}
+
+export function captureOf(records: (RunRecord | undefined)[]): Capture | undefined {
+  const provenances = records.map((record) => record?.provenance);
   if (!provenances.length || !provenances.every((provenance): provenance is Provenance => provenance !== undefined)) return undefined;
   const startedAt = provenances.map((provenance) => provenance.startedAt).sort()[0]!;
   const finishedAt = provenances.map((provenance) => provenance.finishedAt).sort().at(-1)!;
