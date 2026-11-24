@@ -1241,11 +1241,11 @@ type Shared = { line: string; failed: boolean; error?: string };
 
 const ranOnEnd = ({ env }: ProofContext): { onEnd?: true } => decidesAll(env) ? { onEnd: true } : {};
 
-function heldGaps({ code, summary }: FinalGate): { agentGaps?: string[] } {
-  return code === 0 ? { agentGaps: summaryGaps(summary).flatMap(({ kind, gap }) => gap.accepted?.mark === "🤖" ? [gap.accepted.id ?? kind] : []) } : {};
+function heldGaps({ code, summary, seenGaps }: FinalGate): { agentGaps?: string[]; seenGaps?: string[] } {
+  return code === 0 ? { agentGaps: summaryGaps(summary).flatMap(({ kind, gap }) => gap.accepted?.mark === "🤖" ? [gap.accepted.id ?? kind] : []), seenGaps: seenGaps ?? [] } : {};
 }
 
-async function shareGateResult(head: ProofIdentity, passed: boolean, startedAt: Date, context: ProofContext, held: { agentGaps?: string[] } = {}): Promise<Shared | undefined> {
+async function shareGateResult(head: ProofIdentity, passed: boolean, startedAt: Date, context: ProofContext, held: { agentGaps?: string[]; seenGaps?: string[] } = {}): Promise<Shared | undefined> {
   const result = passed ? "pass" : "failure";
   try {
     await ledgerOf(context).append({ type: "gate", repository: head.repository, pr: head.pr, commit: head.commit, passed, machine: thisMachine(context.env), at: startedAt.toISOString(), ...passed ? { ...ranOnEnd(context), ...held } : {} });

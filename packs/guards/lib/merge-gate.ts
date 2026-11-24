@@ -341,7 +341,7 @@ const sameRepo = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 function sharedResults(events: LedgerEvent[], layer: Layer): GateResult[] {
   return events.flatMap((event) => event.type === "gate" && sameRepo(event.repository, layer.repository) && event.pr === layer.pr && event.commit === layer.head
-    ? [{ passed: event.passed, at: Date.parse(event.at), ...event.onEnd === true ? { onEnd: true as const } : {}, ...isTextList(event.agentGaps) ? { agentGaps: event.agentGaps } : {} }] : []);
+    ? [{ passed: event.passed, at: Date.parse(event.at), ...event.onEnd === true ? { onEnd: true as const } : {}, ...isTextList(event.agentGaps) ? { agentGaps: event.agentGaps } : {}, ...isTextList(event.seenGaps) ? { seenGaps: event.seenGaps } : {} }] : []);
 }
 
 function latestPassed(results: GateResult[], decidesAllNow: boolean) {
@@ -352,8 +352,8 @@ function latestPassed(results: GateResult[], decidesAllNow: boolean) {
 const namesLayer = (decision: DecisionState, layer: Layer) => decision.scope.prs.some((ref) => sameRepo(ref.replace(/#\d+$/, ""), layer.repository) && ref.endsWith(`#${layer.pr}`));
 const usersMergeAt = (decision: DecisionState, layer: Layer) => live(decision) && decision.class === "merge" && decision.mark === "👤" && namesLayer(decision, layer);
 const overrideAt = (decision: DecisionState, layer: Layer) => usersMergeAt(decision, layer) && decision.scope.kinds?.includes(gateOverride) === true && decision.scope.condition?.startsWith(`${layer.head}:`) === true;
-const quotedChoice = (answer: string) => /["“]([^"”]*)["”]\s*$/.exec(answer)?.[1] ?? answer;
-const choseMerge = (decision: DecisionState, head: string) => decision.question.includes(head) && [mergeCardChoice, `${mergeCardChoice} (Recommended)`].map(normalized).includes(normalized(quotedChoice(decision.answer)));
+const chosen = (answer: string) => normalized(answer.replace(/^\d{4}-\d{2}-\d{2}\s+/, ""));
+const choseMerge = (decision: DecisionState, head: string) => decision.question.includes(head) && [mergeCardChoice, `${mergeCardChoice} (Recommended)`].map(normalized).includes(chosen(decision.answer));
 const mergeWordAt = (decision: DecisionState, layer: Layer) => overrideAt(decision, layer) || (usersMergeAt(decision, layer) && decision.scope.condition === mergeCardCondition(layer.head) && choseMerge(decision, layer.head));
 
 function overrideIn(decisions: DecisionState[], layer: Layer): boolean {
@@ -366,8 +366,8 @@ const inRepository = (decision: DecisionState, repository: string) => decision.s
 function agentGapsAt(results: GateResult[], decisions: DecisionState[], layer: Layer): string[] {
   const latest = latestGateResult(results);
   const counted = latest?.passed && latest.agentGaps ? latest : undefined;
-  const after = decisions.filter((decision) => agentGap(decision) && namesLayer(decision, layer) && !(counted && Date.parse(decision.at) <= counted.at));
-  return [...new Set([...counted?.agentGaps ?? [], ...after.map((decision) => decision.id)])];
+  const unseen = decisions.filter((decision) => agentGap(decision) && namesLayer(decision, layer) && !counted?.seenGaps?.includes(decision.id));
+  return [...new Set([...counted?.agentGaps ?? [], ...unseen.map((decision) => decision.id)])];
 }
 
 const heldLayer = (results: GateResult[], decisions: DecisionState[], layer: Layer) => {

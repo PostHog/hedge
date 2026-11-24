@@ -369,11 +369,12 @@ describe("the PreToolUse hook", () => {
     });
     const where = (ledger: LedgerEvent[], github = true) => ({ home: homeWith({ "guards.merge-gate-exempt": "own/*" }), env: {}, gate: gate({ ledger, github }), intent: io });
     const merge = (ledger: LedgerEvent[], github = true) => mergeGate(call("gh pr merge 9 --repo own/tooling"), where(ledger, github));
-    const pass = (at: string, agentGaps?: string[]): LedgerEvent => ({ type: "gate", repository: "own/tooling", pr: 9, commit: head, passed: true, machine: "box-2", at, ...agentGaps ? { agentGaps } : {} });
+    const pass = (seenGaps?: string[], agentGaps: string[] | undefined = seenGaps && []): LedgerEvent => ({ type: "gate", repository: "own/tooling", pr: 9, commit: head, passed: true, machine: "box-2", at: "2026-11-16T07:30:00Z", ...agentGaps ? { agentGaps } : {}, ...seenGaps ? { seenGaps } : {} });
     expect((await merge([agentGap("own/tooling")]))?.hookSpecificOutput.permissionDecisionReason).toContain(`an agent accepted proof gaps of own/tooling#9 at ${head.slice(0, 12)} (🤖 d-agent) itself`);
-    expect(await merge([agentGap("own/tooling"), pass("2026-11-16T08:30:00Z", [])])).toBeUndefined();
-    expect(await merge([agentGap("own/tooling"), pass("2026-11-16T07:30:00Z", [])])).toBeDefined();
-    expect(await merge([agentGap("own/tooling"), pass("2026-11-16T08:30:00Z")])).toBeDefined();
+    expect(await merge([agentGap("own/tooling"), pass(["d-agent"])])).toBeUndefined();
+    expect(await merge([agentGap("own/tooling"), pass([])])).toBeDefined();
+    expect(await merge([agentGap("own/tooling"), pass()])).toBeDefined();
+    expect(await merge([agentGap("own/tooling"), pass(["d-agent"], ["d-agent"])])).toBeDefined();
     expect(await merge([agentGap("example/product")], false)).toBeUndefined();
     const word = (answer: string): LedgerEvent => ({
       type: "decide", decision: {
@@ -382,6 +383,7 @@ describe("the PreToolUse hook", () => {
       },
     });
     expect(await merge([agentGap("own/tooling"), word("Merge")])).toBeUndefined();
+    expect(await merge([agentGap("own/tooling"), word('"Merge"')])).toBeUndefined();
     expect(await merge([agentGap("own/tooling"), word("Keep it open")])).toBeDefined();
   });
 

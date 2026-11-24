@@ -19,7 +19,7 @@ export type Decision = {
 };
 export type Reversal = { type: "reverse"; id: string; words: string; thread?: string; message?: string; comment?: string; machine: string; at: string };
 export type Lift = { type: "lift"; class: AskClass; words: string; thread: string; message: string; machine: string; at: string };
-export type GateResult = { type: "gate"; repository: string; pr: number; commit: string; passed: boolean; machine: string; at: string; onEnd?: true; agentGaps?: string[] };
+export type GateResult = { type: "gate"; repository: string; pr: number; commit: string; passed: boolean; machine: string; at: string; onEnd?: true; agentGaps?: string[]; seenGaps?: string[] };
 export type LedgerEvent =
   | { type: "decide"; decision: Decision }
   | { type: "void"; id: string; reason: string; at: string }
