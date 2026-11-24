@@ -19,6 +19,16 @@
   your agent instructions turn it on, the agent marks a pull request ready
   once it passes your gate.
 
+### A wait needs something that wakes it
+
+- The question guard's Stop hook stops a top-level T3 thread once when its
+  last line starts with ⏳ or 🔕 and nothing can wake it: no PR watch held
+  until merge or on running checks, no running child task or thread wait, and
+  no scheduled task bound to the thread. It tells the agent to call
+  `watch_pull_request` with `until: "merged"`, keep the lane's child, or
+  schedule the check. It runs after the proof check, and it never snoozes or
+  settles the thread.
+
 ### A revoked app sign-in on the MCP gateway asks for a re-auth
 
 - When ChatGPT revokes the sign-in of a Codex app on the MCP gateway, such as

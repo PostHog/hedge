@@ -307,6 +307,28 @@ describe("the installed Stop hook", () => {
     expect(await stopOn("Pushed the fix.")).toContain("Hedge blocked this stop: your PR is not proven.");
   });
 
+  test("runs the proof check before the wake check, so a bare wait with an unproven PR first hears the proof step it owes", async () => {
+    const { home, checkout, thread, gate, head } = await lane();
+    const routed = hookWith(() => async () => ({ threads: [thread()] }), { threadId: "lane", hidden: async () => true, git: gitWithTestConfig, processes: loneLane });
+    const transcript = join(temp.make("transcript-"), "session.jsonl");
+    writeFileSync(transcript, `${JSON.stringify({ type: "user", message: { role: "user", content: "Ship it" } })}\n`);
+    const stopOn = async (message: string) => JSON.parse((await routed("claude", async () => JSON.stringify({ transcript_path: transcript, cwd: checkout, last_assistant_message: message }), home)).stdout).reason as string;
+    const bareWait = "Pushed the fix.\n\n⏳ **Waiting on** CI";
+    expect(await stopOn(bareWait)).toContain("Hedge blocked this stop: your PR is not proven.");
+    await gate(head, 0);
+    expect(await stopOn(bareWait)).toContain("nothing will wake this thread");
+  });
+
+  test("lets an owed proof step pass when the proof check answers after the shared deadline, after a read that did not yield", async () => {
+    const { home, checkout, thread } = await lane();
+    let clock = 0;
+    const slowTable = { ...loneLane, table: async () => { clock += 10_001; return loneLane.table(); } };
+    const routed = hookWith(() => async () => ({ threads: [thread()] }), { threadId: "lane", hidden: async () => true, git: gitWithTestConfig, processes: slowTable, deadline: () => new Promise<void>(() => {}), now: () => clock });
+    const transcript = join(temp.make("transcript-"), "session.jsonl");
+    writeFileSync(transcript, `${JSON.stringify({ type: "user", message: { role: "user", content: "Ship it" } })}\n`);
+    expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript, cwd: checkout, last_assistant_message: "Pushed the fix." }), home)).stdout).toBe("");
+  });
+
   test("lets an unproven stop pass while the kill switch exists, and still runs the prose guard", async () => {
     const { home, checkout, thread } = await lane();
     mkdirSync(join(home, ".config/hedge"), { recursive: true });
