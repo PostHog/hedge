@@ -143,7 +143,7 @@ test("hedge proof respond refuses answers to a round without findings", async ()
 
 const twoFindings = "FINDINGS:\n- feature.txt:1 | major | Correctness | an empty name -> a blank greeting | anchor: greet the new member\n- feature.txt:1 | major | Correctness | a returning member -> a second greeting | anchor: greet the new member\nCOVERED: feature.txt\n";
 
-test("hedge proof show prints no list for a round it reads as reserved, even when findings land on disk after that read", async () => {
+test("hedge proof show names a round with saved findings and no recorded reviewer as such, and prints its list", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "greet the new member\n");
   await pr.hedge("require", "--none", "--reason", "docs only");
@@ -153,8 +153,9 @@ test("hedge proof show prints no list for a round it reads as reserved, even whe
   const shown = await pr.hedge("show", "--round", "1");
 
   expect(shown.code).toBe(0);
-  expect(shown.output).toContain("reserved, no findings yet");
-  expect(shown.output).not.toContain("Answer each finding by these numbers");
+  expect(shown.output).toMatch(/^round 1 on [0-9a-f]{7}: findings saved, no reviewer recorded yet: /);
+  expect(shown.output).not.toContain("no findings yet");
+  expect(shown.output).toContain("Answer each finding by these numbers, in hedge proof respond:\n1. feature.txt:1 | major | Correctness | an empty name");
 });
 
 async function singleFindingRound(review = "FINDINGS:\n- feature.txt:1 | major | Correctness | an empty name -> a blank greeting | anchor: greet the new member\nCOVERED: feature.txt\n") {
@@ -184,7 +185,7 @@ test("hedge proof respond refuses a code fence in any form, since every numbered
   const fences = ["```text", "~~~", "    ```", "\t~~~", "```first```", "````", "- ```text", "3. ~~~", "  * - ```", "\uFEFF```", "\u00a0```", "2. fixed: a\r```"];
   for (const fence of fences) {
     writeFileSync(join(pr.repository, "responses.md"), fence.startsWith("\uFEFF") ? `${fence}\n1. fixed: from an earlier round\n` : `1. fixed: the greeting guards an empty name\n${fence}\n2. rejected: from an earlier round\n`);
-    await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("responses.md holds a code fence, a line that starts with ``` or ~~~. Every numbered line counts as an answer, quoted or not. Quote an earlier answer with > and write code in single backticks.");
+    await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("responses.md holds a code fence, a line that starts with ``` or ~~~. Every numbered line counts as an answer, also inside a fence. Quote an earlier answer with >, which answers nothing, and write code in single backticks.");
   }
 });
 
@@ -209,7 +210,7 @@ test("a finding marked with a number and a nonbreaking space prints under its ow
   expect((await pr.hedge("show", "--round", "1")).output).toContain("Answer each finding by these numbers, in hedge proof respond:\n1. feature.txt:1 | major |");
 });
 
-test("an answer number too long for a JavaScript number is named as written", async () => {
+test("an answer number too long for a JavaScript number is named in full", async () => {
   const pr = await singleFindingRound();
   writeFileSync(join(pr.repository, "responses.md"), "1. fixed: the greeting guards an empty name\n123456789012345678901234567890. rejected: no such finding\n");
 

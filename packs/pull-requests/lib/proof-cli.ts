@@ -321,9 +321,8 @@ final read that hedge dropped unanswered, with its cause.`,
     run: async ({ options }, identity, context) => {
       const directory = await reviewDirectory(context.home, identity(), roundOption(options));
       const dropped = (await droppedFinalReads(context.home, identity())).map(({ line, cause }) => cause ? `${line}; cause: ${cause}` : line);
-      const { lines, finished } = await roundLines(directory, context);
+      const { lines, findings } = await roundLines(directory, context);
       for (const line of lines) context.print(line);
-      const findings = finished ? await savedFindings(directory).catch((error: unknown) => error instanceof Error ? error : new Error(String(error))) : undefined;
       if (typeof findings === "string") printAnswerNumbers(findings, context.print);
       for (const line of dropped) context.print(line);
       if (!(findings instanceof Error)) return 0;
@@ -1076,14 +1075,15 @@ function positive(value: string, option: string, name: string) {
 async function roundLines(directory: string, { now }: CommandContext) {
   const round = await readJson<{ round: number | "final"; commit: string; reviewer?: string; capturedBy?: string; standing?: { reason: string; until: string }; decision?: { mark: string; id: string } } | undefined>(join(directory, "round.json"), undefined);
   if (!round) throw new Error(`${directory} has no reservation`);
-  const finished = round.reviewer ? `finished by ${round.reviewer}, ${round.capturedBy === "hedge" ? "captured by hedge" : "saved by the author"}: ${join(directory, "findings.md")}` : "reserved, no findings yet";
+  const findings = await savedFindings(directory).catch((error: unknown) => error instanceof Error ? error : new Error(String(error)));
+  const finished = round.reviewer ? `finished by ${round.reviewer}, ${round.capturedBy === "hedge" ? "captured by hedge" : "saved by the author"}: ${join(directory, "findings.md")}` : findings === undefined ? "reserved, no findings yet" : `findings saved, no reviewer recorded yet: ${join(directory, "findings.md")}`;
   const header = `${round.round === "final" ? "final read" : `round ${round.round}`} on ${short(round.commit)}: ${finished}`;
   const anchors = join(directory, "anchors.md");
   const standing = round.standing ? [`accepted by the standing rule until ${round.standing.until}: ${round.standing.reason}`] : [];
   if (round.decision) standing.push(`decided by ${round.decision.mark} decision ${round.decision.id}`);
   const plan = await readPlan(directory);
   const panel = plan ? [...plan.tier ? [tierLine(plan.tier)] : [], ...await panelLines(directory, now?.() ?? new Date())] : [];
-  return { lines: [header, ...(existsSync(anchors) ? [`anchor check by hedge: ${anchors}`] : []), ...standing, ...panel], finished: Boolean(round.reviewer) };
+  return { lines: [header, ...(existsSync(anchors) ? [`anchor check by hedge: ${anchors}`] : []), ...standing, ...panel], findings };
 }
 
 const tierLine = ({ name, why }: ReviewTier) => `review tier: ${name}: ${why}`;
