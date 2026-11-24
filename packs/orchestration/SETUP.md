@@ -105,9 +105,10 @@ The stop passes when any of these holds:
   its checks still run or are not read yet after a push, or its PR merged,
   and the PR's stack did not dismiss it. This is T3's own rule for an
   awaited watch task. T3 shows no task while a turn runs, so the check
-  reads the watch on the PR itself. A watch whose checks finished, such as
-  one on a PR in the merge queue, one that waits on an approval, or one on
-  a closed PR, is no wait unless it runs `until: "merged"`;
+  reads the watch on the PR itself. A watch whose checks finished is no
+  wait unless it runs `until: "merged"` or its PR merged, such as one on a
+  PR in the merge queue, one that waits on an approval, or one on a closed
+  PR. A closed PR's watch whose checks still run still counts;
 - on Claude, a subagent, a monitor, a background shell, or a session cron
   runs;
 - an enabled scheduled task bound to the thread has a next run time in
