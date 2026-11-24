@@ -160,9 +160,9 @@ const writable = { ...linkedEnvironment, access: "full-access" };
 test("hedge thread send leaves auto to T3 for a running turn that waits on a question card on this machine", async () => {
   const t3 = await stub(fixture([linkedEnvironment], linkedThreads, [localCard]));
 
-  const { output } = await thread(t3, ["send", "--host", "this-box", "mcp:local-card", "/goal Continue the migration"]);
+  const { output } = await thread(t3, ["send", "--host", "this-box", "mcp:local-card", "FYI"]);
 
-  expect(sends(t3)).toEqual([expect.objectContaining({ threadId: "mcp:local-card", message: "/goal Continue the migration", mode: "auto" })]);
+  expect(sends(t3)).toEqual([expect.objectContaining({ threadId: "mcp:local-card", message: "FYI", mode: "auto" })]);
   expect(JSON.parse(output)).toMatchObject({ threadId: "mcp:local-card", delivery: "steered" });
 });
 
