@@ -84,11 +84,14 @@ test("on a one-way door the stop holds when the arbiter later answers CONTINUE",
   pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo CONTINUE";
 
   await expect(pr.hedge(...third)).rejects.toThrow("The review loop stopped at an escalation on a one-way door: Round 2 undoes the rename round 1 asked for. On a one-way door the review loop stops here");
+  pr.env.HEDGE_SETTINGS = JSON.stringify(settings);
+  await expect(pr.hedge(...third)).rejects.toThrow("The review loop stopped at an escalation on a one-way door");
 });
 
 test("on a one-way door the user's override still runs the escalated round", async () => {
   const pr = await checkout();
   const third = await stoppedOneWay(pr);
+  await expect(pr.hedge(...third)).rejects.toThrow("the review loop stops here");
   pr.choose("Run one more round");
 
   const round = await pr.hedge(...third, "--override", `2026-11-14 "Run one more round"`, "--thread", "thread-1");

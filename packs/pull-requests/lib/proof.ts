@@ -248,7 +248,7 @@ async function permitReview(home: string, identity: ProofIdentity, due: boolean,
   if (decision?.mark === "👤") return undefined;
   if (ceiling) throw new Error(ceiling);
   const stopped = await readOneWayStop(home, identity);
-  if (stopped && permit.autonomy?.() === "user") throw new Error(`The review loop stopped at an escalation on a one-way door: ${stopped.reason}. ${await oneWayStop(home, identity, permit.onHistory)}`);
+  if (stopped) throw new Error(`The review loop stopped at an escalation on a one-way door: ${stopped.reason}. ${await oneWayStop(home, identity, permit.onHistory)}`);
   if (!due) return undefined;
   const verdict = await permit.arbiter(await arbiterPrompt(home, identity));
   if (verdict.verdict === "continue") return verdict;
