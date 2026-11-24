@@ -341,11 +341,11 @@ final read that hedge dropped unanswered, with its cause.`,
   respond: {
     usage: "respond --round <number|final-n> <responses.md>",
     summary: `Save your answer to each finding of a finished review: fixed in which commit, or rejected and why. Number the
-answers by the list that hedge proof review and hedge proof show print under "Answer each finding by these numbers":
-each lens's findings in order, then every TESTS item. One line each, such as "1. fixed in 1a2b3c4: <how>" or "2. rejected: <why>". Once
+answers by the list that hedge proof review and hedge proof show print under "Answer each finding by these numbers",
+never by counting findings.md yourself. One line each, such as "1. fixed in 1a2b3c4: <how>" or "2. rejected: <why>". Once
 the review budget is spent, "3. known: <why>" answers a finding that the PR body lists by its file:line under Known
 issues; a known blocker holds the merge. In a review with a FINDINGS block, the block runs to the next TESTS line or
-unindented COVERED line, and prose outside FINDINGS and TESTS is no finding; the list hedge prints is the one to answer by. An answer numbered past the last finding is refused, and so is a code fence, also one that
+unindented COVERED line, and prose outside FINDINGS and TESTS is no finding. An answer numbered past the last finding is refused, and so is a code fence, also one that
 opens a list item: quote an earlier answer with > and write code in single
 backticks. The gate fails while a finding has no answer. A new call replaces the earlier answer. A final read takes the id that review-start printed. The judge in hedge proof gate checks
 each answer against HEAD.`,
