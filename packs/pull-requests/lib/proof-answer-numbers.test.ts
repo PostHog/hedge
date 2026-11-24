@@ -78,9 +78,15 @@ test("hedge proof respond refuses answers numbered past the last finding, so the
   await expect(refused).rejects.toThrow(`Round 1 has 12 findings; answers numbered past them: 13 to ${readingOrderItems}.`);
   await expect(refused).rejects.toThrow(numbered);
 
-  const byNumbers = items.map((_, index) => `${index + 1}. rejected: answer ${index + 1}\n`).join("");
+  const byNumbers = readingOrder.split("\n").slice(0, items.length).join("\n") + "\n";
   writeFileSync(join(pr.repository, "responses.md"), byNumbers);
   expect((await pr.hedge("respond", "--round", "1", "responses.md")).code).toBe(0);
+});
+
+test("the receipt shows each answer next to the finding its listed number names", async () => {
+  const { pr } = await panelRound();
+  writeFileSync(join(pr.repository, "responses.md"), items.map((_, index) => `${index + 1}. rejected: answer ${index + 1}\n`).join(""));
+  await pr.hedge("respond", "--round", "1", "responses.md");
 
   const page = await receiptPage(pr);
   for (const [index, lens] of lenses.entries()) {
@@ -183,6 +189,15 @@ test("a finding marked with a number and a nonbreaking space prints under its ow
   const pr = await singleFindingRound("FINDINGS:\n7.\u00a0feature.txt:1 | major | Correctness | an empty name -> a blank greeting | anchor: greet the new member\nCOVERED: feature.txt\n");
 
   expect((await pr.hedge("show", "--round", "1")).output).toContain("Answer each finding by these numbers, in hedge proof respond:\n1. feature.txt:1 | major |");
+});
+
+test("the fence check reads a long run of bare carriage returns in one pass", async () => {
+  const pr = await singleFindingRound();
+  writeFileSync(join(pr.repository, "responses.md"), `1. fixed: the greeting guards an empty name\n${"\r".repeat(32_000)}\n`);
+  const started = performance.now();
+
+  expect((await pr.hedge("respond", "--round", "1", "responses.md")).code).toBe(0);
+  expect(performance.now() - started).toBeLessThan(400);
 });
 
 test("an answer number too long for a JavaScript number is named as written", async () => {

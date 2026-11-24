@@ -642,7 +642,7 @@ export async function respondToReview(home: string, identity: ProofIdentity, rou
   const directory = await roundDirectory(home, identity, round);
   const findings = await savedFindings(directory);
   if (findings === undefined) throw new Error(`Review round ${round} has no findings yet`);
-  if (fenceLine.test(bytes.toString())) throw new Error(`${responses} holds a code fence, a line that starts with \`\`\` or ~~~. Every numbered line counts as an answer, quoted or not. Quote an earlier answer with > and write code in single backticks.`);
+  if (bytes.toString().split("\n").some((line) => fenceLine.test(line))) throw new Error(`${responses} holds a code fence, a line that starts with \`\`\` or ~~~. Every numbered line counts as an answer, quoted or not. Quote an earlier answer with > and write code in single backticks.`);
   const { count, past } = numbersPast(findings, bytes.toString());
   if (past.length && !count) throw new Error(`Round ${round} has no findings, so it needs no answers.`);
   if (past.length) throw new Error(`Round ${round} has ${count} findings; answers numbered past them: ${spans(past)}. Number your answers by this list, which hedge proof show --round ${round} prints too:\n${answerNumbers(findings)}`);
@@ -662,7 +662,7 @@ export async function respondToReview(home: string, identity: ProofIdentity, rou
 }
 
 const findingItem = /^\s*(?:[-*]|\d+[.)])\s+\S/;
-const fenceLine = /^\uFEFF?[^\S\n]*(?:(?:[-*+]|\d+[.)])[^\S\n]+)*(?:`{3}|~{3})/m;
+const fenceLine = /^\uFEFF?\s*(?:(?:[-*+]|\d+[.)])\s+)*(?:`{3}|~{3})/;
 const answerItem = /^\s*(?:[-*]\s+)?(\d+)[.):]\s+\**(fixed|rejected|known)\b/i;
 
 const noFinding = /^(?:#.*|no findings\.?|findings:?|\(none\))$/i;
