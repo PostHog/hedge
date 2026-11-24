@@ -88,40 +88,48 @@ describe("resolve", () => {
       expect(report.findings.filter((finding) => finding.say.includes("repeats the heading"))).toEqual([expect.objectContaining({ pack: "mine", todo: true, say: expect.stringContaining('Section "My rules" of the mine pack repeats the heading "tests" of standards') })]);
     });
 
-    test("is reported when its own title repeats a heading", () => {
-      expect(repeats("tEsTs", "Name each test after its behaviour.\n").repeatedHeadings).toEqual([{ pack: "mine", guide: "rules", section: "tEsTs", heading: "tEsTs", owner: "standards" }]);
+    const todos = async (result: Plan) => (await apply(result, { home: temp.make("home-"), dryRun: true })).findings.flatMap((finding) => {
+      const heading = finding.todo ? finding.say.match(/ repeats the heading "(.+?)" of /)?.[1] : undefined;
+      return heading === undefined ? [] : [heading];
     });
 
-    test("is reported once for each heading it repeats", () => {
-      const ownerText = "# Coding standards\n\n## Tests\n\n## Naming\n";
-      expect(repeats("My rules", "### Tests\n\n### Naming\n", ownerText).repeatedHeadings?.map((entry) => entry.heading)).toEqual(["Tests", "Naming"]);
+    test("is reported when its own title repeats a heading", async () => {
+      expect(await todos(repeats("tEsTs", "Name each test after its behaviour.\n"))).toEqual(["tEsTs"]);
     });
 
-    test("is found between two horizontal rules at the top of the guide", () => {
-      expect(repeats("My rules", "### Tests\n", "---\n## Tests\n---\n\nMore\n").repeatedHeadings).toHaveLength(1);
+    test("is reported once for each heading it repeats", async () => {
+      expect(await todos(repeats("My rules", "### Tests\n\n### Naming\n", "# Coding standards\n\n## Tests\n\n## Naming\n"))).toEqual(["Tests", "Naming"]);
+    });
+
+    test("is found between two horizontal rules at the top of the guide", async () => {
+      expect(await todos(repeats("My rules", "### Tests\n", "---\n## Tests\n---\n\nMore\n"))).toEqual(["Tests"]);
     });
 
     test("is reported once when its title and its text repeat the same heading", async () => {
-      const report = await apply(repeats("Tests", "### tests\n"), { home: temp.make("home-"), dryRun: true });
-      expect(report.findings.filter((finding) => finding.say.includes("repeats the heading"))).toHaveLength(1);
+      expect(await todos(repeats("Tests", "### tests\n"))).toEqual(["Tests"]);
     });
 
-    test("is not looked for on a Bun without a Markdown parser, and the section is still written", () => {
+    test("is matched in letters whose lower case depends on their place", async () => {
+      expect(await todos(repeats("My rules", "### Λόγος\n", "# Rules\n\n## ΛΌΓΟΣ\n"))).toEqual(["Λόγος"]);
+    });
+
+    test("is not looked for on a Bun without a Markdown parser, and the section is still written", async () => {
       const bun = Bun as { markdown?: unknown };
       const parser = bun.markdown;
       bun.markdown = undefined;
       try {
-        const result = repeats("My rules", "### Tests\n");
-        expect(result.repeatedHeadings).toBeUndefined();
-        expect(file(result, ".agents/guides/rules.md")).toContain("## My rules\n\n### Tests");
+        const home = temp.make("home-");
+        const report = await apply(repeats("My rules", "### Tests\n"), { home });
+        expect(report.findings.filter((finding) => finding.say.includes("repeats the heading"))).toEqual([]);
+        expect(readFileSync(join(home, ".agents/guides/rules.md"), "utf8")).toContain("## My rules\n\n### Tests");
       } finally {
         bun.markdown = parser;
       }
     });
 
-    test("is found in setext and indented headings", () => {
-      expect(repeats("My rules", "  ## Tests\n").repeatedHeadings).toHaveLength(1);
-      expect(repeats("My rules", "Tests\n-----\n").repeatedHeadings).toHaveLength(1);
+    test("is found in setext and indented headings", async () => {
+      expect(await todos(repeats("My rules", "  ## Tests\n"))).toEqual(["Tests"]);
+      expect(await todos(repeats("My rules", "Tests\n-----\n"))).toEqual(["Tests"]);
     });
 
     test.each([
@@ -129,8 +137,8 @@ describe("resolve", () => {
       ["a code block of the section", "My rules", "````md\n```\n## Tests\n````\n", owner],
       ["an HTML comment", "My rules", "<!--\n## Tests\n-->\n", owner],
       ["a closing hash that is part of the text", "My rules", "## Tests#\n", owner],
-    ])("is not found in %s", (_, section, text, ownerText) => {
-      expect(repeats(section, text, ownerText).repeatedHeadings).toBeUndefined();
+    ])("is not found in %s", async (_, section, text, ownerText) => {
+      expect(await todos(repeats(section, text, ownerText))).toEqual([]);
     });
   });
 

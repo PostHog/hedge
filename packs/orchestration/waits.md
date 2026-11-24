@@ -6,7 +6,7 @@ How a T3 thread waits, and what Hedge checks before a turn ends.
 
 - **Working**: a turn runs, or the thread waits on something that wakes it: a pull request watch, a child task, a thread wait, or a background command.
 - **My move**: the turn ended, and nothing wakes the thread. It is in my inbox.
-- **Settled**: the thread owns no open pull request and asks nothing, or it waits only on its own scheduled check.
+- **Settled**: the thread owns no open pull request and asks nothing. It may wait on its own scheduled check.
 - **Snoozed**: hidden until a date. Snooze a thread only when I ask for it. A snooze hides the thread's pull requests and questions behind a timer.
 
 ## Waiting on an event
