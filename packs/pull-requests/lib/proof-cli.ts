@@ -1076,7 +1076,7 @@ async function roundLines(directory: string, { now }: CommandContext) {
   const round = await readJson<{ round: number | "final"; commit: string; reviewer?: string; capturedBy?: string; standing?: { reason: string; until: string }; decision?: { mark: string; id: string } } | undefined>(join(directory, "round.json"), undefined);
   if (!round) throw new Error(`${directory} has no reservation`);
   const findings = await savedFindings(directory).catch((error: unknown) => error instanceof Error ? error : new Error(String(error)));
-  const finished = round.reviewer ? `finished by ${round.reviewer}, ${round.capturedBy === "hedge" ? "captured by hedge" : "saved by the author"}: ${join(directory, "findings.md")}` : findings === undefined ? "reserved, no findings yet" : `findings saved, no reviewer recorded yet: ${join(directory, "findings.md")}`;
+  const finished = round.reviewer ? `finished by ${round.reviewer}, ${round.capturedBy === "hedge" ? "captured by hedge" : "saved by the author"}: ${join(directory, "findings.md")}` : typeof findings === "string" ? `findings saved, no reviewer recorded yet: ${join(directory, "findings.md")}` : "reserved, no findings yet";
   const header = `${round.round === "final" ? "final read" : `round ${round.round}`} on ${short(round.commit)}: ${finished}`;
   const anchors = join(directory, "anchors.md");
   const standing = round.standing ? [`accepted by the standing rule until ${round.standing.until}: ${round.standing.reason}`] : [];

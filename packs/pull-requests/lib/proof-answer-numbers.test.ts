@@ -180,12 +180,26 @@ test("hedge proof show fails on a finished round whose findings it cannot read",
   expect(shown.output).toContain("hedge cannot read the findings of this round: EISDIR");
 });
 
+test("hedge proof show reads a reserved round with unreadable findings as reserved, then names the read error", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet the new member\n");
+  await pr.hedge("require", "--none", "--reason", "docs only");
+  await pr.hedge("review-start", "--scope", "full");
+  mkdirSync(join(pr.pullRequest, "reviews/1/findings.md"));
+
+  const shown = await pr.hedge("show", "--round", "1");
+
+  expect(shown.code).toBe(1);
+  expect(shown.output).toMatch(/^round 1 on [0-9a-f]{7}: reserved, no findings yet\n/);
+  expect(shown.output).toContain("hedge cannot read the findings of this round: EISDIR");
+});
+
 test("hedge proof respond refuses a code fence in any form, since every numbered line counts as an answer", async () => {
   const pr = await singleFindingRound(twoFindings);
   const fences = ["```text", "~~~", "    ```", "\t~~~", "```first```", "````", "- ```text", "3. ~~~", "  * - ```", "\uFEFF```", "\u00a0```", "2. fixed: a\r```"];
   for (const fence of fences) {
     writeFileSync(join(pr.repository, "responses.md"), fence.startsWith("\uFEFF") ? `${fence}\n1. fixed: from an earlier round\n` : `1. fixed: the greeting guards an empty name\n${fence}\n2. rejected: from an earlier round\n`);
-    await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("responses.md holds a code fence, a line that starts with ``` or ~~~. Every numbered line counts as an answer, also inside a fence. Quote an earlier answer with >, which answers nothing, and write code in single backticks.");
+    await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("responses.md holds a code fence, a line that starts with ``` or ~~~. A numbered line that says fixed, rejected or known counts as an answer, also inside a fence. Quote an earlier answer with >, which answers nothing, and write code in single backticks.");
   }
 });
 
