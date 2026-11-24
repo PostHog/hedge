@@ -1,9 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
-import { spawnAsync } from "../../../src/testing/spawn.ts";
 import { join } from "node:path";
-import { acceptGap, checkout, cleanFixtures, fakeModel, finishRound, graded, markPanel, reviewHead, settings, verdict, type Checkout } from "./proof-testing.ts";
+import { acceptGap, checkout, cleanFixtures, fakeModel, finishRound, graded, reviewHead, settings, verdict, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
@@ -45,138 +43,14 @@ test("on end, an ungraded PR still sends an escalated round to the user", async 
 
 const oneWayDoor = () => graded("critical", "medium").replace("two-way door", "one-way door");
 
-async function stoppedOneWay(pr: Checkout) {
+test("on end, an escalated round on a one-way door goes to the agent like any other round", async () => {
+  const pr = await checkout();
   decideAtEnd(pr);
   pr.pullRequestState({ body: oneWayDoor() });
-  return escalatedRound(pr);
-}
+  const third = await escalatedRound(pr);
 
-test("on end, a one-way door stops the loop at an escalated round, asks the user nothing, and says to revert the fixes since the latest review", async () => {
-  const pr = await checkout();
-  const third = await stoppedOneWay(pr);
-  const reviewed = (await pr.git("rev-parse", "HEAD")).slice(0, 7);
-
-  const stop = pr.hedge(...third);
-  await expect(stop).rejects.toThrow(`The arbiter escalates: Round 2 undoes the rename round 1 asked for. On a one-way door the review loop stops here: ask the user nothing about another round. Revert each commit of the PR since ${reviewed} that changes production code`);
-  await expect(stop).rejects.toThrow(`answer its finding "<n>. known: <why>"`);
-  await expect(stop).rejects.not.toThrow("Ask the user with your question tool");
-  await expect(stop).rejects.not.toThrow("--agent");
-});
-
-test("on end, a one-way door stops the loop when the arbiter gives no verdict", async () => {
-  const pr = await checkout();
-  const third = await stoppedOneWay(pr);
-  pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo 'Maybe.'";
-
-  await expect(pr.hedge(...third)).rejects.toThrow("The arbiter gave no verdict: unparseable answer: Maybe.. On a one-way door the review loop stops here");
-});
-
-test("on a one-way door the agent's own decision cannot pass the stop", async () => {
-  const pr = await checkout();
-  const third = await stoppedOneWay(pr);
-
-  await expect(pr.hedge(...third, "--agent", "Round 1 asked for the rename as a nit")).rejects.toThrow("On a one-way door the review loop stops here");
-  await expect(pr.hedge("review-finish", "--round", "3", "--reviewer", "gpt-6.1-sol", "findings.md")).rejects.toThrow("not reserved");
-});
-
-test("on a one-way door the stop holds when the arbiter later answers CONTINUE", async () => {
-  const pr = await checkout();
-  const third = await stoppedOneWay(pr);
-  await expect(pr.hedge(...third)).rejects.toThrow("the review loop stops here");
-  pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo CONTINUE";
-
-  await expect(pr.hedge(...third)).rejects.toThrow("The review loop stopped at an escalation on a one-way door: Round 2 undoes the rename round 1 asked for. On a one-way door the review loop stops here");
-  pr.env.HEDGE_SETTINGS = JSON.stringify(settings);
-  await expect(pr.hedge(...third)).rejects.toThrow("The review loop stopped at an escalation on a one-way door");
-});
-
-test("on a one-way door the user's override still runs the escalated round", async () => {
-  const pr = await checkout();
-  const third = await stoppedOneWay(pr);
-  await expect(pr.hedge(...third)).rejects.toThrow("the review loop stops here");
-  pr.choose("Run one more round");
-
-  const round = await pr.hedge(...third, "--override", `2026-11-14 "Run one more round"`, "--thread", "thread-1");
-  expect(round.output).toContain(`"round":3`);
-});
-
-test("a finding is answered known after the one-way stop, and not before it", async () => {
-  const pr = await checkout();
-  const third = await stoppedOneWay(pr);
-  writeFileSync(join(pr.repository, "responses.md"), "1. known: listed under Known issues.\n");
-
-  await expect(pr.hedge("respond", "--round", "2", "responses.md")).rejects.toThrow(`Answer a finding "known" only once the review budget of 6 reviews is spent; 2 ran. Fix or reject it now. A stop of the review loop at an escalation on a one-way door allows it too`);
-  await expect(pr.hedge(...third)).rejects.toThrow("the review loop stops here");
-  expect((await pr.hedge("respond", "--round", "2", "responses.md")).code).toBe(0);
-});
-
-async function stoppedAfterFix(pr: Checkout) {
-  const third = await stoppedOneWay(pr);
-  const reviewed = (await pr.git("rev-parse", "HEAD")).slice(0, 7);
-  const stopped = (await pr.commit("feature.txt", "newer\n")).slice(0, 7);
-  return { third, reviewed, stopped, stop: pr.hedge(...third).then(() => "", (error: Error) => error.message) };
-}
-
-test("the stop names the latest review as the start of the fixes to revert", async () => {
-  const pr = await checkout();
-  const { reviewed, stop } = await stoppedAfterFix(pr);
-
-  expect(await stop).toContain(`Revert each commit of the PR since ${reviewed} that changes production code`);
-});
-
-test("the end table names the commit the loop stopped at", async () => {
-  const pr = await checkout();
-  const { stopped, stop } = await stoppedAfterFix(pr);
-  await stop;
-  await pr.hedge("gate");
-
-  expect((await pr.decide("report", "--pr", "example/product#42")).output).toContain(`| example/product#42 | 2 rounds; stopped at an escalation on a one-way door at ${stopped} |`);
-});
-
-test("a round that weighs the budget while another call stops the loop is refused", async () => {
-  const pr = await checkout();
-  const third = await stoppedOneWay(pr);
-  const [started, go] = ["started", "go"].map((name) => join(pr.home, name));
-  await spawnAsync(["mkfifo", started, go]);
-  pr.env.HEDGE_REVIEW_ARBITER = `cat >/dev/null; if mkdir "${pr.home}/first" 2>/dev/null; then echo > "${started}"; read line < "${go}"; echo CONTINUE; else echo 'ESCALATE: Round 2 undoes the rename round 1 asked for.'; fi`;
-
-  const slow = pr.hedge(...third);
-  await readFile(started, "utf8");
-  await expect(pr.hedge(...third)).rejects.toThrow("the review loop stops here");
-  await writeFile(go, "go\n");
-
-  await expect(slow).rejects.toThrow("The reviews changed while this one weighed the budget");
-  await expect(pr.hedge("show", "--round", "3")).rejects.toThrow("has no reservation");
-});
-
-test("when no review is on HEAD's history, the stop names no commit to revert", async () => {
-  const pr = await checkout();
-  const third = await stoppedOneWay(pr);
-  const reviewed = (await pr.git("rev-parse", "HEAD")).slice(0, 7);
-  await pr.git("reset", "-q", "--hard", "main");
-  await pr.commit("feature.txt", "rebased\n");
-
-  const stop = await pr.hedge(...third).then(() => "", (error: Error) => error.message);
-
-  expect(stop).toContain("On a one-way door the review loop stops here: ask the user nothing about another round. No finished review of this PR is on HEAD's history, so hedge names no commit to revert: only the user's --override reads HEAD.");
-  expect(stop).not.toContain(reviewed);
-});
-
-test("the gate's judge reads that hedge stopped the review loop", async () => {
-  const pr = await checkout();
-  const third = await stoppedOneWay(pr);
-  const stopped = (await pr.git("rev-parse", "HEAD")).slice(0, 7);
-  await expect(pr.hedge(...third)).rejects.toThrow("the review loop stops here");
-  await pr.hedge("require", "--none", "--reason", "Docs only");
-  markPanel(pr, "1");
-  for (const round of ["1", "2"]) {
-    writeFileSync(join(pr.repository, "responses.md"), "1. rejected: the fixture finding names no line.\n");
-    await pr.hedge("respond", "--round", round, "responses.md");
-  }
-  const judge = fakeModel(pr, "JUDGE", verdict());
-  await pr.hedge("gate");
-
-  expect(judge.prompts().at(-1)).toContain(`Hedge stopped the review loop at an escalation on a one-way door at ${stopped}`);
+  await expect(pr.hedge(...third)).rejects.toThrow("The arbiter escalates: Round 2 undoes the rename round 1 asked for. Decide the round yourself: run this command again with --agent '<your reason>'");
+  expect((await pr.hedge(...third, "--agent", "Round 1 asked for the rename as a nit")).code).toBe(0);
 });
 
 test("on ask, a one-way door still asks the user about an escalated round, and a known answer waits for the budget", async () => {
@@ -197,6 +71,29 @@ test("on ask, an escalated round asks the user as before", async () => {
   await expect(pr.hedge(...third)).rejects.toThrow("Ask the user with your question tool");
 });
 
+test("on end, fixes rounds and final reads past the budget share the agent's three reads, and then the budget holds", async () => {
+  const pr = await checkout();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.reviewCeiling": 2, "pull-requests.autonomy": "end" });
+  pr.pullRequestState({ body: graded("non-critical", "medium") });
+  let reviewed = await pr.commit("feature.txt", "new\n");
+  await pr.hedge("review-start", "--scope", "full");
+  await finishRound(pr, "1");
+  pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo CONTINUE";
+  const fixesRound = async (round: number, ...args: string[]) => {
+    const head = await pr.commit("feature.txt", `fix ${round}\n`);
+    await pr.hedge("review-start", "--scope", "fixes", "--base", reviewed, ...args);
+    await finishRound(pr, String(round));
+    reviewed = head;
+  };
+  await fixesRound(2);
+
+  for (const round of [3, 4]) await fixesRound(round, "--agent", "The last fix changed the greeting.");
+  await pr.commit("feature.txt", "fix final\n");
+  expect((await pr.hedge("review-start", "--scope", "final", "--base", reviewed, "--agent", "The last fix changed the greeting.")).code).toBe(0);
+  await finishRound(pr, "final-1");
+  await expect(fixesRound(5, "--agent", "The last fix changed the greeting.")).rejects.toThrow("The agent's 3 reads past the budget are spent too");
+});
+
 test("on end, a gap prints the agent's own decision, and the ledger takes it", async () => {
   const pr = await checkout();
   decideAtEnd(pr);
@@ -213,18 +110,45 @@ test("on end, a gap prints the agent's own decision, and the ledger takes it", a
   expect((await pr.decide("list", "--class", "proof-gap")).output).toContain("🤖 **Accept the prod-shape gap? example/product#42: No production read access** Accept the gap");
 });
 
-test("on end, a panel gap, any gap on a one-way door, and a product gap on a critical PR still go to the user", async () => {
+test("on end, a panel gap, any gap on a one-way door, and a product gap on a critical PR go to the agent", async () => {
   const pr = await checkout();
   decideAtEnd(pr);
   pr.pullRequestState({ body: graded("non-critical") });
   await pr.commit("feature.txt", "new\n");
 
-  expect((await pr.hedge("gap", "--kind", "panel", "--reason", "A docs-only lane")).output).toContain("Ask the user with your question tool");
-  pr.pullRequestState({ body: graded("non-critical").replace("two-way door", "one-way door") });
-  expect((await pr.hedge("gap", "--kind", "post-deploy-watch", "--reason", "No dashboard yet")).output).toContain("Ask the user with your question tool");
+  expect((await pr.hedge("gap", "--kind", "panel", "--reason", "A docs-only lane")).output).toContain("Decide the gap yourself");
+  pr.pullRequestState({ body: oneWayDoor() });
+  expect((await pr.hedge("gap", "--kind", "prod-shape", "--reason", "No production read access")).output).toContain("Decide the gap yourself");
   pr.pullRequestState({ body: graded("critical", "high") });
-  expect((await pr.hedge("gap", "--kind", "prod-shape", "--reason", "No production read access")).output).toContain("Ask the user with your question tool");
-  expect((await pr.hedge("gap", "--kind", "post-deploy-watch", "--reason", "No dashboard yet")).output).toContain("Decide the gap yourself");
+  expect((await pr.hedge("gap", "--kind", "prod-shape", "--reason", "No production read access")).output).toContain("Decide the gap yourself");
+});
+
+const acceptAlone = (pr: Checkout, kind: string, reason: string) =>
+  pr.decide("record", "--mark", "🤖", "--class", "proof-gap", "--kind", kind, "--pr", "example/product#42", "--question", `Accept the ${kind} gap? example/product#42: ${reason}`, "--answer", "Accept the gap", "--rejected", "Keep the gap open", "--reason", "The change reads no stored rows");
+
+test("on end, the gate counts the agent's acceptance of a panel gap and of a product gap on a one-way door", async () => {
+  const pr = await checkout();
+  decideAtEnd(pr);
+  pr.pullRequestState({ body: oneWayDoor() });
+  await pr.commit("feature.txt", "new\n");
+  await pr.hedge("require", "--kinds", "prod-shape");
+  for (const [kind, reason] of [["panel", "A docs-only lane"], ["prod-shape", "No production read access"]] as const) {
+    await pr.hedge("gap", "--kind", kind, "--reason", reason);
+    expect((await acceptAlone(pr, kind, reason)).code).toBe(0);
+  }
+
+  const gate = (await pr.hedge("gate")).output;
+  expect(gate).toMatch(/prod-shape: gap from \w+, accepted by 🤖 decision/);
+  expect(gate).toMatch(/panel gap from \w+, accepted by 🤖 decision/);
+});
+
+test("on ask, the agent cannot accept a panel gap", async () => {
+  const pr = await checkout();
+  pr.pullRequestState({ body: graded("non-critical") });
+  await pr.commit("feature.txt", "new\n");
+  await pr.hedge("gap", "--kind", "panel", "--reason", "A docs-only lane");
+
+  await expect(acceptAlone(pr, "panel", "A docs-only lane")).rejects.toThrow("a panel gap is the user's to accept");
 });
 
 test("on end, the gate tells the agent to decide an open judge gap alone", async () => {
@@ -242,18 +166,60 @@ test("on end, the gate tells the agent to decide an open judge gap alone", async
   expect(gate.output).toContain("judge gap: not accepted: The judge reads feature.txt as code. Decide the gap yourself: run hedge decision record --mark 🤖 --class proof-gap --kind judge --pr example/product#42");
 });
 
-test("on a one-way door, the gate's first judge failure tells the agent to ask the user, never to decide alone", async () => {
+test("on end, the gate's first judge failure on a one-way door tells the agent to decide it alone", async () => {
   const pr = await checkout();
   decideAtEnd(pr);
-  pr.pullRequestState({ body: graded("non-critical").replace("two-way door", "one-way door") });
+  pr.pullRequestState({ body: oneWayDoor() });
   await pr.commit("feature.txt", "greet new members\n");
   await reviewHead(pr);
   await pr.hedge("require", "--none", "--reason", "Docs only");
   fakeModel(pr, "JUDGE", verdict({ owed: { verdict: "fail", reason: "feature.txt is code, not docs", citations: ["feature.txt"] } }));
 
   const gate = await pr.hedge("gate");
-  expect(gate.output).toContain("judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and ask the user; an agent never decides on a one-way door");
+  expect(gate.output).toContain("judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and decide it with hedge decision record --mark 🤖");
+});
+
+test("on ask, the gate's first judge failure on a one-way door tells the agent to ask the user", async () => {
+  const pr = await checkout();
+  pr.pullRequestState({ body: oneWayDoor() });
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  fakeModel(pr, "JUDGE", verdict({ owed: { verdict: "fail", reason: "feature.txt is code, not docs", citations: ["feature.txt"] } }));
+
+  const gate = await pr.hedge("gate");
+  expect(gate.output).toContain("judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and ask the user; on ask an agent never decides on a one-way door");
   expect(gate.output).not.toContain("--mark 🤖");
+});
+
+test("on end, the agent still decides no design ask alone on a critical PR", async () => {
+  const pr = await checkout();
+  decideAtEnd(pr);
+  pr.pullRequestState({ body: graded("critical", "medium") });
+  await pr.commit("feature.txt", "new\n");
+
+  await expect(pr.decide("record", "--mark", "🤖", "--class", "design", "--pr", "example/product#42", "--question", "Keep the greeting short?", "--answer", "Keep it short", "--rejected", "Make it long", "--reason", "Short reads better")).rejects.toThrow("example/product#42 is critical at HEAD: an agent decides only process there");
+});
+
+test("on end, a judge the arbiter stops tells the agent to decide the judge gap alone", async () => {
+  const pr = await checkout();
+  decideAtEnd(pr);
+  pr.pullRequestState({ body: graded("non-critical") });
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  fakeModel(pr, "JUDGE", verdict({ owed: { verdict: "fail", reason: "feature.txt is code, not docs", citations: ["feature.txt"] } }));
+  pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo 'ESCALATE: The judge failed the owed kinds three times.'";
+  for (const answer of ["First answer.", "Second answer.", "Third answer."]) {
+    writeFileSync(join(pr.repository, "responses.md"), `${answer}\n`);
+    await pr.hedge("respond", "--round", "1", "responses.md");
+    await pr.hedge("gate").catch(() => undefined);
+  }
+
+  const gate = (await pr.hedge("gate")).output;
+  expect(gate).toContain("judge: the arbiter stops the retries: The judge failed the owed kinds three times. First record hedge proof gap --kind judge --reason <why>, then do what it prints: decide the gap yourself with its hedge decision record --mark 🤖 command, or, on an ungraded PR or a gap the user keeps owed, ask the user its question");
+  expect(gate).not.toContain("escalate to the user");
+  expect(gate).not.toContain("or ask the user");
 });
 
 test("on end, the printed decision command quotes a gap reason so the shell passes it whole", async () => {

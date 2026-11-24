@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { armOf } from "./proof-triage.ts";
-import { answerFixed, checkout, cleanFixtures, fakeModel, graded, settings, type Checkout } from "./proof-testing.ts";
+import { answerFixed, checkout, cleanFixtures, fakeModel, graded, hubAt, settings, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
@@ -190,6 +190,69 @@ test("with triage on, a treated pull request on the standard path gets a hard bu
   await expect(pr.hedge(...third, "--agent", "One more read checks the last fix.")).rejects.toThrow("The review budget of 2 reviews is spent");
   pr.choose("Run one more round");
   expect((await pr.hedge(...third, "--override", `2026-10-25 "Run one more round"`)).code).toBe(0);
+});
+
+test("on end, the agent's own reason runs up to three reads past a spent treated budget, and then the budget holds", async () => {
+  const pr = await budgeted("on", graded("non-critical", "medium"));
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...JSON.parse(pr.env.HEDGE_SETTINGS!), "pull-requests.autonomy": "end" });
+  await firstLine(pr, "--single");
+  expect((await readAgain(pr, "1")).code).toBe(0);
+
+  const spent = await readAgain(pr, "final-1").then(() => "", (error: Error) => error.message);
+  expect(spent).toContain("The review budget of 2 reviews is spent, and no read checks the production changes since");
+  expect(spent).toContain("Decide yourself whether one more read is worth it: run this command again with --agent '<your reason>'. You may run 3 more reads past the budget this way");
+  expect(spent).not.toContain("--override");
+  expect(spent).toContain("Ask the user nothing about it. When no read is worth it: Revert each commit of the PR since");
+  const again = async () => pr.hedge("review", "--scope", "final", "--base", await latestReviewed(pr), "--agent", "The last fix changed the greeting.");
+  expect((await again()).code).toBe(0);
+  for (const answered of ["final-2", "final-3"]) expect((await readAgain(pr, answered, "--agent", "The last fix changed the greeting.")).code).toBe(0);
+
+  await expect(readAgain(pr, "final-4", "--agent", "The last fix changed the greeting.")).rejects.toThrow("The agent's 3 reads past the budget are spent too: ask the user nothing about another read");
+
+  const babysat = (answered: string, ...args: string[]) => readAgain(pr, answered, "--phase", "babysit", ...args);
+  expect((await pr.hedge("review", "--scope", "final", "--phase", "babysit", "--base", await latestReviewed(pr))).code).toBe(0);
+  expect((await babysat("final-5")).code).toBe(0);
+  await expect(babysat("final-6")).rejects.toThrow("You may run 3 more reads past the budget this way");
+});
+
+test("on end, a read past the budget that finds nothing still takes one of the agent's three reads", async () => {
+  const pr = await budgeted("on", graded("non-critical", "medium"));
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...JSON.parse(pr.env.HEDGE_SETTINGS!), "pull-requests.autonomy": "end" });
+  await firstLine(pr, "--single");
+  expect((await readAgain(pr, "1")).code).toBe(0);
+  await answerFixed(pr, "final-1");
+  fakeModel(pr, "REVIEWER", noFindings("feature.ts"));
+  const quietRead = async (line: number) => {
+    const base = await pr.git("rev-parse", "HEAD");
+    await pr.commit("feature.ts", `export const greet = (name: string) => \`${line} \${name}\`;\n`);
+    return pr.hedge("review", "--scope", "final", "--base", base, "--agent", "The last fix changed the greeting.");
+  };
+
+  for (const line of [1, 2, 3]) expect((await quietRead(line)).code).toBe(0);
+  await expect(quietRead(4)).rejects.toThrow("The agent's 3 reads past the budget are spent too");
+});
+
+test("on end, the user's override that takes over an unrecorded agent read past the budget leaves the agent all three reads", async () => {
+  const pr = await budgeted("on", graded("non-critical", "medium"));
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...JSON.parse(pr.env.HEDGE_SETTINGS!), "pull-requests.autonomy": "end" });
+  await firstLine(pr, "--single");
+  expect((await readAgain(pr, "1")).code).toBe(0);
+  await answerFixed(pr, "final-1");
+  fakeModel(pr, "REVIEWER", noFindings("feature.ts"));
+  const base = await pr.git("rev-parse", "HEAD");
+  await pr.commit("feature.ts", "export const greet = (name: string) => `hi ${name}`;\n");
+  const read = ["review", "--scope", "final", "--base", base];
+  const configured = JSON.parse(pr.env.HEDGE_SETTINGS!);
+  const hub = hubAt(pr, "drops appends");
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...configured, ...JSON.parse(pr.env.HEDGE_SETTINGS!) });
+  await expect(pr.hedge(...read, "--agent", "The last fix changed the greeting.")).rejects.toThrow("Not recorded");
+  hub.state.hub = "up";
+  pr.choose("Run one more round");
+  expect((await pr.hedge(...read, "--override", `2026-10-25 "Run one more round"`)).code).toBe(0);
+
+  await pr.commit("feature.ts", "export const greet = (name: string) => `hello ${name}`;\n");
+  const next = await pr.hedge("review", "--scope", "final", "--base", await latestReviewed(pr)).then(() => "", (error: Error) => error.message);
+  expect(next).toContain("You may run 3 more reads past the budget this way");
 });
 
 test("a treated pull request on the strict path gets three reads", async () => {
