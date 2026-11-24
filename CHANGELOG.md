@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### A wait needs something that wakes it
+
+- The question guard's Stop hook stops a top-level T3 thread once when its
+  last line starts with ⏳ or 🔕 and nothing can wake it: no PR watch held
+  until merge, no running child task or thread wait, and no scheduled task
+  bound to the thread. It tells the agent to call `watch_pull_request` with
+  `until: "merged"`, keep the lane's child, or schedule the check. It never
+  snoozes or settles the thread.
+
 ### A hard read budget for treated pull requests
 
 - With `pull-requests.triage` on or `split`, a treated pull request gets a

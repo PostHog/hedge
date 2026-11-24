@@ -7,6 +7,7 @@ import { matchThread, questionCard, type ShellThread, t3CliRunner, t3UserData, w
 import { backgroundReason, unwaitedBackgroundTasks } from "../lib/background-stop.ts";
 import { checksRun, claudeTaskRuns, proofStop, waits, type ProofStopEvent, type ProofStopOptions } from "../lib/proof-stop.ts";
 import { asksForDecision, asksInProse, personName, proseTitles } from "../lib/prose-question.ts";
+import { wakeStop } from "../lib/wake-stop.ts";
 
 export type StopEvent = { transcript_path?: string; stop_hook_active?: boolean; last_assistant_message?: string };
 export type StopBlock = { decision: "block"; reason: string };
@@ -217,7 +218,10 @@ async function guardStopAndProof(event: StopEvent & ProofStopEvent, home: string
   if (prose || existsSync(join(home, killSwitch))) return prose;
   const background = await guardBackground(event, home, threadId).catch(() => undefined);
   if (background) return background;
-  return proofStop({ ...event, last_assistant_message: await finalMessage(event) }, { home, shell, ...deps, threadId });
+  const last = await finalMessage(event);
+  const noWake = await wakeStop(event, last, { home, threadId, shell }).catch(() => undefined);
+  if (noWake) return noWake;
+  return proofStop({ ...event, last_assistant_message: last }, { home, shell, ...deps, threadId });
 }
 
 export const hookWith = (shell: (home: string) => ReadShell, stop: StopDeps = {}): Hook => async (_provider, readInput, home) => {
