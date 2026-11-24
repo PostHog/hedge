@@ -60,7 +60,7 @@ const numbersIn = (names: Iterable<string>, pattern: RegExp) => [...names].flatM
 function highestRecorded(ledger: string, kind: Kind): number {
   const { prefix, file } = kinds[kind];
   const rows = readFileSync(join(ledger, file), "utf8").split("\n");
-  return Math.max(0, ...numbersIn(rows, new RegExp(`^\\|\\s*${prefix}(\\d+)\\s*\\|`, "g")));
+  return Math.max(0, ...numbersIn(rows, new RegExp(`^\\|\\s*${prefix}(\\d+)[a-z]?\\s*\\|`, "g")));
 }
 
 function reservations(home: string, ledger: string): string {

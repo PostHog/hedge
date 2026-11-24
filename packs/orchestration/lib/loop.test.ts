@@ -62,6 +62,11 @@ describe("hedge loop next-id", () => {
     expect((await loop(["next-id", "--kind", "signal", "--ledger", dir])).out).toBe("S231");
   });
 
+  test("counts a follow-up lane with a letter after its number", async () => {
+    const dir = ledger({ "lanes.md": lanes("L064", "L065b") });
+    expect((await loop(["next-id", "--kind", "lane", "--ledger", dir])).out).toBe("L066");
+  });
+
   test("never hands out an id twice before the ledger records it", async () => {
     const home = temp.make("home-");
     const dir = ledger({ "lanes.md": lanes("L064") });

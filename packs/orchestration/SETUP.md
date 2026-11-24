@@ -152,7 +152,8 @@ Two commands give the loop skills the same facts:
 - `hedge loop check-pause [--ledger <dir>]` exits 0 while the loops run, 1
   while they are paused, and 3 when `limits.md` cannot be read.
 - `hedge loop next-id --kind lane|signal [--ledger <dir>]` prints the next
-  lane or signal id, one past the highest row in `lanes.md` or `signals.md`.
+  lane or signal id, one past the highest row in `lanes.md` or `signals.md`,
+  follow-up rows such as `L028b` included.
   It reserves each id with an exclusive file create under
   `~/.local/state/hedge/loop-ids/`, so two coordinators on one machine never
   get the same id. Write the row and push the ledger right after.
