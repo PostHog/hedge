@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { checkout, cleanFixtures, fakeModel, reviewHead, verdict, type Checkout } from "./proof-testing.ts";
 
@@ -123,6 +123,23 @@ test("dev-observed evidence saved after the dev merge carries to HEAD across a c
   expect(gate.output).toContain("dev result: example/product#11 merged at 2026-10-25T09:00:00Z");
 });
 
+test("dev-observed carries the nearest observation saved after the dev merge, past a nearer one saved before it", async () => {
+  const pr = await checkout();
+  fakeModel(pr, "JUDGE", verdict());
+  pr.pullRequestState({ number: 11, merged: true });
+  await pr.hedge("require", "--after-dev", "example/product#11");
+  const observed = await ranLiveRun(pr, undefined, "dev-observed");
+  const early = await pr.commit("feature.test.ts", "expect(greet(\"ada\")).toBe(\"hi ada\");\n");
+  expect((await pr.hedge("run", "--kind", "dev-observed", "--", "echo", "hi ada")).code).toBe(0);
+  const directory = join(pr.pullRequest, early, "dev-observed");
+  for (const name of readdirSync(directory)) utimesSync(join(directory, name), new Date("2026-10-25T08:00:00Z"), new Date("2026-10-25T08:00:00Z"));
+  await pr.commit("feature.spec.ts", "expect(greet(\"bo\")).toBe(\"hi bo\");\n");
+
+  const gate = await pr.hedge("gate");
+
+  expect(gate.output).toContain(`dev-observed: evidence of ${observed.slice(0, 7)} carried across 2 quiet commit(s) (test-only delta)`);
+});
+
 test("evidence at a commit carries to HEAD across commits that change only tests, verified by code, and stops at a production change", async () => {
   const pr = await checkout();
   const judge = fakeModel(pr, "JUDGE", verdict());
@@ -135,7 +152,7 @@ test("evidence at a commit carries to HEAD across commits that change only tests
   expect(carried.output).toContain(`live-run: evidence of ${proved.slice(0, 7)} carried across 1 quiet commit(s) (test-only delta); captured by the Hedge runner at ${proved.slice(0, 7)}`);
   const prompt = judge.prompts().at(-1)!;
   expect(prompt).toContain(`${verifiedAtHead} ${proved.slice(0, 7)}`);
-  expect(prompt).toContain("hedge carried it to HEAD across clean merges of the base and commits that change only test files no production file names.");
+  expect(prompt).toContain("hedge carried it to HEAD across the commits the gate's line names, each checked in code: clean merges of the base, commits that change only test files no production file names, and reverts of earlier commits of this PR.");
   expect(prompt).toContain(allVerified);
 
   await pr.commit("feature.ts", "export const greet = (name: string) => `hello ${name}`;\n");

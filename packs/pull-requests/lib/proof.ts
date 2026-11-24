@@ -1226,11 +1226,14 @@ async function devObservedStatus(weigh: Weigh, cleanBaseMerge: CleanBaseMerge, q
   const gapState = (): KindState => ({ state: "gap", accepted: acceptance !== undefined, gap: gapProof(gap, weighed, decisions) });
   if (acceptance?.by === "the user") return { ...status(undefined, gapState()), ...countedGap(weighed) };
   const proved = await provedCommits(home, identity, kind);
-  const head = proved.get(identity.commit);
-  const carried = head ? undefined : reviewedThrough(identity.commit, new Set(proved.keys()), cleanBaseMerge, quietCommit);
+  const savedAt = new Map(await Promise.all([...proved].map(async ([commit, proof]) => [commit, await newestFile(evidenceDirectory(home, identity, kind, proof))] as const)));
+  const afterMerge = new Set([...savedAt].filter(([, saved]) => dev?.mergedAt && saved !== undefined && saved >= nanosOf(dev.mergedAt)).map(([commit]) => commit));
+  const candidates = afterMerge.size ? afterMerge : new Set(proved.keys());
+  const head = candidates.has(identity.commit) ? proved.get(identity.commit) : undefined;
+  const carried = head ? undefined : reviewedThrough(identity.commit, candidates, cleanBaseMerge, quietCommit);
   const found = head ?? (carried && proved.get(carried.from));
   const directory = found && evidenceDirectory(home, identity, kind, found);
-  const saved = directory ? await newestFile(directory) : undefined;
+  const saved = found ? savedAt.get(head ? identity.commit : carried!.from) : undefined;
   if (dev?.mergedAt && found && directory && saved !== undefined && saved >= nanosOf(dev.mergedAt)) {
     const result: DevResult = {
       pr: devText(dev.ref), mergedAt: dev.mergedAt, ...dev.mergeCommit ? { mergeCommit: dev.mergeCommit } : {}, savedAt: isoOf(saved),

@@ -79,24 +79,25 @@ async function evidenceSection({ evidence, commit, owed }: JudgeInput) {
     parts.push(`### ${kind}`, untrusted(`the gate's line for ${kind}`, line));
     if (!directory) continue;
     readable.push(directory);
-    const files = await Promise.all((await readdir(directory).catch(() => [])).sort().map(async (name) => {
+    const records: (RunRecord | undefined)[] = [];
+    const rendered: string[] = [];
+    for (const name of (await readdir(directory).catch(() => [])).sort()) {
       const path = join(directory, name);
       const extension = extname(name).toLowerCase();
-      const media = imageExtensions.has(extension) ? "image" : videoExtensions.has(extension) ? "video" : undefined;
-      const bytes = media ? undefined : await readFile(path);
-      return { path, media, bytes, record: bytes && await runRecordOf(path, bytes) };
-    }));
-    const capture = captureOf(files.map((file) => file.record));
+      if (imageExtensions.has(extension)) { records.push(undefined); images.push(path); rendered.push(untrusted(`${kind} evidence file`, `Image: ${path} (attached)`)); continue; }
+      if (videoExtensions.has(extension)) { records.push(undefined); rendered.push(untrusted(`${kind} evidence file`, `Video: ${path} (not shown; judge it by the other evidence)`)); continue; }
+      const bytes = await readFile(path);
+      const record = await runRecordOf(path, bytes);
+      records.push(record);
+      rendered.push(...runnerMark(directory, record, path, kind));
+      rendered.push(bytes.includes(0) ? untrusted(`${kind} evidence file`, `Binary file: ${path}`) : untrusted(`${kind} evidence ${basename(path)}`, capped(bytes.toString(), evidenceCap)));
+    }
+    const capture = captureOf(records);
     if (capture && (capture.commit === commit || capture.commit === carriedFrom)) {
       verified.add(kind);
-      parts.push(`Provenance verified by code: ${captureText(capture)}${capture.commit === commit ? ", at HEAD" : "; hedge carried it to HEAD across clean merges of the base and commits that change only test files no production file names"}.`);
+      parts.push(`Provenance verified by code: ${captureText(capture)}${capture.commit === commit ? ", at HEAD" : "; hedge carried it to HEAD across the commits the gate's line names, each checked in code: clean merges of the base, commits that change only test files no production file names, and reverts of earlier commits of this PR"}.`);
     }
-    for (const { path, media, bytes, record } of files) {
-      if (media === "image") { images.push(path); parts.push(untrusted(`${kind} evidence file`, `Image: ${path} (attached)`)); continue; }
-      if (media === "video" || !bytes) { parts.push(untrusted(`${kind} evidence file`, `Video: ${path} (not shown; judge it by the other evidence)`)); continue; }
-      parts.push(...runnerMark(directory, record, path, kind));
-      parts.push(bytes.includes(0) ? untrusted(`${kind} evidence file`, `Binary file: ${path}`) : untrusted(`${kind} evidence ${basename(path)}`, capped(bytes.toString(), evidenceCap)));
-    }
+    parts.push(...rendered);
   }
   const allVerified = owed.kinds.length > 0 && owed.kinds.every((kind) => verified.has(kind));
   if (allVerified) parts.unshift("Every owed kind's provenance is verified by code, so the proof question asks only whether the evidence shows the behavior this diff changes.");
