@@ -77,6 +77,15 @@ test("on a one-way door the agent's own decision cannot pass the stop", async ()
   await expect(pr.hedge("review-finish", "--round", "3", "--reviewer", "gpt-6.1-sol", "findings.md")).rejects.toThrow("not reserved");
 });
 
+test("on a one-way door the stop holds when the arbiter later answers CONTINUE", async () => {
+  const pr = await checkout();
+  const third = await stoppedOneWay(pr);
+  await expect(pr.hedge(...third)).rejects.toThrow("the review loop stops here");
+  pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo CONTINUE";
+
+  await expect(pr.hedge(...third)).rejects.toThrow("The review loop stopped at an escalation on a one-way door: Round 2 undoes the rename round 1 asked for. On a one-way door the review loop stops here");
+});
+
 test("on a one-way door the user's override still runs the escalated round", async () => {
   const pr = await checkout();
   const third = await stoppedOneWay(pr);
@@ -96,14 +105,15 @@ test("a finding is answered known after the one-way stop, and not before it", as
   expect((await pr.hedge("respond", "--round", "2", "responses.md")).code).toBe(0);
 });
 
-test("the end table shows the one-way stop", async () => {
+test("the stop names the latest review as the start of the fixes to revert, and the end table names the commit it stopped at", async () => {
   const pr = await checkout();
   const third = await stoppedOneWay(pr);
-  await expect(pr.hedge(...third)).rejects.toThrow("the review loop stops here");
   const reviewed = (await pr.git("rev-parse", "HEAD")).slice(0, 7);
+  const stopped = (await pr.commit("feature.txt", "newer\n")).slice(0, 7);
+  await expect(pr.hedge(...third)).rejects.toThrow(`Revert each commit of the PR since ${reviewed} that changes production code`);
   await pr.hedge("gate");
 
-  expect((await pr.decide("report", "--pr", "example/product#42")).output).toContain(`| example/product#42 | 2 rounds; stopped at an escalation on a one-way door at ${reviewed} |`);
+  expect((await pr.decide("report", "--pr", "example/product#42")).output).toContain(`| example/product#42 | 2 rounds; stopped at an escalation on a one-way door at ${stopped} |`);
 });
 
 test("on ask, a one-way door still asks the user about an escalated round, and a known answer waits for the budget", async () => {

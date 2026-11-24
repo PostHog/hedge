@@ -26,18 +26,21 @@ export async function measureGrowth(home: string, head: ProofIdentity, run: Run,
   const first = !opening || !start ? undefined : start === opening.commit ? { production: 0, tests: 0, docs: 0, commit: start, from: start } : sizeAt({ ...head, commit: opening.commit }, run, start);
   const final = sizeAt(head, run, isCommitSha(baseSha) ? forkPoint(head, run, baseSha) : undefined);
   const stop = await readOneWayStop(home, head);
-  return { rounds: rounds.length, finalReads: reviews.length - rounds.length, ...first ? { first } : {}, ...final ? { final } : {}, ...stop ? { oneWayStop: stop.reviewed } : {} };
+  return { rounds: rounds.length, finalReads: reviews.length - rounds.length, ...first ? { first } : {}, ...final ? { final } : {}, ...stop ? { oneWayStop: stop.commit } : {} };
 }
 
 const counted = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
 const figure = (lines: number | undefined) => typeof lines === "number" ? lines.toLocaleString("en-US") : "unknown";
 const span = (from: number | undefined, to: number | undefined) => `${figure(from)} → ${figure(to)}`;
 
+function reviewsCell(growth: Growth) {
+  if (!growth.rounds && !growth.finalReads) return "no review";
+  return [counted(growth.rounds, "round"), ...growth.finalReads ? [counted(growth.finalReads, "final read")] : []].join(", ");
+}
+
 function roundsCell(growth: Growth | undefined) {
   if (!growth) return "not measured";
-  if (!growth.rounds && !growth.finalReads) return "no review";
-  const reviews = [counted(growth.rounds, "round"), ...growth.finalReads ? [counted(growth.finalReads, "final read")] : []].join(", ");
-  return isCommitSha(growth.oneWayStop) ? `${reviews}; stopped at an escalation on a one-way door at ${growth.oneWayStop.slice(0, 7)}` : reviews;
+  return isCommitSha(growth.oneWayStop) ? `${reviewsCell(growth)}; stopped at an escalation on a one-way door at ${growth.oneWayStop.slice(0, 7)}` : reviewsCell(growth);
 }
 
 function linesCell(growth: Growth | undefined) {
