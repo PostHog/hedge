@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { checkout, cleanFixtures, reviewHead } from "./proof-testing.ts";
+import { checkout, clean, cleanFixtures, fakeModel, reviewHead } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
@@ -85,4 +85,28 @@ test("--landed does not skip an open bot finding, so it cannot pass an open PR p
   const gate = await pr.hedge("gate", "--landed");
   expect(gate.code).toBe(1);
   expect(lastLine(gate.output)).toStartWith("gate: fail (exit 1): bot threads: 1 bot finding waits for an answer: https://github.com/example/product/pull/42#discussion_r1 (feature.txt:1). ");
+});
+
+test("--landed on a merged PR still names a finding the bots left after the merge", async () => {
+  const pr = await reviewed();
+  pr.pullRequestState({ merged: true });
+  pr.reviewThreads([finding("posthog", "https://github.com/example/product/pull/42#discussion_r1")]);
+  const gate = await pr.hedge("gate", "--landed");
+  expect(gate.code).toBe(1);
+  expect(lastLine(gate.output)).toStartWith("gate: fail (exit 1): bot threads: 1 bot finding waits for an answer: https://github.com/example/product/pull/42#discussion_r1 (feature.txt:1). ");
+});
+
+test("the gate reads the bot threads of the PR it gates, not another one", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "new\n");
+  const target = ["--repo", "example/product", "--pr", "43"];
+  await pr.hedge("require", "--none", "--reason", "docs only", ...target);
+  fakeModel(pr, "REVIEWER", clean);
+  await pr.hedge("review", "--lens", "correctness", ...target);
+  expect((await pr.hedge("review", "--wait", ...target)).code).toBe(0);
+  pr.reviewThreads([finding("posthog", "https://github.com/example/product/pull/42#discussion_r1")]);
+  pr.reviewThreads([finding("veria-ai", "https://github.com/example/product/pull/43#discussion_r7")], 43);
+  const gate = await pr.hedge("gate", ...target);
+  expect(gate.code).toBe(1);
+  expect(lastLine(gate.output)).toStartWith("gate: fail (exit 1): bot threads: 1 bot finding waits for an answer: https://github.com/example/product/pull/43#discussion_r7 (feature.txt:1). ");
 });
