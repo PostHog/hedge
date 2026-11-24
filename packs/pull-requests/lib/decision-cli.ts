@@ -40,8 +40,8 @@ what must stay true at HEAD; the judge checks it. Classes: ${askClasses.join(", 
 With --class merge --kind ${gateOverride} and --condition '<full head sha>: <incident and why>', the user's 👤 answer
 lets the merge gate pass that one PR at that head without a hedge proof gate pass; a push leaves it behind. Only 👤
 records it. With --class merge and --condition '<full head sha>: merge card', the user's 👤 choice of "${mergeCardChoice}"
-on a merge card whose question names the PR and that head lifts the hold on a gap an agent accepted; any other choice
-is refused. Each option other than --pr and --kind is taken once.
+on a merge card whose question names the PR and that head lifts the hold on each gap an agent accepted whose
+decision id the question names; any other choice is refused. Each option other than --pr and --kind is taken once.
 record with 🤖 records the agent's own decision with the option it rejected. Hedge reads each PR's Tier line in its
 merge-risk callout at HEAD: it refuses an ungraded PR, and on a critical PR anything but process (review and status
 asks, judge and post-deploy-watch gaps). On ask it never takes a panel gap: ${panelRefusal}. With pull-requests.autonomy

@@ -67,7 +67,7 @@ test("the receipt writes the merge card block into the PR body without the minut
 });
 
 test("a gate pass with a gap the agent accepted holds the merge, own tooling included, until the user's merge word for that head", async () => {
-  const { pr, head } = await agentAcceptedGap();
+  const { pr, head, id } = await agentAcceptedGap();
   expect((await pr.hedge("gate")).code).toBe(0);
   const other = join(tmpdir(), `merge-card-hold-${process.pid}-${Date.now()}`);
   mkdirSync(join(other, ".local/state/hedge"), { recursive: true });
@@ -77,7 +77,7 @@ test("a gate pass with a gap the agent accepted holds the merge, own tooling inc
     writeFileSync(join(other, ".local/state/hedge/decisions.jsonl"), readFileSync(join(pr.home, ".local/state/hedge/decisions.jsonl"), "utf8"));
     return mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home: other, env: { HEDGE_SETTINGS: JSON.stringify({ "pull-requests.autonomy": "end" }) }, github });
   };
-  const mergeWord = async (at: string, choice = "Merge", question = `Merge example/product#42 at ${at}?`) => {
+  const mergeWord = async (at: string, choice = "Merge", question = `Merge example/product#42 at ${at}? An agent accepted ${id}.`) => {
     pr.choose(choice, question);
     return pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${at}: merge card`);
   };
@@ -94,7 +94,6 @@ test("a gate pass with a gap the agent accepted holds the merge, own tooling inc
     expect((await mergeWord(head)).code).toBe(0);
     expect(await mergeOn("")).toBeUndefined();
     expect(await mergeOn("example/*")).toBeUndefined();
-    pr.clock.now = new Date(pr.clock.now.getTime() + 60_000);
     await pr.hedge("require", "--kinds", "live-run");
     await pr.hedge("gap", "--kind", "live-run", "--reason", "No sandbox");
     await pr.decide("record", "--mark", "🤖", "--class", "proof-gap", "--kind", "live-run", "--pr", "example/product#42", "--question", "Accept the live-run gap? example/product#42: No sandbox", "--answer", "Accept the gap", "--rejected", "Keep the gap open", "--reason", "The hook runs in its own tests");
