@@ -20,13 +20,15 @@ export const noWakeReason = (person: string) => `Hedge blocked this stop: your c
   + "for a lane, keep its delegate_task child or call t3_thread_wait; for a check at a time, call schedule_task bound to this thread. "
   + `If nothing can wake it, such as a reply by email, say so and end on the line for ${person}'s move instead. Do not snooze the thread to hide it.`;
 
+const t3Time = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+
 function hasScheduledCheck(home: string, threadId: string): boolean {
   const path = t3StatePath(t3UserData(home));
   if (!existsSync(path)) return false;
   const db = new Database(path, { readonly: true });
   try {
     return db.query<{ next: string }, [string]>("select next_run_at next from scheduled_tasks where thread_id = ? and enabled = 1 and next_run_at is not null")
-      .all(threadId).some(({ next }) => Number.isFinite(Date.parse(next)));
+      .all(threadId).some(({ next }) => t3Time.test(next));
   } finally {
     db.close();
   }

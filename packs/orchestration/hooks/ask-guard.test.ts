@@ -498,7 +498,7 @@ describe("the wake guard", () => {
     db.run(`insert into scheduled_tasks (task_id, title, prompt, enabled, schedule_json, project_id, thread_id, workspace_strategy_json, model_selection_json,
         runtime_mode, interaction_mode, created_by, creation_source, created_at, updated_at, next_run_at, last_run_at, last_run_status, run_count, thread_mode)
       values (?, 'check', 'check', ?, ?, 'p', ?, ?, ?, 'full-access', 'default', 'agent', 'mcp', '2026-11-20T00:00:00Z', '2026-11-20T00:00:00Z', ?, ?, ?, ?, 'continue')`,
-      [crypto.randomUUID(), enabled ? 1 : 0, JSON.stringify({ type: "once", runAt: nextRunAt ?? "2026-11-20T08:00:00.000Z" }), threadId, JSON.stringify({ type: "root" }),
+      [crypto.randomUUID(), enabled ? 1 : 0, JSON.stringify({ type: "once", runAt: "2026-11-20T08:00:00.000Z" }), threadId, JSON.stringify({ type: "root" }),
         JSON.stringify({ instanceId: "claudeAgent", model: "claude-opus-5-5", options: [{ id: "effort", value: "high" }] }), nextRunAt,
         ran ? "2026-11-20T08:00:00.000Z" : null, ran ? "succeeded" : "never", ran ? 1 : 0]);
     db.close();
@@ -603,6 +603,7 @@ describe("the wake guard", () => {
     ["ran for the last time", (where: string) => scheduled(where, conductor, null)],
     ["is bound to another thread", (where: string) => scheduled(where, "mcp:other", "2999-01-01T00:00:00Z")],
     ["has a next run that is no time", (where: string) => scheduled(where, conductor, "soon")],
+    ["has a next run in a form T3 does not write", (where: string) => scheduled(where, conductor, "Sat, 21 Nov 2026 08:00:00 GMT")],
   ])("sends back a check line whose scheduled task %s", async (_, arrange) => {
     const where = home("Robin");
     arrange(where);
@@ -627,13 +628,22 @@ describe("the wake guard", () => {
     expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)) }), home("Robin"))).stdout).toBe("");
   });
 
-  test("lets the stop through once the one deadline of the proof check and the wake check has passed", async () => {
-    const stalled = { pid: 30, table: () => new Promise<string>(() => {}) };
-    let deadlines = 0;
-    const routed = hookWith(() => async () => ({ threads: [{ id: conductor, title: "Conductor", projectId: "p", status: "completed" }] as ShellThread[] }),
-      { threadId: conductor, processes: stalled, deadline: async () => { deadlines++; } });
+  test("lets the stop through when the deadline the proof check started ends during the wake check", async () => {
+    const ends: (() => void)[] = [];
+    const deadline = () => new Promise<void>((resolve) => { ends.push(resolve); });
+    let reads = 0;
+    const wakeStalls = { pid: 30, table: () => ++reads === 1 ? lone.table() : new Promise<string>(() => { ends[0]?.(); }) };
+    const threads = [{ id: conductor, title: "Conductor", projectId: "p", status: "completed" }] as ShellThread[];
+    const routed = hookWith(() => async () => ({ threads }), { threadId: conductor, processes: wakeStalls, deadline });
     expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)), cwd: "/" }), home("Robin"))).stdout).toBe("");
-    expect(deadlines).toBe(1);
+  });
+
+  test("lets the stop through when a read that does not yield runs past the deadline", async () => {
+    let clock = 0;
+    const slowRead = { pid: 30, table: async () => { clock += 10_001; return lone.table(); } };
+    const threads = [{ id: conductor, title: "Conductor", projectId: "p", status: "completed" }] as ShellThread[];
+    const routed = hookWith(() => async () => ({ threads }), { threadId: conductor, processes: slowRead, deadline: () => new Promise<void>(() => {}), now: () => clock });
+    expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)) }), home("Robin"))).stdout).toBe("");
   });
 
   test("lets the stop through when the check does not answer before the deadline the hook passes on", async () => {

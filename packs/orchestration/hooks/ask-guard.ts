@@ -201,7 +201,7 @@ const liveShell = (home: string): ReadShell => {
   return () => (snapshot ??= readShell(home));
 };
 
-export type StopDeps = Partial<Pick<ProofStopOptions, "threadId" | "git" | "processes" | "deadline">> & { hidden?: IsHidden };
+export type StopDeps = Partial<Pick<ProofStopOptions, "threadId" | "git" | "processes" | "deadline">> & { hidden?: IsHidden; now?: () => number };
 
 export async function guardBackground(event: StopEvent & ProofStopEvent, home: string, threadId: string | undefined): Promise<StopBlock | undefined> {
   if (event.stop_hook_active || !threadId || !event.transcript_path || !event.background_tasks?.length) return undefined;
@@ -216,12 +216,15 @@ async function guardStopAndProof(event: StopEvent & ProofStopEvent, home: string
   const background = await guardBackground(event, home, threadId).catch(() => undefined);
   if (background) return background;
   const last = await finalMessage(event);
+  const now = deps.now ?? Date.now;
+  const started = now();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const end = deps.deadline?.() ?? new Promise<void>((resolve) => { timer = setTimeout(resolve, proofStopDeadlineMs); });
   const deadline = () => end;
   try {
     const proof = await proofStop({ ...event, last_assistant_message: last }, { home, shell, ...deps, deadline, threadId });
-    return proof ?? await wakeStop(event, last, { home, threadId, shell, processes: deps.processes, deadline });
+    const answer = proof ?? await wakeStop(event, last, { home, threadId, shell, processes: deps.processes, deadline });
+    return now() - started < proofStopDeadlineMs ? answer : undefined;
   } finally {
     clearTimeout(timer);
   }
