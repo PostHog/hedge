@@ -801,7 +801,7 @@ function listedItems(reviewed: ReviewedLine[]): { items: ReviewedItem[]; recover
 
 export type Answer = { verdict: "fixed" | "rejected" | "known"; text: string };
 
-const listMark = /^\s*(?:[-*]|\d+[.)])\s+/;
+const listMark = /^[ \t]*(?:[-*]|\d+[.)])[ \t]+/;
 
 export function answerNumbers(findings: string) {
   const items = reviewedItems(findings);
@@ -812,7 +812,7 @@ export function answerNumbers(findings: string) {
 
 function numbersPast(findings: string, responses: string) {
   const count = reviewedItems(findings).length;
-  const numbers = responses.split("\n").map((line) => Number(answerItem.exec(line)?.[1])).filter((number) => number > count);
+  const numbers = unfenced(responses).split("\n").map((line) => Number(answerItem.exec(line)?.[1])).filter((number) => number > count);
   return { count, past: [...new Set(numbers)].sort((a, b) => a - b) };
 }
 

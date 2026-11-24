@@ -132,3 +132,19 @@ test("hedge proof show fails on a finished round whose findings it cannot read",
 
   await expect(pr.hedge("show", "--round", "1")).rejects.toThrow("EISDIR");
 });
+
+test("an answer past the last finding quoted in a fenced block saves as other text, as on main", async () => {
+  const pr = await singleFindingRound();
+  writeFileSync(join(pr.repository, "responses.md"), "1. fixed: the greeting guards an empty name\n\nAn earlier round read:\n\n```text\n2. rejected: same as 1.\n```\n");
+
+  expect((await pr.hedge("respond", "--round", "1", "responses.md")).code).toBe(0);
+});
+
+test("a prose finding that starts with a bare list marker keeps that line in the list", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet the new member\n");
+  await pr.hedge("require", "--none", "--reason", "docs only");
+  fakeModel(pr, "REVIEWER", "1.\nThe greeting drops an empty name.\n");
+
+  expect((await pr.hedge("review", "--single")).output).toContain("Answer each finding by these numbers, in hedge proof respond:\n1. 1.\n   The greeting drops an empty name.");
+});
