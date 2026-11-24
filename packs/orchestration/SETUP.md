@@ -128,3 +128,30 @@ The stop passes when any of these holds:
 - any read fails, or the check takes longer than 10 seconds. At the deadline
   it stops the git and `ps` commands it started, and the hook process exits
   once it has answered, even when a helper of those commands still runs.
+
+## Loop pause
+
+The `loop-pause` workflow is on by default. It installs
+`hooks/loop-pause.ts` for PreToolUse in Claude and Codex. The setting
+`orchestration.loopLedger` names the loops' ledger directory, which holds
+`limits.md`, `lanes.md` and `signals.md`. With a context library, it defaults
+to its `quality-loop` directory. Without the setting, the hook does nothing.
+
+A thread whose first prompt asks for a coordinator run or round of the
+`quality-loop` or `signal-loop` skill, or starts with its slash command, is a
+loop coordinator. When such a thread calls `delegate_task` while `limits.md`
+says `Paused: yes`, or while the file cannot be read or says neither `yes` nor
+`no`, the call is denied: the coordinator settles the lanes that ended, keeps
+its watches and post-deploy checks, records a no-op run, and starts no lane.
+Settling, `watch_pull_request`, `schedule_task`, `t3_thread_send`, and every
+other thread pass.
+
+Two commands give the loop skills the same facts:
+
+- `hedge loop check-pause [--ledger <dir>]` exits 0 while the loops run, 1
+  while they are paused, and 3 when `limits.md` cannot be read.
+- `hedge loop next-id --kind lane|signal [--ledger <dir>]` prints the next
+  lane or signal id, one past the highest row in `lanes.md` or `signals.md`.
+  It reserves each id with an exclusive file create under
+  `~/.local/state/hedge/loop-ids/`, so two coordinators on one machine never
+  get the same id. Write the row and push the ledger right after.

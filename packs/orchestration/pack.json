@@ -72,6 +72,16 @@
       "ask": "never"
     },
     {
+      "key": "orchestration.loopLedger",
+      "question": "Which directory holds the loops' ledger, with limits.md, lanes.md and signals.md? ~/ is allowed.",
+      "type": "string",
+      "optional": true,
+      "ask": "never",
+      "fromContext": {
+        "value": "{path}/quality-loop"
+      }
+    },
+    {
       "key": "orchestration.proseTitles",
       "question": "Which title starts mark T3 threads that ask in prose instead of on a question card, because a job queues messages into them? Separate them with commas, such as ⚠️, 🚨. Leave it empty for none.",
       "type": "string",
@@ -107,6 +117,15 @@
         "orchestration.proseTitles"
       ],
       "sentence": "A top-level T3 thread that ends its turn with a decision for you in prose is stopped once and told to ask with the question tool, so the decision reaches you even while the thread waits on a watch. A thread whose title starts with one of your prose titles asks in prose instead, and its question cards are turned back, because a job queues messages into it. A T3 thread that owns an open pull request and ends its turn while the proof gate has not passed at the pushed head is sent back once, with the step still owed."
+    },
+    {
+      "id": "loop-pause",
+      "name": "Loop pause",
+      "default": true,
+      "settings": [
+        "orchestration.loopLedger"
+      ],
+      "sentence": "While the loop ledger's limits.md says Paused: yes, or cannot be read, a quality-loop or signal-loop coordinator cannot start a lane; it still settles lanes and keeps its watches, and every other thread starts subthreads as before."
     }
   ],
   "files": [
@@ -119,9 +138,18 @@
       "path": "hooks/ask-guard.ts",
       "target": ".config/hedge/hooks/PreToolUse/ask-guard.ts",
       "workflow": "question-guard"
+    },
+    {
+      "path": "hooks/loop-pause.ts",
+      "target": ".config/hedge/hooks/PreToolUse/loop-pause.ts",
+      "workflow": "loop-pause"
     }
   ],
   "subcommands": {
+    "loop": [
+      "check-pause",
+      "next-id"
+    ],
     "thread": [
       "list",
       "read",
