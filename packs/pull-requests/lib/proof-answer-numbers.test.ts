@@ -138,7 +138,7 @@ test("hedge proof show fails on a finished round whose findings it cannot read",
 
 test("hedge proof respond refuses a code fence in any form, since every numbered line counts as an answer", async () => {
   const pr = await singleFindingRound(twoFindings);
-  const fences = ["```text", "~~~", "    ```", "\t~~~", "```first```", "````"];
+  const fences = ["```text", "~~~", "    ```", "\t~~~", "```first```", "````", "- ```text", "3. ~~~", "  * - ```"];
   for (const fence of fences) {
     writeFileSync(join(pr.repository, "responses.md"), `1. fixed: the greeting guards an empty name\n${fence}\n2. rejected: from an earlier round\n`);
     await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("responses.md holds a code fence, a line that starts with ``` or ~~~. Every numbered line counts as an answer, quoted or not. Quote an earlier answer with > and write code inline.");

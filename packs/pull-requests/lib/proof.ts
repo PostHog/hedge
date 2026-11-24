@@ -667,7 +667,7 @@ export async function respondToReview(home: string, identity: ProofIdentity, rou
 }
 
 const findingItem = /^\s*(?:[-*]|\d+[.)])\s+\S/;
-const fenceLine = /^[ \t]*(?:`{3}|~{3})/m;
+const fenceLine = /^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)*(?:`{3}|~{3})/m;
 const answerItem = /^\s*(?:[-*]\s+)?(\d+)[.):]\s+\**(fixed|rejected|known)\b/i;
 
 const noFinding = /^(?:#.*|no findings\.?|findings:?|\(none\))$/i;
