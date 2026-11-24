@@ -137,17 +137,20 @@ The `loop-pause` workflow is on by default. It installs
 `limits.md`, `lanes.md` and `signals.md`. With a context library, it defaults
 to its `quality-loop` directory. Without the setting, or when that directory
 does not exist, such as on a machine whose loops keep their ledger in
-`orchestration.ledgerRepo` elsewhere, the hook does nothing. Set it to that
+`orchestration.ledgerRepo` elsewhere, the hook does nothing. Any other error
+reading the directory denies. Set it to that
 ledger's checkout to turn the hook on there.
 
-A thread whose first prompt opens, after any bracketed note on who sent it,
-with a line that starts with "Run" or "Start" and names a coordinator and the
-`quality-loop` or `signal-loop` skill in either order, or with the skill's
-slash command, is a loop coordinator. A prompt that asks about a coordinator
-run, or quotes one further down, is not. When such a thread calls `delegate_task` while `limits.md`
-says `Paused: yes`, or while the file cannot be read, has no `Paused:` line,
-says neither `yes` nor `no`, or has `Paused:` lines that disagree, the call is
-denied: the coordinator settles the lanes that ended, keeps
+A thread that a T3 scheduled task started, whose first line after T3's note
+starts with "Run" or "Start" and names a coordinator and the `quality-loop` or
+`signal-loop` skill, is a loop coordinator. A coordinator run a person starts
+by hand is not: the skill's own `hedge loop check-pause` step covers it. A
+scheduled prompt that opens with "Run" and names both, such as a scheduled
+audit of coordinator runs, counts as a coordinator. When such a thread calls
+`delegate_task` while `limits.md` says `Paused: yes`, or while the file cannot
+be read, has no `Paused:` line, says anything but a plain `yes` or `no` (a
+note may follow after a comma, a semicolon, a spaced dash, or in closed
+brackets), or has `Paused:` lines that disagree, the call is denied: the coordinator settles the lanes that ended, keeps
 its watches and post-deploy checks, records a no-op run, and starts no lane.
 Settling, `watch_pull_request`, `schedule_task`, `t3_thread_send`, and every
 other thread pass.
@@ -161,6 +164,7 @@ Two commands give the loop skills the same facts:
   lane or signal id, one past the highest row in `lanes.md` or `signals.md`,
   follow-up rows such as `L012b` included.
   It reserves each id with an exclusive file create under
-  `~/.local/state/hedge/loop-ids/`, keyed by the ledger repository's origin
-  and the ledger's folder in it, so two coordinators on one machine never get
-  the same id, even from two checkouts. Write the row and push the ledger right after.
+  `~/.local/state/hedge/loop-ids/`, keyed by the ledger directory's real
+  path, so two coordinators on one machine that share a checkout never get
+  the same id. Two checkouts are like two machines: write the row and push the
+  ledger right after.

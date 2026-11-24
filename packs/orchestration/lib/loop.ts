@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readFileSync, realpathSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import { cannotTell } from "../../base/lib/command.ts";
 import { expandHome } from "./lessons.ts";
 
@@ -34,7 +33,7 @@ function ledgerDir(args: string[], io: LoopIo, known: string[]): string {
 }
 
 const pauseLine = /^[ \t>*_-]*Paused[*_]*:[*_]*[ \t]*(.*)$/gim;
-const pauseValue = /^[*_`]*(yes|no)[*_`]*(?:\.|[,;]\s.*|\s*\(.*|\s+[\u2013\u2014-]\s.*)?$/i;
+const pauseValue = /^[*_`]*(yes|no)[*_`]*(?:\.|[,;]\s.*|\s*\([^()]*\)|\s+[\u2013\u2014-]\s.*)?$/i;
 
 export function pauseState(ledger: string): PauseState {
   const file = join(ledger, "limits.md");
@@ -76,31 +75,8 @@ function highestRecorded(ledger: string, kind: Kind): number {
   return Math.max(0, ...numbersIn(rows, new RegExp(`^\\s*\\|\\s*${prefix}(\\d+)[a-z]?\\s*\\|`, "g")));
 }
 
-function git(ledger: string, ...args: string[]): string | undefined {
-  const run = spawnSync("git", ["-C", ledger, ...args], { encoding: "utf8" });
-  return run.status === 0 && run.stdout.trim() ? run.stdout.trim() : undefined;
-}
-
-function repositoryOf(remote: string): string {
-  const scp = /^(?:[^@/]+@)?([^:/]+):(?!\/)(.+)$/.exec(remote);
-  let host = scp?.[1] ?? "";
-  let path = scp?.[2] ?? remote;
-  if (!scp && URL.canParse(remote)) {
-    const url = new URL(remote);
-    [host, path] = [url.host, url.pathname];
-  }
-  return `${host.toLowerCase()}/${path.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "")}`;
-}
-
-function ledgerIdentity(ledger: string): string {
-  const real = realpathSync(ledger);
-  const top = git(real, "rev-parse", "--show-toplevel");
-  const remote = top && git(real, "config", "--get", "remote.origin.url");
-  return remote ? `${repositoryOf(remote)}#${relative(realpathSync(top), real)}` : real;
-}
-
 function reservations(home: string, ledger: string): string {
-  const key = createHash("sha256").update(ledgerIdentity(ledger)).digest("hex").slice(0, 16);
+  const key = createHash("sha256").update(realpathSync(ledger)).digest("hex").slice(0, 16);
   const dir = join(home, ".local/state/hedge/loop-ids", key);
   mkdirSync(dir, { recursive: true });
   return dir;

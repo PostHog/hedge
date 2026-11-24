@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../../../src/testing/git.ts";
 import { runLoop, type LoopIo } from "./loop.ts";
@@ -36,7 +35,7 @@ describe("hedge loop check-pause", () => {
     expect(await loop(["check-pause", "--ledger", dir])).toMatchObject({ code: 0, out: expect.stringContaining("start lanes up to the WIP limits") });
   });
 
-  test.each(["- **Paused:** no (since the planning)\n", "Paused: no, resumed after review\n", "Paused: no - resumed\n", "Paused: no.\n"])("exits 0 for a no with a note after it: %p", async (limits) => {
+  test.each(["- **Paused:** no (since the planning)\n", "Paused: no, resumed after review\n", "Paused: no - resumed\n", "Paused: no.\n", "Paused: no (since Friday)\n"])("exits 0 for a no with a note after it: %p", async (limits) => {
     expect((await loop(["check-pause", "--ledger", ledger({ "limits.md": limits })])).code).toBe(0);
   });
 
@@ -56,6 +55,7 @@ describe("hedge loop check-pause", () => {
     ["Paused lines that disagree after a merge", { "limits.md": "Paused: no\nQuality loop WIP: 2\nPaused: yes\n" }],
     ["markup inside a no", { "limits.md": "Paused: n_o\n" }],
     ["a no followed by another value", { "limits.md": "Paused: no: yes\n" }],
+    ["a no with an unclosed bracket", { "limits.md": "Paused: no (\n" }],
   ])("fails closed with exit 3 on %s", async (_, files) => {
     const result = await loop(["check-pause", "--ledger", ledger(files)]);
     expect(result).toMatchObject({ code: 3, out: expect.stringContaining("start no lane") });
@@ -111,37 +111,20 @@ describe("hedge loop next-id", () => {
     expect((await loop(["next-id", "--kind", "lane", "--ledger", dir])).out).toBe("L071");
   });
 
-  test.each([
-    ["the same origin", "https://example.com/acme/ledger.git"],
-    ["an SSH origin", "git@example.com:acme/ledger.git"],
-    ["an ssh:// origin", "ssh://git@example.com/acme/ledger"],
-  ])("never hands out one id to two checkouts of the same ledger repository on one machine, with %s", async (_, secondOrigin) => {
+  test("shares reservations between paths that lead to the same ledger", async () => {
     const home = temp.make("home-");
-    const first = temp.make("checkout-");
-    mkdirSync(join(first, "quality-loop"));
-    writeFileSync(join(first, "quality-loop/lanes.md"), lanes("L064"));
-    for (const args of [["init", "-q"], ["remote", "add", "origin", "https://example.com/acme/ledger.git"]]) spawnSync("git", ["-C", first, ...args]);
-    const second = temp.make("checkout-");
-    cpSync(first, second, { recursive: true });
-    spawnSync("git", ["-C", second, "remote", "set-url", "origin", secondOrigin]);
-    const one = await loop(["next-id", "--kind", "lane", "--ledger", join(first, "quality-loop")], undefined, home);
-    const two = await loop(["next-id", "--kind", "lane", "--ledger", join(second, "quality-loop")], undefined, home);
+    const dir = ledger({ "lanes.md": lanes("L064") });
+    const link = join(temp.make("link-"), "ledger");
+    symlinkSync(dir, link);
+    const one = await loop(["next-id", "--kind", "lane", "--ledger", dir], undefined, home);
+    const two = await loop(["next-id", "--kind", "lane", "--ledger", link], undefined, home);
     expect([one.out, two.out]).toEqual(["L065", "L066"]);
   });
 
-  test.each([
-    ["paths that differ only in case", "/srv/git/Origin.git", "/srv/git/origin.git"],
-    ["SSH hosts on different ports", "ssh://git@example.com:2222/acme/ledger.git", "ssh://git@example.com:2200/acme/ledger.git"],
-  ])("keeps the ids of two different ledger repositories apart: %s", async (_, firstOrigin, secondOrigin) => {
+  test("keeps the ids of two ledgers apart", async () => {
     const home = temp.make("home-");
-    const checkouts = [firstOrigin, secondOrigin].map((origin) => {
-      const checkout = temp.make("checkout-");
-      writeFileSync(join(checkout, "lanes.md"), lanes("L064"));
-      for (const args of [["init", "-q"], ["remote", "add", "origin", origin]]) spawnSync("git", ["-C", checkout, ...args]);
-      return checkout;
-    });
     const ids = [];
-    for (const checkout of checkouts) ids.push((await loop(["next-id", "--kind", "lane", "--ledger", checkout], undefined, home)).out);
+    for (const dir of [ledger({ "lanes.md": lanes("L064") }), ledger({ "lanes.md": lanes("L064") })]) ids.push((await loop(["next-id", "--kind", "lane", "--ledger", dir], undefined, home)).out);
     expect(ids).toEqual(["L065", "L065"]);
   });
 
