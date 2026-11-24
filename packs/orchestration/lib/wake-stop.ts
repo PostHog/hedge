@@ -1,10 +1,10 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { matchThread, type ShellThread, t3StatePath, t3UserData } from "../../base/lib/t3/index.ts";
-import { claudeTaskRuns, waits, type ProofStopEvent } from "./proof-stop.ts";
+import { claudeTaskRuns, nestedSession, realProcesses, waits, type ProcessTable, type ProofStopEvent } from "./proof-stop.ts";
 import { personName } from "./prose-question.ts";
 
-export type WakeStopOptions = { home: string; threadId: string | undefined; shell: () => Promise<{ threads: ShellThread[] }>; now?: () => number };
+export type WakeStopOptions = { home: string; threadId: string | undefined; shell: () => Promise<{ threads: ShellThread[] }>; processes?: ProcessTable; now?: () => number };
 
 const waitMarks = ["⏳", "🔕"];
 
@@ -39,6 +39,8 @@ export async function wakeStop(event: ProofStopEvent, message: string | undefine
   const { home, threadId } = options;
   if (event.stop_hook_active || !threadId || !message || !closesOnWait(message)) return undefined;
   if (claudeTaskRuns(event) || event.session_crons?.length) return undefined;
+  const processes = options.processes ?? realProcesses;
+  if (nestedSession(await processes.table(), processes.pid)) return undefined;
   const now = (options.now ?? Date.now)();
   const { threads } = await options.shell();
   const thread = matchThread(threads, threadId, (item) => item.id);

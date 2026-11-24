@@ -105,6 +105,8 @@ The stop passes when any of these holds:
 - an enabled scheduled task bound to the thread has a next run in T3's state;
 - the thread is snoozed, waits on a question card, is a child thread, or was
   delegated from another machine;
+- the hook runs in a model session that another one started, as in the proof
+  check below;
 - any read fails.
 
 ### Proof check at Stop

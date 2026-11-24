@@ -219,7 +219,7 @@ async function guardStopAndProof(event: StopEvent & ProofStopEvent, home: string
   const background = await guardBackground(event, home, threadId).catch(() => undefined);
   if (background) return background;
   const last = await finalMessage(event);
-  const noWake = await wakeStop(event, last, { home, threadId, shell }).catch(() => undefined);
+  const noWake = await wakeStop(event, last, { home, threadId, shell, processes: deps.processes }).catch(() => undefined);
   if (noWake) return noWake;
   return proofStop({ ...event, last_assistant_message: last }, { home, shell, ...deps, threadId });
 }

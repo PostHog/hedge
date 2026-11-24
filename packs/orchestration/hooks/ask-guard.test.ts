@@ -502,9 +502,10 @@ describe("the wake guard", () => {
     db.close();
   }
 
-  const ends = async (thread: Partial<ShellThread>, message = waitLine, event: object = {}, where = home("Robin"), others: Partial<ShellThread>[] = []) => {
+  const lone = { pid: 30, table: async () => "1 0 t3\n20 1 claude\n30 20 bun\n" };
+  const ends = async (thread: Partial<ShellThread>, message = waitLine, event: object = {}, where = home("Robin"), others: Partial<ShellThread>[] = [], processes = lone) => {
     const threads = [{ id: conductor, title: "Conductor", projectId: "p", status: "completed", ...thread }, ...others] as ShellThread[];
-    const routed = hookWith(() => async () => ({ threads }), { threadId: conductor });
+    const routed = hookWith(() => async () => ({ threads }), { threadId: conductor, processes });
     const result = await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Relay it"), claudeSays(message)), last_assistant_message: message, ...event }), where);
     return result.stdout ? JSON.parse(result.stdout) as { decision: string; reason: string } : undefined;
   };
@@ -535,6 +536,11 @@ describe("the wake guard", () => {
     ["a delegation from another machine", { delegatedFrom: { environmentId: "env-2", threadId: "mcp:x" } }],
   ])("lets a wait line through when the thread has %s", async (_, thread) => {
     expect(await ends(thread as Partial<ShellThread>)).toBeUndefined();
+  });
+
+  test("lets a wait line through in a model session that another session started, such as codex exec in a lane", async () => {
+    const nested = { pid: 40, table: async () => "1 0 t3\n20 1 claude\n30 20 bash\n35 30 codex\n40 35 bun\n" };
+    expect(await ends({}, waitLine, {}, home("Robin"), [], nested)).toBeUndefined();
   });
 
   test("lets a wait line through while a child thread of this one runs", async () => {
