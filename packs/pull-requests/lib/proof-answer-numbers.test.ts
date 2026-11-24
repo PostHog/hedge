@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { checkout, cleanFixtures, fakeModel } from "./proof-testing.ts";
+import { checkout, cleanFixtures, fakeModel, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
@@ -11,8 +11,8 @@ const lensAnswer = `I read the whole diff.
 - **Errors:** a failed send is logged.
 
 FINDINGS:
-- feature.txt:1 | major | Correctness | an empty name -> a blank greeting | guard it | anchor: greet the new member
-- feature.txt:1 | minor | Correctness | a typo -> confusion | fix it | anchor: greet the new member
+- feature.txt:1 | major | LENS | an empty name -> a blank greeting | guard it | anchor: greet the new member
+- feature.txt:1 | minor | LENS | a typo -> confusion | fix it | anchor: greet the new member
 
 COVERED:
 
@@ -21,25 +21,32 @@ COVERED:
 
 TESTS:
 
-- feature.test.ts:3 The test waits on a real timer. Control the clock.
+- feature.test.ts:3 The LENS test waits on a real timer. Control the clock.
 `;
+
+function lensNamingReviewer(pr: Checkout) {
+  const reply = join(pr.home, "lens-answer");
+  writeFileSync(reply, lensAnswer);
+  pr.env.HEDGE_PROOF_REVIEWER = `lens=$(awk '/^Lens: / && !seen { sub(/^Lens: /, ""); print; seen = 1 }'); sed "s/LENS/$lens/g" "${reply}"`;
+}
 
 async function panelRound() {
   const pr = await checkout();
   await pr.commit("feature.txt", "greet the new member\n");
   await pr.hedge("require", "--none", "--reason", "docs only");
-  fakeModel(pr, "REVIEWER", lensAnswer);
+  lensNamingReviewer(pr);
   await pr.hedge("review", "--lens", "correctness", "--lens", "sweep");
   return { pr, waited: await pr.hedge("review", "--wait") };
 }
 
-const lenses = 4;
-const major = "feature.txt:1 | major | Correctness | an empty name -> a blank greeting | guard it | anchor: greet the new member";
-const minor = "feature.txt:1 | minor | Correctness | a typo -> confusion | fix it | anchor: greet the new member";
-const testItem = "TESTS: feature.test.ts:3 The test waits on a real timer. Control the clock.";
-const items = [...Array.from({ length: lenses }, () => [major, minor]).flat(), ...Array.from({ length: lenses }, () => testItem)];
+const lenses = ["Correctness", "Risk", "Fresh eyes", "Sweep"];
+const finding = (lens: string) => [
+  `feature.txt:1 | major | ${lens} | an empty name -> a blank greeting | guard it | anchor: greet the new member`,
+  `feature.txt:1 | minor | ${lens} | a typo -> confusion | fix it | anchor: greet the new member`,
+];
+const items = [...lenses.flatMap(finding), ...lenses.map((lens) => `TESTS: feature.test.ts:3 The ${lens} test waits on a real timer. Control the clock.`)];
 const numbered = ["Answer each finding by these numbers, in hedge proof respond:", ...items.map((item, index) => `${index + 1}. ${item}`)].join("\n");
-const readingOrderItems = lenses * 7;
+const readingOrderItems = lenses.length * 7;
 
 test("a finished panel prints its findings by the numbers hedge pairs answers with: every lens's findings, then every TESTS item", async () => {
   const { pr, waited } = await panelRound();
@@ -58,7 +65,24 @@ test("hedge proof respond refuses answers numbered past the last finding, so the
   await expect(refused).rejects.toThrow(`Round 1 has 12 findings; answers numbered past them: 13 to ${readingOrderItems}.`);
   await expect(refused).rejects.toThrow(numbered);
 
-  writeFileSync(join(pr.repository, "responses.md"), readingOrder.split("\n").slice(0, items.length).join("\n") + "\n");
+  const byNumbers = readingOrder.split("\n").slice(0, items.length).join("\n") + "\n";
+  writeFileSync(join(pr.repository, "responses.md"), byNumbers);
+  expect((await pr.hedge("respond", "--round", "1", "responses.md")).code).toBe(0);
+});
+
+test("an answer missing from a responses file is refused with the list to number by", async () => {
+  const { pr } = await panelRound();
+  const allButLast = items.slice(0, -1).map((_, index) => `${index + 1}. rejected: answered by hedge's numbers\n`).join("");
+  writeFileSync(join(pr.repository, "responses.md"), allButLast);
+
+  await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow(numbered);
+});
+
+test("an answer-like line quoted in a fenced block is no answer past the last finding", async () => {
+  const { pr } = await panelRound();
+  const answers = items.map((_, index) => `${index + 1}. rejected: answered by hedge's numbers\n`).join("");
+  writeFileSync(join(pr.repository, "responses.md"), `${answers}\nAn earlier receipt read:\n\n\`\`\`text\n13. rejected: same as 3.\n\`\`\`\n`);
+
   expect((await pr.hedge("respond", "--round", "1", "responses.md")).code).toBe(0);
 });
 
@@ -78,8 +102,10 @@ COVERED: feature.txt
 
   expect(reviewed.output).toContain([
     "Answer each finding by these numbers, in hedge proof respond:",
-    "1. feature.txt:1 | major | Correctness | the greeting drops an empty name | anchor: greet the new member",
-    "2. feature.txt:1 | major | Correctness | the greeting repeats for a returning member | anchor: greet the new member",
+    "1. feature.txt:1 | major | Correctness | the greeting",
+    "   drops an empty name | anchor: greet the new member",
+    "2. feature.txt:1 | major | Correctness | the greeting",
+    "   repeats for a returning member | anchor: greet the new member",
   ].join("\n"));
 });
 

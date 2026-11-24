@@ -673,10 +673,14 @@ function printAnswerNumbers(findings: string, print: CommandContext["print"]) {
 
 async function printSavedReview({ round, id, directory }: SingleRound, { print }: CommandContext) {
   const reservation = await readReservation(directory);
-  print(JSON.stringify({ round, id, directory, reviewer: reservation?.reviewer, ...await readTriage(directory) }));
   const findings = await readFile(join(directory, "findings.md"), "utf8");
-  print(findings.trim());
   const anchors = await readFile(join(directory, "anchors.md"), "utf8").catch(() => "");
+  return printReview({ round, id, directory, reviewer: reservation?.reviewer, ...await readTriage(directory) }, findings, anchors, print);
+}
+
+function printReview(header: object, findings: string, anchors: string, print: CommandContext["print"]) {
+  print(JSON.stringify(header));
+  print(findings.trim());
   if (anchors) print(`\n${anchors.trim()}`);
   printAnswerNumbers(findings, print);
   return 0;
@@ -709,11 +713,7 @@ async function askReviewer(reserved: SingleRound, head: ProofIdentity, author: F
   const anchors = anchorCheck(answer.text, diff, await reviewRecords(home, head));
   await storeCapturedFindings(reserved.directory, head, roundId(reserved.id), answer.text, answer.model, answer.usage);
   if (anchors) await writeFile(join(reserved.directory, "anchors.md"), anchors + "\n", { mode: 0o600 });
-  print(JSON.stringify({ round: reserved.round, id: reserved.id, directory: reserved.directory, reviewer: answer.model, ...await readTriage(reserved.directory) }));
-  print(answer.text.trim());
-  if (anchors) print(`\n${anchors}`);
-  printAnswerNumbers(answer.text, print);
-  return 0;
+  return printReview({ round: reserved.round, id: reserved.id, directory: reserved.directory, reviewer: answer.model, ...await readTriage(reserved.directory) }, answer.text, anchors, print);
 }
 
 async function reserveHedgeReview(options: Map<string, string>, head: ProofIdentity, context: CommandContext, panel = false) {

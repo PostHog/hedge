@@ -806,13 +806,13 @@ const listMark = /^\s*(?:[-*]|\d+[.)])\s+/;
 export function answerNumbers(findings: string) {
   const items = reviewedItems(findings);
   if (!items.length) return "";
-  const lines = items.map(({ text, test }, index) => `${index + 1}. ${test ? "TESTS: " : ""}${text.replace(listMark, "").split("\n").join(" ")}`);
+  const lines = items.map(({ text, test }, index) => `${index + 1}. ${test ? "TESTS: " : ""}${text.replace(listMark, "").split("\n").join("\n   ")}`);
   return ["Answer each finding by these numbers, in hedge proof respond:", ...lines].join("\n");
 }
 
 function numbersPast(findings: string, responses: string) {
   const count = reviewedItems(findings).length;
-  const numbers = responses.split("\n").map((line) => Number(answerItem.exec(line)?.[1])).filter((number) => number > count);
+  const numbers = unfenced(responses).split("\n").map((line) => Number(answerItem.exec(line)?.[1])).filter((number) => number > count);
   return { count, past: [...new Set(numbers)].sort((a, b) => a - b) };
 }
 
