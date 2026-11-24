@@ -5,6 +5,8 @@ import { modelFor, type ModelRow } from "../../base/lib/models.ts";
 import { numberSetting } from "../../base/lib/settings.ts";
 import { covers, hubLedger, refText, riskCalloutOf, tierOf, type Env, type Ledger, type PrRef, type Ssh } from "./decision-ledger.ts";
 import { ciOf, readPullRequest, type PullRequest, type Run } from "./pr-ci.ts";
+import { ghThrough } from "./gh.ts";
+import { openBotFindings } from "./pr-threads.ts";
 import { askGap, authorOf, ciRunningCode, conditionName, isStandingCondition, judgeDirectory, judgeGap, judgeGapProof, listStanding, parseVerdict, prDirectory, proofGate, pullRequestDirectory, readDecisions, readJson, receiptOf, reviewRecords, withBrokenConditions, writeJson, type Arbiter, type Decisions, type JudgeSummary, type ProofIdentity, type ProofSummary, type PushedHead } from "./proof.ts";
 import { displayEntry } from "./proof-display.ts";
 import { receiptMarker } from "./proof-receipt.ts";
@@ -65,7 +67,7 @@ export async function finalGate(head: ProofIdentity, context: JudgingContext, { 
   const files = await proofFiles(home, head);
   const checked = await proofGate(home, head, {
     landed, cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)), ci: () => ciOf(home, head, run, now?.() ?? new Date(), env),
-    pushedHead, ledger: hubLedger(home, env, ssh), now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env),
+    pushedHead, openBotFindings: botFindingsOf(head, run), ledger: hubLedger(home, env, ssh), now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env),
   });
   const judged: Judged = checked.code === 0 ? await judgeHead(head, checked, context) : { code: checked.code, lines: [], covered: "", judge: { state: "skipped", lines: [] }, reason: checked.failure };
   const shown = pull === undefined ? undefined : receiptMarker((pull as PullRequest).body);
@@ -100,6 +102,8 @@ async function grownBy(home: string, head: ProofIdentity, run: Run, pull: PullRe
   return { ...growth, ...sanity ? { sanity } : {}, ...bloat ? { bloat } : {} };
 }
 
+const botFindingsOf = (head: PrRef, run: Run) => () => openBotFindings({ repo: head.repository, pr: head.pr }, ghThrough(run));
+
 const pushedHeadOf = (head: ProofIdentity, run: Run, seen: (pull: PullRequest) => void = () => {}) => (): PushedHead => {
   try {
     const read = readPullRequest(head, run);
@@ -117,7 +121,7 @@ export async function currentSummary(ref: PrRef, pull: PullRequest, ledger: Ledg
   const live = await proofGate(home, head, {
     landed: pull.state === "merged", cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)),
     ci: () => ciOf(home, head, run, now?.() ?? new Date(), env),
-    pushedHead: pushedHeadOf(head, run, (read) => { readAsSaved &&= JSON.stringify(keyOf(read, saved.key.landed, saved.key.fingerprint)) === JSON.stringify(saved.key); }),
+    pushedHead: pushedHeadOf(head, run, (read) => { readAsSaved &&= JSON.stringify(keyOf(read, saved.key.landed, saved.key.fingerprint)) === JSON.stringify(saved.key); }), openBotFindings: botFindingsOf(head, run),
     ledger, now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env),
   });
   const judged = readAsSaved && JSON.stringify(live.conditions) === JSON.stringify(saved.conditions) && live.proofSummary.ci.line === saved.gate.summary.ci.line && JSON.stringify(live.proofSummary.ci.checks) === JSON.stringify(saved.gate.summary.ci.checks);
@@ -131,7 +135,7 @@ export async function receiptSummary(head: ProofIdentity, pull: PullRequest, led
   const { home, env, run, now } = context;
   const live = await proofGate(home, head, {
     landed: pull.state === "merged", cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)),
-    ci: () => ciOf(home, head, run, now?.() ?? new Date(), env), pushedHead: pushedHeadOf(head, run), ledger, now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env),
+    ci: () => ciOf(home, head, run, now?.() ?? new Date(), env), pushedHead: pushedHeadOf(head, run), openBotFindings: botFindingsOf(head, run), ledger, now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env),
   });
   return { summary: { ...live.proofSummary, code: live.code, judge: { state: "skipped", lines: [] } }, gated: false };
 }

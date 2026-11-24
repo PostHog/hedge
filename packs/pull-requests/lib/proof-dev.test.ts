@@ -20,7 +20,7 @@ async function prodPr() {
   expect(await requireProofs(home, prod, [], "claude", dev)).toEqual(["dev-observed"]);
   return {
     home,
-    gate: (devPull: () => DevPull) => proofGate(home, prod, { ci: () => ({ state: "green", detail: "all pass" }), pushedHead: () => ({ commit: prod.commit }), ledger: localLedger(home), devPull }),
+    gate: (devPull: () => DevPull) => proofGate(home, prod, { ci: () => ({ state: "green", detail: "all pass" }), pushedHead: () => ({ commit: prod.commit }), openBotFindings: async () => [], ledger: localLedger(home), devPull }),
     async observe(output: string, at: string) {
       const file = join(home, `${at}.log`);
       writeFileSync(file, output);
