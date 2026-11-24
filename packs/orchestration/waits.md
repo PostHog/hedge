@@ -19,7 +19,7 @@ Keep the thread Working with something that wakes it, then end the turn and say 
   - A watch ends after many comment-only wakes. When a wake says the watch ended, and the pull request is still open, call `watch_pull_request` again.
 - **A child task**: its completion wakes you. Do not poll it.
 - **Another thread**: call `t3_thread_wait`. When it returns a finished run, act on it in the same turn. When it times out with `next`, end the turn. When it times out without `next`, read its status: while it runs, call it again; when it waits on a question or an approval, answer it or ask me.
-- **A command**, such as a deploy or a CI run: wait in one call that blocks until it ends. When it outlasts the shell's foreground limit, run it in the background and pass its task id to `t3_background_wait`. When T3 refuses the task id, as it does for Codex, wait in blocking calls that each end within the limit.
+- **A command**, such as a deploy or a CI run: wait in one call that blocks until it ends. When it outlasts the shell's foreground limit and your tools include `t3_background_wait`, run it in the background and pass its task id to `t3_background_wait`. Without that tool, as on Codex, keep the command in one shell session and wait on it in blocking calls that each end within the limit.
 
 ## Nothing to wake it
 
