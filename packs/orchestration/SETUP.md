@@ -48,11 +48,11 @@ The `question-guard` workflow is on by default. It installs one hook file,
 A message that an agent or `hedge thread send` sends to a thread whose
 running turn waits on a question card steers that turn by default on Claude
 and Codex, which steer without interrupting. The card stays open, and the
-thread's agent reads the message when the person answers. `hedge thread send`
-passes mode `auto` to T3, and T3 queues for a provider that cannot take a
-steer. In mode `auto`, a slash command, such as `/goal`, to a thread that
-waits on a card goes out as `queue`, since T3 runs some at once and stops the
-turn and its card.
+thread's agent reads the message when the person answers. In mode `auto`,
+`hedge thread send` sends `queue` to a thread that waits on a card when the
+message is a slash command, such as `/goal`, which T3 can run at once and
+stop the turn, or when the thread runs on another provider, such as
+Antigravity, whose steer can fail a turn that waits on a card.
 
 ### Threads that ask in prose
 
