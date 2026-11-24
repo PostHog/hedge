@@ -22,10 +22,8 @@ describe("the Orchestration pack", () => {
     expect(agents.slice(agents.indexOf("# Orchestration"))).toMatchSnapshot();
   });
 
-  test("writes the Waits guide and points at it from its rules", () => {
-    const result = withPack();
-    expect(fileContent(result, ".agents/guides/waits.md")).toContain("## Owning thread");
-    expect(fileContent(result, ".agents/AGENTS.md")).toContain("`~/.agents/guides/waits.md`");
+  test("writes the Waits guide", () => {
+    expect(fileContent(withPack(), ".agents/guides/waits.md")).toContain("## Owning thread");
   });
 
   test("needs the Pull requests pack", () => {

@@ -99,7 +99,7 @@ async function reconcile(plan: Plan, options: ApplyOptions): Promise<{ report: R
   const unknown = context.adopt.filter((target) => !adoptable.has(target));
   if (unknown.length) throw new Error(`nothing to adopt at ${unknown.join(", ")}: no part of your profile writes it`);
   const report: Report = { ok: true, actions: [], findings: [], humanLeft: [] };
-  report.findings.push(...packFindings(plan), ...hubFindings(plan), ...waitingFindings(plan));
+  report.findings.push(...packFindings(plan), ...hubFindings(plan), ...waitingFindings(plan), ...repeatFindings(plan));
   if (plan.unanswered.length) {
     report.ok = false;
     report.findings.push(...plan.unanswered.map((setting) => ({ id: `unanswered:${setting.key}`, pack: setting.key.split(".")[0] ?? "", say: `${setting.question} Answer it with hedge set ${setting.key}=<value>.`, repair: "human" as const })));
@@ -400,6 +400,15 @@ function packFindings(plan: Plan): Finding[] {
   return plan.packs
     .filter((pack) => !pack.available || pack.reason)
     .map((pack) => ({ id: `pack:${pack.name}`, pack: pack.name, say: pack.available ? `The ${pack.name} pack uses its last fetched files: ${pack.reason}` : `The ${pack.name} pack is not applied: ${pack.reason}` }));
+}
+
+function repeatFindings(plan: Plan): Finding[] {
+  return (plan.repeatedHeadings ?? []).map((entry) => ({
+    id: `repeats:${entry.guide}:${entry.section}`,
+    pack: entry.pack,
+    say: `Section "${entry.section}" of the ${entry.pack} pack repeats the heading "${entry.heading}" of ${entry.owner} in ~/.agents/guides/${entry.guide}.md. Agents then read two versions of one rule. Keep only what the guide does not say, under a heading of its own, or change the rule with a setting.`,
+    todo: true as const,
+  }));
 }
 
 function hubFindings(plan: Plan): Finding[] {

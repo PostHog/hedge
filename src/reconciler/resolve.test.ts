@@ -72,18 +72,40 @@ describe("resolve", () => {
     expect(file(plan(), ".agents/guides/coding-standards.md")).toBe("# Coding standards\n\nKeep it simple.\n\n## Pull requests\n\nKeep each pull request under 400 lines.\n");
   });
 
-  test("throws when a section repeats a heading of the guide it adds to", () => {
+  describe("a section that repeats a heading of its guide", () => {
     const owner = "# Coding standards\n\n## Tests\n\nWrite the test first.\n";
-    const base = withPack({ schema: 1, name: "standards", summary: "Standards.", guides: [{ guide: "rules", path: "rules.md" }] }, { "rules.md": owner });
-    const copy = withPack({ schema: 1, name: "mine", summary: "Mine.", guides: [{ guide: "rules", section: "My rules", path: "mine.md" }] }, { "mine.md": "### Tests\n\nWrite the test first, always.\n" });
-    expect(() => plan({ packs: ["standards", "mine"] }, mac, [engine, base, copy])).toThrow('mine: section "My rules" of guide rules repeats the heading "Tests" of standards');
-  });
+    const repeats = (section: string, text: string, ownerText = owner) => {
+      const base = withPack({ schema: 1, name: "standards", summary: "Standards.", guides: [{ guide: "rules", path: "rules.md" }] }, { "rules.md": ownerText });
+      const extra = withPack({ schema: 1, name: "mine", summary: "Mine.", guides: [{ guide: "rules", section, path: "mine.md" }] }, { "mine.md": text });
+      return plan({ packs: ["standards", "mine"] }, mac, [engine, base, extra]);
+    };
 
-  test("allows a section heading that the guide only shows inside a code block", () => {
-    const owner = "# Coding standards\n\n```md\n## Tests\n```\n";
-    const base = withPack({ schema: 1, name: "standards", summary: "Standards.", guides: [{ guide: "rules", path: "rules.md" }] }, { "rules.md": owner });
-    const extra = withPack({ schema: 1, name: "mine", summary: "Mine.", guides: [{ guide: "rules", section: "My rules", path: "mine.md" }] }, { "mine.md": "### Tests\n\nName each test after its behaviour.\n" });
-    expect(file(plan({ packs: ["standards", "mine"] }, mac, [engine, base, extra]), ".agents/guides/rules.md")).toContain("### Tests\n\nName each test after its behaviour.");
+    test("is written and reported as a to-do in any letter case", async () => {
+      const result = repeats("My rules", "### tests\n\nWrite the test first, always.\n");
+      expect(file(result, ".agents/guides/rules.md")).toContain("### tests\n\nWrite the test first, always.");
+      const report = await apply(result, { home: temp.make("home-"), dryRun: true });
+      expect(report.ok).toBe(true);
+      expect(report.findings.find((finding) => finding.id === "repeats:rules:My rules")).toMatchObject({ pack: "mine", todo: true, say: expect.stringContaining('Section "My rules" of the mine pack repeats the heading "tests" of standards') });
+    });
+
+    test("is reported when its own title repeats a heading", () => {
+      expect(repeats("tEsTs", "Name each test after its behaviour.\n").repeatedHeadings).toEqual([{ pack: "mine", guide: "rules", section: "tEsTs", heading: "tEsTs", owner: "standards" }]);
+    });
+
+    test("is found in setext and indented headings", () => {
+      expect(repeats("My rules", "  ## Tests\n").repeatedHeadings).toHaveLength(1);
+      expect(repeats("My rules", "Tests\n-----\n").repeatedHeadings).toHaveLength(1);
+    });
+
+    test.each([
+      ["a code block of the guide", "My rules", "### Tests\n", "# Coding standards\n\n````md\n```\n## Tests\n````\n"],
+      ["a code block of the section", "My rules", "````md\n```\n## Tests\n````\n", owner],
+      ["an HTML comment", "My rules", "<!--\n## Tests\n-->\n", owner],
+      ["front matter", "My rules", "---\ntitle: x\n---\n## Notes\n", "---\ntitle: x\n---\n# Coding standards\n"],
+      ["a closing hash that is part of the text", "My rules", "## Tests#\n", owner],
+    ])("is not found in %s", (_, section, text, ownerText) => {
+      expect(repeats(section, text, ownerText).repeatedHeadings).toBeUndefined();
+    });
   });
 
   test("throws when two packs own the same guide", () => {

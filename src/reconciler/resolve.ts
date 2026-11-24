@@ -168,7 +168,7 @@ export function resolve(profile: Profile, saved: MachineFile, sources: FetchedSo
     return job.task && project !== undefined ? { ...job, task: { ...job.task, project: String(project) } } : job;
   });
   const whole = order.map((candidate) => (byOldName.has(candidate.manifest.name) ? { ...candidate, manifest: { ...candidate.manifest, instructions: undefined, guides: undefined, skills: undefined } } : candidate));
-  plan.files = checkTargets([...instructionFiles(whole, profile, plan.models, active), ...packFiles, ...guideFiles(whole, settings, plan.settings), ...skillFiles(whole, profile, sources, plan)]);
+  plan.files = checkTargets([...instructionFiles(whole, profile, plan.models, active), ...packFiles, ...guideFiles(whole, settings, plan), ...skillFiles(whole, profile, sources, plan)]);
   plan.commands = packCommands(order);
   return plan;
 }
@@ -490,7 +490,7 @@ function instructionFiles(order: Candidate[], profile: Profile, models: ModelRow
   return [".agents/AGENTS.md", ".codex/AGENTS.md", ".claude/rules/hedge.md", ".gemini/AGENTS.md"].map((target) => ({ target, content }));
 }
 
-function guideFiles(order: Candidate[], settings: Array<PackSetting & { pack: string }>, values: Record<string, SettingValue>): DesiredFile[] {
+function guideFiles(order: Candidate[], settings: Array<PackSetting & { pack: string }>, plan: Plan): DesiredFile[] {
   const owners = new Map<string, { pack: string; text: string }>();
   const sections = new Map<string, GuideSection[]>();
   for (const { manifest, dir } of order) {
@@ -509,32 +509,30 @@ function guideFiles(order: Candidate[], settings: Array<PackSetting & { pack: st
   for (const [guide, added] of sections) {
     const owner = owners.get(guide);
     if (!owner) throw new ResolveError(`guide ${guide} has sections but no owning pack`);
-    for (const section of added) refuseRepeatedHeading(guide, owner, section);
+    for (const section of added) noteRepeatedHeading(plan, guide, owner, section);
   }
   const files: DesiredFile[] = [...owners].map(([guide, owner]) => ({
     target: `.agents/guides/${guide}.md`,
-    content: [owner.text, ...(sections.get(guide) ?? []).map((section) => `## ${section.title}\n\n${section.text}`)].join("\n\n") + "\n",
+    content: [owner.text, ...(sections.get(guide) ?? []).map(rendered)].join("\n\n") + "\n",
   }));
-  files.push({ target: ".agents/guides/skill-settings.md", content: skillSettings(settings, values) });
+  files.push({ target: ".agents/guides/skill-settings.md", content: skillSettings(settings, plan.settings) });
   return files;
 }
 
 type GuideSection = { pack: string; title: string; text: string };
 
+const rendered = (section: GuideSection) => `## ${section.title}\n\n${section.text}`;
+
 function headings(text: string): string[] {
-  let fenced = false;
-  return text.split("\n").flatMap((line) => {
-    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
-    const heading = fenced ? undefined : line.match(/^#{1,6}\s+(.+?)\s*#*\s*$/)?.[1];
-    return heading ? [heading] : [];
-  });
+  const found: string[] = [];
+  Bun.markdown.render(text.replace(/^---\n[\s\S]*?\n---\n/, ""), { heading: (children: string) => (found.push(children.trim()), "") });
+  return found;
 }
 
-function refuseRepeatedHeading(guide: string, owner: { pack: string; text: string }, section: GuideSection) {
+function noteRepeatedHeading(plan: Plan, guide: string, owner: { pack: string; text: string }, section: GuideSection) {
   const owned = new Set(headings(owner.text).map((heading) => heading.toLowerCase()));
-  const repeated = headings(section.text).find((heading) => owned.has(heading.toLowerCase()));
-  if (repeated === undefined) return;
-  throw new ResolveError(`${section.pack}: section "${section.title}" of guide ${guide} repeats the heading "${repeated}" of ${owner.pack}. Add only what the guide does not say, under a heading of its own, or change the rule with a setting.`);
+  const heading = headings(rendered(section)).find((candidate) => owned.has(candidate.toLowerCase()));
+  if (heading !== undefined) (plan.repeatedHeadings ??= []).push({ pack: section.pack, guide, section: section.title, heading, owner: owner.pack });
 }
 
 function skillSettings(settings: Array<PackSetting & { pack: string }>, values: Record<string, SettingValue>) {
