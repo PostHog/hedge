@@ -32,11 +32,12 @@ function hasScheduledCheck(home: string, threadId: string): boolean {
   }
 }
 
-const outsideWakeCheck = (thread: ShellThread, now: number) => Boolean(subagentParent(thread) || thread.delegatedFrom || thread.pendingRuntimeRequest || isSnoozed(thread, now));
+const outsideWakeCheck = (thread: ShellThread, now: number) => Boolean(subagentParent(thread) || thread.lineage?.sideChat || thread.delegatedFrom || thread.pendingRuntimeRequest || isSnoozed(thread, now));
 
 type ShellPullRequest = NonNullable<ShellThread["pullRequests"]>[number];
 
-const watchWakes = ({ watch }: ShellPullRequest) => Boolean(watch) && (watch!.until === "merged" || watch!.checksPending !== false);
+const watchWakes = ({ snapshot, watch }: ShellPullRequest) => Boolean(watch)
+  && (watch!.until === "merged" || watch!.checksPending !== false || (snapshot?.state?.toLowerCase() ?? "open") !== "open");
 
 const wakes = (threads: ShellThread[], thread: ShellThread) => waits(threads, thread) || (thread.pullRequests ?? []).some(watchWakes);
 

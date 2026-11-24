@@ -540,6 +540,12 @@ describe("the wake guard", () => {
     expect(await ends({ ...merged, status: "running" })).toBeUndefined();
   });
 
+  test.each(["merged", "closed"])("lets a wait through whose default watch is still on a PR that was %s, while T3 owes its last wake", async (state) => {
+    const ended = watching({});
+    ended.pullRequests[0]!.snapshot.state = state;
+    expect(await ends({ ...ended, status: "running" })).toBeUndefined();
+  });
+
   test("lets a wait through after a push, when T3 cleared checksPending and kept the old result", async () => {
     const pushed = watching({});
     delete (pushed.pullRequests[0]!.watch as { checksPending?: boolean }).checksPending;
@@ -558,6 +564,10 @@ describe("the wake guard", () => {
     ["a delegation from another machine", { delegatedFrom: { environmentId: "env-2", threadId: "mcp:x" } }],
   ])("lets a wait line through when the thread has %s", async (_, thread) => {
     expect(await ends(thread as Partial<ShellThread>)).toBeUndefined();
+  });
+
+  test("lets a side chat through, which T3 keeps out of its top-level list", async () => {
+    expect(await ends({ lineage: { parentThreadId: "mcp:conductor-0", relationshipToParent: "fork", sideChat: true } })).toBeUndefined();
   });
 
   test("sends back a fork, which T3 shows as a top-level thread, though it has a parent", async () => {
@@ -620,11 +630,10 @@ describe("the wake guard", () => {
   test("lets the stop through once the one deadline of the proof check and the wake check has passed", async () => {
     const stalled = { pid: 30, table: () => new Promise<string>(() => {}) };
     let deadlines = 0;
-    const passed = Promise.resolve();
-    const later = new Promise<void>(() => {});
     const routed = hookWith(() => async () => ({ threads: [{ id: conductor, title: "Conductor", projectId: "p", status: "completed" }] as ShellThread[] }),
-      { threadId: conductor, processes: stalled, deadline: () => ++deadlines === 1 ? passed : later });
+      { threadId: conductor, processes: stalled, deadline: async () => { deadlines++; } });
     expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)), cwd: "/" }), home("Robin"))).stdout).toBe("");
+    expect(deadlines).toBe(1);
   });
 
   test("lets the stop through when the check does not answer before the deadline the hook passes on", async () => {
