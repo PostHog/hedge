@@ -27,6 +27,12 @@
   and refuses it when the ledger cannot be read. A 🤖 gap decision of the PR
   holds it until a gate pass at its head that read that decision shows no
   such gap.
+- While the decision ledger cannot be read, the hook now refuses every
+  enqueue and merge, since it cannot tell whether a gap an agent accepted
+  holds the head. Before, a gate pass on this machine let it through.
+- `hedge proof gate` saves its run and shares its pass before it reads the
+  PR's timeline for the card line, so a slow GitHub read cannot keep a pass
+  from counting.
 
 ### A message steers a thread that waits on a question card
 

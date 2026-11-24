@@ -383,7 +383,7 @@ const overrideHint = (person: string) => `For an incident fix that cannot wait f
 const heldReason = (held: string[], person: string) => `Hedge blocked this merge: an agent accepted proof gaps of ${held.join("; ")} itself, so it merges only on ${person}'s word for that head, whatever else lets it merge: own tooling, a standing merge grant, or full send. `
   + `Show it on a merge card: ask ${person} with the question tool, naming the PR, its full head sha and each held decision id, with the options "${mergeCardChoice}" and "Keep it open". When they choose "${mergeCardChoice}", record the answer with \`hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full 40-character head sha>: merge card'\`, then merge again. The answer lifts only the gaps its question named, and a push leaves it behind; a gate pass at the new head that saw no such gap lifts the hold.`;
 
-const unreadReason = (repositories: string[]) => `Hedge blocked this merge: the decision ledger could not be read, so the merge gate cannot tell whether an agent accepted a proof gap in ${repositories.join(", ")} itself. Those repositories skip the gate, but such a gap holds a merge until the person's word. Try again when the hub answers.`;
+const unreadReason = (repositories: string[]) => `Hedge blocked this merge: the decision ledger could not be read, so the merge gate cannot tell whether an agent accepted a proof gap in ${repositories.join(", ")} itself, and such a gap holds a merge until the person's word. Try again when the hub answers.`;
 
 /** Why the call may not go out, or undefined when every open layer of every target passed the gate at its head and none holds a gap an agent accepted without the person's merge word. */
 export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: string): Promise<string | undefined> {
@@ -420,6 +420,7 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
   } catch (error) {
     return `Hedge blocked this merge: the merge gate could not check it (${(error as Error).message}). A merge needs a \`hedge proof gate\` pass at each PR's head on GitHub; try again when GitHub answers.`;
   }
+  if (!missing.length && hubError !== undefined) return unreadReason([...new Set(intent.targets.map((target) => target.repository))]);
   if (!missing.length) return held.length ? heldReason(held, person) : undefined;
   const hub = hubError ? ` The decision ledger could not be read (${hubError}), so only this machine's gate records counted.` : "";
   return `Hedge blocked this merge: \`hedge proof gate\` has not passed at the head of ${missing.join("; ")}. A missing proof store, a pass at an older head, or a pass that a later failed run at the same head replaced does not count, nor a pass from while pull-requests.autonomy was end once it is ask again.${hub} `

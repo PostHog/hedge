@@ -275,9 +275,9 @@ describe("the gate pass each layer needs", () => {
     expect(await risk(one(100), { ...deep, pullFor: async () => 100 })).toContain("loops back to #100");
   });
 
-  test("an unreadable ledger refuses a PR without a local pass and says why", async () => {
-    expect(await risk(one(9), gate({ hubDown: true }))).toContain("decision ledger could not be read");
-    expect(await risk(one(9), gate({ hubDown: true, local: [`9@${head}`] }))).toBeUndefined();
+  test("an unreadable ledger refuses a merge: without a local pass it names the missing gate, and with one it cannot tell whether a gap an agent accepted holds the head", async () => {
+    expect(await risk(one(9), gate({ hubDown: true }))).toContain("has not passed at the head of example/product#9");
+    expect(await risk(one(9), gate({ hubDown: true, local: [`9@${head}`] }))).toContain("the decision ledger could not be read, so the merge gate cannot tell whether an agent accepted a proof gap in example/product itself");
   });
 
   test("GitHub not answering refuses the merge; a comment on an issue GitHub shows as no PR passes, and one it hides does not", async () => {

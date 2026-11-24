@@ -536,8 +536,9 @@ code and the reason. The gate's lines and hedge decision report come from the sa
       await record({ code: gate.code, reason: gate.reason, ...ranOnEnd(context), ...heldGaps(gate) });
       const shared = unshared?.failed ? unshared.line : (await shareGateResult(head, gate.code === 0, gatedAt, context, heldGaps(gate)))?.line;
       const waitLine = waited?.failedRead ? `ci: --wait stopped early at a failed read of GitHub: ${waited.failedRead}` : undefined;
-      if (flags.has("--json")) print(JSON.stringify({ ...gate.summary, reason: gate.reason, ...waitLine ? { wait: waitLine } : {}, ...shared ? { ledger: shared } : {}, ...gate.card ? { mergeCard: gate.card } : {} }));
-      else for (const line of [...gate.lines, ...waitLine ? [waitLine] : [], ...shared ? [shared] : [], ...gate.card ? [gate.card] : [], gate.verdict]) print(line);
+      const card = gate.code === 0 ? gate.cardOf?.() : undefined;
+      if (flags.has("--json")) print(JSON.stringify({ ...gate.summary, reason: gate.reason, ...waitLine ? { wait: waitLine } : {}, ...shared ? { ledger: shared } : {}, ...card ? { mergeCard: card } : {} }));
+      else for (const line of [...gate.lines, ...waitLine ? [waitLine] : [], ...shared ? [shared] : [], ...card ? [card] : [], gate.verdict]) print(line);
       return gate.code;
     },
   },
