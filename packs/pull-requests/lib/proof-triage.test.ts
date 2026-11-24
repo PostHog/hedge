@@ -202,6 +202,7 @@ test("on end, the agent's own reason runs up to three reads past a spent treated
   expect(spent).toContain("The review budget of 2 reviews is spent, and no read checks the production changes since");
   expect(spent).toContain("Decide yourself whether one more read is worth it: run this command again with --agent '<your reason>'. You may run 3 more reads past the budget this way");
   expect(spent).not.toContain("--override");
+  expect(spent).toContain("Ask the user nothing about it. When no read is worth it: Revert each commit of the PR since");
   const again = async () => pr.hedge("review", "--scope", "final", "--base", await latestReviewed(pr), "--agent", "The last fix changed the greeting.");
   expect((await again()).code).toBe(0);
   for (const answered of ["final-2", "final-3"]) expect((await readAgain(pr, answered, "--agent", "The last fix changed the greeting.")).code).toBe(0);

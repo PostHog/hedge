@@ -239,16 +239,18 @@ export function parseVerdict(output: string, model: string): ArbiterVerdict {
 
 export type ReviewLimits = { free: number; ceiling: number };
 
-export const atCeiling = `hedge proof asks nothing more. For each open blocker or major, revert the fix that brought it in, or list it in a "## Known issues" section of the PR body, one "- <blocker|major>: <file:line> <finding>" item each, and answer its finding "<n>. known: <why>". A blocker or major that the last read found in the fixes since the panel is reverted, never listed. An open blocker holds the merge; the user's merge word accepts the rest. Only the user's --override runs another review or final read, such as a read of the fix of an open blocker`;
+const knownIssuesStep = `For each open blocker or major, revert the fix that brought it in, or list it in a "## Known issues" section of the PR body, one "- <blocker|major>: <file:line> <finding>" item each, and answer its finding "<n>. known: <why>". A blocker or major that the last read found in the fixes since the panel is reverted, never listed. An open blocker holds the merge; the user's merge word accepts the rest.`;
+export const atCeiling = `hedge proof asks nothing more. ${knownIssuesStep} Only the user's --override runs another review or final read, such as a read of the fix of an open blocker`;
 
-type Stop = { lead: string; text: string };
-const stopWith = (lead: string, rest: string): Stop => ({ lead, text: `${lead} ${rest}` });
-const budgetSpent = ({ ceiling }: ReviewLimits) => stopWith(`The review budget of ${ceiling} reviews is spent.`, atCeiling);
-const fixesUnread = ({ ceiling }: ReviewLimits, latest: string) => stopWith(`The review budget of ${ceiling} reviews is spent, and no read checks the production changes since ${short(latest)}.`, `Revert each commit of the PR since ${short(latest)} that changes production code, never a merge of the base: the gate carries a revert of a PR commit. When a merge of the base holds them, such as a conflict resolution, only the user's --override reads them. ${atCeiling}`);
+type Stop = { lead: string; text: string; agentNext: string };
+const stopWith = (lead: string, rest: string, agentNext: string): Stop => ({ lead, text: `${lead} ${rest}`, agentNext });
+const budgetSpent = ({ ceiling }: ReviewLimits) => stopWith(`The review budget of ${ceiling} reviews is spent.`, atCeiling, knownIssuesStep);
+const revertSince = (latest: string) => `Revert each commit of the PR since ${short(latest)} that changes production code, never a merge of the base: the gate carries a revert of a PR commit.`;
+const fixesUnread = ({ ceiling }: ReviewLimits, latest: string) => stopWith(`The review budget of ${ceiling} reviews is spent, and no read checks the production changes since ${short(latest)}.`, `${revertSince(latest)} When a merge of the base holds them, such as a conflict resolution, only the user's --override reads them. ${atCeiling}`, `${revertSince(latest)} ${knownIssuesStep}`);
 
 export const agentExtraReads = 3;
 
-const pastBudget = (stop: Stop, left: number) => `${stop.lead} Decide yourself whether one more read is worth it: run this command again with --agent '<your reason>'. You may run ${left} more read${left === 1 ? "" : "s"} past the budget this way; then hedge stops the review loop. It lands in the ledger as a 🤖 review decision, and ${endTableNote}. Ask the user nothing about it.`;
+const pastBudget = (stop: Stop, left: number) => `${stop.lead} Decide yourself whether one more read is worth it: run this command again with --agent '<your reason>'. You may run ${left} more read${left === 1 ? "" : "s"} past the budget this way; then hedge stops the review loop. It lands in the ledger as a 🤖 review decision, and ${endTableNote}. Ask the user nothing about it. When no read is worth it: ${stop.agentNext}`;
 
 type Budget = { stop?: Stop; pastBudget: number };
 type Permitted = { arbiter?: ArbiterVerdict; pastBudget?: true };
