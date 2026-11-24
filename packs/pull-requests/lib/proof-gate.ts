@@ -7,7 +7,7 @@ import { covers, hubLedger, refText, riskCalloutOf, tierOf, type Env, type Ledge
 import { ciOf, readPullRequest, type PullRequest, type Run } from "./pr-ci.ts";
 import { ghThrough } from "./gh.ts";
 import { openBotFindings } from "./pr-threads.ts";
-import { askGap, authorOf, ciRunningCode, conditionName, isStandingCondition, judgeDirectory, judgeGap, judgeGapProof, listStanding, parseVerdict, prDirectory, proofGate, pullRequestDirectory, readDecisions, readJson, receiptOf, reviewRecords, withBrokenConditions, writeJson, type Arbiter, type Decisions, type JudgeSummary, type ProofIdentity, type ProofSummary, type PushedHead } from "./proof.ts";
+import { askGap, authorOf, readOneWayStop, ciRunningCode, conditionName, isStandingCondition, judgeDirectory, judgeGap, judgeGapProof, listStanding, parseVerdict, prDirectory, proofGate, pullRequestDirectory, readDecisions, readJson, receiptOf, reviewRecords, withBrokenConditions, writeJson, type Arbiter, type Decisions, type JudgeSummary, type ProofIdentity, type ProofSummary, type PushedHead } from "./proof.ts";
 import { displayEntry } from "./proof-display.ts";
 import { receiptMarker } from "./proof-receipt.ts";
 import { baseRefs, cleanBaseMerge, devPullOf, diffOf, mergeBase, pullRequestDetails, remotesOf, topLevel } from "./proof-checkout.ts";
@@ -159,6 +159,7 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
     commit: head.commit, crossFamily: otherFamily(row, author), ci: checked.ci, owed: checked.owed!, ledger: checked.lines,
     evidence: checked.evidence, reviews: await reviewRecords(home, head), rubric: await readRubric(home), references: skillReferences(home),
     conditions: [...checked.conditions, ...weighedGap?.condition ? [weighedGap.condition] : []], criticalPaths: await readCriticalPaths(home, head.repository, env),
+    oneWayStop: (await readOneWayStop(home, head))?.commit,
   };
   const outcome = await judgeDiff(head, known, row, context);
   const verdict = (lines: string[], gap?: JudgeSummary["gap"]): JudgeSummary => ({ state: outcome.state, model: outcome.model, ...gap ? { gap } : {}, lines });

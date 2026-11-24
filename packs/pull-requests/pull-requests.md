@@ -11,7 +11,7 @@ The workflow that `full-stop`, `full-send`, and `stamp-pr` follow.
 
 Run `qa-swarm` in place of step 3 when I ask for it, when I ask for `full-send`, or when the diff touches a danger area of the `merge-risk` skill.
 
-Ask me about review rounds and proof gaps as `pull-requests.autonomy` says. On `ask`, ask me each time. On `end`, decide alone as `hedge proof` prints, and send me `hedge decision report` when the work is done: its Decisions list and its end table. Ask me at once, on `end` too, for a guard or policy refusal, a one-way door, an open security finding, and a gap on a critical pull request other than review, status, judge, and post-deploy-watch.
+Ask me about review rounds and proof gaps as `pull-requests.autonomy` says. On `ask`, ask me each time. On `end`, decide alone as `hedge proof` prints, and send me `hedge decision report` when the work is done: its Decisions list and its end table. On `end`, when the review arbiter escalates or gives no verdict on a one-way door, the review loop stops: ask me nothing about another round, revert each production commit since the latest review, and revert or list each open blocker or major under "## Known issues" as `hedge proof` prints. Ask me at once, on `end` too, for a guard or policy refusal, a one-way door, an open security finding, and a gap on a critical pull request other than review, status, judge, and post-deploy-watch.
 
 Show me a comment before you post it as `pull-requests.commentApproval` says: `people` for comments that a person reads, `all` for every comment, `none` for no comment. This setting replaces the approval rule of `leaving-pr-comments`.
 

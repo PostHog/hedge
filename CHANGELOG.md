@@ -18,6 +18,21 @@
 - `hedge pr bot-threads` and the gate share one reader, and both now know the
   logins of these bots.
 
+### A one-way door stops the review loop at an escalation
+
+- With `pull-requests.autonomy` set to `end`, when the review arbiter
+  escalates or gives no verdict on a one-way door, `hedge proof review` no
+  longer tells the agent to ask the user for another round. The loop stops:
+  revert each production commit since the latest review, and revert or list
+  each open blocker or major under Known issues, as at the review budget.
+- `--agent` cannot pass the stop. The user's `--override` still runs a round.
+- `hedge proof` records the stop in the pull request's reviews. While it
+  stands, every later round and final read refuses until the user's
+  `--override`, also after a switch to `ask`. `hedge proof respond` takes a
+  `known` answer after it, the gate's judge reads the stop, and the end table
+  in `hedge decision report` shows it.
+- On `ask`, a pull request that never stopped on `end` runs as before.
+
 ### A hard read budget for treated pull requests
 
 - With `pull-requests.triage` on or `split`, a treated pull request gets a
