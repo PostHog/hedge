@@ -152,25 +152,59 @@ test("hedge thread read refuses --mode", async () => {
   await expect(thread(t3, ["read", "--mode", "queue", "mcp:local-idle"])).rejects.toThrow("Usage: hedge thread list");
 });
 
-test("hedge thread send steers a running turn that waits on a question card on this machine by default", async () => {
-  const t3 = await stub(fixture([linkedEnvironment], linkedThreads, [
-    shellThread("mcp:local-card", { status: "running", activeRunId: "run-2", pendingRuntimeRequest: { id: "card-1", kind: "user_input" } }),
-  ]));
+const card = { id: "card-1", kind: "user_input" };
+const localCard = (providerInstanceId: string) => shellThread("mcp:local-card", { status: "running", activeRunId: "run-2", pendingRuntimeRequest: card, providerInstanceId });
+const linkedCard = (providerInstanceId: string) => linkedThread("mcp:linked-card", { status: "running", pendingRequestCount: 1, providerInstanceId });
+const writable = { ...linkedEnvironment, access: "full-access" };
+
+test.each(["claudeAgent", "codex"])("hedge thread send steers a running %s turn that waits on a question card on this machine by default", async (provider) => {
+  const t3 = await stub(fixture([linkedEnvironment], linkedThreads, [localCard(provider)]));
 
   const { output } = await thread(t3, ["send", "--host", "this-box", "mcp:local-card", "FYI"]);
 
   expect(JSON.parse(output)).toMatchObject({ threadId: "mcp:local-card", delivery: "steered" });
 });
 
-test("hedge thread send steers a running turn that waits on a question card on a linked machine by default", async () => {
-  const t3 = await stub(fixture([{ ...linkedEnvironment, access: "full-access" }], [
-    ...linkedThreads,
-    linkedThread("mcp:linked-card", { status: "running", pendingRequestCount: 1 }),
-  ]));
+test.each(["claudeAgent", "codex"])("hedge thread send steers a running %s turn that waits on a question card on a linked machine by default", async (provider) => {
+  const t3 = await stub(fixture([writable], [...linkedThreads, linkedCard(provider)]));
 
   const { output } = await thread(t3, ["send", "--host", "devbox-2", "mcp:linked-card", "FYI"]);
 
   expect(JSON.parse(output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-card", delivery: "steered" });
+});
+
+test("hedge thread send queues behind a question card on a provider that steers by restarting the turn", async () => {
+  const local = await stub(fixture([linkedEnvironment], linkedThreads, [localCard("antigravity")]));
+  const linked = await stub(fixture([writable], [...linkedThreads, linkedCard("antigravity")]));
+
+  const sentHere = await thread(local, ["send", "--host", "this-box", "mcp:local-card", "FYI"]);
+  const sentThere = await thread(linked, ["send", "--host", "devbox-2", "mcp:linked-card", "FYI"]);
+
+  expect(JSON.parse(sentHere.output)).toMatchObject({ delivery: "queued" });
+  expect(JSON.parse(sentThere.output)).toMatchObject({ delivery: "queued" });
+});
+
+test("hedge thread send queues a slash command behind a question card", async () => {
+  const t3 = await stub(fixture([linkedEnvironment], linkedThreads, [localCard("claudeAgent")]));
+
+  const { output } = await thread(t3, ["send", "--host", "this-box", "mcp:local-card", "/goal Continue the migration"]);
+
+  expect(JSON.parse(output)).toMatchObject({ delivery: "queued" });
+});
+
+test("hedge thread send fails closed to queue on a linked thread when checking pending requests fails", async () => {
+  const base = fixture([writable]);
+  const t3 = await stub({
+    ...base,
+    tools(name, args) {
+      if (name === "t3_thread_read") throw new ToolRefusal("orchestration_error", "timeout");
+      return base.tools!(name, args);
+    },
+  });
+
+  const result = await thread(t3, ["send", "--host", "devbox-2", "mcp:linked-busy", "FYI"]);
+
+  expect(JSON.parse(result.output)).toMatchObject({ host: "devbox-2", threadId: "mcp:linked-busy", delivery: "queued" });
 });
 
 test("hedge thread send refuses an archived thread, an empty message, and a thread it cannot place, and sends nothing", async () => {

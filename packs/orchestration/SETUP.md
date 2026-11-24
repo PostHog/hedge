@@ -46,10 +46,13 @@ The `question-guard` workflow is on by default. It installs one hook file,
   with one of your prose titles is turned back. See below.
 
 A message that an agent or `hedge thread send` sends to a thread whose
-running turn waits on a question card steers that turn by default, on a
-provider that steers without interrupting, such as Claude and Codex. The card
-stays open, and the thread's agent reads the message when the person answers.
-On other providers T3 queues the message.
+running turn waits on a question card steers that turn by default on Claude
+and Codex, which steer without interrupting. The card stays open, and the
+thread's agent reads the message when the person answers. `hedge thread send`
+in mode `auto` queues the message instead when the thread runs on another
+provider, such as Antigravity, or the message is a slash command, since T3
+would restart the turn and cancel the card. It also queues when it cannot
+read a linked thread.
 
 ### Threads that ask in prose
 

@@ -5,16 +5,18 @@
 ### A message steers a thread that waits on a question card
 
 - `hedge thread send` no longer turns `auto` into `queue` when the target
-  thread waits on a question card or an approval, on this machine or a
-  linked one. T3 steers the running turn, the card stays open, and the
-  agent reads the message once the person answers.
+  thread waits on a question card or an approval on Claude or Codex, on this
+  machine or a linked one. T3 steers the running turn, the card stays open,
+  and the agent reads the message once the person answers. On any other
+  provider, and for a slash command, it still queues, since T3 would restart
+  the turn and cancel the card.
 - The `question-guard` workflow no longer turns back a `t3_thread_send` to a
   thread that waits on a card. The prose-title card check stays.
 - Hedge's own jobs that message threads, such as mail watch, review wait and
   library shares, steer such a thread too.
-- The base rule tells agents to omit `mode`, to leave a message that T3
-  queued as it is, and never to send `restart` to a thread that waits on a
-  card.
+- The base rule tells agents to omit `mode`, to queue for a card on another
+  provider and for a slash command, to leave a message that T3 queued as it
+  is, and never to send `restart` to a thread that waits on a card.
 
 ### A one-way door stops the review loop at an escalation
 
