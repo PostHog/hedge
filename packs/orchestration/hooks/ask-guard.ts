@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { type Hook, printing, runHook } from "../../base/lib/hook.ts";
 import { matchThread, questionCard, type ShellThread, t3CliRunner, t3UserData, withT3Session } from "../../base/lib/t3/index.ts";
 import { backgroundReason, unwaitedBackgroundTasks } from "../lib/background-stop.ts";
-import { checksRun, claudeTaskRuns, proofStop, waits, type ProofStopEvent, type ProofStopOptions } from "../lib/proof-stop.ts";
+import { awaitsChecks, claudeTaskRuns, isSnoozed, proofStop, waits, type ProofStopEvent, type ProofStopOptions } from "../lib/proof-stop.ts";
 import { asksForDecision, asksInProse, personName, proseTitles } from "../lib/prose-question.ts";
 import { wakeStop } from "../lib/wake-stop.ts";
 
@@ -76,16 +76,13 @@ export function currentTurn(transcript: string): string[] {
   return lines;
 }
 
-const awaitsChecks = ({ snapshot, watch }: NonNullable<ShellThread["pullRequests"]>[number]) =>
-  Boolean(watch) && !["merged", "closed"].includes(snapshot?.state?.toLowerCase() ?? "open") && (checksRun(watch!) || Boolean(watch!.awaitingApproval?.length));
-
 export const hiddenIn = (shell: ReadShell, now = Date.now): IsHidden => async (threadId, home, event) => {
   if (!threadId) return false;
   try {
     const { threads } = await shell();
     const thread = matchThread(threads, threadId, (item) => item.id);
     if (!thread || thread.lineage?.parentThreadId || asksInProse(thread.title, proseTitles(home))) return false;
-    return (Boolean(thread.snoozedUntil) && Date.parse(thread.snoozedUntil!) > now()) || claudeTaskRuns(event)
+    return isSnoozed(thread, now()) || claudeTaskRuns(event)
       || waits(threads, thread) || (thread.pullRequests ?? []).some(awaitsChecks);
   } catch {
     return false;
@@ -219,9 +216,8 @@ async function guardStopAndProof(event: StopEvent & ProofStopEvent, home: string
   const background = await guardBackground(event, home, threadId).catch(() => undefined);
   if (background) return background;
   const last = await finalMessage(event);
-  const noWake = await wakeStop(event, last, { home, threadId, shell, processes: deps.processes }).catch(() => undefined);
-  if (noWake) return noWake;
-  return proofStop({ ...event, last_assistant_message: last }, { home, shell, ...deps, threadId });
+  const proof = await proofStop({ ...event, last_assistant_message: last }, { home, shell, ...deps, threadId });
+  return proof ?? wakeStop(event, last, { home, threadId, shell, processes: deps.processes, deadline: deps.deadline });
 }
 
 export const hookWith = (shell: (home: string) => ReadShell, stop: StopDeps = {}): Hook => async (_provider, readInput, home) => {

@@ -7,6 +7,7 @@ import { tempDirs } from "../../../src/testing/git.ts";
 import { devbox, engineSource, resolveEngine, skillSources } from "../../../src/testing/packs.ts";
 import { dispatch } from "../../base/hooks/run.ts";
 import { asksForDecision } from "../lib/prose-question.ts";
+import { wakeStop } from "../lib/wake-stop.ts";
 import type { ShellThread } from "../../base/lib/t3/index.ts";
 import { startT3Stub } from "../../../src/integrations/t3/testing.ts";
 import { guardBackground, guardCard, guardSend, guardStop, hiddenIn, hook, hookWith, killSwitch, type IsHidden, type SendEvent, type SendGuardOptions, type StopEvent } from "./ask-guard.ts";
@@ -497,8 +498,8 @@ describe("the wake guard", () => {
     db.run(scheduleTable.replace("create table", "create table if not exists"));
     db.run(`insert into scheduled_tasks (task_id, title, prompt, enabled, schedule_json, project_id, thread_id, workspace_strategy_json, model_selection_json,
         runtime_mode, interaction_mode, created_by, creation_source, created_at, updated_at, next_run_at, last_run_status, run_count, thread_mode)
-      values (?, 'check', 'check', ?, '{}', 'p', ?, '{}', '{}', 'full-access', 'default', 'agent', 'mcp', '2026-11-20T00:00:00Z', '2026-11-20T00:00:00Z', ?, 'never', 0, 'existing_thread')`,
-      [crypto.randomUUID(), enabled ? 1 : 0, threadId, nextRunAt]);
+      values (?, 'check', 'check', ?, ?, 'p', ?, '{}', '{}', 'full-access', 'default', 'agent', 'mcp', '2026-11-20T00:00:00Z', '2026-11-20T00:00:00Z', ?, 'never', 0, 'continue')`,
+      [crypto.randomUUID(), enabled ? 1 : 0, JSON.stringify({ type: "once", runAt: nextRunAt ?? "2026-11-20T08:00:00.000Z" }), threadId, nextRunAt]);
     db.close();
   }
 
@@ -509,7 +510,9 @@ describe("the wake guard", () => {
     const result = await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Relay it"), claudeSays(message)), last_assistant_message: message, ...event }), where);
     return result.stdout ? JSON.parse(result.stdout) as { decision: string; reason: string } : undefined;
   };
-  const queuedWatch = { pullRequests: [{ repository: "o/r", number: 140205, url: "https://github.com/o/r/pull/140205", snapshot: { state: "open" }, watch: { headSha: "abc", passed: true, failedChecks: [] } }] };
+  const watching = (watch: object) => ({ pullRequests: [{ repository: "o/r", number: 140205, url: "https://github.com/o/r/pull/140205", snapshot: { state: "open" }, watch: { headSha: "abc", passed: true, failedChecks: [], awaitingApproval: [], checksPending: false, ...watch } }] });
+  const queuedWatch = watching({});
+  const watchTask = { kind: "monitor", taskId: "pull-request-watch:github.com/o/r#140205" };
 
   test("sends back once a top-level thread that ends on a wait line with nothing that can wake it", async () => {
     const blocked = await ends({});
@@ -523,19 +526,25 @@ describe("the wake guard", () => {
   });
 
   test("sends back a wait whose only PR watch ended with its checks, though the PR still waits in the merge queue", async () => {
-    expect(await ends({ ...queuedWatch, pendingBackgroundTasks: [{ kind: "monitor", taskId: "pull-request-watch:o/r#140205" }] })).toMatchObject({ decision: "block" });
+    expect(await ends({ ...queuedWatch, pendingBackgroundTasks: [watchTask] })).toMatchObject({ decision: "block" });
   });
 
   test.each([
-    ["a PR watch held until merge", { ...queuedWatch, pendingBackgroundTasks: [{ kind: "monitor", taskId: "pull-request-watch:o/r#140205", awaited: true }] }],
+    ["a PR watch held until merge", { ...watching({ until: "merged" }), pendingBackgroundTasks: [{ ...watchTask, awaited: true }] }],
+    ["a PR watch whose checks still run", { ...watching({ passed: false, checksPending: true }), pendingBackgroundTasks: [watchTask] }],
+    ["a PR watch that waits on an approval", { ...watching({ awaitingApproval: ["deploy"] }), pendingBackgroundTasks: [watchTask] }],
     ["a delegated lane still running", { pendingBackgroundTasks: [{ kind: "subagent", childThreadId: "thread:lane" }] }],
     ["a thread wait", { blockedOnThreadWait: true }],
     ["a snooze the person set", { snoozedUntil: "2999-01-01T00:00:00Z" }],
     ["a pending question card", { pendingRuntimeRequest: { id: "card-1", kind: "user_input" } }],
-    ["a parent thread", { lineage: { parentThreadId: "mcp:conductor-0" } }],
+    ["a parent thread it runs under as a subagent", { lineage: { parentThreadId: "mcp:conductor-0", relationshipToParent: "subagent" } }],
     ["a delegation from another machine", { delegatedFrom: { environmentId: "env-2", threadId: "mcp:x" } }],
   ])("lets a wait line through when the thread has %s", async (_, thread) => {
     expect(await ends(thread as Partial<ShellThread>)).toBeUndefined();
+  });
+
+  test("sends back a fork, which T3 shows as a top-level thread, though it has a parent", async () => {
+    expect(await ends({ lineage: { parentThreadId: "mcp:conductor-0", relationshipToParent: "fork" } })).toMatchObject({ decision: "block" });
   });
 
   test("lets a wait line through in a model session that another session started, such as codex exec in a lane", async () => {
@@ -552,9 +561,12 @@ describe("the wake guard", () => {
     expect(await ends({}, waitLine, { session_crons: [{ id: "c1" }] })).toBeUndefined();
   });
 
-  test("lets a wait or check line through when an enabled scheduled task bound to the thread runs later", async () => {
+  test.each([
+    ["runs later", "2999-01-01T00:00:00.000Z"],
+    ["is due and T3 has not run it yet", "2020-01-01T00:00:00.000Z"],
+  ])("lets a wait or check line through when an enabled scheduled task bound to the thread %s", async (_, nextRunAt) => {
     const where = home("Robin");
-    scheduled(where, conductor, "2999-01-01T00:00:00Z");
+    scheduled(where, conductor, nextRunAt);
     expect(await ends({}, checkLine, {}, where)).toBeUndefined();
     expect(await ends({}, waitLine, {}, where)).toBeUndefined();
   });
@@ -562,7 +574,6 @@ describe("the wake guard", () => {
   test.each([
     ["is turned off", (where: string) => scheduled(where, conductor, "2999-01-01T00:00:00Z", false)],
     ["ran for the last time", (where: string) => scheduled(where, conductor, null)],
-    ["is due in the past", (where: string) => scheduled(where, conductor, "2020-01-01T00:00:00Z")],
     ["is bound to another thread", (where: string) => scheduled(where, "mcp:other", "2999-01-01T00:00:00Z")],
   ])("sends back a check line whose scheduled task %s", async (_, arrange) => {
     const where = home("Robin");
@@ -583,7 +594,12 @@ describe("the wake guard", () => {
     mkdirSync(join(off, ".config/hedge"), { recursive: true });
     writeFileSync(join(off, killSwitch), "");
     expect(await ends({}, waitLine, {}, off)).toBeUndefined();
-    const routed = hookWith(() => async () => { throw new Error("T3 down"); }, { threadId: conductor });
-    expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)) }), home("Robin"))).stdout).toBe("");
+    const down = async () => { throw new Error("T3 down"); };
+    expect(await wakeStop({}, waitLine, { home: home("Robin"), threadId: conductor, shell: down, processes: lone })).toBeUndefined();
+  });
+
+  test("lets the stop through when the check does not answer before its deadline", async () => {
+    const stalled = { pid: 30, table: () => new Promise<string>(() => {}) };
+    expect(await wakeStop({}, waitLine, { home: home("Robin"), threadId: conductor, shell: async () => ({ threads: [] }), processes: stalled, deadline: async () => {} })).toBeUndefined();
   });
 });
