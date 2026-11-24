@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { checkout, cleanFixtures, fakeModel, reviewHead } from "./proof-testing.ts";
+import { checkout, cleanFixtures, fakeModel } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
@@ -87,7 +87,9 @@ test("hedge proof respond refuses answers to a round without findings", async ()
   const pr = await checkout();
   await pr.commit("feature.txt", "greet the new member\n");
   await pr.hedge("require", "--none", "--reason", "docs only");
-  await reviewHead(pr, "No findings.\n");
+  await pr.hedge("review-start", "--scope", "full");
+  writeFileSync(join(pr.repository, "findings.md"), "No findings.\n");
+  await pr.hedge("review-finish", "--round", "1", "--reviewer", "gpt-6.1-sol", "findings.md");
   writeFileSync(join(pr.repository, "responses.md"), "1. fixed: the greeting guards an empty name\n");
 
   await expect(pr.hedge("respond", "--round", "1", "responses.md")).rejects.toThrow("Round 1 has no findings, so it needs no answers.");
