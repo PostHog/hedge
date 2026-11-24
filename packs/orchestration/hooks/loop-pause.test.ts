@@ -13,6 +13,8 @@ const claudePrompt = (text: string) => ({ type: "user", message: { role: "user",
 const claudeMeta = { type: "user", isMeta: true, message: { role: "user", content: "Caveat: local command output follows." } };
 const claudeSays = (text: string) => ({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
 const codexPrompt = (text: string) => ({ type: "event_msg", payload: { type: "user_message", message: text } });
+const codexMessage = (text: string) => ({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text }] } });
+const codexInstructions = codexMessage("# AGENTS.md instructions for /home/robin/app\n\n<INSTRUCTIONS>\nRun one coordinator run of the quality-loop skill when asked.\n</INSTRUCTIONS>");
 const delegate = "mcp__t3-code__delegate_task";
 
 function machine(limits: string | undefined, settings: Record<string, unknown> = { "orchestration.loopLedger": "~/ledger" }) {
@@ -43,6 +45,7 @@ describe("the loop pause guard", () => {
   test.each([
     ["a scheduled quality-loop coordinator", [claudeMeta, claudePrompt(qualityRun), claudeSays("Loading the ledger.")], "claude"],
     ["a signal-loop coordinator in Codex", [codexPrompt(signalRound)], "codex"],
+    ["a signal-loop coordinator in a Codex session that logs its prompt only as a message", [{ type: "session_meta", payload: { id: "s1" } }, codexInstructions, codexMessage(signalRound)], "codex"],
     ["a scheduled coordinator whose prompt opens with T3's note on who sent it", [claudePrompt(`[T3 Code: scheduled task "nightly-quality-loop" sent this prompt, not the user typing in this chat.]\n\n${qualityRun}`)], "claude"],
     ["a coordinator started with the skill's slash command", [claudePrompt("<command-name>/quality-loop</command-name>")], "claude"],
     ["a coordinator woken later by a lane's end", [claudePrompt(qualityRun), claudeSays("Lanes started."), claudePrompt("Lane L064 ended.")], "claude"],
@@ -73,6 +76,7 @@ describe("the loop pause guard", () => {
   test.each([
     ["a thread that is no loop coordinator", [claudePrompt("Fix the login redirect and open a draft PR.")]],
     ["a lane of the loop", [claudePrompt("You are quality-loop lane L064. Ship one PR for the cover stage of billing.")]],
+    ["a Codex lane whose project instructions mention a coordinator run", [codexInstructions, codexMessage("You are signal-loop lane L070. Ship one fix PR.")]],
     ["a thread that quotes a coordinator prompt below its own task", [claudePrompt(`Create the nightly schedules on this machine.\n\n1. Title \`Quality loop\`. Prompt:\n\n${qualityRun}`)]],
     ["a thread that mentions a coordinator only after its first prompt", [claudePrompt("Summarize last night's PRs."), claudePrompt(qualityRun)]],
   ])("lets %s start subthreads while the loops are paused", (_, lines) => {

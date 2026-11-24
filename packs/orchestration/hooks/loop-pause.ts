@@ -7,7 +7,7 @@ import { readSettings } from "../lib/prose-question.ts";
 export type DelegateEvent = { tool_name?: string; transcript_path?: string };
 export type LaneDenial = { hookSpecificOutput: { hookEventName: "PreToolUse"; permissionDecision: "deny"; permissionDecisionReason: string } };
 
-type Line = { type?: string; isMeta?: boolean; message?: { content?: unknown }; payload?: { type?: string; message?: unknown } };
+type Line = { type?: string; isMeta?: boolean; message?: { content?: unknown }; payload?: { type?: string; role?: string; message?: unknown; content?: unknown } };
 
 const startsSubthread = /(?:^|__)delegate_task$/;
 const provenance = /^\s*(?:\[[^\]\n]*\]\s*)*/;
@@ -16,13 +16,22 @@ const slashCommand = /<command-name>\/(?:[\w-]+:)?(?:quality|signal)-loop<\/comm
 
 const opensCoordinatorRun = (prompt: string) => asksForRun.test(prompt.replace(provenance, "")) || slashCommand.test(prompt);
 
+const codexContext = /^\s*(?:# AGENTS\.md instructions|<environment_context>|<user_instructions>)/;
+
+function textOf(content: unknown, blockTypes: string[]): string | undefined {
+  if (typeof content === "string") return content;
+  const texts = Array.isArray(content) ? content.filter((block) => blockTypes.includes(block?.type)).map((block) => String(block.text ?? "")) : [];
+  return texts.length ? texts.join("\n") : undefined;
+}
+
 function promptText(line: Line): string | undefined {
   if (line.type === "event_msg" && line.payload?.type === "user_message") return typeof line.payload.message === "string" ? line.payload.message : undefined;
+  if (line.type === "response_item" && line.payload?.type === "message" && line.payload.role === "user") {
+    const text = textOf(line.payload.content, ["input_text"]);
+    return text === undefined || codexContext.test(text) ? undefined : text;
+  }
   if (line.type !== "user" || line.isMeta) return undefined;
-  const content = line.message?.content;
-  if (typeof content === "string") return content;
-  const texts = Array.isArray(content) ? content.filter((block) => block?.type === "text").map((block) => String(block.text ?? "")) : [];
-  return texts.length ? texts.join("\n") : undefined;
+  return textOf(line.message?.content, ["text"]);
 }
 
 function firstPrompt(transcript: string): string | undefined {
