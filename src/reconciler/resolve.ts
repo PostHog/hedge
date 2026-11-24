@@ -531,8 +531,11 @@ function headings(text: string): string[] {
 
 function noteRepeatedHeadings(plan: Plan, guide: string, owner: { pack: string; text: string }, section: GuideSection) {
   const owned = new Set(headings(owner.text).map((heading) => heading.toLowerCase()));
-  const added = new Set([...headings(`## ${section.title}`), ...headings(section.text)]);
-  for (const heading of [...added].filter((candidate) => owned.has(candidate.toLowerCase()))) {
+  const reported = new Set<string>();
+  for (const heading of [...headings(`## ${section.title}`), ...headings(section.text)]) {
+    const key = heading.toLowerCase();
+    if (!owned.has(key) || reported.has(key)) continue;
+    reported.add(key);
     (plan.repeatedHeadings ??= []).push({ pack: section.pack, guide, section: section.title, heading, owner: owner.pack });
   }
 }

@@ -102,8 +102,8 @@ describe("resolve", () => {
     });
 
     test("is reported once when its title and its text repeat the same heading", async () => {
-      const report = await apply(repeats("Tests", "### Tests\n"), { home: temp.make("home-"), dryRun: true });
-      expect(report.findings.filter((finding) => finding.id.startsWith("repeats:"))).toHaveLength(1);
+      const report = await apply(repeats("Tests", "### tests\n"), { home: temp.make("home-"), dryRun: true });
+      expect(report.findings.filter((finding) => finding.say.includes("repeats the heading"))).toHaveLength(1);
     });
 
     test("is not looked for on a Bun without a Markdown parser, and the section is still written", () => {

@@ -4,7 +4,7 @@ How a T3 thread waits, and what Hedge checks before a turn ends.
 
 ## Thread states
 
-- **Working**: a turn runs, or the thread waits on something that wakes it: a pull request watch, a child task, a thread wait, a background command, or a scheduled check.
+- **Working**: a turn runs, or the thread waits on something that wakes it: a pull request watch, a child task, a thread wait, or a background command.
 - **My move**: the turn ended, and nothing wakes the thread. It is in my inbox.
 - **Settled**: the thread owns no open pull request and asks nothing, or it waits only on its own scheduled check.
 - **Snoozed**: hidden until a date. Snooze a thread only when I ask for it. A snooze hides the thread's pull requests and questions behind a timer.
@@ -19,15 +19,15 @@ Keep the thread Working with something that wakes it, then end the turn and say 
   - A watch ends after many comment-only wakes. When a wake says the watch ended, and the pull request is still open, call `watch_pull_request` again.
 - **A child task**: its completion wakes you. Do not poll it.
 - **Another thread**: call `t3_thread_wait`. When it returns a finished run, act on it in the same turn. When it times out with `next`, end the turn. When it times out without `next`, read its status: while it runs, call it again; when it waits on a question or an approval, answer it or ask me.
-- **A command**, such as a deploy or a CI run: wait in one call that blocks until it ends. When it outlasts the shell's foreground limit, run it in the background and pass its task id to `t3_background_wait`.
+- **A command**, such as a deploy or a CI run: wait in one call that blocks until it ends. When it outlasts the shell's foreground limit on Claude, run it in the background and pass its task id to `t3_background_wait`. T3 takes only Claude's own background tasks there; on another provider, wait in blocking calls that each end within the limit.
 
 ## Nothing to wake it
 
-When the answer comes by email, from a person on Slack, or from another place T3 does not watch, bind a `schedule_task` to the thread for a re-check, or say so and end the turn on my move. Never snooze a thread to hide a wait.
+When the answer comes by email, from a person on Slack, or from another place T3 does not watch, bind a `schedule_task` to the thread for a re-check, or not, and end the turn on my move with what you wait for. Never snooze a thread to hide a wait.
 
 ## Waiting on its own schedule
 
-For a post-deploy check or a timed re-check, bind a `schedule_task` to the thread and check that it has a next run. Then settle the thread with `t3_thread_organize`. The task wakes the thread. A clean check settles it again; a problem or a question keeps it in my inbox. After a merge, the `rollout` skill's **Settle between checks** says what each check reads.
+For a post-deploy check or a timed re-check in a thread that owns no open pull request, bind a `schedule_task` to the thread and check that it has a next run. Then settle the thread with `t3_thread_organize`. The task wakes the thread. A clean check settles it again; a problem or a question keeps it in my inbox. After a merge, the `rollout` skill's **Settle between checks** says what each check reads.
 
 ## On each wake
 
@@ -43,9 +43,9 @@ A thread whose title starts with a mark in `orchestration.proseTitles` asks in p
 
 Every open pull request you open for me, each layer of a stack included, has exactly one **owning thread**: the thread that links it and watches it, from its opening until it merges or closes. The owning thread reacts to comments, CI, and conflicts as `babysit-pr` says, and starts the merge once it is ready and I gave the merge word.
 
-- In a map or loop whose lanes run as `delegate_task` subthreads, the conductor or coordinator owns the pull requests. A subthread never calls `watch_pull_request`. The conductor wakes it with `t3_thread_send` for CI, review, conflict, and rollout turns.
+- In a map or loop whose lanes run as `delegate_task` subthreads, the conductor or coordinator owns the pull requests, as `~/.agents/guides/t3.md` says.
 - Keep the watch through handoffs and parks.
-- Hand each open pull request over before the thread settles, archives, or moves:
+- Hand each open pull request over before the thread settles, archives, or moves, to a thread on the same machine: `hedge pr handover` finds the new thread only in this machine's T3.
   1. Ask the thread that takes it over to link it with `link_pull_request` and watch it with `watch_pull_request`.
   2. Check with `list_thread_pull_requests` that the new thread links and watches it.
   3. Run `hedge pr handover --pr <url> --to <thread id>`, then settle the old thread.
