@@ -803,24 +803,28 @@ const listMark = /^[^\S\n]*(?:[-*]|\d+[.)])[^\S\n]+/;
 export function answerNumbers(findings: string) {
   const items = reviewedItems(findings);
   if (!items.length) return "";
-  const lines = items.map(({ text, test }, index) => `${index + 1}. ${test ? "TESTS: " : ""}${text.replace(listMark, "").split("\n").join("\n   ")}`);
+  const lines = items.map(({ text, test, note }, index) => `${index + 1}. ${note ? "anchor check note, no answer needed: " : test ? "TESTS: " : ""}${text.replace(listMark, "").split("\n").join("\n   ")}`);
   return ["Answer each finding by these numbers, in hedge proof respond:", ...lines].join("\n");
 }
 
 function numbersPast(findings: string, responses: string) {
   const count = reviewedItems(findings).length;
-  const numbers = responses.split("\n").flatMap((line) => { const digits = answerItem.exec(line)?.[1]; return digits ? [BigInt(digits)] : []; }).filter((number) => number > BigInt(count));
-  return { count, past: [...new Set(numbers)].sort((a, b) => a < b ? -1 : 1) };
+  const written = new Map<bigint, string>();
+  for (const line of responses.split("\n")) {
+    const digits = answerItem.exec(line)?.[1];
+    if (digits && BigInt(digits) > BigInt(count) && !written.has(BigInt(digits))) written.set(BigInt(digits), digits);
+  }
+  return { count, past: [...written].sort(([a], [b]) => a < b ? -1 : 1) };
 }
 
-function spans(numbers: bigint[]) {
-  const runs: bigint[][] = [];
+function spans(numbers: [bigint, string][]) {
+  const runs: [bigint, string][][] = [];
   for (const number of numbers) {
     const run = runs.at(-1);
-    if (run && run.at(-1) === number - 1n) run.push(number);
+    if (run && run.at(-1)![0] === number[0] - 1n) run.push(number);
     else runs.push([number]);
   }
-  return runs.map((run) => run.length > 2 ? `${run[0]} to ${run.at(-1)}` : run.join(", ")).join(", ");
+  return runs.map((run) => run.length > 2 ? `${run[0]![1]} to ${run.at(-1)![1]}` : run.map(([, digits]) => digits).join(", ")).join(", ");
 }
 
 export function answeredFindings(findings: string, responses: string) {
