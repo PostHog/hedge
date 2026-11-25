@@ -9,8 +9,9 @@
   `PostHog/posthog=Visual Review gate / storybook`. No CI produces their
   result: someone accepts the visual change.
 - `hedge proof gate` does not wait on such a check, does not count it red,
-  and does not ask for a ci gap on it. The CI line names it and what it
-  reports. GitHub still holds the merge until the person passes it.
+  and does not ask for a ci gap on it. The CI line names it without its
+  result, so a person passing it later leaves the gate as it was. GitHub
+  still holds the merge until the person passes it.
 
 ### Proof provenance is checked in code, and the judge asks less
 

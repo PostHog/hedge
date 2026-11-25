@@ -140,7 +140,7 @@ const workflowOf = (context: string) => {
 };
 
 function withPinnedStatuses(entries: Entry[], required: RequiredCheck[], draft: boolean, run: Run): Entry[] {
-  const pins = required.filter((check) => check.appId !== undefined);
+  const pins = required.filter((check) => check.appId !== undefined && !check.passedByPerson);
   const apps = new Map<string, number | undefined>();
   const appOf = (bot: string) => apps.has(bot) ? apps.get(bot) : apps.set(bot, appOfBot(bot, run)).get(bot);
   const spelledTwice = (entry: Entry) => entries.some((other) => other.status && other.name !== entry.name && other.name.toLowerCase() === entry.name.toLowerCase());
@@ -189,8 +189,6 @@ function notRequired(entries: Entry[], { countRunning = true } = {}) {
   return parts.length ? `; not required: ${parts.join("; ")}` : "";
 }
 
-const worstOf = (matches: Entry[]) => matches.reduce((a, b) => rank[b.outcome] > rank[a.outcome] ? b : a).outcome;
-
 function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boolean): CiResult {
   const counted = new Set<Entry>();
   const [failing, pending, missing, withheld, listed, byPerson]: string[][] = [[], [], [], [], [], []];
@@ -201,11 +199,11 @@ function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boo
     matches.forEach((entry) => counted.add(entry));
     if (check.passedByPerson) {
       named.forEach((entry) => counted.add(entry));
-      byPerson.push(`${check.context} (${matches.length ? worstOf(matches) : "not reported yet"})`);
+      byPerson.push(check.context);
       continue;
     }
     if (!matches.length) { (!draft ? missing : check.postedOnceReady && !entries.some((entry) => entry.name.toLowerCase() === check.context.toLowerCase()) ? listed : withheldFromDraft(check, entries) ? withheld : missing).push(check.context); continue; }
-    const worst = worstOf(matches);
+    const worst = matches.reduce((a, b) => rank[b.outcome] > rank[a.outcome] ? b : a).outcome;
     if (worst === "fail") failing.push(check.context);
     else if (worst === "pending") pending.push(check.context);
   }
@@ -243,7 +241,8 @@ export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date,
     required = required.map((check) => ({ ...check, ...readyOnly.has(check.context) ? { postedOnceReady: true as const } : {}, ...personPassed.has(check.context) ? { passedByPerson: true as const } : {} }));
     const counted = withPinnedStatuses(entries, required, pr.draft, run);
     const verdict = requiredVerdict(counted, required, pr.draft);
-    return { ...stacked ? { ...verdict, detail: `${verdict.detail} (required by ${pr.defaultBranch}; the base ${pr.base} requires none)` } : verdict, checks: checksOf(counted) };
+    const shown = counted.filter((entry) => !required.some((check) => check.passedByPerson && check.context === entry.name));
+    return { ...stacked ? { ...verdict, detail: `${verdict.detail} (required by ${pr.defaultBranch}; the base ${pr.base} requires none)` } : verdict, checks: checksOf(shown) };
   } catch (error) {
     return { state: "unknown", detail: (error as Error).message };
   }

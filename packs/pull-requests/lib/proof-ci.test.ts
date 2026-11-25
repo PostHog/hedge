@@ -420,7 +420,7 @@ async function personChecked(listing: unknown = "example/product=Visual Review g
   return pr;
 }
 
-const personLine = (outcome: string) => `a person passes it on GitHub, so the gate does not wait on it: Visual Review gate / storybook (${outcome})`;
+const personLine = "a person passes it on GitHub, so the gate does not wait on it: Visual Review gate / storybook";
 
 test("a required check that pull-requests.personChecks lists neither holds the gate nor asks for a ci gap, whatever it reports", async () => {
   const pr = await personChecked();
@@ -428,16 +428,16 @@ test("a required check that pull-requests.personChecks lists neither holds the g
 
   pr.statuses([{ context: "Visual Review gate / storybook", state: "failure", by: "product[bot]" }]);
   const changed = await pr.hedge("gate");
-  expect(ciLine(changed.output)).toBe(`ci: green, 1 required check(s) pass; ${personLine("fail")}`);
+  expect(ciLine(changed.output)).toBe(`ci: green, 1 required check(s) pass; ${personLine}`);
   expect(changed.output).not.toContain("--kind ci");
   expect(changed.code).toBe(0);
 
   pr.statuses([{ context: "Visual Review gate / storybook", state: "pending", by: "product[bot]" }]);
-  expect(ciLine((await pr.hedge("gate")).output)).toBe(`ci: green, 1 required check(s) pass; ${personLine("pending")}`);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe(`ci: green, 1 required check(s) pass; ${personLine}`);
 
   pr.statuses([]);
   const unreported = await pr.hedge("gate");
-  expect(ciLine(unreported.output)).toBe(`ci: green, 1 required check(s) pass; ${personLine("not reported yet")}`);
+  expect(ciLine(unreported.output)).toBe(`ci: green, 1 required check(s) pass; ${personLine}`);
   expect(unreported.code).toBe(0);
 });
 
@@ -445,11 +445,11 @@ test("the other required checks still decide beside a check a person passes", as
   const pr = await personChecked();
   pr.statuses([{ context: "Visual Review gate / storybook", state: "success", by: "product[bot]" }]);
   pr.ci([{ name: "build", bucket: "fail" }]);
-  expect(ciLine((await pr.hedge("gate")).output)).toStartWith(`ci: red, required failing: build; ${personLine("pass")}. Fix it`);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith(`ci: red, required failing: build; ${personLine}. Fix it`);
 
   pr.ci([{ name: "build", bucket: "pending" }]);
   const running = await pr.hedge("gate");
-  expect(ciLine(running.output)).toBe(`ci: pending, required waiting on: build; ${personLine("pass")}`);
+  expect(ciLine(running.output)).toBe(`ci: pending, required waiting on: build; ${personLine}`);
   expect(running.code).toBe(75);
 });
 
@@ -458,4 +458,25 @@ test("a check another repository's pull-requests.personChecks lists still holds 
   pr.ci([{ name: "build", bucket: "pass" }]);
   pr.statuses([{ context: "Visual Review gate / storybook", state: "failure", by: "product[bot]" }]);
   expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: red, required failing: Visual Review gate / storybook");
+});
+
+test("a person passing a listed check after the gate leaves the gate's CI line and check list as they were, so the saved gate still holds", async () => {
+  const pr = await personChecked();
+  pr.ci([{ name: "build", bucket: "pass" }]);
+  pr.statuses([{ context: "Visual Review gate / storybook", state: "failure", by: "product[bot]" }]);
+  const before = JSON.parse((await pr.hedge("gate", "--json")).output);
+  pr.statuses([{ context: "Visual Review gate / storybook", state: "success", by: "product[bot]" }]);
+  const after = JSON.parse((await pr.hedge("gate", "--json")).output);
+  expect(after.ci).toEqual(before.ci);
+  expect(before.ci.checks).toEqual(["build (app 1): pass"]);
+});
+
+test("the gate does not ask GitHub for the app of a bot that posted only a listed check", async () => {
+  const pr = await personChecked();
+  pr.githubApp("product", { error: "HTTP 503: Service Unavailable" });
+  pr.ci([{ name: "build", bucket: "pass" }]);
+  pr.statuses([{ context: "Visual Review gate / storybook", state: "failure", by: "product[bot]" }]);
+  const gate = await pr.hedge("gate");
+  expect(ciLine(gate.output)).toBe(`ci: green, 1 required check(s) pass; ${personLine}`);
+  expect(gate.code).toBe(0);
 });
