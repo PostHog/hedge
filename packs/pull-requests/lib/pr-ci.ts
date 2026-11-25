@@ -215,6 +215,17 @@ function notRequired(entries: Entry[], { countRunning = true } = {}) {
   return parts.length ? `; not required: ${parts.join("; ")}` : "";
 }
 
+const reportOf = (check: RequiredCheck) => (entry: Entry) => entry.name.toLowerCase() === check.context.toLowerCase() && (entry.status || entry.appId === check.appId);
+
+function personPassed(required: RequiredCheck[], entries: Entry[], listed: Set<string>) {
+  const alone = (check: RequiredCheck) => {
+    const workflow = workflowOf(check.context);
+    return required.every((other) => other === check || (other.context !== check.context && (workflow === undefined || !other.context.startsWith(workflow))));
+  };
+  const onlyItsOwn = (check: RequiredCheck) => entries.every((entry) => entry.name.toLowerCase() !== check.context.toLowerCase() || reportOf(check)(entry));
+  return required.filter((check) => check.appId !== undefined && listed.has(check.context) && alone(check) && onlyItsOwn(check));
+}
+
 function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boolean): CiResult {
   const counted = new Set<Entry>();
   const [failing, pending, missing, withheld, listed, later]: string[][] = [[], [], [], [], [], []];
@@ -241,8 +252,8 @@ function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boo
 const sourceOf = (entry: Entry) => [entry.status ? "status" : "", entry.appId === undefined ? "" : `app ${entry.appId}`].filter(Boolean).join(", ");
 const checksOf = (entries: Entry[]) => [...new Set(entries.map((entry) => `${entry.name}${sourceOf(entry) ? ` (${sourceOf(entry)})` : ""}: ${entry.outcome}`))].sort();
 
-function postedOnceReady(repository: string, env: Record<string, string | undefined>) {
-  const pairs = (optionalStringSetting("pull-requests.draftSkippedChecks", env) ?? "").split(",").map((pair) => pair.trim()).filter(Boolean);
+function listedChecks(key: string, repository: string, env: Record<string, string | undefined>) {
+  const pairs = (optionalStringSetting(key, env) ?? "").split(",").map((pair) => pair.trim()).filter(Boolean);
   return new Set(pairs.flatMap((pair) => {
     const split = pair.indexOf("=");
     return split > 0 && pair.slice(0, split).trim().toLowerCase() === repository.toLowerCase() ? [pair.slice(split + 1).trim()] : [];
@@ -256,13 +267,17 @@ export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date,
     let required = requiredChecks(home, identity.repository, pr.base, run, now, fresh);
     const stacked = !required.length && pr.defaultBranch !== undefined && pr.defaultBranch !== pr.base;
     if (stacked) required = requiredChecks(home, identity.repository, pr.defaultBranch!, run, now, fresh);
-    const entries = entriesOf(identity, run);
-    if (!required.length) return { ...everyCheck(entries, identity.commit), checks: checksOf(entries) };
-    const readyOnly = pr.draft ? postedOnceReady(identity.repository, env) : new Set<string>();
+    const reported = entriesOf(identity, run);
+    const byPerson = stacked ? [] : personPassed(required, reported, listedChecks("pull-requests.personChecks", identity.repository, env));
+    const entries = reported.filter((entry) => !byPerson.some((check) => reportOf(check)(entry)));
+    required = required.filter((check) => !byPerson.includes(check));
+    if (!required.length && !byPerson.length) return { ...everyCheck(entries, identity.commit), checks: checksOf(entries) };
+    const readyOnly = pr.draft ? listedChecks("pull-requests.draftSkippedChecks", identity.repository, env) : new Set<string>();
     required = required.map((check) => readyOnly.has(check.context) ? { ...check, postedOnceReady: true as const } : check);
     if (pr.mergedAt) required = markChangedAfterMerge(required, identity.repository, pr.mergedAt, run);
     const counted = withPinnedStatuses(entries, required, pr.draft, run);
     const verdict = requiredVerdict(counted, required, pr.draft);
+    if (byPerson.length) verdict.detail += `; a person passes it on GitHub, so the gate does not wait on it: ${listOf(byPerson.map((check) => check.context))}`;
     return { ...stacked ? { ...verdict, detail: `${verdict.detail} (required by ${pr.defaultBranch}; the base ${pr.base} requires none)` } : verdict, checks: checksOf(counted) };
   } catch (error) {
     return { state: "unknown", detail: (error as Error).message };

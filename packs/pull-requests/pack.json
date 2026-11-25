@@ -117,6 +117,13 @@
       "ask": "never"
     },
     {
+      "key": "pull-requests.personChecks",
+      "question": "Which required checks does a person pass on GitHub, such as a visual review that someone accepts, as owner/name=check pairs separated by commas? The gate does not wait on such a check and asks for no ci gap on it. GitHub still holds the merge until the person passes it.",
+      "type": "string",
+      "optional": true,
+      "ask": "never"
+    },
+    {
       "key": "pull-requests.criticalPathFiles",
       "question": "Which file lists the critical paths of each repository, as owner/name=path pairs separated by commas? A path is relative to your home folder. The judge fails a merge-risk Tier line that is not critical when the diff touches a path on the list.",
       "type": "string",
