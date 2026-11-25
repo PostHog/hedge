@@ -368,6 +368,32 @@ test("terminates its detached child process group when the parent receives SIGTE
     expect(await runner.exited).not.toBe(0);
   } finally {
     runner.kill("SIGKILL");
-    try { process.kill(childPid, "SIGKILL"); } catch {}
+    if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
+  }
+});
+
+test("terminates a descendant holding stdout open on SIGTERM even after the command leader exits", async () => {
+  const dir = temp.make("hedge-term-pipe-");
+  const [ready, gone, leaderGone] = [join(dir, "ready"), join(dir, "gone"), join(dir, "leader-gone")];
+  expect(Bun.spawnSync(["mkfifo", ready, gone, leaderGone]).exitCode).toBe(0);
+  const runner = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      `import { capture } from ${JSON.stringify(join(import.meta.dir, "coder.ts"))}; await capture(["sh", "-c", 'exec 4>"$3"; { sleep 30 4>&- & } 3>"$1"; echo $! > "$2"', "probe", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}, ${JSON.stringify(leaderGone)}], { timeoutMs: 30_000 });`,
+    ],
+    { stdout: "ignore", stderr: "ignore" },
+  );
+  const holderGone = Bun.file(gone).text();
+  const leaderClosed = Bun.file(leaderGone).text();
+  const childPid = Number((await Bun.file(ready).text()).trim());
+  expect(await leaderClosed).toBe("");
+  try {
+    runner.kill("SIGTERM");
+    expect(await holderGone).toBe("");
+    expect(await runner.exited).not.toBe(0);
+  } finally {
+    runner.kill("SIGKILL");
+    if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
   }
 });

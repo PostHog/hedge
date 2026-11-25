@@ -361,6 +361,56 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     });
   }
 
+  for (const sig of ["SIGINT", "SIGQUIT"] as const) {
+    test(`escalates and stops a human step that ignores ${sig} when hedge packs receives ${sig}`, async () => {
+      const { home } = await machineWithProfile();
+      const [ready, gone] = [join(home, "ready"), join(home, "gone")];
+      expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+      await withTeamPack(home, {
+        workflows: [flow("allowlist")],
+        human: [humanStep("allowlist", 'trap "" INT QUIT; sleep 30 3>"$HOME/gone" & ps -o pgid= -p $$ | tr -d " " > "$HOME/ready"; wait', "allowlist")],
+      });
+      const [holderGone, started] = [readFile(gone, "utf8"), readFile(ready, "utf8")];
+      const listing = Bun.spawn([process.execPath, join(engineRoot, "src/cli.ts"), "packs"], { env: { ...Bun.env, HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+      try {
+        await started;
+        listing.kill(sig);
+        expect(await holderGone).toBe("");
+        expect(await listing.exited).not.toBe(0);
+      } finally {
+        listing.kill("SIGKILL");
+        const pgid = Number((await started).trim());
+        if (pgid > 0) try { process.kill(-pgid, "SIGKILL"); } catch {}
+      }
+    });
+  }
+
+  test("preserves the controlling terminal for human probes run from a PTY, matching hedge doctor", async () => {
+    const { home } = await machineWithProfile();
+    await withTeamPack(home, {
+      workflows: [flow("tty-check")],
+      human: [humanStep("tty-check", "stty -g </dev/tty >/dev/null", "tty-check")],
+    });
+    const runInPty = `import fcntl, os, pty, subprocess, sys, termios
+m, s = pty.openpty()
+def setup():
+    os.setsid()
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+p = subprocess.Popen(sys.argv[1:], stdin=s, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=setup)
+os.close(s)
+out, err = p.communicate(timeout=15)
+os.close(m)
+sys.stdout.buffer.write(out)
+sys.stderr.buffer.write(err)
+sys.exit(p.returncode)
+`;
+    const result = Bun.spawnSync(["python3", "-c", runInPty, process.execPath, join(engineRoot, "src/cli.ts"), "packs"], {
+      env: { ...Bun.env, HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString("utf8")).toContain("  ✓ team  Team rules.\n      Workflows: tty-check on");
+  });
+
   test("propagates pack-level human prerequisite timeouts to dependent workflows and prints both hints when another probe fails", async () => {
     const { home } = await machineWithProfile();
     const [ready, gone] = [join(home, "ready"), join(home, "gone")];

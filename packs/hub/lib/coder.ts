@@ -65,9 +65,9 @@ export function captureWith(timer: Timer): Capture {
     let reaped = false;
     const stopOnInterrupt = () => {
       stopped = true;
-      if (!child || reaped) return;
+      if (!child) return;
       kill(-child.pid);
-      kill(child.pid);
+      if (!reaped) kill(child.pid);
     };
     const interrupted = (name: NodeJS.Signals) => {
       stopOnInterrupt();
@@ -86,13 +86,12 @@ export function captureWith(timer: Timer): Capture {
       const live = child;
       void live.exited.finally(() => {
         reaped = true;
-        release();
       });
       if (stopped) stopOnInterrupt();
       cancel = timer(timeoutMs, () => {
         expired = true;
         kill(-live.pid);
-        kill(live.pid);
+        if (!reaped) kill(live.pid);
       });
       const text = (stream: ReadableStream<Uint8Array> | number | undefined) => (stream instanceof ReadableStream ? new Response(stream).text() : "");
       const [stdout, stderr, code] = await Promise.all([text(live.stdout), text(live.stderr), live.exited]);
