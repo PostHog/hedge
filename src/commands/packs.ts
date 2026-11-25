@@ -69,20 +69,26 @@ async function listPacks(context: ChangeContext) {
   const aliases = catalogAliases(context);
   const partly = oldNameOnly(aliases, context.profile.packs);
   const missing = context.plan.packs.filter((pack) => !pack.available);
-  const unmet = await context.unmetHumanSteps();
+  const left = await context.humanStepsLeft();
   context.print("Your packs:");
   for (const manifest of manifests(context)) {
-    const unmetHere = unmet.filter((step) => step.pack === manifest.name);
+    const failing = left.failing.filter((step) => step.pack === manifest.name);
+    const unchecked = left.unchecked.filter((step) => step.pack === manifest.name);
     const done = manifest.name === "base" || (on.has(manifest.name) && !partly.has(manifest.name));
-    const mark = !done ? "·" : unmetHere.length ? "~" : "✓";
+    const mark = !done ? "·" : failing.length ? "~" : unchecked.length ? "?" : "✓";
     context.print(`  ${mark} ${manifest.name}  ${manifest.summary}`);
     if (on.has(manifest.name) && partly.has(manifest.name))
       for (const name of context.profile.packs.filter((name) => aliases.get(name)?.pack === manifest.name)) context.print(`      The old name ${name} selects only: ${aliases.get(name)!.workflows.join(", ")}. Add ${manifest.name} for the whole pack.`);
     const workflows = context.plan.workflows.filter((workflow) => workflow.pack === manifest.name);
+    const leftFor = (steps: typeof failing, workflow: Plan["workflows"][number]) => steps.some((step) => step.workflow === workflow.id);
     const state = (workflow: Plan["workflows"][number]) =>
-      workflow.active ? (unmetHere.some((step) => step.workflow === workflow.id) ? "needs setup" : "on") : workflow.reason && workflow.reason !== "turned off" ? `off: ${workflow.reason}` : "off";
+      !workflow.active ? (workflow.reason && workflow.reason !== "turned off" ? `off: ${workflow.reason}` : "off")
+      : leftFor(failing, workflow) ? "needs setup"
+      : leftFor(unchecked, workflow) ? "not checked"
+      : "on";
     if (on.has(manifest.name) && workflows.length) context.print(`      Workflows: ${workflows.map((workflow) => `${workflow.id} ${state(workflow)}`).join(", ")}`);
-    if (unmetHere.length) context.print("      Needs setup on this machine. Run hedge doctor for the steps.");
+    if (failing.length) context.print("      Needs setup on this machine. Run hedge doctor for the steps.");
+    else if (unchecked.length) context.print("      Hedge could not check this pack's setup in time. Run hedge doctor.");
     if (on.has(manifest.name)) for (const workflow of manifest.workflows ?? []) if (workflow.risk) context.print(`      Terms note for ${workflow.id}: ${workflow.risk}`);
   }
   for (const pack of missing) context.print(`  ! ${pack.name}  is in your profile, but ${pack.reason ?? "its source is not here"}`);

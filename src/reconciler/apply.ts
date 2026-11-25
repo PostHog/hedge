@@ -249,12 +249,15 @@ export async function check(plan: Plan, options: { home: string; adapters?: Adap
   return report;
 }
 
-export async function unmetHumanSteps(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void> }): Promise<Array<Owned<HumanStep>>> {
+export type HumanStepsLeft = { failing: Array<Owned<HumanStep>>; unchecked: Array<Owned<HumanStep>> };
+
+export async function humanStepsLeft(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void> }): Promise<HumanStepsLeft> {
   const run = viaEngine(plan, options.run ?? spawnRunner(options.home, plan.machine.profileDir));
   const deadline = new AbortController();
   void options.giveUp.then(() => deadline.abort());
-  const passed = await Promise.all(plan.human.map(async (step) => (await run(step.probe, {}, deadline.signal)) === 0));
-  return plan.human.filter((_, index) => !passed[index]);
+  const outcome = async (step: Owned<HumanStep>) => ((await run(step.probe, {}, deadline.signal)) === 0 ? "passes" : deadline.signal.aborted ? "unchecked" : "fails");
+  const outcomes = await Promise.all(plan.human.map(outcome));
+  return { failing: plan.human.filter((_, index) => outcomes[index] === "fails"), unchecked: plan.human.filter((_, index) => outcomes[index] === "unchecked") };
 }
 
 function checkFinding(item: Owned<PackCheck>, code: number): Finding {

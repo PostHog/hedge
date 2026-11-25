@@ -229,7 +229,7 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     expect((await hedge(home, ["packs"])).output).toContain(`  ~ team  Team rules.\n      Workflows: allowlist on\n${needsSetup}`);
   });
 
-  test("counts a human step that does not answer in time as needing setup, and stops it with every process it started", async () => {
+  test("says a human step that does not answer in time is not checked, and stops it with every process it started", async () => {
     const { home } = await machineWithProfile();
     const [ready, gone] = [join(home, "ready"), join(home, "gone")];
     expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
@@ -238,7 +238,7 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     const started = readFile(ready, "utf8");
     const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await started) };
     try {
-      expect((await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output).toContain("Workflows: allowlist needs setup");
+      expect((await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output).toContain("  ? team  Team rules.\n      Workflows: allowlist not checked\n      Hedge could not check this pack's setup in time. Run hedge doctor.");
       expect(await holderGone).toBe("");
     } finally {
       try { process.kill(Number((await started).trim())); } catch {}
