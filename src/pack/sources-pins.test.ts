@@ -637,4 +637,35 @@ esac
     expect(headOffline.stale).toContain("could not fetch HEAD");
   });
 
+  test("applying a tag at an intermediate cached commit does not hide earlier ancestors from offline SHA pins", async () => {
+    const repo = await packRepo("Commit 1.");
+    const c1 = await spawnGit(repo, "rev-parse", "HEAD");
+    const cache = temp.make("cache-shallow-ancestor-");
+    const ref = { name: "team", repo, ref: "main" };
+    const initial = await fetchSource(ref, cache);
+    if ("error" in initial) throw new Error(initial.error);
+
+    writePack(repo, "Commit 2.");
+    await spawnGit(repo, "commit", "-q", "-am", "c2");
+    const c2 = await spawnGit(repo, "rev-parse", "HEAD");
+    writePack(repo, "Commit 3.");
+    await spawnGit(repo, "commit", "-q", "-am", "c3");
+    await spawnGit(repo, "tag", "v3");
+    writePack(repo, "Commit 4.");
+    await spawnGit(repo, "commit", "-q", "-am", "c4");
+
+    const advanced = await advanceSource(ref, cache, c1);
+    expect(advanced.state).toBe("moved");
+
+    const tagged = await fetchSource({ name: "team", repo, ref: "v3" }, cache);
+    if ("error" in tagged) throw new Error(tagged.error);
+    expect(tagged.packs[0]?.manifest.summary).toBe("Commit 3.");
+
+    rmSync(repo, { recursive: true, force: true });
+    const pinned = await fetchSource({ name: "team", repo, ref: c2 }, cache);
+    if ("error" in pinned) throw new Error(pinned.error);
+    expect(pinned.stale).toBeUndefined();
+    expect(pinned.packs[0]?.manifest.summary).toBe("Commit 2.");
+  });
+
 });

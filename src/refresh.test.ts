@@ -284,14 +284,14 @@ describe("hedge refresh", () => {
     expect(box.lines.join("\n")).not.toContain("could not fetch");
   });
 
-  test("refreshes a branch whose name starts with a plus sign after shortening refs/heads/+release", async () => {
+  test("tracks literal plus-prefixed and forced branch spellings by exact Git refspec identity", async () => {
     const box = await machine("main");
     await spawnGit(box.repo, "checkout", "-q", "-b", "+release");
     box.pin("refs/heads/+release");
     expect(await box.hedge("apply", "--profile", box.profile)).toBe(0);
     expect(box.read(guide)).toBe("Rules v1.\n");
 
-    box.pin("+release");
+    box.pin("++release");
     await commit(box.repo, "mid", { "packs/team/rules.md": "Rules mid.\n", "packs/team/AGENTS.md": "Team mid.\n", "packs/team/skills/review/SKILL.md": "# review\n" });
     const midSha = await spawnGit(box.repo, "rev-parse", "HEAD");
     await v2(box.repo);
@@ -328,6 +328,16 @@ describe("hedge refresh", () => {
     expect(await bothPlus.hedge("refresh")).toBe(0);
     expect(bothPlus.read(guide)).toBe("Rules v2.\n");
 
+    const switchCheck = await machine("refs/heads/+main");
+    await spawnGit(switchCheck.repo, "checkout", "-q", "-b", "+main");
+    expect(await switchCheck.hedge("apply", "--profile", switchCheck.profile)).toBe(0);
+    expect(switchCheck.read(guide)).toBe("Rules v1.\n");
+    await spawnGit(switchCheck.repo, "checkout", "-q", "main");
+    await commit(switchCheck.repo, "plain-main-v2", { "packs/team/rules.md": "Plain main v2.\n", "packs/team/AGENTS.md": "Plain main v2.\n", "packs/team/skills/review/SKILL.md": "# review\n" });
+    switchCheck.pin("+main");
+    expect(await switchCheck.hedge("refresh")).toBe(0);
+    expect(switchCheck.read(guide)).toBe("Rules v1.\n");
+
     const legacyBroken = await machine("main");
     expect(await legacyBroken.hedge("apply", "--profile", legacyBroken.profile)).toBe(0);
     const cacheDir = join(legacyBroken.home, ".local/share/hedge/sources/team");
@@ -345,10 +355,10 @@ describe("hedge refresh", () => {
     await spawnGit(literalPlus.repo, "checkout", "-q", "+release");
     expect(await literalPlus.hedge("apply", "--profile", literalPlus.profile)).toBe(0);
     expect(literalPlus.read(guide)).toBe("Rules v1.\n");
-    literalPlus.pin("+release");
     await commit(literalPlus.repo, "plus-v2", { "packs/team/rules.md": "Plus release v2.\n", "packs/team/AGENTS.md": "Plus v2.\n", "packs/team/skills/review/SKILL.md": "# review\n" });
     await spawnGit(literalPlus.repo, "checkout", "-q", "release");
     await commit(literalPlus.repo, "plain-v2", { "packs/team/rules.md": "Plain release v2.\n", "packs/team/AGENTS.md": "Plain v2.\n", "packs/team/skills/review/SKILL.md": "# review\n" });
+    await spawnGit(join(literalPlus.home, ".local/share/hedge/sources/team"), "fetch", "-q", "--no-tags", literalPlus.repo, "release");
     expect(await literalPlus.hedge("refresh")).toBe(0);
     expect(literalPlus.read(guide)).toBe("Plus release v2.\n");
 

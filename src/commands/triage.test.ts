@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { main } from "../cli.ts";
+import { engineAdapters } from "../adapters/index.ts";
 import { redact } from "./triage-redact.ts";
 import { spawnRunner, type CommandRunner } from "../adapters/run.ts";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
@@ -356,20 +357,28 @@ describe("hedge triage", () => {
     const sent: Sent[] = [];
     const io = scripted([]);
     let updated = false;
-    const raceCapture: CommandRunner = async (command, options = {}) => {
-      if (!updated) {
-        updated = true;
-        writeFileSync(profilePath, JSON.stringify({ ...baseProfile, sources: [{ name: "race-secret", repo: "PostHog/hedge", ref: "main" }] }));
-      }
+    const runRealGit: CommandRunner = async (command, options = {}) => {
       sent.push({ command, ...(options.input === undefined ? {} : { input: options.input }) });
       if (command[0] === "git") return spawnRunner(command, options);
       return capture([], undefined)(command, options);
     };
-    const code = await main(["triage", "--send"], { home, engineRoot, platform: "darwin", env: {}, print: io.terminal.print, terminal: io.terminal, capture: raceCapture, hostname: () => "noras-mbp.local", run: async () => 0 });
+    const raceAdapters = () => {
+      if (!updated) {
+        updated = true;
+        writeFileSync(profilePath, JSON.stringify({ ...baseProfile, sources: [{ name: "race-secret", repo: "PostHog/hedge", ref: "main" }] }));
+      }
+      return engineAdapters();
+    };
+    const code = await main(["triage", "--send"], { home, engineRoot, platform: "darwin", env: {}, print: io.terminal.print, terminal: io.terminal, capture: runRealGit, adapters: raceAdapters, hostname: () => "noras-mbp.local", run: async () => 0 });
     expect(code).toBe(0);
     const issue = sent.find((call) => call.command[1] === "issue")!;
     expect(issue.input).toContain("The pack source <private source> is not pinned to a commit SHA.");
     expect(issue.input).not.toContain("race-secret");
+  });
+
+  test("home-path redaction does not collide with internal redactor placeholders", () => {
+    expect(redact("Saved /home/guest.0.0.~", "/home/guest", [{ text: "acme/secret", as: "<private repo>" }])).toBe("Saved ~.0.0.~");
+    expect(redact("acme/secret at /home/guest.0.0.~", "/home/guest", [{ text: "acme/secret", as: "<private repo>" }])).toBe("<private repo> at ~.0.0.~");
   });
 
   test("a long title is cut after redaction, so no part of a secret reaches the issue", async () => {

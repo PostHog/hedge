@@ -1140,8 +1140,9 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     }
   }
 
+  const preMasked = applyRules(text, fixedSecretRules);
   const usedNonces = new Set<number>();
-  for (const part of [text, home, ...valid.flatMap((entry) => [entry.text, entry.as])]) {
+  for (const part of [text, stripHome(text), preMasked, stripHome(preMasked), home, ...valid.flatMap((entry) => [entry.text, stripHome(entry.text), entry.as, stripHome(entry.as)])]) {
     for (const match of part.matchAll(/~\.(\d+)\./g)) usedNonces.add(Number(match[1]));
   }
   let nonce = 0;
@@ -1264,7 +1265,6 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     return pos === 0 ? value : out + value.slice(pos);
   };
 
-  const preMasked = applyRules(text, fixedSecretRules);
   const matchedOriginals: string[] = [];
   const matchedLabels: string[] = [];
   const masked = applySpellings(preMasked, maskedSpellings, undefined, undefined, (match, as) => {

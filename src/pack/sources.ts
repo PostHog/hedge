@@ -18,7 +18,7 @@ export type Clock = { sleep(ms: number): Promise<void> };
 const realClock: Clock = { sleep: (ms) => Bun.sleep(ms) };
 
 type BlockedSwitch = { repo: string; resolved?: string; resolvedDigest?: string };
-type Good = { repo: string; ref: string; commit: string; branch?: boolean; trackedBranch?: string; peeled?: boolean; asked?: string; askedBranch?: boolean; blocked?: BlockedSwitch[]; resolved?: string; resolvedDigest?: string };
+type Good = { repo: string; ref: string; commit: string; branch?: boolean; peeled?: boolean; asked?: string; askedBranch?: boolean; blocked?: BlockedSwitch[]; resolved?: string; resolvedDigest?: string };
 
 export const withoutUserinfo = (text: string) => text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi, "$1");
 
@@ -695,7 +695,8 @@ async function restoreKnownShallow(dir: string, beforeShallow: Set<string>, targ
     if (match) parents.push(match[1]!.toLowerCase());
   }
   if (!parents.length) return;
-  const alreadyPinnedForRepo = (await exactPinTarget(dir, effectiveDigest, targetCommit)) !== undefined;
+  const beforeKept = [...beforeShallow].every((sha) => current.has(sha));
+  const alreadyPinnedForRepo = beforeKept && (await pinTarget(dir, effectiveDigest, targetCommit)) !== undefined;
   if (!alreadyPinnedForRepo) {
     for (const parent of parents) {
       if ((await pinTarget(dir, effectiveDigest, parent)) === undefined) return;
@@ -773,27 +774,15 @@ export function sourceCache(home: string) {
   return join(home, ".local", "share", "hedge", "sources");
 }
 
-const branchName = (ref: unknown) => (typeof ref === "string" ? stripTrailingColon(ref).replace(/^refs\/heads\//, "") : undefined);
-const forcedBranchName = (ref: unknown) => {
+const branchName = (ref: unknown) => {
   if (typeof ref !== "string") return undefined;
-  const trimmed = stripTrailingColon(ref);
-  if (!trimmed.startsWith("+")) return undefined;
-  const stripped = trimmed.slice(1).replace(/^refs\/heads\//, "");
+  const stripped = stripSourceRefspec(ref).replace(/^refs\/heads\//, "");
   return stripped || undefined;
 };
 
-async function readFetchHeadFirstLine(dir: string): Promise<string | undefined> {
-  try {
-    return firstFetchHeadEntry(await readFile(join(dir, ".git", "FETCH_HEAD"), "utf8"));
-  } catch {
-    return undefined;
-  }
-}
-
 async function fetchHeadIsBranch(dir: string, ref: string, expectedOid?: string): Promise<boolean | undefined> {
   const branch = branchName(ref);
-  const forced = forcedBranchName(ref);
-  if (!branch && !forced) return false;
+  if (!branch) return false;
   let fetched: string;
   try {
     fetched = await readFile(join(dir, ".git", "FETCH_HEAD"), "utf8");
@@ -805,20 +794,20 @@ async function fetchHeadIsBranch(dir: string, ref: string, expectedOid?: string)
     const oid = first.match(/^([0-9a-f]{40}|[0-9a-f]{64})\t/i)?.[1]?.toLowerCase();
     if (oid !== expectedOid.toLowerCase()) return false;
   }
-  return (Boolean(branch) && first.includes(`\tbranch '${branch}' of `)) || (Boolean(forced) && first.includes(`\tbranch '${forced}' of `));
+  return first.includes(`\tbranch '${branch}' of `);
 }
 
 export async function followsBranch(ref: SourceRef, cacheRoot: string) {
   const dir = join(cacheRoot, ref.name);
   const good = await lastGood(dir);
   const branch = branchName(ref.ref);
-  const forced = forcedBranchName(ref.ref);
   const repo = repoUrl(ref.repo);
   if (!good || !branch || typeof good.commit !== "string" || !gitHash.test(good.commit)) return false;
   const effectiveDigest = repoDigest(await resolvedRepoUrl(dir, repo));
   const goodDigest = goodResolvedDigest(good);
   const sameRepo = good.repo === repo && (goodDigest === undefined || goodDigest === effectiveDigest);
-  if ((forced !== undefined || forcedBranchName(good.ref) !== undefined || forcedBranchName(good.asked) !== undefined) && !sameRepo) return false;
+  const hasPlusPrefix = (value: unknown) => typeof value === "string" && value.startsWith("+");
+  if ((hasPlusPrefix(ref.ref) || hasPlusPrefix(good.ref) || hasPlusPrefix(good.asked)) && !sameRepo) return false;
   if (Array.isArray(good.blocked) && good.blocked.length) {
     if (good.blocked.some((entry) => entry && entry.repo === repo && goodResolvedDigest(entry) === effectiveDigest)) return false;
   }
@@ -831,11 +820,7 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
     if (good.branch === false) return false;
     return (await fetchHeadIsBranch(dir, ref.ref)) === true;
   }
-  const aliasMatch =
-    (forced !== undefined && (branchName(good.ref) === forced || branchName(good.asked) === forced)) ||
-    forcedBranchName(good.ref) === branch ||
-    forcedBranchName(good.asked) === branch;
-  if (!aliasMatch && branchName(good.asked) !== branch) return false;
+  if (branchName(good.asked) !== branch) return false;
   return (await fetchHeadIsBranch(dir, ref.ref)) === true;
 }
 
@@ -873,57 +858,21 @@ export async function advanceSource(ref: SourceRef, cacheRoot: string, from: str
 
 async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimitMs: number): Promise<Advance> {
   const repo = repoUrl(ref.repo);
-  let branch = stripTrailingColon(ref.ref).replace(/^refs\/heads\//, "");
-  const forced = forcedBranchName(ref.ref);
-  let head = `refs/heads/${branch}`;
+  const branch = branchName(ref.ref);
+  const head = branch ? `refs/heads/${branch}` : "";
   if (!branch || isInvalidRef(head)) return { state: "failed", say: `invalid ref ${JSON.stringify(ref.ref)} for ${ref.repo}` };
   const effectiveRepo = await resolvedRepoUrl(dir, repo);
-  const forcedHead = forced && forced !== branch && !isInvalidRef(`refs/heads/${forced}`) ? `refs/heads/${forced}` : undefined;
-  let trackedChoice: "literal" | "forced" | undefined;
-  if (forcedHead && forced) {
-    const first = await readFetchHeadFirstLine(dir);
-    if (first?.includes(`\tbranch '${branch}' of `)) trackedChoice = "literal";
-    else if (first?.includes(`\tbranch '${forced}' of `)) trackedChoice = "forced";
-    else {
-      const good = await lastGood(dir);
-      if (good?.trackedBranch === branch) trackedChoice = "literal";
-      else if (good?.trackedBranch === forced) trackedChoice = "forced";
-      else if (typeof good?.ref === "string" && good.ref.startsWith("refs/heads/") && branchName(good.ref) === branch) trackedChoice = "literal";
-      else if (typeof good?.ref === "string" && branchName(good.ref) === forced) trackedChoice = "forced";
-    }
-  }
-  const heads =
-    trackedChoice === "literal"
-      ? [head]
-      : trackedChoice === "forced" && forcedHead
-        ? [forcedHead]
-        : forcedHead
-          ? [forcedHead, head]
-          : [head];
-  const listed = await git(dir, "ls-remote", repo, ...heads);
+  const listed = await git(dir, "ls-remote", repo, head);
   if (!listed.ok) return { state: "failed", say: `could not reach ${ref.repo}: ${listed.stderr}` };
   const cachedGood = await lastGood(dir);
   const cachedDigest = goodResolvedDigest(cachedGood);
   if (cachedGood && (cachedGood.repo !== repo || (cachedDigest !== undefined && cachedDigest !== repoDigest(effectiveRepo)))) {
     return { state: "refused", say: `${ref.name} now points to ${ref.repo}, not the repository Hedge loaded last. Run hedge apply.` };
   }
-  const rows = listed.stdout.split("\n").map((line) => line.split("\t"));
-  let commit: string | undefined;
-  if (trackedChoice === "literal") {
-    commit = rows.find(([, name]) => name === head)?.[0];
-  } else if (trackedChoice === "forced" && forced && forcedHead) {
-    branch = forced;
-    head = forcedHead;
-    commit = rows.find(([, name]) => name === forcedHead)?.[0];
-  } else {
-    commit = forcedHead ? rows.find(([, name]) => name === forcedHead)?.[0] : undefined;
-    if (commit && forced && forcedHead) {
-      branch = forced;
-      head = forcedHead;
-    } else {
-      commit = rows.find(([, name]) => name === head)?.[0];
-    }
-  }
+  const commit = listed.stdout
+    .split("\n")
+    .map((line) => line.split("\t"))
+    .find(([, name]) => name === head)?.[0];
   if (!commit) return { state: "failed", say: `${ref.repo} has no branch ${branch}` };
   if (commit === from) return { state: "same", commit };
   const rewritten = (tip: string) => ({ state: "refused" as const, say: `${branch} of ${ref.repo} moved to ${tip.slice(0, 12)}, which does not build on ${from.slice(0, 12)}, the commit Hedge loaded last. Hedge refresh runs no pack code from a rewritten branch. Run hedge update to take it.` });
@@ -970,7 +919,7 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} changed checkout HEAD while loading` };
   }
   const effectiveDigest = repoDigest(effectiveRepo);
-  const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, trackedBranch: branch, resolvedDigest: effectiveDigest });
+  const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest });
   if (saveError) {
     if (before) await restoreCheckout(dir, before);
     else if ((await git(dir, "checkout", "-q", "--detach", `${from}^{commit}`)).ok) clearLoadedModules(dir);
