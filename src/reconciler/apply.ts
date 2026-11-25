@@ -478,6 +478,24 @@ function spawnRunner(home: string, profileDir: string | undefined, onResult?: (s
 }
 
 const probeSupervisor = join(import.meta.dir, "probe-supervisor.ts");
+const activeSupervisors = new Set<Promise<unknown>>();
+
+async function waitSupervisorSlot(signal: AbortSignal): Promise<boolean> {
+  while (activeSupervisors.size >= probeConcurrency) {
+    if (signal.aborted) return false;
+    let onAbort!: () => void;
+    const aborted = new Promise<void>((resolve) => {
+      onAbort = resolve;
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      await Promise.race([aborted, ...activeSupervisors]);
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+  return !signal.aborted;
+}
 
 async function readSupervisorResult(stdout: ReadableStream<Uint8Array>, onFirstCode: (code: number) => void): Promise<{ code?: number; cleanup: boolean }> {
   const reader = stdout.getReader();
@@ -535,21 +553,25 @@ async function runDetached(command: string[], env: Record<string, string | undef
   };
   signal.addEventListener("abort", onAbort, { once: true });
   for (const name of stopSignals) process.on(name, interrupted);
-  if (signal.aborted) {
+  if (!(await waitSupervisorSlot(signal))) {
     release();
     return 124;
   }
   try {
-    child = Bun.spawn(bunScript(probeSupervisor), {
-      stdin: new TextEncoder().encode(JSON.stringify(command)),
+    const encoded = JSON.stringify(command);
+    const overStdin = Buffer.byteLength(encoded) > 65_536;
+    child = Bun.spawn(overStdin ? bunScript(probeSupervisor) : bunScript(probeSupervisor, encoded), {
+      stdin: overStdin ? new TextEncoder().encode(encoded) : "ignore",
       stdout: "pipe",
       stderr: "ignore",
       env,
       detached: true,
     });
-    void child.exited.then(() => {
+    const done = child.exited.finally(() => {
       reaped = true;
+      activeSupervisors.delete(done);
     });
+    activeSupervisors.add(done);
     if (stopSignal || signal.aborted) endGroup(stopSignal ?? "SIGTERM");
     const status = await readSupervisorResult(child.stdout, (code) => onResult?.(signal, code));
     if (status.code !== undefined && status.cleanup) {
@@ -561,7 +583,6 @@ async function runDetached(command: string[], env: Record<string, string | undef
   } catch {
     return supervisorSpawnFailed;
   } finally {
-    reaped = true;
     release();
   }
 }

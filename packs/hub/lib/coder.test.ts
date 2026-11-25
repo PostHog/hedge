@@ -421,3 +421,28 @@ process.exit(0);`;
     if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
   }
 });
+
+test("kills a background child holding stdout open after the command exits under a box lock", async () => {
+  const dir = temp.make("hedge-lock-pipe-");
+  const [ready, gone, leaderGone] = [join(dir, "ready"), join(dir, "gone"), join(dir, "leader-gone")];
+  expect(Bun.spawnSync(["mkfifo", ready, gone, leaderGone]).exitCode).toBe(0);
+  const started = Bun.file(ready).text();
+  const holderGone = Bun.file(gone).text();
+  const leaderClosed = Bun.file(leaderGone).text();
+  const clock = handTimer();
+  const result = withBoxLock(temp.make("hedge-lock-"), "box-pipe", { waitMs: 0 }, () =>
+    captureWith(clock.timer)(
+      ["sh", "-c", `exec 4>${JSON.stringify(leaderGone)}; { sleep 30 4>&- & } 3>${JSON.stringify(gone)}; echo $! > ${JSON.stringify(ready)}`],
+      { timeoutMs: 30 },
+    ),
+  );
+  const childPid = Number((await started).trim());
+  expect(await leaderClosed).toBe("");
+  try {
+    clock.fire();
+    expect(await result).toEqual({ code: 124, stdout: "", stderr: "timed out after 30 ms" });
+    expect(await holderGone).toBe("");
+  } finally {
+    if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
+  }
+});

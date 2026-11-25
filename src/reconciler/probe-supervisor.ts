@@ -1,5 +1,4 @@
-import { closeSync, existsSync, writeSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
+import { closeSync, writeSync } from "node:fs";
 
 export type StopSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT";
 export type Timer = (ms: number, fire: () => void) => () => void;
@@ -10,7 +9,6 @@ export const interruptGraceMs = 300;
 export type SupervisorHost = {
   spawn: (command: string[]) => { exited: Promise<number> };
   killGroup: (signal: NodeJS.Signals) => void;
-  hasOtherMembers: () => Promise<boolean>;
   timer: Timer;
   onSignal: (signal: StopSignal, handler: () => void) => void;
   reportResult: (code: number) => void;
@@ -23,56 +21,6 @@ const realTimer: Timer = (ms, fire) => {
   return () => clearTimeout(handle);
 };
 
-export async function hasOtherGroupMembers(pgid = process.pid): Promise<boolean> {
-  if (process.platform === "linux") {
-    try {
-      for (const entry of await readdir("/proc")) {
-        if (!/^\d+$/.test(entry)) continue;
-        const pid = Number(entry);
-        if (pid === pgid) continue;
-        let stat: string;
-        try {
-          stat = await readFile(`/proc/${entry}/stat`, "utf8");
-        } catch {
-          continue;
-        }
-        const end = stat.lastIndexOf(")");
-        if (end === -1) continue;
-        const fields = stat.slice(end + 2).split(" ");
-        const state = fields[0];
-        const group = Number(fields[2]);
-        const threads = Number(fields[17]);
-        if (group === pgid && ((state !== "Z" && state !== "X") || threads > 1)) return true;
-      }
-      return false;
-    } catch {}
-  }
-  try {
-    const ps = existsSync("/bin/ps") ? "/bin/ps" : "ps";
-    const proc = Bun.spawn([ps, "-axo", "pid=,pgid=,ppid=,stat="], {
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "ignore",
-      timeout: graceMs,
-      killSignal: "SIGKILL",
-    });
-    const [code, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
-    if (code !== 0 || proc.signalCode) return true;
-    for (const line of stdout.split("\n")) {
-      const parts = line.trim().split(/\s+/);
-      if (parts.length < 4) continue;
-      const pid = Number(parts[0]);
-      const group = Number(parts[1]);
-      const ppid = Number(parts[2]);
-      const state = parts[3]!;
-      if (group === pgid && pid > 0 && pid !== pgid && ppid !== pgid && !state.startsWith("Z")) return true;
-    }
-    return false;
-  } catch {
-    return true;
-  }
-}
-
 export async function supervise(command: string[], host: SupervisorHost): Promise<number> {
   let resolveDone!: (code: number) => void;
   const settled = new Promise<number>((resolve) => (resolveDone = resolve));
@@ -80,7 +28,6 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
   let stop: StopSignal | undefined;
   let target: { exited: Promise<number> } | undefined;
   let leaderDone = false;
-  let scanning = false;
   let finished = false;
   let cancelInterrupt: (() => void) | undefined;
   let cancelHard: (() => void) | undefined;
@@ -143,12 +90,7 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
       if (!stop) stop = sig;
       if (!target) return exit(128);
       if (leaderDone) {
-        if (scanning) {
-          cancelHard?.();
-          cancelHard = undefined;
-          arm(sig);
-          forwardGroup(sig);
-        } else if (sig === "SIGTERM" || sig === "SIGHUP") {
+        if (sig === "SIGTERM" || sig === "SIGHUP") {
           armHard();
           forwardGroup(sig);
         }
@@ -177,31 +119,8 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
   if (finished) return settled;
   if (!stop) {
     host.reportResult(code);
-    scanning = true;
-    cancelHard = host.timer(graceMs, () => {
-      cancelHard = undefined;
-      if (finished || !scanning) return;
-      scanning = false;
-      if (!stop) {
-        armHard();
-        forwardGroup("SIGTERM");
-      }
-      host.reportCleanup();
-    });
-    const hasPeers = await host.hasOtherMembers();
-    const stillScanning = scanning;
-    scanning = false;
-    if (finished || !stillScanning) return settled;
-    if (!hasPeers) {
-      exit(code);
-      return settled;
-    }
-    if (!stop) {
-      cancelHard?.();
-      cancelHard = undefined;
-      armHard();
-      forwardGroup("SIGTERM");
-    }
+    armHard();
+    forwardGroup("SIGTERM");
     host.reportCleanup();
   }
   return settled;
@@ -218,7 +137,8 @@ if (import.meta.main) {
   }
   let command: string[] = [];
   try {
-    const parsed = JSON.parse(await Bun.stdin.text()) as unknown;
+    const raw = Bun.argv[2] ?? (await Bun.stdin.text());
+    const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed) && parsed.every((arg) => typeof arg === "string")) command = parsed;
   } catch {}
   await supervise(command, {
@@ -228,7 +148,6 @@ if (import.meta.main) {
         process.kill(-process.pid, signal);
       } catch {}
     },
-    hasOtherMembers: () => hasOtherGroupMembers(process.pid),
     timer: realTimer,
     onSignal: (signal, handler) => void handlers.set(signal, handler),
     reportResult: (code) => {

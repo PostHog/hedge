@@ -44,8 +44,19 @@ export const orphanGraceSeconds = 10;
 
 function holdingLocks(argv: string[], locks: number[], timeoutMs: number): string[] {
   if (!locks.length) return argv;
+  const holdFd = locks.length + 3;
   const closed = locks.map((_, index) => `${index + 3}>&-`).join(" ");
-  return ["timeout", "-s", "KILL", String(Math.ceil(timeoutMs / 1000) + orphanGraceSeconds), "/bin/sh", "-c", `exec "$@" ${closed}`, "hedge-box-lock", ...argv];
+  return [
+    "timeout",
+    "-s",
+    "KILL",
+    String(Math.ceil(timeoutMs / 1000) + orphanGraceSeconds),
+    "/bin/sh",
+    "-c",
+    `(while read -r _ <&${holdFd}; do :; done) </dev/null >/dev/null 2>&1 ${closed} & exec "$@" ${closed} ${holdFd}<&-`,
+    "hedge-box-lock",
+    ...argv,
+  ];
 }
 
 const captureSupervisor = join(import.meta.dir, "capture-supervisor.ts");
@@ -136,22 +147,41 @@ export function captureWith(timer: Timer): Capture {
       } else {
         live.send({ argv: holdingLocks(argv, locks, timeoutMs), lockCount: locks.length });
       }
+      let hardKill: ReturnType<typeof setTimeout> | undefined;
+      let forceExpired = false;
       cancel = timer(timeoutMs, () => {
         expired = true;
         stopChild();
-        void live.exited.finally(() => stopStream.abort());
+        hardKill = setTimeout(() => {
+          forceExpired = true;
+          if (!reaped) {
+            try {
+              process.kill(-live.pid, "SIGKILL");
+            } catch {}
+            try {
+              live.kill("SIGKILL");
+            } catch {}
+          }
+          stopStream.abort();
+          settle({ code: timedOut });
+        }, 150);
+        void live.exited.finally(() => {
+          if (hardKill) clearTimeout(hardKill);
+          stopStream.abort();
+        });
       });
       const [stdout, stderr, status] = await Promise.all([
         readText(live.stdout, stopStream.signal),
         readText(live.stderr, stopStream.signal),
         statusPromise,
       ]);
-      if (!reaped) {
+      if (hardKill) clearTimeout(hardKill);
+      if (!reaped && !expired) {
         try {
           live.send("done");
         } catch {}
       }
-      await live.exited;
+      if (!forceExpired) await live.exited;
       if (expired) return timeoutResult(timeoutMs, stdout);
       if (status.error !== undefined) {
         const err = new Error(status.error) as NodeJS.ErrnoException;

@@ -1,23 +1,36 @@
-import { closeSync } from "node:fs";
+import { closeSync, writeSync } from "node:fs";
 
 type StartMessage = { argv: string[]; lockCount: number };
 
 let target: ReturnType<typeof Bun.spawn> | undefined;
 let targetReaped = false;
 let targetCode: number | undefined;
+let holdFd: number | undefined;
 let parentGone = false;
 let killing = false;
+
+const anchorAlive = () => {
+  if (holdFd === undefined) return false;
+  try {
+    writeSync(holdFd, "\n");
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 const killAll = () => {
   if (killing) return;
   killing = true;
-  if (target && !targetReaped) {
+  if (target && (!targetReaped || anchorAlive())) {
     try {
       process.kill(-target.pid, "SIGKILL");
     } catch {}
-    try {
-      target.kill("SIGKILL");
-    } catch {}
+    if (!targetReaped) {
+      try {
+        target.kill("SIGKILL");
+      } catch {}
+    }
   }
   try {
     process.kill(-process.pid, "SIGKILL");
@@ -43,8 +56,9 @@ process.on("message", async (message: unknown) => {
   if (!message || typeof message !== "object" || !Array.isArray((message as StartMessage).argv)) return;
   const { argv, lockCount } = message as StartMessage;
   const lockFds = Array.from({ length: lockCount }, (_, index) => index + 3);
+  const stdio: [number, number, number, ...(number | "pipe")[]] = lockCount > 0 ? [0, 1, 2, ...lockFds, "pipe"] : [0, 1, 2];
   try {
-    target = Bun.spawn(argv, { stdio: [0, 1, 2, ...lockFds] });
+    target = Bun.spawn(argv, { stdio });
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
     try {
@@ -52,7 +66,10 @@ process.on("message", async (message: unknown) => {
     } catch {}
     process.exit(127);
   }
-  for (const fd of [1, 2, ...lockFds]) {
+  if (lockCount > 0 && typeof target.stdio[lockCount + 3] === "number") {
+    holdFd = target.stdio[lockCount + 3] as number;
+  }
+  for (const fd of [1, 2]) {
     try {
       closeSync(fd);
     } catch {}

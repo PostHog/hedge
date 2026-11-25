@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../testing/git.ts";
 
@@ -33,11 +33,9 @@ async function fifoWrite(path: string, content: string): Promise<void> {
   await proc.exited;
 }
 
-function spawnControlledSupervisor(command: string[], options?: { holdScan?: boolean }) {
+function spawnControlledSupervisor(command: string[]) {
   const harness = `
-import { hasOtherGroupMembers, supervise } from ${JSON.stringify(supervisorPath)};
-let releaseScan;
-const scanHold = ${JSON.stringify(Boolean(options?.holdScan))} ? new Promise((resolve) => { releaseScan = resolve; }) : Promise.resolve();
+import { supervise } from ${JSON.stringify(supervisorPath)};
 const timers = [];
 const write = (line) => process.stdout.write(line + "\\n");
 const reader = Bun.stdin.stream().getReader();
@@ -57,8 +55,6 @@ void (async () => {
           next.cancelled = true;
           next.fire();
         }
-      } else if (cmd === "release-scan") {
-        releaseScan?.();
       }
     }
   }
@@ -67,10 +63,6 @@ await supervise(${JSON.stringify(command)}, {
   spawn: (argv) => Bun.spawn(argv, { stdio: ["ignore", "ignore", "ignore"] }),
   killGroup: (signal) => {
     try { process.kill(-process.pid, signal); } catch {}
-  },
-  hasOtherMembers: async () => {
-    await scanHold;
-    return await hasOtherGroupMembers(process.pid);
   },
   timer: (_ms, fire) => {
     const entry = { fire, cancelled: false };
@@ -406,83 +398,34 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
     }
   });
 
-  test("escalates stalled descendant scans through SIGTERM before SIGKILL and forwards SIGINT arriving during scan", async () => {
-    const dir = temp.make("sup-stalled-scan-");
-    const [ready, leaderGate, termSaw, termGate, termDone, gone] = [
+  test("kills a descendant spawned right as another stray child exits on SIGTERM", async () => {
+    const dir = temp.make("sup-respawn-");
+    const [ready, gate, grandReady, grandGone] = [
       join(dir, "ready"),
-      join(dir, "leader-gate"),
-      join(dir, "term-saw"),
-      join(dir, "term-gate"),
-      join(dir, "term-done"),
-      join(dir, "gone"),
+      join(dir, "gate"),
+      join(dir, "grand-ready"),
+      join(dir, "grand-gone"),
     ];
-    mkfifo(ready, leaderGate, termSaw, termGate, termDone, gone);
+    mkfifo(ready, gate, grandReady, grandGone);
     const started = fifoRead(ready);
-    const sawTerm = fifoRead(termSaw);
-    const sawDone = fifoRead(termDone);
-    const closed = fifoRead(gone);
-    const childScript = `trap 'echo got-term > ${JSON.stringify(termSaw)}; cat ${JSON.stringify(termGate)} >/dev/null; echo term-done > ${JSON.stringify(termDone)}; exit 0' TERM; exec 3>${JSON.stringify(gone)}; echo $$ > ${JSON.stringify(ready)}; sleep 30 3>&- & wait`;
-    const leaderScript = `import { readFileSync } from "node:fs";
-Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore", "ignore", "ignore"] });
-readFileSync(${JSON.stringify(leaderGate)}, "utf8");
-process.exit(7);`;
-    const stalled = spawnControlledSupervisor([process.execPath, "-e", leaderScript], { holdScan: true });
+    const grandStarted = fifoRead(grandReady);
+    const grandClosed = fifoRead(grandGone);
+    const grandBin = join(dir, "grand.sh");
+    writeFileSync(grandBin, '#!/bin/sh\ntrap "" HUP TERM\nexec 3>"$1"\necho $$ > "$2"\nexec sleep 30\n', { mode: 0o755 });
+    const childScript = `trap '${grandBin} ${grandGone} ${grandReady} & exit 0' TERM; echo $$ > ${JSON.stringify(ready)}; sleep 30 & wait`;
+    const sup = spawnControlledSupervisor(["sh", "-c", 'sh -c "$1" & cat "$2" >/dev/null; exit 0', "probe", childScript, gate]);
     try {
-      const childPid = Number((await started).trim());
-      expect(childPid).toBeGreaterThan(0);
-      await fifoWrite(leaderGate, "go\n");
-      await stalled.advance();
-      expect((await sawTerm).trim()).toBe("got-term");
-      expect(() => process.kill(childPid, 0)).not.toThrow();
-      await fifoWrite(termGate, "go\n");
-      expect((await sawDone).trim()).toBe("term-done");
-      expect(await closed).toBe("");
-      await stalled.drain();
+      expect(Number((await started).trim())).toBeGreaterThan(0);
+      await fifoWrite(gate, "go\n");
+      const grandPid = Number((await grandStarted).trim());
+      expect(grandPid).toBeGreaterThan(0);
+      await sup.waitCleanup();
+      expect(() => process.kill(grandPid, 0)).not.toThrow();
+      await sup.advance();
+      expect(await grandClosed).toBe("");
+      expect(await sup.drain()).toBe(0);
     } finally {
-      stalled.cleanup();
-    }
-
-    const dir3 = temp.make("sup-scan-sigint-");
-    const [ready3, leaderGate3, leaderGone3, intSaw3, intGate3, intDone3, gone3] = [
-      join(dir3, "ready"),
-      join(dir3, "leader-gate"),
-      join(dir3, "leader-gone"),
-      join(dir3, "int-saw"),
-      join(dir3, "int-gate"),
-      join(dir3, "int-done"),
-      join(dir3, "gone"),
-    ];
-    const prematureTerm3 = join(dir3, "premature-term");
-    mkfifo(ready3, leaderGate3, leaderGone3, intSaw3, intGate3, intDone3, gone3);
-    const started3 = fifoRead(ready3);
-    const leaderClosed3 = fifoRead(leaderGone3);
-    const sawInt3 = fifoRead(intSaw3);
-    const sawDone3 = fifoRead(intDone3);
-    const closed3 = fifoRead(gone3);
-    const childScript3 = `trap 'echo term > ${JSON.stringify(prematureTerm3)}' TERM; trap 'echo got-int > ${JSON.stringify(intSaw3)}; cat ${JSON.stringify(intGate3)} >/dev/null; echo int-done > ${JSON.stringify(intDone3)}; exit 0' INT; exec 3>${JSON.stringify(gone3)}; echo $$ > ${JSON.stringify(ready3)}; sleep 30 3>&- & wait`;
-    const leaderScript3 = `import { openSync, readFileSync } from "node:fs";
-openSync(${JSON.stringify(leaderGone3)}, "w");
-Bun.spawn(["sh", "-c", ${JSON.stringify(childScript3)}], { stdio: ["ignore", "ignore", "ignore"] });
-readFileSync(${JSON.stringify(leaderGate3)}, "utf8");
-process.exit(0);`;
-    const scanInt = spawnControlledSupervisor([process.execPath, "-e", leaderScript3], { holdScan: true });
-    try {
-      const childPid = Number((await started3).trim());
-      expect(childPid).toBeGreaterThan(0);
-      await fifoWrite(leaderGate3, "go\n");
-      expect(await leaderClosed3).toBe("");
-      await scanInt.waitArmed();
-      scanInt.proc.kill("SIGINT");
-      expect((await sawInt3).trim()).toBe("got-int");
-      scanInt.releaseScan();
-      expect(existsSync(prematureTerm3)).toBe(false);
-      await fifoWrite(intGate3, "go\n");
-      expect((await sawDone3).trim()).toBe("int-done");
-      expect(await closed3).toBe("");
-      expect(existsSync(prematureTerm3)).toBe(false);
-      await scanInt.drain();
-    } finally {
-      scanInt.cleanup();
+      sup.cleanup();
     }
   });
 });
