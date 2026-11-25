@@ -1,90 +1,108 @@
-import { dlopen, FFIType } from "bun:ffi";
+export type StopSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT";
+export type Timer = (ms: number, fire: () => void) => () => void;
 
-const command = Bun.argv.slice(2);
-if (!command.length) process.exit(127);
+export const graceMs = 150;
+export const interruptGraceMs = 300;
 
-const libc = dlopen(process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6", {
-  setpgid: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
-  getpgrp: { args: [], returns: FFIType.i32 },
-});
-if (libc.symbols.setpgid(0, 0) !== 0 && libc.symbols.getpgrp() !== process.pid) process.exit(127);
-
-const graceMs = 150;
-const interruptGraceMs = 300;
-let stop: NodeJS.Signals | undefined;
-let target: ReturnType<typeof Bun.spawn> | undefined;
-let done = false;
-let escalated = false;
-let timer: ReturnType<typeof setTimeout> | undefined;
-let hardTimer: ReturnType<typeof setTimeout> | undefined;
-const forwarded = new Set<NodeJS.Signals>();
-
-const finishGroup = () => {
-  try {
-    process.kill(-process.pid, "SIGKILL");
-  } catch {}
-  process.exit(143);
+export type SupervisorHost = {
+  spawn: (command: string[]) => { exited: Promise<number> };
+  killGroup: (signal: NodeJS.Signals) => void;
+  timer: Timer;
+  onSignal: (signal: StopSignal, handler: () => void) => void;
+  exit: (code: number) => void;
 };
 
-const forwardGroup = (name: NodeJS.Signals) => {
-  if (forwarded.has(name)) return;
-  forwarded.add(name);
-  try {
-    process.kill(-process.pid, name);
-  } catch {}
+const realTimer: Timer = (ms, fire) => {
+  const handle = setTimeout(fire, ms);
+  return () => clearTimeout(handle);
 };
 
-const arm = (name: NodeJS.Signals) => {
-  if (done) return;
-  if (name === "SIGTERM" || name === "SIGHUP") {
-    if (timer) {
-      clearTimeout(timer);
-      timer = undefined;
+export async function supervise(command: string[], host: SupervisorHost): Promise<void> {
+  if (!command.length) return host.exit(127);
+
+  let stop: StopSignal | undefined;
+  let target: { exited: Promise<number> } | undefined;
+  let leaderDone = false;
+  let finished = false;
+  let cancelInterrupt: (() => void) | undefined;
+  let cancelHard: (() => void) | undefined;
+
+  const finishGroup = () => {
+    if (finished) return;
+    finished = true;
+    cancelInterrupt?.();
+    cancelInterrupt = undefined;
+    cancelHard?.();
+    cancelHard = undefined;
+    host.killGroup("SIGKILL");
+    host.exit(143);
+  };
+
+  const armHard = () => {
+    if (finished || cancelHard) return;
+    cancelInterrupt?.();
+    cancelInterrupt = undefined;
+    cancelHard = host.timer(graceMs, finishGroup);
+  };
+
+  const arm = (name: StopSignal) => {
+    if (finished) return;
+    if (name === "SIGTERM" || name === "SIGHUP") {
+      armHard();
+      return;
     }
-    if (!hardTimer) hardTimer = setTimeout(finishGroup, graceMs);
-    return;
+    if (!cancelInterrupt && !cancelHard) {
+      cancelInterrupt = host.timer(interruptGraceMs, () => {
+        cancelInterrupt = undefined;
+        armHard();
+        host.killGroup("SIGTERM");
+      });
+    }
+  };
+
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
+    host.onSignal(sig, () => {
+      if (!stop) stop = sig;
+      if (!target) return host.exit(128);
+      if (leaderDone) return;
+      arm(sig);
+    });
   }
-  if (!timer && !hardTimer) {
-    timer = setTimeout(() => {
-      timer = undefined;
-      escalated = true;
-      if (!hardTimer) hardTimer = setTimeout(finishGroup, graceMs);
-      forwardGroup("SIGTERM");
-    }, interruptGraceMs);
+
+  try {
+    target = host.spawn(command);
+  } catch {
+    return host.exit(127);
   }
-};
 
-const onSignal = (name: NodeJS.Signals) => {
-  if (!stop) stop = name;
-  if (!target) process.exit(128);
-  if (done) return;
-  arm(name);
-  forwardGroup(name);
-};
+  if (stop) arm(stop);
 
-for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) process.on(sig, onSignal);
-for (const sig of ["SIGTTIN", "SIGTTOU"] as const) process.on(sig, () => {});
-
-try {
-  target = Bun.spawn(command, { stdio: ["ignore", "ignore", "ignore"] });
-} catch {
-  process.exit(127);
+  const code = await target.exited;
+  leaderDone = true;
+  if (finished) return;
+  if (!stop) {
+    cancelInterrupt?.();
+    cancelHard?.();
+    return host.exit(code);
+  }
+  if (!cancelHard) {
+    cancelInterrupt?.();
+    cancelInterrupt = undefined;
+    armHard();
+    host.killGroup("SIGTERM");
+  }
 }
 
-if (stop) {
-  arm(stop);
-  forwardGroup(stop);
+if (import.meta.main) {
+  await supervise(Bun.argv.slice(2), {
+    spawn: (command) => Bun.spawn(command, { stdio: ["ignore", "ignore", "ignore"] }),
+    killGroup: (signal) => {
+      try {
+        process.kill(-process.pid, signal);
+      } catch {}
+    },
+    timer: realTimer,
+    onSignal: (signal, handler) => void process.on(signal, handler),
+    exit: (code) => process.exit(code),
+  });
 }
-
-const code = await target.exited;
-done = true;
-if (timer) clearTimeout(timer);
-if (hardTimer) clearTimeout(hardTimer);
-if (stop) {
-  if (!escalated && (stop === "SIGINT" || stop === "SIGQUIT")) {
-    forwardGroup("SIGTERM");
-    await Bun.sleep(graceMs);
-  }
-  finishGroup();
-}
-process.exit(code);

@@ -463,13 +463,16 @@ async function runDetached(command: string[], env: Record<string, string | undef
   const endGroup = (name: NodeJS.Signals = "SIGTERM") => {
     stopSignal ??= name;
     if (!child || reaped) return;
-    try { process.kill(child.pid, name); } catch {}
+    try { process.kill(-child.pid, name); } catch {}
   };
   const onAbort = () => endGroup("SIGTERM");
   const interrupted = (name: NodeJS.Signals) => {
     endGroup(name);
     release();
-    if (!process.listenerCount(name)) process.kill(process.pid, name);
+    if (!process.listenerCount(name)) {
+      if (name === "SIGQUIT") process.exit(131);
+      process.kill(process.pid, name);
+    }
   };
   const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
   const release = () => {
@@ -483,7 +486,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
     return 124;
   }
   try {
-    child = Bun.spawn(bunScript(probeSupervisor, ...command), { stdout: "ignore", stderr: "ignore", env });
+    child = Bun.spawn(bunScript(probeSupervisor, ...command), { stdout: "ignore", stderr: "ignore", env, detached: true });
     if (stopSignal || signal.aborted) endGroup(stopSignal ?? "SIGTERM");
     return await child.exited;
   } catch {

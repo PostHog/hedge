@@ -72,7 +72,10 @@ export function captureWith(timer: Timer): Capture {
     const interrupted = (name: NodeJS.Signals) => {
       stopOnInterrupt();
       release();
-      if (!process.listenerCount(name)) process.kill(process.pid, name);
+      if (!process.listenerCount(name)) {
+        if (name === "SIGQUIT") process.exit(131);
+        process.kill(process.pid, name);
+      }
     };
     const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
     const release = () => {
