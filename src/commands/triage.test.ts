@@ -265,6 +265,7 @@ describe("hedge triage", () => {
               { name: "team-l", repo: "/work/repo", ref: "main" },
               { name: "noras-mbp", repo: "acme/host-alias-packs", ref: "main" },
               { name: "bad-numeric", repo: 12345, ref: "main" },
+              { name: "team-m", repo: "session", ref: "main" },
             ],
           },
         },
@@ -275,6 +276,7 @@ describe("hedge triage", () => {
       join(home, ".local/state/hedge/logs/setup.log"),
       [
         "PASSWORD=correct-horse-battery-staple",
+        "SESSION=live-session-secret-value",
         "GET https://example.com/cb?auth=super-secret-value",
         "read /Users/alice/.ssh/config",
         "fetch https://nora:topsecret@git.example.com/secret-owner/secret-repo.git <internal-release>",
@@ -294,6 +296,7 @@ describe("hedge triage", () => {
     expect(result.code).toBe(0);
     const issue = result.sent.find((call) => call.command[1] === "issue")!;
     expect(issue.input).toContain("<branch>=<redacted>");
+    expect(issue.input).toContain("<team-m source>=<redacted>");
     expect(issue.input).toContain("https://example.com/cb?<branch>=<redacted>");
     expect(issue.input).toContain("read /<branch>/<user>/.ssh/config");
     expect(issue.input).toContain("fetch <team-d source> <<branch>>");
@@ -306,7 +309,7 @@ describe("hedge triage", () => {
     expect(issue.input).toContain("https://example.com/cb?token=<redacted>");
     expect(issue.input).toContain("fetched <<this machine> source> from mirror");
     expect(issue.input).toContain("unlabeled <secret> end");
-    for (const leaked of ["correct-horse-battery-staple", "super-secret-value", "alice", "topsecret", "secret-owner", "secret-repo", "internal-release", keyLikeAlias, "private-project", "customer.internal", "embargoed-release", "top-secret", "private-release", "secret-home-branch", "project.git", "/work/private", "super-secret-suffix", "query-secret-suffix", "noras-mbp", "AbCdEfGhIj1234", "KlMnOpQrSt5678"]) expect(issue.input).not.toContain(leaked);
+    for (const leaked of ["correct-horse-battery-staple", "live-session-secret-value", "super-secret-value", "alice", "topsecret", "secret-owner", "secret-repo", "internal-release", keyLikeAlias, "private-project", "customer.internal", "embargoed-release", "top-secret", "private-release", "secret-home-branch", "project.git", "/work/private", "super-secret-suffix", "query-secret-suffix", "noras-mbp", "AbCdEfGhIj1234", "KlMnOpQrSt5678"]) expect(issue.input).not.toContain(leaked);
   });
 
   test("redacts unpinned source aliases and repos from an inherited HEDGE_PROFILE_DIR without disclosing its alias or engine fork", async () => {

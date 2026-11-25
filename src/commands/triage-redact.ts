@@ -146,15 +146,19 @@ function applySpellings(text: string, spellings: CompiledSpelling[], exempt?: Se
   return result;
 }
 
+const reservedWord = new RegExp(String.raw`^(?:${secretKey}|bearer|basic|auth|code|sig|key|users|home)$`, "i");
+
 export function redact(text: string, home: string, known: KnownName[] = []): string {
   const stripHome = (value: string) => (home.length > 1 ? value.split(home.replace(/\/$/, "")).join("~") : value);
   const valid = known.filter((entry) => typeof entry.text === "string" && typeof entry.as === "string");
-  const primary = valid.filter((entry) => !entry.after);
-  const after = valid.filter((entry) => entry.after);
+  const primary = valid.filter((entry) => !entry.after && !reservedWord.test(entry.text));
+  const after = valid.filter((entry) => entry.after || reservedWord.test(entry.text)).map((entry) => (entry.after ? entry : { ...entry, after: true }));
 
-  let fence = "~~";
-  const used = [text, ...valid.flatMap((entry) => [entry.text, entry.as])];
-  while (used.some((part) => part.includes(fence))) fence += "~";
+  let maxTildes = 1;
+  for (const part of [text, ...valid.flatMap((entry) => [entry.text, entry.as])]) {
+    for (const run of part.matchAll(/~+/g)) if (run[0].length > maxTildes) maxTildes = run[0].length;
+  }
+  const fence = "~".repeat(maxTildes + 1);
 
   const rawPrimarySpellings = compileSpellings(primary);
   const sanitizeLabel = (entry: KnownName) => applyRules(stripHome(applySpellings(entry.as, rawPrimarySpellings, undefined, entry)), allRules);
@@ -182,8 +186,9 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
   };
 
   const result = passOne(text);
-  const exempt = new Set([...redactorLabels, ...labels, ...after.map(sanitizeLabel)]);
-  const afterSpellings = compileSpellings(after, passOne, exempt);
+  const sanitizedAfter = after.map((entry) => ({ ...entry, as: sanitizeLabel(entry) }));
+  const exempt = new Set([...redactorLabels, ...labels, ...sanitizedAfter.map((entry) => entry.as)]);
+  const afterSpellings = compileSpellings(sanitizedAfter, passOne, exempt);
   return applySpellings(result, afterSpellings, exempt);
 }
 

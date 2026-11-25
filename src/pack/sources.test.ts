@@ -370,8 +370,7 @@ describe("fetchSource", () => {
     writeFileSync(join(cache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo: repoB, ref: commitB1, commit: commitA1 }) + "\n");
 
     const directHit = await fetchSource({ name: "team", repo: repoB, ref: commitA1 }, cache);
-    if ("error" in directHit) throw new Error(directHit.error);
-    expect(directHit.stale).toContain(`could not fetch ${commitA1}`);
+    expect(directHit).toMatchObject({ error: expect.stringContaining(`could not fetch ${commitA1}`) });
 
     await fetchSource({ name: "team", repo: repoB, ref: "main" }, cache);
     const afterBranch = await fetchSource({ name: "team", repo: repoB, ref: commitA1 }, cache);
@@ -535,6 +534,69 @@ describe("fetchSource", () => {
     if ("error" in pinCheck) throw new Error(pinCheck.error);
     expect(await spawnGit(enclosing, "symbolic-ref", "-q", "HEAD")).toBe(outerBranch);
     expect(await spawnGit(enclosing, "rev-parse", "HEAD")).toBe(outerHead);
+
+    const detachedCache = temp.make("detached-edit-");
+    await fetchSource({ name: "team", repo: repoA, ref: commitA1 }, detachedCache);
+    const detachedDir = join(detachedCache, "team");
+    writePack(detachedDir, "Detached local commit.");
+    await spawnGit(detachedDir, "commit", "-q", "-am", "detached local edit");
+    const detachedLocal = await spawnGit(detachedDir, "rev-parse", "HEAD");
+    const detachedRefs = join(detachedDir, ".git", "refs");
+    setDirModes(detachedRefs, 0o555);
+    try {
+      const blocked = await fetchSource({ name: "team", repo: repoA, ref: commitA2 }, detachedCache);
+      expect(blocked).toMatchObject({ error: expect.stringContaining(`could not record ${commitA2}`) });
+      expect(await spawnGit(detachedDir, "rev-parse", "HEAD")).toBe(detachedLocal);
+    } finally {
+      setDirModes(detachedRefs, 0o755);
+    }
+  });
+
+  test("keys pin history by Git's resolved insteadOf URL and invalidates pack.ts modules on refresh rollback", async () => {
+    const repoA = await packRepo("InsteadOf Repo A.");
+    const commitA = await spawnGit(repoA, "rev-parse", "HEAD");
+    const repoB = await packRepo("InsteadOf Repo B.");
+    const alias = "https://instead.example.com/team/packs.git";
+    const cache = temp.make("insteadof-");
+    const dir = join(cache, "team");
+    mkdirSync(dir, { recursive: true });
+    await spawnGit(dir, "init", "-q");
+    await spawnGit(dir, "config", `url.${repoA}.insteadOf`, alias);
+
+    const first = await fetchSource({ name: "team", repo: alias, ref: commitA }, cache);
+    if ("error" in first) throw new Error(first.error);
+    expect(first.packs[0]?.manifest.summary).toBe("InsteadOf Repo A.");
+
+    await spawnGit(dir, "config", "--unset", `url.${repoA}.insteadOf`);
+    await spawnGit(dir, "config", `url.${repoB}.insteadOf`, alias);
+    const switched = await fetchSource({ name: "team", repo: alias, ref: commitA }, cache);
+    expect("error" in switched).toBe(true);
+
+    const modRepo = temp.make("mod-repo-");
+    await spawnGit(modRepo, "init", "-q", "-b", "main");
+    mkdirSync(join(modRepo, "packs/team"), { recursive: true });
+    writeFileSync(join(modRepo, "packs/team/pack.ts"), 'export default { sdk: 1, name: "team", summary: "Module v1.", register() {} };\n');
+    await spawnGit(modRepo, "add", ".");
+    await spawnGit(modRepo, "commit", "-q", "-m", "v1");
+    const mod1 = await spawnGit(modRepo, "rev-parse", "HEAD");
+    writeFileSync(join(modRepo, "packs/team/pack.ts"), 'export default { sdk: 1, name: "team", summary: "Module v2.", register() {} };\n');
+    await spawnGit(modRepo, "commit", "-q", "-am", "v2");
+
+    const modCache = temp.make("mod-cache-");
+    await fetchSource({ name: "team", repo: modRepo, ref: mod1 }, modCache);
+    const modMeta = join(modCache, "team", ".git", "hedge-source.json");
+    writeFileSync(modMeta, JSON.stringify({ repo: modRepo, ref: "main", commit: mod1 }) + "\n");
+    const modRefs = join(modCache, "team", ".git", "refs");
+    setDirModes(modRefs, 0o555);
+    try {
+      const failed = await advanceSource({ name: "team", repo: modRepo, ref: "main" }, modCache, mod1);
+      expect(failed).toMatchObject({ state: "failed" });
+    } finally {
+      setDirModes(modRefs, 0o755);
+    }
+    const cached = await cachedSource({ name: "team", repo: modRepo, ref: "main" }, modCache);
+    if ("error" in cached) throw new Error(cached.error);
+    expect(cached.packs[0]?.manifest.summary).toBe("Module v1.");
   });
 
   test("records pinned history even for a relative repository path named after an Object property", async () => {
