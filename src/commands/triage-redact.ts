@@ -56,11 +56,45 @@ const canonMaskRules: Rule[] = [
 ];
 const contextualSecretRules: Rule[] = secretRules.slice(8);
 const emailRule: Rule = standardRules[0]!;
-const nonEmailStandardRules: Rule[] = standardRules.slice(1);
-const preAfterRules: Rule[] = [...contextualSecretRules, ...nonEmailStandardRules];
-const preAfterAllRules: Rule[] = [...secretRules, ...nonEmailStandardRules];
 const allRules: Rule[] = [...secretRules, ...standardRules, randomRule];
 const preRandomRules: Rule[] = [...contextualSecretRules, ...standardRules];
+
+function insideEmail(text: string, start: number, end: number): boolean {
+  let lo = start;
+  while (lo > 0 && /[A-Za-z0-9_.+%@-]/.test(text[lo - 1]!)) lo--;
+  let hi = end;
+  while (hi < text.length && /[A-Za-z0-9_.+%@-]/.test(text[hi]!)) hi++;
+  const slice = text.slice(lo, hi);
+  if (!slice.includes("@") && !/%40/i.test(slice)) return false;
+  const [pattern, replace] = emailRule;
+  pattern.lastIndex = 0;
+  for (let match = pattern.exec(slice); match !== null; match = pattern.exec(slice)) {
+    const mStart = lo + match.index;
+    const mEnd = mStart + match[0]!.length;
+    if (mStart < end && mEnd > start) {
+      const repl = typeof replace === "function" ? replace(match[0]!, mStart, text) : replace;
+      if (repl !== match[0]!) return true;
+    }
+  }
+  return false;
+}
+
+function skipEmailOverlap([pattern, replacement]: Rule): Rule {
+  return [
+    pattern,
+    (match: string, ...rest: Array<string | number | undefined>) => {
+      const whole = rest.at(-1) as string;
+      const offset = rest.at(-2) as number;
+      if (insideEmail(whole, offset, offset + match.length)) return match;
+      if (typeof replacement === "function") return replacement(match, ...rest);
+      return replacement.replace(/\$(\d+)/g, (_, n) => String(rest[Number(n) - 1] ?? ""));
+    },
+  ];
+}
+
+const nonEmailStandardRules: Rule[] = [...standardRules.slice(1, 5).map(skipEmailOverlap), ...standardRules.slice(5)];
+const preAfterRules: Rule[] = [...contextualSecretRules, ...nonEmailStandardRules];
+const preAfterAllRules: Rule[] = [...secretRules.slice(0, 6), ...secretRules.slice(7), ...nonEmailStandardRules];
 
 const tokenLetters = 32;
 const windowLetters = 128;
@@ -1390,13 +1424,14 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     matchedLabels.push(as);
     return `${prefix}${index}${suffix}`;
   });
-  const bearerRedacted = redactBearerMasked(stripHome(masked), matchedOriginals);
+  const homeStripped = stripHome(masked);
   if (!after.length) {
+    const bearerRedacted = redactBearerMasked(homeStripped, matchedOriginals);
     const preRandom = applyRules(bearerRedacted, preRandomRules);
     const postRandom = replaceMaskedRandom(preRandom, matchedOriginals);
     return postRandom.replace(tokenRegex, (_tok, idx) => matchedLabels[Number(idx)] ?? "");
   }
-  const preAfter = applyRules(bearerRedacted, preAfterRules);
+  const preAfter = applyRules(homeStripped, preAfterRules);
 
   let expanded = "";
   let expPos = 0;
@@ -1428,17 +1463,93 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     ...findCanonAcSpans(afterSpellings.canonAc, expanded, undefined, allowPartialMerge),
     ...findAcSpans(afterSpellings.csAc, expanded, undefined, allowPartialMerge),
   ];
+  const sensitiveSpans = [...primarySpans, ...afterSpans];
   const emailSpans: MatchSpan[] = [];
-  const [emailPattern, emailReplace] = emailRule;
-  emailPattern.lastIndex = 0;
-  for (let match = emailPattern.exec(expanded); match !== null; match = emailPattern.exec(expanded)) {
-    const matchedEmail = match[0]!;
-    const replacement = typeof emailReplace === "function" ? emailReplace(matchedEmail, match.index, expanded) : emailReplace;
-    if (replacement !== matchedEmail) {
-      emailSpans.push({ start: match.index, end: match.index + matchedEmail.length, len: matchedEmail.length, as: replacement });
+  const bearerSpans: MatchSpan[] = [];
+  if (sensitiveSpans.length) {
+    const ordered = [...sensitiveSpans].sort((a, b) => a.start - b.start || a.end - b.end);
+    const intervals: Array<{ start: number; end: number }> = [];
+    for (const span of ordered) {
+      const prev = intervals.at(-1);
+      if (prev && span.start <= prev.end) {
+        if (span.end > prev.end) prev.end = span.end;
+      } else {
+        intervals.push({ start: span.start, end: span.end });
+      }
+    }
+    const overlapsSensitive = (start: number, end: number) => {
+      let lo = 0;
+      let hi = intervals.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (intervals[mid]!.end <= start) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo < intervals.length && intervals[lo]!.start < end;
+    };
+    const mergeWindows = (raw: Array<{ start: number; end: number }>) => {
+      const out: Array<{ start: number; end: number }> = [];
+      for (const win of raw) {
+        const prev = out.at(-1);
+        if (prev && win.start <= prev.end) {
+          if (win.end > prev.end) prev.end = win.end;
+        } else {
+          out.push({ start: win.start, end: win.end });
+        }
+      }
+      return out;
+    };
+    const emailWindows = mergeWindows(
+      intervals.map(({ start, end }) => {
+        let lo = start;
+        while (lo > 0 && /[A-Za-z0-9_.+%@-]/.test(expanded[lo - 1]!)) lo--;
+        let hi = end;
+        while (hi < expanded.length && /[A-Za-z0-9_.+%@-]/.test(expanded[hi]!)) hi++;
+        return { start: lo, end: hi };
+      }),
+    );
+    const [emailPattern, emailReplace] = emailRule;
+    for (const win of emailWindows) {
+      const slice = expanded.slice(win.start, win.end);
+      if (!slice.includes("@") && !/%40/i.test(slice)) continue;
+      emailPattern.lastIndex = 0;
+      for (let match = emailPattern.exec(slice); match !== null; match = emailPattern.exec(slice)) {
+        const matchedEmail = match[0]!;
+        const absStart = win.start + match.index;
+        const absEnd = absStart + matchedEmail.length;
+        if (!overlapsSensitive(absStart, absEnd)) continue;
+        const replacement = typeof emailReplace === "function" ? emailReplace(matchedEmail, absStart, expanded) : emailReplace;
+        if (replacement !== matchedEmail) {
+          emailSpans.push({ start: absStart, end: absEnd, len: matchedEmail.length, as: replacement });
+        }
+      }
+    }
+    const bearerWindows = mergeWindows(
+      intervals.map(({ start, end }) => {
+        let lo = start;
+        while (lo > 0 && /[A-Za-z0-9._~+/=-]/.test(expanded[lo - 1]!)) lo--;
+        while (lo > 0 && /\s/.test(expanded[lo - 1]!)) lo--;
+        lo = Math.max(0, lo - 8);
+        let hi = end;
+        while (hi < expanded.length && /[A-Za-z0-9._~+/=-]/.test(expanded[hi]!)) hi++;
+        return { start: lo, end: hi };
+      }),
+    );
+    const bearerBodyRegex = /\b(Bearer|Basic|token)(\s+)([A-Za-z0-9._~+/=-]{12,})/gi;
+    for (const win of bearerWindows) {
+      const slice = expanded.slice(win.start, win.end);
+      bearerBodyRegex.lastIndex = 0;
+      for (let match = bearerBodyRegex.exec(slice); match !== null; match = bearerBodyRegex.exec(slice)) {
+        if (match.index === 0 && win.start > 0 && /\w/.test(expanded[win.start - 1]!)) continue;
+        const body = match[3]!;
+        const bodyStart = win.start + match.index + match[1]!.length + match[2]!.length;
+        const bodyEnd = bodyStart + body.length;
+        if (!overlapsSensitive(bodyStart, bodyEnd)) continue;
+        bearerSpans.push({ start: bodyStart, end: bodyEnd, len: body.length, as: "<token>" });
+      }
     }
   }
-  const combined = [...primarySpans, ...afterSpans, ...emailSpans];
+  const combined = [...sensitiveSpans, ...emailSpans, ...bearerSpans];
   const exemptSpans = findExemptOverlaps(exempt, expanded, combined);
   const mergedOriginals: string[] = [];
   const mergedLabels: string[] = [];

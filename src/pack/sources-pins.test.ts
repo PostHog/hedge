@@ -717,7 +717,7 @@ esac
     }
   });
 
-  test("doctor prints unpinned advisory when remote.origin.url differs by a trailing space, supports +SHA and SHA: pins, rolls back history refs on metadata write failure, and batches multi-refresh checks", async () => {
+  test("doctor prints unpinned advisory when remote.origin.url differs by a trailing space", async () => {
     const root = temp.make("origin-space-");
     const home = join(root, "home");
     const profileDir = join(root, "profile");
@@ -760,7 +760,14 @@ esac
     });
     expect(doctorCode).toBe(0);
     expect(doctorLines.join("\n")).toContain("Note: The pack source ext is not pinned to a commit SHA.");
+  });
 
+  test("fetches +SHA and SHA: refspecs offline and doctor treats them as pinned", async () => {
+    const root = temp.make("plus-sha-");
+    const home = join(root, "home");
+    const profileDir = join(root, "profile");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(profileDir, { recursive: true });
     const pinRepo = await packRepo("Pin refspec.");
     const pinSha = await spawnGit(pinRepo, "rev-parse", "HEAD");
     const pinCache = temp.make("cache-plus-sha-");
@@ -769,6 +776,25 @@ esac
       if ("error" in online) throw new Error(online.error);
       expect(online.stale).toBeUndefined();
     }
+    const baseProfile = {
+      schema: 1,
+      engine: { repo: "PostHog/hedge", ref: "main", channel: "track" },
+      sources: [] as Array<{ name: string; repo: string; ref: string }>,
+      packs: [],
+      plan: "both",
+      settings: {},
+      workflows: {},
+    };
+    writeFileSync(join(profileDir, "hedge.json"), JSON.stringify(baseProfile));
+    expect(
+      await main(["apply", "--profile", profileDir], {
+        home,
+        engineRoot,
+        platform: process.platform,
+        print: () => {},
+        run: async () => 0,
+      }),
+    ).toBe(0);
     writeFileSync(
       join(profileDir, "hedge.json"),
       JSON.stringify({
@@ -797,7 +823,9 @@ esac
       expect(offline.stale).toBeUndefined();
       expect(offline.packs[0]?.manifest.summary).toBe("Pin refspec.");
     }
+  });
 
+  test("does not expose refreshed commits offline after a metadata write failure", async () => {
     const failRepo = await tsRepo({
       "packs/team/pack.ts": 'export default { sdk: 1, name: "team", summary: "Base v1.", register() {} };\n',
     });
@@ -846,7 +874,9 @@ esac
         expect(offlineAfterFailedRefresh.packs[0]?.manifest.summary).toBe("Base v1.");
       }
     }
+  });
 
+  test("keeps intermediate commits available offline across multiple branch refreshes", async () => {
     const repo = await packRepo("R0.");
     const cache = temp.make("cache-multi-refresh-");
     const ref = { name: "team", repo, ref: "main" };
@@ -957,6 +987,40 @@ esac
     const tagOffline = await fetchSource({ name: "team", repo: tagRepo, ref: tagOid }, tagCache);
     if ("error" in tagOffline) throw new Error(tagOffline.error);
     expect([tagOffline.packs[0]?.manifest.summary, tagOffline.stale]).toEqual(["Annotated tag v1.", undefined]);
+  });
+
+  test("serves last-good legacy 40-hex branch offline when FETCH_HEAD points at a rejected tip, and repairs damaged non-string branch metadata online", async () => {
+    const hexRepo = await packRepo("Hex branch v1.");
+    const hexBranch = "c".repeat(40);
+    await spawnGit(hexRepo, "checkout", "-q", "-b", hexBranch);
+    const v1Sha = await spawnGit(hexRepo, "rev-parse", "HEAD");
+    writeFileSync(join(hexRepo, "packs/team/pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Broken v2." }));
+    await spawnGit(hexRepo, "commit", "-q", "-am", "broken-v2");
+    const legacyCache = temp.make("cache-legacy-hex-rejected-tip-");
+    const legacyDir = join(legacyCache, "team");
+    mkdirSync(legacyDir, { recursive: true });
+    await spawnGit(legacyDir, "init", "-q");
+    await spawnGit(legacyDir, "fetch", "-q", "--depth", "1", "--no-tags", hexRepo, v1Sha);
+    await spawnGit(legacyDir, "checkout", "-q", "--detach", `${v1Sha}^{commit}`);
+    await spawnGit(legacyDir, "fetch", "-q", "--depth", "1", "--no-tags", hexRepo, `refs/heads/${hexBranch}`);
+    writeFileSync(join(legacyDir, ".git", "hedge-source.json"), JSON.stringify({ repo: hexRepo, ref: hexBranch, commit: v1Sha }) + "\n");
+    rmSync(hexRepo, { recursive: true, force: true });
+    const legacyOffline = await fetchSource({ name: "team", repo: hexRepo, ref: hexBranch }, legacyCache);
+    if ("error" in legacyOffline) throw new Error(legacyOffline.error);
+    expect(legacyOffline.packs[0]?.manifest.summary).toBe("Hex branch v1.");
+    expect(legacyOffline.stale).toContain(`could not fetch ${hexBranch}`);
+
+    const damagedRepo = await packRepo("Damaged meta v1.");
+    const damagedSha = await spawnGit(damagedRepo, "rev-parse", "HEAD");
+    const damagedCache = temp.make("cache-damaged-branch-ref-");
+    const init = await fetchSource({ name: "team", repo: damagedRepo, ref: damagedSha }, damagedCache);
+    if ("error" in init) throw new Error(init.error);
+    const metaPath = join(damagedCache, "team", ".git", "hedge-source.json");
+    const existing = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+    writeFileSync(metaPath, JSON.stringify({ ...existing, branch: true, ref: 42 }) + "\n");
+    const repaired = await fetchSource({ name: "team", repo: damagedRepo, ref: damagedSha }, damagedCache);
+    if ("error" in repaired) throw new Error(repaired.error);
+    expect([repaired.packs[0]?.manifest.summary, repaired.stale]).toEqual(["Damaged meta v1.", undefined]);
   });
 
 });

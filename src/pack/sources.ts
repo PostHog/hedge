@@ -239,14 +239,19 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
       (existsSync(join(dir, ".git")) &&
         !(await git(dir, "cat-file", "-e", rawStrippedRef)).ok &&
         (await fetchHeadEntry(dir, [rawGood.ref]))?.oid === rawStrippedRef.toLowerCase()));
-  const legacyBranch =
+  const effectiveBefore = await resolvedRepoUrl(dir, repo);
+  const rawFhEntry =
     !legacyPeeled &&
     rawGood !== undefined &&
     rawGoodDigest === undefined &&
     rawGood.branch === undefined &&
-    typeof rawGood.ref === "string" &&
-    (await fetchHeadIsBranch(dir, rawGood.ref)) === true &&
-    (await fetchHeadRepo(dir, rawGood.commit, rawGood.ref)) !== undefined;
+    typeof rawGood.ref === "string"
+      ? await fetchHeadEntry(dir, [rawGood.ref])
+      : undefined;
+  const legacyBranch =
+    rawFhEntry !== undefined &&
+    (await fetchHeadIsBranch(dir, rawGood!.ref)) === true &&
+    (fetchHeadMatches(rawFhEntry.url, effectiveBefore) || fetchHeadMatches(rawFhEntry.url, rawGood!.repo));
   const good =
     legacyPeeled && rawGood
       ? { ...rawGood, peeled: true }
@@ -255,7 +260,6 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
         : rawGood;
   const goodDigest = goodResolvedDigest(good);
   const before = await currentCheckout(dir);
-  const effectiveBefore = await resolvedRepoUrl(dir, repo);
   const effectiveBeforeDigest = repoDigest(effectiveBefore);
   const legacyOk =
     good !== undefined &&
@@ -695,7 +699,7 @@ async function checkedOutFromCache(dir: string, repo: string, effectiveRepo: str
     (goodDigest !== undefined ? goodDigest === effectiveDigest : hasGoodCommit(good) && (await legacyFallbackMatches(dir, good, effectiveRepo)));
   if (
     sameGoodRepo &&
-    ((good.branch === true && stripSourceRefspec(good.ref).toLowerCase() === oid) ||
+    ((good.branch === true && typeof good.ref === "string" && stripSourceRefspec(good.ref).toLowerCase() === oid) ||
       (good.askedBranch === true && typeof good.asked === "string" && stripSourceRefspec(good.asked).toLowerCase() === oid))
   ) {
     return undefined;
