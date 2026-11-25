@@ -279,8 +279,9 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await started) };
     try {
       expect((await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output).toContain(notChecked);
+      expect(await holderGone).toBe("");
     } finally {
-      if (await endHolder(started)) await holderGone;
+      await endHolder(started);
     }
   });
 
@@ -504,6 +505,32 @@ process.exit(await c.exited);`;
     const onNode = await hedge(home, ["packs"]);
     expect(onNode.code).toBe(0);
     expect(onNode.output).toContain(`  ~ team  Team rules.\n      Workflows: service-only on\n${needsSetup}`);
+
+    const { home: soloSvcHome } = await machineWithProfile();
+    const soloSvcSource = join(soloSvcHome, ".local/share/hedge/sources/team");
+    await cachedCheckout(soloSvcSource, { name: "team", repo: "team/packs", ref: "main" });
+    mkdirSync(join(soloSvcSource, "packs/team"), { recursive: true });
+    writeFileSync(
+      join(soloSvcSource, "packs/team/pack.ts"),
+      `export default {
+  sdk: 1,
+  name: "team",
+  summary: "Team rules.",
+  register(hedge) {
+    const linuxSvc = hedge.workflow({ id: "linux-svc", name: "Linux svc", sentence: "Serves on Linux.", default: true });
+    const signIn = hedge.check({ id: "sign-in", say: "Sign in.", test: async () => false, repair: { ask: "Sign in." } });
+    hedge.service({ on: "hub", os: "linux", id: "svc", when: linuxSvc, after: signIn, serve: { port: 4599, health: "/health", credential: async () => "x" } });
+  },
+};
+`,
+    );
+    const soloSvcDir = join(soloSvcHome, "profile");
+    const soloSvcBase = JSON.parse(readFileSync(join(soloSvcDir, "hedge.json"), "utf8")) as ProfileFile;
+    writeFileSync(join(soloSvcDir, "hedge.json"), JSON.stringify({ ...soloSvcBase, sources: [...soloSvcBase.sources, { name: "team", repo: "team/packs", ref: "main" }], packs: [...soloSvcBase.packs, "team"] }, null, 2) + "\n");
+    writeFileSync(join(soloSvcHome, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "mac", profileDir: soloSvcDir }));
+    const soloMacSvc = await hedge(soloSvcHome, ["packs"], 0, { platform: "darwin" });
+    expect(soloMacSvc.code).toBe(0);
+    expect(soloMacSvc.output).toContain(`  ~ team  Team rules.\n      Workflows: linux-svc on\n${needsSetup}`);
 
     const { home: osHome } = await machineWithProfile();
     await withTeamPack(osHome, {

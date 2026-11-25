@@ -218,7 +218,7 @@ export function captureWith(timer: Timer): Capture {
       for (const [k, v] of Object.entries(childEnv)) {
         if (v !== undefined && k !== tagEnvVar) envEntries.push([k, v]);
       }
-      envEntries.push([tagEnvVar, fullTag]);
+      envEntries.push([tagEnvVar, tag]);
       child = Bun.spawn(bunScript(captureSupervisor), {
         env: supervisorEnv(fullTag),
         stdio: [input, output, output, ...locks, "pipe"],

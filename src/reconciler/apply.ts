@@ -750,7 +750,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
     const fullTag = appendTag(env[tagEnvVar], tag);
     const targetEnv: Record<string, string> = Object.create(null);
     for (const [k, v] of Object.entries(env)) if (v !== undefined) targetEnv[k] = v;
-    targetEnv[tagEnvVar] = fullTag;
+    targetEnv[tagEnvVar] = tag;
     const payload = {
       command,
       env: targetEnv,

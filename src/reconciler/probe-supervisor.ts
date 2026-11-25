@@ -45,22 +45,29 @@ export type SupervisorHost = {
   exit: (code: number) => void;
 };
 
-type ProcTargets = { pids: number[]; groups: number[]; orphanPids: number[]; hasSessionGroup?: boolean };
+type ProcTargets = { pids: number[]; groups: number[]; orphanPids: number[]; hasSessionGroup?: boolean; leaderSeenLive?: boolean };
 
 function envMatchesTag(value: string, tag: string): boolean {
   return value.split(",").includes(tag);
 }
 
-function hasEnvTagLinux(pid: number, tag: string): boolean {
+function envMatchesAnyTag(value: string, tags: Set<string>): boolean {
+  for (const part of value.split(",")) {
+    if (tags.has(part)) return true;
+  }
+  return false;
+}
+
+function readEnvTagLinux(pid: number): string | undefined {
   const prefix = `${tagEnvVar}=`;
   try {
     const raw = readFileSync(`/proc/${pid}/environ`, "utf8");
     for (const entry of raw.split("\0")) {
-      if (entry.startsWith(prefix) && envMatchesTag(entry.slice(prefix.length), tag)) return true;
+      if (entry.startsWith(prefix)) return entry.slice(prefix.length) || undefined;
     }
-    return false;
+    return undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -219,11 +226,13 @@ export function drainControlFd(fd: number): { lines: string[]; rest: string; clo
   return { lines, rest, closed };
 }
 
-export function discoverTargetsLinux(sessionId?: number, tag?: string): ProcTargets {
+export function discoverTargetsLinux(sessionId?: number, tag?: string, deadLeaderReaped?: boolean): ProcTargets {
   const self = process.pid;
   const includeDetached = Boolean(tag);
-  const rows: Array<{ pid: number; ppid: number; pgrp: number; sid: number }> = [];
+  const rows: Array<{ pid: number; ppid: number; pgrp: number; sid: number; envTag?: string }> = [];
   const matched = new Set<number>();
+  const activeTags = new Set<string>(tag ? [tag] : []);
+  let leaderSeenLive = false;
   if (sessionId !== undefined) matched.add(sessionId);
   try {
     for (const name of readdirSync("/proc")) {
@@ -238,14 +247,19 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string): ProcTarg
       const closeParen = stat.lastIndexOf(")");
       if (closeParen === -1) continue;
       const fields = stat.slice(closeParen + 2).split(" ");
-      if (!includeDetached && fields[0] === "Z" && Number(fields[17]) <= 1) continue;
+      const state = fields[0];
+      if (deadLeaderReaped !== undefined && sessionId !== undefined && pid === sessionId) {
+        if (deadLeaderReaped || (state !== "Z" && state !== "X" && state !== "x")) leaderSeenLive = true;
+      }
+      if (!includeDetached && state === "Z" && Number(fields[17]) <= 1) continue;
       const ppid = Number(fields[1]);
       const pgrp = Number(fields[2]);
       const sid = Number(fields[3]);
-      rows.push({ pid, ppid, pgrp, sid });
+      const envTag = tag && pid !== self ? readEnvTagLinux(pid) : undefined;
+      rows.push({ pid, ppid, pgrp, sid, ...(envTag ? { envTag } : {}) });
       if (sessionId !== undefined && (sid === sessionId || pgrp === sessionId)) {
         matched.add(pid);
-      } else if (tag && pid !== self && hasEnvTagLinux(pid, tag)) {
+      } else if (tag && envTag && envMatchesTag(envTag, tag)) {
         matched.add(pid);
       }
     }
@@ -255,9 +269,25 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string): ProcTarg
     while (grew) {
       grew = false;
       for (const row of rows) {
-        if (!matched.has(row.pid) && matched.has(row.ppid)) {
+        if (matched.has(row.pid) && row.envTag) {
+          const nested = ownTag(row.envTag);
+          if (nested && !activeTags.has(nested)) {
+            activeTags.add(nested);
+            grew = true;
+          }
+        }
+      }
+      for (const row of rows) {
+        if (matched.has(row.pid)) continue;
+        if (row.envTag && envMatchesAnyTag(row.envTag, activeTags)) {
           matched.add(row.pid);
           grew = true;
+        } else if (matched.has(row.ppid)) {
+          const foreignCompleted = Boolean(tag && row.envTag && !envMatchesAnyTag(row.envTag, activeTags));
+          if (!foreignCompleted) {
+            matched.add(row.pid);
+            grew = true;
+          }
         }
       }
     }
@@ -279,7 +309,7 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string): ProcTarg
       orphanPids.push(row.pid);
     }
   }
-  return { pids, groups: [...groups], orphanPids, hasSessionGroup };
+  return { pids, groups: [...groups], orphanPids, hasSessionGroup, leaderSeenLive };
 }
 
 const psLookupLimitMs = 200;
@@ -287,15 +317,15 @@ const psBin = existsSync("/bin/ps") ? "/bin/ps" : existsSync("/usr/bin/ps") ? "/
 
 const tagPrefixBytes = new TextEncoder().encode(`${tagEnvVar}=`);
 
-function procArgs2HasTag(buf: Uint8Array, tag: string): boolean {
-  if (buf.byteLength < 4) return false;
+function procArgs2EnvTag(buf: Uint8Array): string | undefined {
+  if (buf.byteLength < 4) return undefined;
   const argc = new DataView(buf.buffer, buf.byteOffset, buf.byteLength).getInt32(0, true);
-  if (argc < 0) return false;
+  if (argc < 0) return undefined;
   let pos = 4;
   while (pos < buf.byteLength && buf[pos] !== 0) pos++;
   while (pos < buf.byteLength && buf[pos] === 0) pos++;
   for (let i = 0; i < argc; i++) {
-    if (pos >= buf.byteLength) return false;
+    if (pos >= buf.byteLength) return undefined;
     while (pos < buf.byteLength && buf[pos] !== 0) pos++;
     pos++;
   }
@@ -315,17 +345,18 @@ function procArgs2HasTag(buf: Uint8Array, tag: string): boolean {
           break;
         }
       }
-      if (match && envMatchesTag(decoder.decode(buf.subarray(start + tagPrefixBytes.byteLength, pos)), tag)) return true;
+      if (match) return decoder.decode(buf.subarray(start + tagPrefixBytes.byteLength, pos)) || undefined;
     }
     pos++;
   }
-  return false;
+  return undefined;
 }
 
 type DarwinLib = {
   getsid: (pid: number) => number;
   getpgid: (pid: number) => number;
   proc_listallpids: (buf: ReturnType<typeof ptr> | null, size: number) => number;
+  proc_pidinfo: (pid: number, flavor: number, arg: bigint, buf: ReturnType<typeof ptr>, size: number) => number;
   sysctl: (
     name: ReturnType<typeof ptr>,
     namelen: number,
@@ -347,6 +378,7 @@ function getDarwinLib(): DarwinLib | null {
         getsid: { args: [FFIType.i32], returns: FFIType.i32 },
         getpgid: { args: [FFIType.i32], returns: FFIType.i32 },
         proc_listallpids: { args: [FFIType.pointer, FFIType.i32], returns: FFIType.i32 },
+        proc_pidinfo: { args: [FFIType.i32, FFIType.i32, FFIType.u64, FFIType.pointer, FFIType.i32], returns: FFIType.i32 },
         sysctl: {
           args: [FFIType.pointer, FFIType.u32, FFIType.pointer, FFIType.pointer, FFIType.pointer, FFIType.u64],
           returns: FFIType.i32,
@@ -356,6 +388,7 @@ function getDarwinLib(): DarwinLib | null {
         getsid: (pid) => lib.symbols.getsid(pid),
         getpgid: (pid) => lib.symbols.getpgid(pid),
         proc_listallpids: (buf, size) => lib.symbols.proc_listallpids(buf, size),
+        proc_pidinfo: (pid, flavor, arg, buf, size) => lib.symbols.proc_pidinfo(pid, flavor, arg, buf, size),
         sysctl: (name, namelen, oldp, oldlenp, newp, newlen) => lib.symbols.sysctl(name, namelen, oldp, oldlenp, newp, newlen),
       };
     } catch {
@@ -379,9 +412,9 @@ function getDarwinProcArgsBuf(lib: DarwinLib): Uint8Array {
   return darwinProcArgsBuf;
 }
 
-function hasEnvTagDarwin(pid: number, tag: string): boolean {
+function readEnvTagDarwin(pid: number): string | undefined {
   const lib = getDarwinLib();
-  if (!lib) return false;
+  if (!lib) return undefined;
   const buf = getDarwinProcArgsBuf(lib);
   const mib = new Int32Array([1, 49, pid]);
   const sizeBuf = new BigUint64Array(1);
@@ -389,17 +422,17 @@ function hasEnvTagDarwin(pid: number, tag: string): boolean {
   if (lib.sysctl(ptr(mib), 3, ptr(buf), ptr(sizeBuf), null, 0) === 0) {
     const written = Number(sizeBuf[0]);
     if (written > 0 && written < buf.byteLength) {
-      return procArgs2HasTag(buf.subarray(0, written), tag);
+      return procArgs2EnvTag(buf.subarray(0, written));
     }
   }
   sizeBuf[0] = 0n;
-  if (lib.sysctl(ptr(mib), 3, null, ptr(sizeBuf), null, 0) !== 0) return false;
+  if (lib.sysctl(ptr(mib), 3, null, ptr(sizeBuf), null, 0) !== 0) return undefined;
   const needed = Number(sizeBuf[0]);
-  if (needed <= 0 || needed > 4 * 1024 * 1024) return false;
+  if (needed <= 0 || needed > 4 * 1024 * 1024) return undefined;
   const big = new Uint8Array(needed);
   sizeBuf[0] = BigInt(needed);
-  if (lib.sysctl(ptr(mib), 3, ptr(big), ptr(sizeBuf), null, 0) !== 0) return false;
-  return procArgs2HasTag(big.subarray(0, Number(sizeBuf[0])), tag);
+  if (lib.sysctl(ptr(mib), 3, ptr(big), ptr(sizeBuf), null, 0) !== 0) return undefined;
+  return procArgs2EnvTag(big.subarray(0, Number(sizeBuf[0])));
 }
 
 function sessionIdDarwin(pid: number): number | undefined {
@@ -417,8 +450,9 @@ function buildTargetsFromPs(
   excludePids: Set<number>,
 ): ProcTargets {
   const includeDetached = Boolean(tag);
-  const rows: Array<{ pid: number; ppid: number; pgid: number }> = [];
+  const rows: Array<{ pid: number; ppid: number; pgid: number; envTag?: string }> = [];
   const matched = new Set<number>();
+  const activeTags = new Set<string>(tag ? [tag] : []);
   if (sessionId !== undefined) matched.add(sessionId);
   if (treeText) {
     for (const line of treeText.split("\n")) {
@@ -429,10 +463,11 @@ function buildTargetsFromPs(
       const pgid = Number(parts[2]);
       if (!Number.isFinite(pid) || !Number.isFinite(ppid) || !Number.isFinite(pgid)) continue;
       if (excludePids.has(pid)) continue;
-      rows.push({ pid, ppid, pgid });
+      const envTag = tag && pid !== self ? readEnvTagDarwin(pid) : undefined;
+      rows.push({ pid, ppid, pgid, ...(envTag ? { envTag } : {}) });
       if (sessionId !== undefined && (pgid === sessionId || sessionIdDarwin(pid) === sessionId)) {
         matched.add(pid);
-      } else if (tag && pid !== self && hasEnvTagDarwin(pid, tag)) {
+      } else if (tag && envTag && envMatchesTag(envTag, tag)) {
         matched.add(pid);
       }
     }
@@ -442,9 +477,25 @@ function buildTargetsFromPs(
     while (grew) {
       grew = false;
       for (const row of rows) {
-        if (!matched.has(row.pid) && matched.has(row.ppid)) {
+        if (matched.has(row.pid) && row.envTag) {
+          const nested = ownTag(row.envTag);
+          if (nested && !activeTags.has(nested)) {
+            activeTags.add(nested);
+            grew = true;
+          }
+        }
+      }
+      for (const row of rows) {
+        if (matched.has(row.pid)) continue;
+        if (row.envTag && envMatchesAnyTag(row.envTag, activeTags)) {
           matched.add(row.pid);
           grew = true;
+        } else if (matched.has(row.ppid)) {
+          const foreignCompleted = Boolean(tag && row.envTag && !envMatchesAnyTag(row.envTag, activeTags));
+          if (!foreignCompleted) {
+            matched.add(row.pid);
+            grew = true;
+          }
         }
       }
     }
@@ -479,6 +530,15 @@ function psPidStat(treeText: string, targetPid: number): string | undefined {
   return undefined;
 }
 
+function pidExistsByKill(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
+
 function pidStateLinux(pid: number): string | undefined {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
@@ -492,13 +552,24 @@ function pidStateLinux(pid: number): string | undefined {
 
 function isDeadLeaderRecycledLinux(pid: number, reaped: boolean): boolean {
   const state = pidStateLinux(pid);
-  if (state === undefined) return false;
+  if (state === undefined) return pidExistsByKill(pid);
   if (reaped) return true;
   return state !== "Z" && state !== "X" && state !== "x";
 }
 
-function discoverTargetsSync(sessionId?: number, tag?: string, skipIfLeaderPresent = false): ProcTargets | undefined {
-  if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag);
+function isDeadLeaderRecycledDarwin(lib: DarwinLib, pid: number, reaped: boolean, inPidList?: boolean): boolean {
+  if (inPidList === false) return false;
+  if (inPidList === undefined && !pidExistsByKill(pid)) return false;
+  if (reaped) return true;
+  const buf = new Uint8Array(136);
+  const n = lib.proc_pidinfo(pid, 3, 0n, ptr(buf), 136);
+  if (n < 8) return pidExistsByKill(pid);
+  const status = new DataView(buf.buffer).getUint32(4, true);
+  return status !== 5;
+}
+
+function discoverTargetsSync(sessionId?: number, tag?: string, deadLeaderReaped?: boolean): ProcTargets | undefined {
+  if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag, deadLeaderReaped);
   if (sessionId === undefined && !tag) return undefined;
   const lib = getDarwinLib();
   if (!lib) return undefined;
@@ -511,35 +582,73 @@ function discoverTargetsSync(sessionId?: number, tag?: string, skipIfLeaderPrese
   const self = process.pid;
   const limit = Math.min(actual, capacity);
   let effectiveSessionId = sessionId;
-  if (skipIfLeaderPresent && sessionId !== undefined) {
+  if (deadLeaderReaped !== undefined && sessionId !== undefined) {
+    let leaderPresent = false;
     for (let i = 0; i < limit; i++) {
       if (buf[i] === sessionId) {
-        effectiveSessionId = undefined;
+        leaderPresent = true;
         break;
       }
     }
+    if (isDeadLeaderRecycledDarwin(lib, sessionId, deadLeaderReaped, leaderPresent)) {
+      effectiveSessionId = undefined;
+    }
     if (effectiveSessionId === undefined && !tag) return { pids: [], groups: [], orphanPids: [], hasSessionGroup: false };
   }
-  const pids: number[] = [];
-  const groups = new Set<number>();
-  const orphanPids: number[] = [];
-  let hasSessionGroup = false;
+  const activeTags = new Set<string>(tag ? [tag] : []);
+  const rows: Array<{ pid: number; sid: number; pgid: number; envTag?: string }> = [];
+  const matched = new Set<number>();
   for (let i = 0; i < limit; i++) {
     const pid = buf[i]!;
     if (pid <= 0 || pid === self || pid === effectiveSessionId) continue;
     const sid = lib.getsid(pid);
     const pgid = lib.getpgid(pid);
+    const envTag = tag ? readEnvTagDarwin(pid) : undefined;
+    rows.push({ pid, sid, pgid, ...(envTag ? { envTag } : {}) });
     const inSession = effectiveSessionId !== undefined && (sid === effectiveSessionId || pgid === effectiveSessionId);
-    if (!inSession && !(tag && hasEnvTagDarwin(pid, tag))) continue;
-    pids.push(pid);
+    if (inSession || (tag && envTag && envMatchesTag(envTag, tag))) {
+      matched.add(pid);
+    }
+  }
+  if (tag) {
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const row of rows) {
+        if (matched.has(row.pid) && row.envTag) {
+          const nested = ownTag(row.envTag);
+          if (nested && !activeTags.has(nested)) {
+            activeTags.add(nested);
+            grew = true;
+          }
+        }
+      }
+      for (const row of rows) {
+        if (!matched.has(row.pid) && row.envTag && envMatchesAnyTag(row.envTag, activeTags)) {
+          matched.add(row.pid);
+          grew = true;
+        }
+      }
+    }
+  }
+  if (deadLeaderReaped !== undefined && effectiveSessionId !== undefined && isDeadLeaderRecycledDarwin(lib, effectiveSessionId, deadLeaderReaped)) {
+    return tag ? discoverTargetsSync(undefined, tag) : { pids: [], groups: [], orphanPids: [], hasSessionGroup: false };
+  }
+  const pids: number[] = [];
+  const groups = new Set<number>();
+  const orphanPids: number[] = [];
+  let hasSessionGroup = false;
+  for (const row of rows) {
+    if (!matched.has(row.pid)) continue;
+    pids.push(row.pid);
     if (effectiveSessionId === undefined) {
-      orphanPids.push(pid);
-    } else if (pgid > 0 && pgid !== effectiveSessionId && pgid !== self) {
-      groups.add(pgid);
-    } else if (pgid === effectiveSessionId) {
+      orphanPids.push(row.pid);
+    } else if (row.pgid > 0 && row.pgid !== effectiveSessionId && row.pgid !== self) {
+      groups.add(row.pgid);
+    } else if (row.pgid === effectiveSessionId) {
       hasSessionGroup = true;
     } else {
-      orphanPids.push(pid);
+      orphanPids.push(row.pid);
     }
   }
   return { pids, groups: [...groups], orphanPids, hasSessionGroup };
@@ -631,44 +740,58 @@ export function signalTargets(targets: ProcTargets, signal: NodeJS.Signals, sess
   if (sessionId !== undefined) signalOneGroup(sessionId, signal);
 }
 
-function signalDeadTargets(targets: ProcTargets, deadSessionId?: number): void {
+function signalDeadTargets(targets: ProcTargets, deadSessionId?: number, guard?: () => boolean): void {
   for (const pgrp of targets.groups) {
     if (pgrp === deadSessionId) continue;
+    if (guard && !guard()) return;
     signalOneGroup(pgrp, "SIGKILL");
   }
   for (const pid of targets.pids) {
     if (pid === deadSessionId || pid === process.pid) continue;
+    if (guard && !guard()) return;
     signalOnePid(pid, "SIGKILL");
   }
   if (deadSessionId !== undefined && targets.hasSessionGroup) {
+    if (guard && !guard()) return;
     signalOneGroup(deadSessionId, "SIGKILL");
   }
 }
 
-export function killDeadSessionSync(deadSessionId: number, tag?: string, reaped = false): void {
-  if (process.platform === "linux") {
-    const recycled = isDeadLeaderRecycledLinux(deadSessionId, reaped);
-    const sid = recycled ? undefined : deadSessionId;
-    if (sid === undefined && !tag) return;
-    signalDeadTargets(discoverTargetsLinux(sid, tag), sid);
+function sweepDeadLinux(deadSessionId: number, tag: string | undefined, reaped: boolean): void {
+  if (isDeadLeaderRecycledLinux(deadSessionId, reaped)) {
+    if (tag) signalDeadTargets(discoverTargetsLinux(undefined, tag), undefined);
     return;
   }
-  const found = discoverTargetsSync(deadSessionId, tag, true);
-  if (found) signalDeadTargets(found, deadSessionId);
+  const targets = discoverTargetsLinux(deadSessionId, tag, reaped);
+  if (targets.leaderSeenLive || isDeadLeaderRecycledLinux(deadSessionId, reaped)) {
+    if (tag) signalDeadTargets(discoverTargetsLinux(undefined, tag), undefined);
+    return;
+  }
+  signalDeadTargets(targets, deadSessionId, () => !isDeadLeaderRecycledLinux(deadSessionId, reaped));
+}
+
+export function killDeadSessionSync(deadSessionId: number, tag?: string, reaped = false): void {
+  if (process.platform === "linux") {
+    sweepDeadLinux(deadSessionId, tag, reaped);
+    return;
+  }
+  const found = discoverTargetsSync(deadSessionId, tag, reaped);
+  if (!found) return;
+  const lib = getDarwinLib();
+  if (lib && isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped)) {
+    const tagged = tag ? discoverTargetsSync(undefined, tag) : undefined;
+    if (tagged) signalDeadTargets(tagged, undefined);
+    return;
+  }
+  signalDeadTargets(found, deadSessionId, lib ? () => !isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped) : undefined);
 }
 
 export function killDeadSession(deadSessionId: number, tag?: string, reaped = false): void | Promise<void> {
   if (process.platform === "linux") {
-    const run = () => {
-      const recycled = isDeadLeaderRecycledLinux(deadSessionId, reaped);
-      const sid = recycled ? undefined : deadSessionId;
-      if (sid === undefined && !tag) return;
-      signalDeadTargets(discoverTargetsLinux(sid, tag), sid);
-    };
     if (!reaped && isDeadLeaderRecycledLinux(deadSessionId, false)) {
-      return Bun.sleep(15).then(run);
+      return Bun.sleep(15).then(() => sweepDeadLinux(deadSessionId, tag, reaped));
     }
-    run();
+    sweepDeadLinux(deadSessionId, tag, reaped);
     return;
   }
   return (async () => {
@@ -687,11 +810,16 @@ export function killDeadSession(deadSessionId: number, tag?: string, reaped = fa
       }
       stat = psPidStat(treeRes.text, deadSessionId);
     }
-    const recycled = stat !== undefined && (reaped || !stat.includes("Z"));
+    const lib = getDarwinLib();
+    const recycled = (stat !== undefined && (reaped || !stat.includes("Z"))) || (lib !== null && isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped));
     const sid = recycled ? undefined : deadSessionId;
     if (sid === undefined && !tag) return;
     const targets = buildTargetsFromPs(process.pid, sid, tag, treeRes.text, new Set([treeRes.pid]));
-    signalDeadTargets(targets, sid);
+    if (sid !== undefined && lib && isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped)) {
+      if (tag) signalDeadTargets(buildTargetsFromPs(process.pid, undefined, tag, treeRes.text, new Set([treeRes.pid])), undefined);
+      return;
+    }
+    signalDeadTargets(targets, sid, sid !== undefined && lib ? () => !isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped) : undefined);
   })();
 }
 

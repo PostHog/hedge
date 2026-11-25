@@ -99,7 +99,7 @@ export function resolve(profile: Profile, saved: MachineFile, sources: FetchedSo
     return !reason;
   };
 
-  const resolvedCatalog = serviceCatalog(order, profile, activeIds(settledWorkflows(profile, { ...machine, role: "hub" }, order, names, byOldName)), byOldName, machine.role === "hub" ? os : "linux");
+  const resolvedCatalog = serviceCatalog(order, profile, activeIds(settledWorkflows(profile, { ...machine, role: "hub" }, order, names, byOldName)), byOldName, machine.role === "hub" ? os : "linux", os, active);
   plan.catalog = resolvedCatalog.catalog;
   if (Object.keys(resolvedCatalog.catalogWorkflows).length) plan.catalogWorkflows = resolvedCatalog.catalogWorkflows;
   const packFiles: DesiredFile[] = [];
@@ -176,7 +176,7 @@ export function resolve(profile: Profile, saved: MachineFile, sources: FetchedSo
 }
 
 /** Every served service of the profile, judged the same way on every node: plans and workflows from the profile, the os of the hub (Linux off the hub), and no gate, which only the hub can test. Two services that claim one port fail. */
-function serviceCatalog(order: Candidate[], profile: Profile, active: Set<string>, byOldName: ByOldName, hubOs: Os) {
+function serviceCatalog(order: Candidate[], profile: Profile, active: Set<string>, byOldName: ByOldName, hubOs: Os, localOs: Os, localActive: Set<string>) {
   const ports = new Map<number, string>();
   const catalogWorkflows: Record<number, string> = {};
   const catalog = order.flatMap(({ manifest }) =>
@@ -186,7 +186,7 @@ function serviceCatalog(order: Candidate[], profile: Profile, active: Set<string
       const other = ports.get(port);
       if (other) throw new ResolveError(`port ${port} is claimed by both ${other} and ${name}`);
       ports.set(port, name);
-      if (scope.workflow) catalogWorkflows[port] = scope.workflow;
+      if (scope.workflow && (!scope.on || scope.on.includes(localOs)) && localActive.has(scope.workflow)) catalogWorkflows[port] = scope.workflow;
       return [{ pack: manifest.name, id, port, health, ...(after ? { after } : {}) }];
     }),
   );
