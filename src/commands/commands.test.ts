@@ -290,20 +290,6 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     }
   });
 
-  test("stops a background child a human step leaves behind after exiting, even when it ignores SIGTERM", async () => {
-    const { home } = await machineWithProfile();
-    const [ready, gone] = [join(home, "ready"), join(home, "gone")];
-    expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
-    await withTeamPack(home, { workflows: [flow("allowlist")], human: [humanStep("allowlist", 'trap "" TERM; { sleep 30 & } 3>"$HOME/gone"; echo $! > "$HOME/ready"; exit 0', "allowlist")] });
-    const [holderGone, started] = [readFile(gone, "utf8"), readFile(ready, "utf8")];
-    try {
-      expect((await hedge(home, ["packs"])).output).toContain("  ✓ team  Team rules.\n      Workflows: allowlist on");
-      expect(await holderGone).toBe("");
-    } finally {
-      await endHolder(started);
-    }
-  });
-
   for (const sig of ["SIGHUP", "SIGQUIT"] as const) {
     test(`stops human steps when hedge packs receives ${sig}`, async () => {
       const { home } = await machineWithProfile();
@@ -323,23 +309,25 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
 
   test("propagates pack-level human prerequisite timeouts to dependent workflows and prints both hints when another probe fails", async () => {
     const { home } = await machineWithProfile();
+    const [failDone, ready, gone] = [join(home, "fail-done"), join(home, "ready"), join(home, "gone")];
+    expect(Bun.spawnSync(["mkfifo", failDone, ready, gone]).exitCode).toBe(0);
     await withTeamPack(home, {
       workflows: [flow("allowlist"), flow("sync")],
-      human: [humanStep("allowlist", "allowlist-probe", "allowlist"), humanStep("sign-in", "sign-in-probe")],
+      human: [
+        humanStep("allowlist", 'exec 3>"$HOME/fail-done"; exit 1', "allowlist"),
+        humanStep("sign-in", `cat "$HOME/fail-done"; ${blockedProbe("-")}`),
+      ],
       steps: [{ id: "sync-step", workflow: "sync", after: "sign-in", run: ["true"] }],
     });
-    let allowlistFinished!: () => void;
-    const allowlistDone = new Promise<void>((resolve) => { allowlistFinished = resolve; });
-    const run = async (command: string[], _env?: Record<string, string | undefined>, signal?: AbortSignal) => {
-      if (command[2] === "allowlist-probe") {
-        setImmediate(allowlistFinished);
-        return 1;
-      }
-      return await new Promise<number>((resolve) => signal?.addEventListener("abort", () => resolve(124), { once: true }));
-    };
-    const timesOutAfterFailure = { now: () => 0, sleep: () => allowlistDone };
-    const output = (await hedge(home, ["packs"], 0, { clock: timesOutAfterFailure, run })).output;
-    expect(output).toContain("  ~ team  Team rules.\n      Workflows: allowlist needs setup, sync not checked\n      Needs setup on this machine. Run hedge doctor for the steps.\n      Hedge could not check this pack's setup in time. Run hedge doctor.");
+    const [holderGone, started] = [readFile(gone, "utf8"), readFile(ready, "utf8")];
+    const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await started) };
+    try {
+      const output = (await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output;
+      expect(output).toContain("  ~ team  Team rules.\n      Workflows: allowlist needs setup, sync not checked\n      Needs setup on this machine. Run hedge doctor for the steps.\n      Hedge could not check this pack's setup in time. Run hedge doctor.");
+      expect(await holderGone).toBe("");
+    } finally {
+      await endHolder(started);
+    }
   });
 });
 

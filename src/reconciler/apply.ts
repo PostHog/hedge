@@ -455,9 +455,10 @@ function spawnRunner(home: string, profileDir: string | undefined): Runner {
 async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal) {
   let child: { pid: number; exited: Promise<number> } | undefined;
   let stopSignal: NodeJS.Signals | undefined;
+  let reaped = false;
   const endGroup = (name: NodeJS.Signals = "SIGTERM") => {
     stopSignal ??= name;
-    if (!child) return;
+    if (!child || reaped) return;
     try { process.kill(-child.pid, name); } catch {}
   };
   const onAbort = () => endGroup("SIGTERM");
@@ -485,8 +486,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
   } catch {
     return 127;
   } finally {
-    endGroup(stopSignal ?? "SIGTERM");
-    endGroup("SIGKILL");
+    reaped = true;
     release();
   }
 }
