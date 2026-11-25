@@ -1,6 +1,6 @@
 import { closeSync, writeSync } from "node:fs";
 
-type StartMessage = { argv: string[]; lockCount: number };
+type StartMessage = { argv: string[]; locked: boolean };
 
 let target: ReturnType<typeof Bun.spawn> | undefined;
 let targetReaped = false;
@@ -54,9 +54,8 @@ process.on("message", async (message: unknown) => {
     process.exit(targetCode ?? 0);
   }
   if (!message || typeof message !== "object" || !Array.isArray((message as StartMessage).argv)) return;
-  const { argv, lockCount } = message as StartMessage;
-  const lockFds = Array.from({ length: lockCount }, (_, index) => index + 3);
-  const stdio: [number, number, number, ...(number | "pipe")[]] = lockCount > 0 ? [0, 1, 2, ...lockFds, "pipe"] : [0, 1, 2];
+  const { argv, locked } = message as StartMessage;
+  const stdio: [number, number, number, ...("pipe")[]] = locked ? [0, 1, 2, "pipe"] : [0, 1, 2];
   try {
     target = Bun.spawn(argv, { stdio });
   } catch (error) {
@@ -66,9 +65,9 @@ process.on("message", async (message: unknown) => {
     } catch {}
     process.exit(127);
   }
-  if (lockCount > 0) {
-    if (typeof target.stdio[lockCount + 3] === "number") {
-      holdFd = target.stdio[lockCount + 3] as number;
+  if (locked) {
+    if (typeof target.stdio[3] === "number") {
+      holdFd = target.stdio[3];
     }
     try {
       process.send?.({ pgid: target.pid });

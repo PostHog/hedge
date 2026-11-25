@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from "node:fs";
+import { closeSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { install, plan as planFiles } from "../files/install.ts";
 import { packName } from "../pack/manifest.ts";
@@ -258,7 +258,8 @@ const supervisorSpawnFailed = -1;
 
 export async function humanStepsLeft(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void>; graceMs?: number }): Promise<HumanStepsLeft> {
   const reported = new WeakMap<AbortSignal, number>();
-  const run = viaEngine(plan, options.run ?? spawnRunner(options.home, plan.machine.profileDir, (sig, code) => reported.set(sig, code), options.graceMs));
+  const live = new Set<LiveProbe>();
+  const run = viaEngine(plan, options.run ?? spawnRunner(options.home, plan.machine.profileDir, (sig, code) => reported.set(sig, code), options.graceMs, live));
   let timedOut = false;
   void options.giveUp.then(() => {
     timedOut = true;
@@ -283,7 +284,11 @@ export async function humanStepsLeft(plan: Plan, options: { home: string; run?: 
   const workers = Array.from({ length: Math.min(probeConcurrency, plan.human.length) }, async () => {
     while (next < plan.human.length && !timedOut) await checkOne(next++);
   });
-  await Promise.all(workers);
+  try {
+    await Promise.all(workers);
+  } finally {
+    handOffWatchdog(live);
+  }
   return { failing: plan.human.filter((_, index) => outcomes[index] === "fails"), unchecked: plan.human.filter((_, index) => outcomes[index] === "unchecked") };
 }
 
@@ -464,7 +469,7 @@ function viaEngine(plan: Plan, run: Runner): Runner {
 const undoRunner = (run: Runner, step: LedgerStep): Runner => (command) => run(command, { [undoVariable]: ledgerKey(step) });
 
 /** Runs commands with the plan's home directory as HOME, so a step installs into the home it applies to, and with the plan's profile, so a nested hedge reads the profile this run applies or checks. */
-function spawnRunner(home: string, profileDir: string | undefined, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number): Runner {
+function spawnRunner(home: string, profileDir: string | undefined, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number, live?: Set<LiveProbe>): Runner {
   return async (command, env = {}, signal) => {
     const childEnv = withLegacyNames({ ...Bun.env, HOME: home, ...(profileDir ? { HEDGE_PROFILE_DIR: profileDir } : {}), ...env });
     if (!signal) {
@@ -474,13 +479,73 @@ function spawnRunner(home: string, profileDir: string | undefined, onResult?: (s
         return 127;
       }
     }
-    return await runDetached(command, childEnv, signal, onResult, cleanupGraceMs);
+    return await runDetached(command, childEnv, signal, onResult, cleanupGraceMs, live);
   };
 }
 
 const probeSupervisor = join(import.meta.dir, "probe-supervisor.ts");
+const probeWatchdog = join(import.meta.dir, "probe-watchdog.ts");
+const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
 let activeSupervisors = 0;
 const supervisorWaiters: Array<() => void> = [];
+
+type LiveProbe = { pid: number; aliveFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
+type ActiveRunner = { stop: (name: NodeJS.Signals) => void };
+const activeRunners = new Set<ActiveRunner>();
+const allLiveProbes = new Set<LiveProbe>();
+let interruptHandlersAttached = false;
+
+function handOffWatchdog(probes: Iterable<LiveProbe>) {
+  const batch: Array<{ pid: number; fd: number; delayMs: number }> = [];
+  for (const probe of probes) {
+    if (probe.aliveFd === undefined) continue;
+    batch.push({ pid: probe.pid, fd: probe.aliveFd, delayMs: probe.delayMs });
+    probe.aliveFd = undefined;
+  }
+  if (!batch.length) return;
+  const payload = JSON.stringify(batch.map((entry, index) => ({ pid: entry.pid, fd: index + 3, delayMs: entry.delayMs })));
+  try {
+    const watchdog = Bun.spawn(bunScript(probeWatchdog, payload), {
+      stdio: ["ignore", "ignore", "ignore", ...batch.map((entry) => entry.fd)],
+      detached: true,
+    });
+    watchdog.unref();
+  } catch {
+  } finally {
+    for (const entry of batch) {
+      try {
+        closeSync(entry.fd);
+      } catch {}
+    }
+  }
+}
+
+function handleProcessInterrupt(name: NodeJS.Signals) {
+  for (const runner of [...activeRunners]) runner.stop(name);
+  for (const probe of [...allLiveProbes]) probe.stop(name);
+  handOffWatchdog(allLiveProbes);
+  detachInterruptHandlers();
+  if (!process.listenerCount(name)) {
+    if (name === "SIGQUIT") process.exit(131);
+    process.kill(process.pid, name);
+  }
+}
+
+function syncInterruptHandlers() {
+  const needed = activeRunners.size > 0 || allLiveProbes.size > 0;
+  if (needed && !interruptHandlersAttached) {
+    interruptHandlersAttached = true;
+    for (const name of stopSignals) process.on(name, handleProcessInterrupt);
+  } else if (!needed && interruptHandlersAttached) {
+    detachInterruptHandlers();
+  }
+}
+
+function detachInterruptHandlers() {
+  if (!interruptHandlersAttached) return;
+  interruptHandlersAttached = false;
+  for (const name of stopSignals) process.off(name, handleProcessInterrupt);
+}
 
 async function acquireSupervisorSlot(signal: AbortSignal): Promise<(() => void) | undefined> {
   if (signal.aborted) return undefined;
@@ -542,56 +607,44 @@ async function readSupervisorResult(stdout: ReadableStream<Uint8Array>, onFirstC
   return { code, cleanup };
 }
 
-async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number) {
+async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number, live?: Set<LiveProbe>) {
   if (!command.length) return 127;
-  let child: { pid: number; exited: Promise<number>; stdout: ReadableStream<Uint8Array>; kill(signal?: NodeJS.Signals): void; unref(): void } | undefined;
+  let child: ReturnType<typeof Bun.spawn> | undefined;
+  let probe: LiveProbe | undefined;
   let stopSignal: NodeJS.Signals | undefined;
   let reaped = false;
-  let hardKill: ReturnType<typeof setTimeout> | undefined;
-  const armParentHardKill = (name: NodeJS.Signals) => {
-    if (hardKill || !child || reaped) return;
-    const target = child;
-    const extra = name === "SIGINT" || name === "SIGQUIT" ? interruptGraceMs : 0;
-    hardKill = setTimeout(() => {
-      hardKill = undefined;
-      if (reaped) return;
-      try {
-        process.kill(-target.pid, "SIGKILL");
-      } catch {}
-      try {
-        target.kill("SIGKILL");
-      } catch {}
-    }, (cleanupGraceMs ?? graceMs) + extra + 100);
-  };
+  const delayFor = (name: NodeJS.Signals) => (cleanupGraceMs ?? graceMs) + (name === "SIGINT" || name === "SIGQUIT" ? interruptGraceMs : 0) + 100;
+  let lastSignal: NodeJS.Signals | undefined;
   const endGroup = (name: NodeJS.Signals = "SIGTERM") => {
     stopSignal ??= name;
-    if (!child || reaped) return;
+    if (!child || reaped || lastSignal === name) return;
+    lastSignal = name;
+    if (probe) probe.delayMs = Math.max(probe.delayMs, delayFor(name));
     try {
       process.kill(-child.pid, "SIGCONT");
     } catch {}
     try {
       child.kill(name);
     } catch {}
-    armParentHardKill(name);
+    if (!live && probe) handOffWatchdog([probe]);
   };
   const onAbort = () => endGroup("SIGTERM");
-  const interrupted = (name: NodeJS.Signals) => {
-    endGroup(name);
-    release();
-    if (!process.listenerCount(name)) {
-      if (name === "SIGQUIT") process.exit(131);
-      process.kill(process.pid, name);
-    }
-  };
-  const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
+  const runner: ActiveRunner = { stop: endGroup };
   const release = () => {
     signal.removeEventListener("abort", onAbort);
-    for (const name of stopSignals) process.off(name, interrupted);
+    activeRunners.delete(runner);
+    syncInterruptHandlers();
   };
   signal.addEventListener("abort", onAbort, { once: true });
-  for (const name of stopSignals) process.on(name, interrupted);
+  activeRunners.add(runner);
+  syncInterruptHandlers();
   const releaseSlot = await acquireSupervisorSlot(signal);
   if (!releaseSlot) {
+    release();
+    return 124;
+  }
+  if (signal.aborted || stopSignal) {
+    releaseSlot();
     release();
     return 124;
   }
@@ -601,23 +654,32 @@ async function runDetached(command: string[], env: Record<string, string | undef
     const encoded = JSON.stringify(payload);
     const overStdin = Buffer.byteLength(encoded) > 65_536;
     child = Bun.spawn(overStdin ? bunScript(probeSupervisor) : bunScript(probeSupervisor, encoded), {
-      stdin: overStdin ? new TextEncoder().encode(encoded) : "ignore",
-      stdout: "pipe",
-      stderr: "ignore",
+      stdio: [overStdin ? new TextEncoder().encode(encoded) : "ignore", "pipe", "ignore", "pipe"],
       env,
       detached: true,
     });
+    const aliveFd = typeof child.stdio[3] === "number" ? child.stdio[3] : undefined;
+    probe = { pid: child.pid, aliveFd, delayMs: (cleanupGraceMs ?? graceMs) + 100, stop: endGroup };
+    allLiveProbes.add(probe);
+    live?.add(probe);
+    syncInterruptHandlers();
     handedToExit = true;
+    const owned = probe;
     void child.exited.finally(() => {
       reaped = true;
-      if (hardKill) {
-        clearTimeout(hardKill);
-        hardKill = undefined;
+      if (owned.aliveFd !== undefined) {
+        try {
+          closeSync(owned.aliveFd);
+        } catch {}
+        owned.aliveFd = undefined;
       }
+      allLiveProbes.delete(owned);
+      live?.delete(owned);
+      syncInterruptHandlers();
       releaseSlot();
     });
     if (stopSignal || signal.aborted) endGroup(stopSignal ?? "SIGTERM");
-    const status = await readSupervisorResult(child.stdout, (code) => onResult?.(signal, code));
+    const status = await readSupervisorResult(child.stdout as ReadableStream<Uint8Array>, (code) => onResult?.(signal, code));
     if (status.code !== undefined && status.cleanup) {
       child.unref();
       return status.code;

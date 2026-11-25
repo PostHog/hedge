@@ -3,7 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
 import { dirname, join } from "node:path";
 import { tempDirs } from "../../../src/testing/git.ts";
 import { withBoxLock } from "./box-lock.ts";
-import { captureWith, Coder, grant, reap, type Box, type Capture, type Timer } from "./coder.ts";
+import { capture, captureWith, Coder, grant, reap, type Box, type Capture, type Timer } from "./coder.ts";
 import { appeared } from "./testing.ts";
 
 const temp = tempDirs();
@@ -447,30 +447,59 @@ test("kills a background child holding stdout open after the command exits under
   }
 });
 
-test("wakes and kills a locked command even if its capture supervisor was SIGSTOPped", async () => {
-  const lockHome = temp.make("hedge-lock-stop-");
-  const dir = temp.make("hedge-stop-sup-");
-  const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
-  expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
-  const started = Bun.file(ready).text();
-  const holderGone = Bun.file(gone).text();
-  const clock = handTimer();
-  const result = withBoxLock(lockHome, "box-stop", { waitMs: 0 }, () =>
-    captureWith(clock.timer)(
-      ["sh", "-c", `exec 3>${JSON.stringify(gone)}; ps -o ppid= -p $PPID | tr -d " " > ${JSON.stringify(ready)}; exec sleep 30`],
-      { timeoutMs: 30 },
-    ),
-  );
-  const supPid = Number((await started).trim());
-  expect(supPid).toBeGreaterThan(0);
-  process.kill(supPid, "SIGSTOP");
-  try {
-    clock.fire();
-    expect(await result).toEqual({ code: 124, stdout: "", stderr: "timed out after 30 ms" });
-    expect(await holderGone).toBe("");
-    expect(await withBoxLock(lockHome, "box-stop", { waitMs: 0 }, async () => "free")).toBe("free");
-  } finally {
-    try { process.kill(supPid, "SIGCONT"); } catch {}
-    try { process.kill(supPid, "SIGKILL"); } catch {}
+async function waitStopped(pid: number) {
+  const deadline = performance.now() + 2_000;
+  while (performance.now() < deadline) {
+    const state = Bun.spawnSync(["ps", "-o", "state=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim();
+    if (state.startsWith("T")) return;
+    await Bun.sleep(5);
   }
+  throw new Error(`process ${pid} did not enter stopped state`);
+}
+
+test("wakes and kills a command that suspends its own process group, both unlocked and under a box lock", async () => {
+  for (const locked of [false, true]) {
+    const lockHome = temp.make("hedge-lock-stop-");
+    const dir = temp.make("hedge-stop-group-");
+    const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+    expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+    const started = Bun.file(ready).text();
+    const holderGone = Bun.file(gone).text();
+    const clock = handTimer();
+    const run = () =>
+      captureWith(clock.timer)(
+        ["sh", "-c", `exec 3>${JSON.stringify(gone)}; echo $$ > ${JSON.stringify(ready)}; kill -STOP 0`],
+        { timeoutMs: 30 },
+      );
+    const result = locked ? withBoxLock(lockHome, "box-stop", { waitMs: 0 }, run) : run();
+    const cmdPid = Number((await started).trim());
+    expect(cmdPid).toBeGreaterThan(0);
+    try {
+      await waitStopped(cmdPid);
+      clock.fire();
+      expect(await result).toEqual({ code: 124, stdout: "", stderr: "timed out after 30 ms" });
+      expect(await holderGone).toBe("");
+      if (locked) {
+        expect(await withBoxLock(lockHome, "box-stop", { waitMs: 0 }, async () => "free")).toBe("free");
+      }
+    } finally {
+      try { process.kill(cmdPid, "SIGCONT"); } catch {}
+      try { process.kill(cmdPid, "SIGKILL"); } catch {}
+    }
+  }
+});
+
+test("preserves command arguments and stdin under seven nested box locks", async () => {
+  const lockHome = temp.make("hedge-lock-seven-");
+  const nest = <T>(index: number, fn: () => Promise<T>): Promise<T> =>
+    index > 7 ? fn() : withBoxLock(lockHome, `box-${index}`, { waitMs: 0 }, () => nest(index + 1, fn));
+  const [printed, piped] = await nest(1, async () => [
+    await capture(["printf", "%s", "ok"], { timeoutMs: 10_000 }),
+    await capture(
+      ["sh", "-c", 'read line; printf "%s:%s" "$line" "$1"; if [ -e /dev/fd/3 ]; then echo has-fd >&2; fi', "probe", "arg"],
+      { stdin: "hello\n", timeoutMs: 10_000 },
+    ),
+  ]);
+  expect(printed).toEqual({ code: 0, stdout: "ok", stderr: "" });
+  expect(piped).toEqual({ code: 0, stdout: "hello:arg", stderr: "" });
 });
