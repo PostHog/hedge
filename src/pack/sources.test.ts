@@ -308,16 +308,41 @@ describe("fetchSource", () => {
     expect([fetched.packs[0]?.manifest.summary, fetched.stale]).toEqual(["Team rules v1.", undefined]);
   });
 
-  test("follows a branch across refs/heads/ respellings and after a fallback", async () => {
+  test("follows a branch across refs/heads/ respellings and branch fallbacks, never a tag fallback or malformed record", async () => {
     const repo = await packRepo("Team rules v1.");
+    await spawnGit(repo, "tag", "v2");
     const cache = temp.make("cache-");
     const main = { name: "team", repo, ref: "main" };
     await fetchSource(main, cache);
     expect(await followsBranch({ ...main, ref: "refs/heads/main" }, cache)).toBe(true);
-    const goodFile = join(cache, "team", ".git", "hedge-source.json");
-    const good = JSON.parse(readFileSync(goodFile, "utf8")) as Record<string, unknown>;
-    writeFileSync(goodFile, JSON.stringify({ ...good, ref: "old-branch", asked: "refs/heads/main" }));
+
+    writeFileSync(join(repo, "packs/team/pack.json"), "{broken");
+    await spawnGit(repo, "commit", "-q", "-am", "broken");
+    await spawnGit(repo, "tag", "-f", "v2");
+    expect(await fetchSource({ ...main, ref: "v2" }, cache)).toMatchObject({ stale: expect.stringContaining("does not load") });
+    expect(await followsBranch({ ...main, ref: "v2" }, cache)).toBe(false);
+
+    expect(await fetchSource({ ...main, ref: "refs/heads/main" }, cache)).toMatchObject({ stale: expect.stringContaining("does not load") });
     expect(await followsBranch(main, cache)).toBe(true);
+
+    writeFileSync(join(cache, "team", ".git", "hedge-source.json"), "{}");
+    expect(await followsBranch(main, cache)).toBe(false);
+  });
+
+  test("preserves a pre-upgrade pinned commit in the cache after applying a second pin", async () => {
+    const repo = await packRepo("Team rules v1.");
+    const first = await spawnGit(repo, "rev-parse", "HEAD");
+    writePack(repo, "Team rules v2.");
+    await spawnGit(repo, "commit", "-q", "-am", "v2");
+    const second = await spawnGit(repo, "rev-parse", "HEAD");
+    const cache = temp.make("cache-");
+    await fetchSource({ name: "team", repo, ref: first }, cache);
+    writeFileSync(join(cache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo, ref: first, commit: first }));
+    await fetchSource({ name: "team", repo, ref: second }, cache);
+    rmSync(repo, { recursive: true, force: true });
+    const back = await fetchSource({ name: "team", repo, ref: first }, cache);
+    if ("error" in back) throw new Error(back.error);
+    expect([back.packs[0]?.manifest.summary, back.stale]).toEqual(["Team rules v1.", undefined]);
   });
 });
 

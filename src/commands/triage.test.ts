@@ -212,16 +212,16 @@ describe("hedge triage", () => {
     for (const name of ["silver-fox", "private-packs", "loop-ledger", "acme/"]) expect(`${issue.command[6]}\n${issue.input}`).not.toContain(name);
   });
 
-  test("redacts a private source alias and branch name from doctor's pinning advisory", async () => {
+  test("redacts a private source alias and branch name from doctor's pinning advisory, even on a public repo or incomplete draft", async () => {
     const home = temp.make("home-");
     mkdirSync(join(home, ".config/hedge"), { recursive: true });
-    writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "mac", name: "ssh-silver-fox", setup: { done: ["bootstrap"], draft: { sources: [{ name: "secret-team", repo: "acme/private-packs", ref: "internal-release" }] } } }));
+    writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "mac", name: "ssh-silver-fox", setup: { done: ["bootstrap"], draft: { sources: [{ name: "secret-team", repo: "PostHog/hedge", ref: "internal-release" }, { name: "incomplete-team", repo: "acme/private-packs" }] } } }));
     mkdirSync(join(home, ".local/state/hedge/logs"), { recursive: true });
-    writeFileSync(join(home, ".local/state/hedge/logs/setup.log"), "Note: The pack source secret-team is not pinned to a commit SHA. branch internal-release\n");
+    writeFileSync(join(home, ".local/state/hedge/logs/setup.log"), "Note: The pack source secret-team is not pinned to a commit SHA. branch internal-release\nNote: The pack source incomplete-team is not pinned to a commit SHA.\n");
     const result = await triage(home, ["--send"], []);
     const issue = result.sent.find((call) => call.command[1] === "issue")!;
     expect(issue.input).toContain("Note: The pack source <private source> is not pinned to a commit SHA. branch <branch>");
-    for (const leaked of ["secret-team", "internal-release", "private-packs"]) expect(issue.input).not.toContain(leaked);
+    for (const leaked of ["secret-team", "incomplete-team", "internal-release", "private-packs"]) expect(issue.input).not.toContain(leaked);
   });
 
   test("a long title is cut after redaction, so no part of a secret reaches the issue", async () => {

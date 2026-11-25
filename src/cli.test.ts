@@ -406,9 +406,14 @@ describe("hedge doctor and pack sources", () => {
     expect(await hedge(["doctor"], home)).toEqual({ code: 0, output: "Everything matches your profile." });
   });
 
-  for (const origin of ["git@github.com:Someone/profile.git", "https://github.com/someone/Profile", "ssh://git@ssh.github.com:443/someone/Profile.git"]) {
+  for (const [repo, origin] of [
+    ["someone/profile", "git@github.com:Someone/profile.git"],
+    ["someone/profile", "https://github.com/someone/Profile"],
+    ["someone/profile", "ssh://git@ssh.github.com:443/someone/Profile.git"],
+    ["123/demo", "git@github.com:123/demo.git"],
+  ] as const) {
     test(`says nothing of a source in the profile's own repository at ${origin}, which cannot pin its own commit`, async () => {
-      const home = await applied(() => ({ name: "own", repo: "someone/profile", ref: "main" }), origin);
+      const home = await applied(() => ({ name: "own", repo, ref: "main" }), origin);
       expect(await hedge(["doctor"], home)).toEqual({ code: 0, output: "Everything matches your profile." });
     });
   }

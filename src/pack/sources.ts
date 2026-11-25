@@ -137,14 +137,17 @@ const pinnedCommits = (good: Good | undefined) => (Array.isArray(good?.pinned) ?
 
 async function saveGood(dir: string, good: Good) {
   const before = await lastGood(dir);
-  const kept = before?.repo === good.repo ? pinnedCommits(before) : [];
+  const prior = before?.repo === good.repo
+    ? [...pinnedCommits(before), ...(typeof before.ref === "string" && commitSha.test(before.ref) && typeof before.commit === "string" ? [before.commit] : [])]
+    : [];
+  const kept = [...new Set(prior)];
   const pinned = commitSha.test(good.ref) && !kept.includes(good.commit) ? [...kept, good.commit] : kept;
   await writeFile(goodPath(dir), JSON.stringify({ ...good, ...(pinned.length ? { pinned } : {}) }) + "\n");
 }
 
 const commitSha = /^[0-9a-f]{40}$/i;
 
-const repoKey = (repo: string) => repoUrl(repo).replace(/^.*(?:ssh\.)?github\.com(?::\d+)?[:/]/i, "").replace(/\.git$/, "").toLowerCase();
+const repoKey = (repo: string) => repoUrl(repo).replace(/^(?:[a-z][a-z0-9+.-]*:\/\/[^/]*github\.com(?::\d+)?\/|[^/]*github\.com:)/i, "").replace(/\.git$/, "").toLowerCase();
 
 export async function unpinnedSources(refs: SourceRef[], profileDir: string): Promise<Finding[]> {
   const unpinned = refs.filter((ref) => !commitSha.test(ref.ref));
@@ -185,14 +188,13 @@ export function sourceCache(home: string) {
   return join(home, ".local", "share", "hedge", "sources");
 }
 
-const branchName = (ref: string) => ref.replace(/^refs\/heads\//, "");
+const branchName = (ref: unknown) => (typeof ref === "string" ? ref.replace(/^refs\/heads\//, "") : undefined);
 
 export async function followsBranch(ref: SourceRef, cacheRoot: string) {
   if (commitSha.test(ref.ref)) return false;
   const good = await lastGood(join(cacheRoot, ref.name));
   const branch = branchName(ref.ref);
-  if (!good || (branchName(good.ref) !== branch && (!good.asked || branchName(good.asked) !== branch))) return false;
-  if (good.asked && branchName(good.asked) === branch) return true;
+  if (!good || !branch || (branchName(good.ref) !== branch && branchName(good.asked) !== branch)) return false;
   const fetched = await readFile(join(cacheRoot, ref.name, ".git", "FETCH_HEAD"), "utf8").catch(() => "");
   return fetched.split("\n")[0]?.includes(`\tbranch '${branch}' of `) ?? false;
 }
