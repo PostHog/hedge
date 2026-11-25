@@ -832,23 +832,33 @@ function expandFlexMask(text: string): { literals: string[]; verify?: (slice: st
   const clusterLiterals: string[][] = [];
   let canUseLiterals = true;
   for (const cluster of clusters) {
-    const lit = text.slice(cluster.start, cluster.end);
+    const maxForCluster = Math.floor(flexLiteralLimit / product);
+    if (maxForCluster < 2) {
+      canUseLiterals = false;
+      break;
+    }
     if (cluster.hits.length === 1) {
+      const lit = text.slice(cluster.start, cluster.end);
       const msk = cluster.hits[0]!.masked;
       const alts = msk === lit ? [lit] : [msk, lit];
       clusterLiterals.push(alts);
       product *= alts.length;
     } else if (cluster.hits.every((item) => item.end === cluster.end)) {
+      const lit = text.slice(cluster.start, cluster.end);
       const alts = new Set<string>([lit]);
       for (const item of cluster.hits) {
         alts.add(`${text.slice(cluster.start, item.start)}${item.masked}`);
+        if (alts.size > maxForCluster) {
+          canUseLiterals = false;
+          break;
+        }
       }
+      if (!canUseLiterals) break;
       const list = [...alts];
       clusterLiterals.push(list);
       product *= list.length;
     } else {
-      const maxForCluster = Math.floor(flexLiteralLimit / product);
-      const list = maxForCluster >= 2 ? enumerateClusterVariants(text, cluster, maxForCluster) : undefined;
+      const list = enumerateClusterVariants(text, cluster, maxForCluster);
       if (!list) {
         canUseLiterals = false;
         break;

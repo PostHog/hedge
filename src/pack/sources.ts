@@ -681,7 +681,7 @@ async function readShallowSet(dir: string): Promise<Set<string>> {
   );
 }
 
-async function restoreKnownShallow(dir: string, beforeShallow: Set<string>, targetCommit: string): Promise<void> {
+async function restoreKnownShallow(dir: string, beforeShallow: Set<string>, targetCommit: string, effectiveDigest: string): Promise<void> {
   if (beforeShallow.has(targetCommit)) return;
   const shallowPath = join(dir, ".git", "shallow");
   const current = await readShallowSet(dir);
@@ -695,9 +695,16 @@ async function restoreKnownShallow(dir: string, beforeShallow: Set<string>, targ
     if (match) parents.push(match[1]!.toLowerCase());
   }
   if (!parents.length) return;
-  for (const parent of parents) {
-    const verified = await git(dir, "rev-parse", "--verify", "--quiet", `${parent}^{commit}`);
-    if (!verified.ok) return;
+  const alreadyPinnedForRepo = (await exactPinTarget(dir, effectiveDigest, targetCommit)) !== undefined;
+  if (!alreadyPinnedForRepo) {
+    for (const parent of parents) {
+      if ((await pinTarget(dir, effectiveDigest, parent)) === undefined) return;
+    }
+  } else {
+    for (const parent of parents) {
+      const verified = await git(dir, "rev-parse", "--verify", "--quiet", `${parent}^{commit}`);
+      if (!verified.ok) return;
+    }
   }
   current.delete(targetCommit);
   if (current.size === 0) {
@@ -729,7 +736,7 @@ async function checkout(dir: string, repo: string, ref: string, savedFetchHead: 
     return { effectiveRepo, error: peeled.stderr || "could not resolve fetched commit" };
   }
   const targetCommit = peeled.stdout.toLowerCase();
-  await restoreKnownShallow(dir, beforeShallow, targetCommit);
+  await restoreKnownShallow(dir, beforeShallow, targetCommit, repoDigest(effectiveRepo));
   const moved = await git(dir, "checkout", "-q", "--detach", `${targetCommit}^{commit}`);
   if (!moved.ok) return { effectiveRepo, error: moved.stderr };
   const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
@@ -810,7 +817,8 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
   if (!good || !branch || typeof good.commit !== "string" || !gitHash.test(good.commit)) return false;
   const effectiveDigest = repoDigest(await resolvedRepoUrl(dir, repo));
   const goodDigest = goodResolvedDigest(good);
-  if (good.repo !== repo || (goodDigest !== undefined && goodDigest !== effectiveDigest)) return false;
+  const sameRepo = good.repo === repo && (goodDigest === undefined || goodDigest === effectiveDigest);
+  if ((forced !== undefined || forcedBranchName(good.ref) !== undefined || forcedBranchName(good.asked) !== undefined) && !sameRepo) return false;
   if (Array.isArray(good.blocked) && good.blocked.length) {
     if (good.blocked.some((entry) => entry && entry.repo === repo && goodResolvedDigest(entry) === effectiveDigest)) return false;
   }
@@ -894,6 +902,11 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
           : [head];
   const listed = await git(dir, "ls-remote", repo, ...heads);
   if (!listed.ok) return { state: "failed", say: `could not reach ${ref.repo}: ${listed.stderr}` };
+  const cachedGood = await lastGood(dir);
+  const cachedDigest = goodResolvedDigest(cachedGood);
+  if (cachedGood && (cachedGood.repo !== repo || (cachedDigest !== undefined && cachedDigest !== repoDigest(effectiveRepo)))) {
+    return { state: "refused", say: `${ref.name} now points to ${ref.repo}, not the repository Hedge loaded last. Run hedge apply.` };
+  }
   const rows = listed.stdout.split("\n").map((line) => line.split("\t"));
   let commit: string | undefined;
   if (trackedChoice === "literal") {

@@ -80,6 +80,20 @@ describe("fetchSource pin namespaces and metadata", () => {
     const offlineA1 = await fetchSource({ name: "team", repo: repoA, ref: commitA1 }, cache);
     if ("error" in offlineA1) throw new Error(offlineA1.error);
     expect([offlineA1.packs[0]?.manifest.summary, offlineA1.stale]).toEqual(["Repo A v1.", undefined]);
+
+    const parentRepo = await packRepo("Parent A.");
+    const parentCommit = await spawnGit(parentRepo, "rev-parse", "HEAD");
+    writePack(parentRepo, "Child B.");
+    await spawnGit(parentRepo, "commit", "-q", "-am", "child");
+    const childCommit = await spawnGit(parentRepo, "rev-parse", "HEAD");
+    const shallowB = join(temp.make("shallow-b-"), "b.git");
+    await spawnGit(dirname(shallowB), "clone", "-q", "--depth", "1", `file://${parentRepo}`, shallowB);
+    const sharedCache = temp.make("cache-shallow-cross-repo-");
+    expect("error" in (await fetchSource({ name: "team", repo: parentRepo, ref: parentCommit }, sharedCache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo: shallowB, ref: childCommit }, sharedCache))).toBe(false);
+    rmSync(shallowB, { recursive: true, force: true });
+    const crossPin = await fetchSource({ name: "team", repo: shallowB, ref: parentCommit }, sharedCache);
+    expect("error" in crossPin || crossPin.stale !== undefined).toBe(true);
   });
 
   test("does not trust or migrate a malformed legacy record whose ref and commit SHAs disagree", async () => {
