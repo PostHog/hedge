@@ -389,18 +389,30 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
 
   test("propagates pack-level human prerequisite timeouts to dependent workflows and prints both hints when another probe fails", async () => {
     const { home } = await machineWithProfile();
-    const [ready, gone, allowSup] = [join(home, "ready"), join(home, "gone"), join(home, "allow-sup")];
-    expect(Bun.spawnSync(["mkfifo", ready, gone, allowSup]).exitCode).toBe(0);
+    const [ready, gone, allowReady, allowSawTerm, allowGone] = [
+      join(home, "ready"),
+      join(home, "gone"),
+      join(home, "allow-ready"),
+      join(home, "allow-saw-term"),
+      join(home, "allow-gone"),
+    ];
+    expect(Bun.spawnSync(["mkfifo", ready, gone, allowReady, allowSawTerm, allowGone]).exitCode).toBe(0);
+    const childBin = join(home, "allow-child.sh");
+    writeFileSync(
+      childBin,
+      '#!/bin/sh\ntrap \'echo term > "$3"; exit 0\' TERM\nexec 3>"$1"\necho $$ > "$2"\nsleep 30 3>&- & wait\n',
+      { mode: 0o755 },
+    );
     await withTeamPack(home, {
       workflows: [flow("allowlist"), flow("sync")],
       human: [
-        humanStep("allowlist", 'echo "$PPID" > "$HOME/allow-sup"; exit 1', "allowlist"),
-        humanStep("sign-in", `sup=$(cat "$HOME/allow-sup"); while kill -0 "$sup" 2>/dev/null; do sleep 0.01; done; ${blockedProbe("-")}`),
+        humanStep("allowlist", `${JSON.stringify(childBin)} "$HOME/allow-gone" "$HOME/allow-ready" "$HOME/allow-saw-term" & cat "$HOME/allow-ready" >/dev/null; exit 1`, "allowlist"),
+        humanStep("sign-in", blockedProbe("-")),
       ],
       steps: [{ id: "sync-step", workflow: "sync", after: "sign-in", run: ["true"] }],
     });
-    const [holderGone, started] = [fifoRead(gone), fifoRead(ready)];
-    const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await started) };
+    const [holderGone, started, allowTerm, allowClosed] = [fifoRead(gone), fifoRead(ready), fifoRead(allowSawTerm), fifoRead(allowGone)];
+    const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await Promise.all([started, allowTerm, allowClosed])) };
     try {
       const output = (await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output;
       expect(output).toContain("  ~ team  Team rules.\n      Workflows: allowlist needs setup, sync not checked\n      Needs setup on this machine. Run hedge doctor for the steps.\n      Hedge could not check this pack's setup in time. Run hedge doctor.");

@@ -2,6 +2,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, re
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { boxPrefix } from "../../../src/hub/names.ts";
+import { bunScript } from "../../../src/runner/bun.ts";
 import { heldLocks } from "./box-lock.ts";
 
 const idleStopMs = 2 * 3_600_000;
@@ -34,14 +35,6 @@ export const timedOut = 124;
 export const coderLimitMs = 10 * 60_000;
 const timeoutResult = (timeoutMs: number, stdout = ""): Result => ({ code: timedOut, stdout, stderr: `timed out after ${timeoutMs} ms` });
 
-function kill(target: number): void {
-  try {
-    process.kill(target, "SIGKILL");
-  } catch {
-    return;
-  }
-}
-
 const realTimer: Timer = (ms, fire) => {
   const timeout = setTimeout(fire, Math.max(1, Math.ceil(ms)));
   return () => clearTimeout(timeout);
@@ -55,6 +48,30 @@ function holdingLocks(argv: string[], locks: number[], timeoutMs: number): strin
   return ["timeout", "-s", "KILL", String(Math.ceil(timeoutMs / 1000) + orphanGraceSeconds), "/bin/sh", "-c", `exec "$@" ${closed}`, "hedge-box-lock", ...argv];
 }
 
+const captureSupervisor = join(import.meta.dir, "capture-supervisor.ts");
+
+async function readText(stream: ReadableStream<Uint8Array> | number | undefined, stop: AbortSignal): Promise<string> {
+  if (!(stream instanceof ReadableStream)) return "";
+  const reader = stream.getReader();
+  const onStop = () => void reader.cancel().catch(() => {});
+  stop.addEventListener("abort", onStop, { once: true });
+  if (stop.aborted) onStop();
+  const decoder = new TextDecoder("utf-8");
+  let out = "";
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      out += decoder.decode(value, { stream: true });
+    }
+    out += decoder.decode();
+  } catch {
+  } finally {
+    stop.removeEventListener("abort", onStop);
+  }
+  return out;
+}
+
 export function captureWith(timer: Timer): Capture {
   return async (argv, { env, stdin, timeoutMs, inherit = false }) => {
     const output = inherit ? "inherit" : "pipe";
@@ -63,14 +80,16 @@ export function captureWith(timer: Timer): Capture {
     let child: ReturnType<typeof Bun.spawn> | undefined;
     let stopped = false;
     let reaped = false;
-    const stopOnInterrupt = () => {
+    const stopStream = new AbortController();
+    const stopChild = () => {
       stopped = true;
-      if (!child) return;
-      kill(-child.pid);
-      if (!reaped) kill(child.pid);
+      if (!child || reaped) return;
+      try {
+        child.kill("SIGTERM");
+      } catch {}
     };
     const interrupted = (name: NodeJS.Signals) => {
-      stopOnInterrupt();
+      stopChild();
       release();
       if (!process.listenerCount(name)) {
         if (name === "SIGQUIT") process.exit(131);
@@ -84,21 +103,62 @@ export function captureWith(timer: Timer): Capture {
     for (const name of stopSignals) process.on(name, interrupted);
     let expired = false;
     let cancel = () => {};
+    let resolveStatus!: (status: { code?: number; error?: string; errCode?: string }) => void;
+    const statusPromise = new Promise<{ code?: number; error?: string; errCode?: string }>((resolve) => (resolveStatus = resolve));
+    let settled = false;
+    const settle = (status: { code?: number; error?: string; errCode?: string }) => {
+      if (settled) return;
+      settled = true;
+      resolveStatus(status);
+    };
     try {
-      child = Bun.spawn(holdingLocks(argv, locks, timeoutMs), { env: env as Record<string, string> | undefined, stdio: [input, output, output, ...locks], detached: true });
-      const live = child;
-      void live.exited.finally(() => {
-        reaped = true;
+      child = Bun.spawn(bunScript(captureSupervisor), {
+        env: env as Record<string, string> | undefined,
+        stdio: [input, output, output, ...locks],
+        detached: true,
+        ipc(message) {
+          if (!message || typeof message !== "object") return;
+          const record = message as { code?: unknown; error?: unknown };
+          if (typeof record.error === "string") {
+            settle({ error: record.error, ...(typeof record.code === "string" ? { errCode: record.code } : {}) });
+          } else if (typeof record.code === "number") {
+            settle({ code: record.code });
+          }
+        },
       });
-      if (stopped) stopOnInterrupt();
+      const live = child;
+      void live.exited.then((code) => {
+        reaped = true;
+        settle({ code });
+      });
+      if (stopped) {
+        stopChild();
+      } else {
+        live.send({ argv: holdingLocks(argv, locks, timeoutMs), lockCount: locks.length });
+      }
       cancel = timer(timeoutMs, () => {
         expired = true;
-        kill(-live.pid);
-        if (!reaped) kill(live.pid);
+        stopChild();
+        void live.exited.finally(() => stopStream.abort());
       });
-      const text = (stream: ReadableStream<Uint8Array> | number | undefined) => (stream instanceof ReadableStream ? new Response(stream).text() : "");
-      const [stdout, stderr, code] = await Promise.all([text(live.stdout), text(live.stderr), live.exited]);
-      return expired ? timeoutResult(timeoutMs, stdout) : { code, stdout, stderr };
+      const [stdout, stderr, status] = await Promise.all([
+        readText(live.stdout, stopStream.signal),
+        readText(live.stderr, stopStream.signal),
+        statusPromise,
+      ]);
+      if (!reaped) {
+        try {
+          live.send("done");
+        } catch {}
+      }
+      await live.exited;
+      if (expired) return timeoutResult(timeoutMs, stdout);
+      if (status.error !== undefined) {
+        const err = new Error(status.error) as NodeJS.ErrnoException;
+        if (status.errCode) err.code = status.errCode;
+        throw err;
+      }
+      return { code: status.code ?? 1, stdout, stderr };
     } finally {
       cancel();
       release();
