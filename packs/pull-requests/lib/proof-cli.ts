@@ -186,7 +186,7 @@ or with that heading at the end of the body. Only a # heading that GitHub shows 
 or ends that section, never an underlined one. When the setting changes, the next run moves the block,
 unless taking it out would join the lists or code blocks around it: then it stays and takes the new heading. Once the gate passed at HEAD, it starts with a **Merge card** line: the
 merge-risk grade and door, the reads, each gap with who accepted it, the count of known issues, and the minutes from
-opened to ready, or "still a draft". It prints the full merge card line, as hedge proof gate does, before its last line. It holds a row per owed proof (what ran, the result, the commit or the commit it
+opened to ready, or "still a draft". It prints the merge card line before its last line, as hedge proof gate does but without the gate's held: names. It holds a row per owed proof (what ran, the result, the commit or the commit it
 was reused from), a review row, a judge row, what was not checked, and each gap with who accepted it. It reads the
 proof summary the gate saved at HEAD and the decision ledger, never a proof's pass or fail itself. The block sits
 between ${receiptOpen} head=<sha> hash=<hex> --> and ${receiptClose}; the rest of the body stays as it is, and the
@@ -443,7 +443,7 @@ or the judge failed or was unavailable; 3 means only unaccepted gaps remain; 75 
 holds the gate. No gap waives the head check. The last line is the verdict: on a pass it names what it covered, and
 on any other exit it names the check that held the gate, also when the gate itself fails with an error. On a pass, the line before the verdict, or after a ledger
 line, starts "merge card:": the merge-risk grade and door, the review rounds and final reads and how many ran past the
-review budget, each gap with who accepted it and why, each item under Known issues, and the minutes from opened to
+review budget, each gap with who accepted it and why, after "held:" each 🤖 decision as the merge-gate hook names it (in the gate's line only), each item under Known issues, and the minutes from opened to
 ready and from ready to now; --json carries it as mergeCard. A pass records the gaps that 🤖 decisions accepted, here
 and in the ledger, and the merge-gate hook then holds that head until the user chooses "Merge" on a merge card that
 names the PR, its full head sha, and each held decision as the hook names it, such as d-1a2b3c4d for live-run/prod-shape, recorded with

@@ -14,7 +14,7 @@ import { baseRefs, cleanBaseMerge, devPullOf, diffOf, mergeBase, pullRequestDeta
 import { gitCommitReader, quietCommitIn, testOnlyRange } from "./proof-delta.ts";
 import { isCommitSha, measureGrowth, type Growth } from "./proof-end-table.ts";
 import { autonomyOf, decidesAll } from "./proof-autonomy.ts";
-import { mergeCardLine, readTimeline } from "./proof-merge-card.ts";
+import { heldNames, mergeCardLine, readTimeline } from "./proof-merge-card.ts";
 import { readSanity } from "./proof-sanity.ts";
 import { inputsDigest, readBloat } from "./proof-bloat.ts";
 import { judge, readCriticalPaths, type JudgeInput } from "./proof-judge.ts";
@@ -87,7 +87,8 @@ export async function finalGate(head: ProofIdentity, context: JudgingContext, { 
   await writeJson(savedPath(home, head, head.commit), { key: keyOf(read, landed, await fingerprintOf(home, head, files, checked.decisions)), gate, conditions: checked.conditions } satisfies SavedGate);
   if (gate.code !== 0) return gate;
   const seenGaps = Array.isArray(checked.decisions) ? checked.decisions.filter((decision) => decision.mark === "🤖" && decision.class === "proof-gap" && covers(decision, head)).map((decision) => decision.id) : [];
-  return { ...gate, seenGaps, cardOf: () => mergeCardLine({ ref: head, summary: gate.summary, body: read.body, timeline: readTimeline(head, read, run) }, now?.() ?? new Date()) };
+  const held = Array.isArray(checked.decisions) ? heldNames(gate.summary, checked.decisions) : [];
+  return { ...gate, seenGaps, cardOf: () => mergeCardLine({ ref: head, summary: gate.summary, body: read.body, timeline: readTimeline(head, read, run), held }, now?.() ?? new Date()) };
 }
 
 const verdictOf = (code: number, reason: string, covered: string) =>
