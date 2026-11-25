@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../../../src/testing/git.ts";
 import { dispatch, type HookResult, runInProcessWithin } from "./run.ts";
@@ -630,50 +630,71 @@ describe("hook runner", () => {
     expect(contexts.map((context: string) => Number(context.split(" ")[2]))).not.toContain(process.pid);
   });
 
-  test("runs an aliased hedgeHook in-process through the installed runner with a temporary home and fails a non-callable hedgeHook without spawning a child", async () => {
+  const copyEngineRunner = () => {
     const engine = temp.make("engine-");
     mkdirSync(join(engine, "packs/base/hooks"), { recursive: true });
+    copyFileSync(join(import.meta.dir, "run.sh"), join(engine, "packs/base/hooks/run.sh"));
     copyFileSync(join(import.meta.dir, "run.ts"), join(engine, "packs/base/hooks/run.ts"));
     symlinkSync(join(import.meta.dir, "secret-guard.ts"), join(engine, "packs/base/hooks/secret-guard.ts"));
     symlinkSync(join(import.meta.dir, "../lib"), join(engine, "packs/base/lib"));
+    return engine;
+  };
+
+  const installRunner = (home: string, hooksDir: string) => {
+    const installed = join(home, ".config/hedge/hooks");
+    mkdirSync(join(installed, "PreToolUse"), { recursive: true });
+    symlinkSync(join(hooksDir, "run.sh"), join(installed, "run.sh"));
+    symlinkSync(join(hooksDir, "run.ts"), join(installed, "run.ts"));
+    return installed;
+  };
+
+  test("runs an aliased hedgeHook in-process through the installed run.sh", async () => {
+    const engine = copyEngineRunner();
     const probe = join(engine, "packs/base/hooks/a-probe.ts");
     writeFileSync(probe, `${hookModule('  return { code: 0, stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: String(process.pid) } }), stderr: "" };')}`);
-
     const home = temp.make("home-");
-    mkdirSync(join(home, ".config/hedge/hooks/PreToolUse"), { recursive: true });
-    mkdirSync(join(home, ".agents"), { recursive: true });
-    writeFileSync(join(home, ".agents/AGENTS.md"), "## Model selection\n\n| Work | Model | Effort |\n| --- | --- | --- |\n| Lookup | temp-model | medium |\n");
-    symlinkSync(probe, join(home, ".config/hedge/hooks/PreToolUse/a-probe.ts"));
-    const inProc = Bun.spawn([process.execPath, join(engine, "packs/base/hooks/run.ts"), "claude", "PreToolUse"], {
+    const installed = installRunner(home, join(engine, "packs/base/hooks"));
+    symlinkSync(probe, join(installed, "PreToolUse/a-probe.ts"));
+    const proc = Bun.spawn(["/bin/sh", join(installed, "run.sh"), "claude", "PreToolUse"], {
       env: { ...process.env, HOME: home },
       stdin: new Blob(["{}"]),
       stdout: "pipe",
       stderr: "pipe",
     });
-    expect(await inProc.exited).toBe(0);
-    expect(JSON.parse(await new Response(inProc.stdout).text()).hookSpecificOutput.additionalContext).toBe(String(inProc.pid));
+    expect(await proc.exited).toBe(0);
+    expect(JSON.parse(await new Response(proc.stdout).text()).hookSpecificOutput.additionalContext).toBe(String(proc.pid));
+  });
 
-    const shippedHome = temp.make("shipped-home-");
-    mkdirSync(join(shippedHome, ".config/hedge/hooks/PreToolUse"), { recursive: true });
-    mkdirSync(join(shippedHome, ".agents"), { recursive: true });
-    writeFileSync(join(shippedHome, ".agents/AGENTS.md"), "## Model selection\n\n| Work | Model | Effort |\n| --- | --- | --- |\n| Lookup | temp-model | medium |\n");
-    symlinkSync(join(import.meta.dir, "name-a-model.ts"), join(shippedHome, ".config/hedge/hooks/PreToolUse/name-a-model.ts"));
-    const shipped = Bun.spawn([process.execPath, join(import.meta.dir, "run.ts"), "claude", "PreToolUse"], {
-      env: { ...process.env, HOME: shippedHome },
+  test("runs shipped hooks in-process through the installed run.sh without spawning a child Bun process", async () => {
+    const home = temp.make("shipped-home-");
+    const installed = installRunner(home, import.meta.dir);
+    mkdirSync(join(home, ".agents"), { recursive: true });
+    writeFileSync(join(home, ".agents/AGENTS.md"), "## Model selection\n\n| Work | Model | Effort |\n| --- | --- | --- |\n| Lookup | temp-model | medium |\n");
+    const pidLog = join(home, "bun-pids.log");
+    writeFileSync(join(installed, "count.ts"), `import { appendFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(pidLog)}, \`\${process.pid}\\n\`);\n`);
+    writeFileSync(join(installed, "bunfig.toml"), `preload = ["./count.ts"]\n`);
+    symlinkSync(join(import.meta.dir, "name-a-model.ts"), join(installed, "PreToolUse/name-a-model.ts"));
+    symlinkSync(join(import.meta.dir, "secret-guard.ts"), join(installed, "PreToolUse/secret-guard.ts"));
+    const shipped = Bun.spawn(["/bin/sh", join(installed, "run.sh"), "claude", "PreToolUse"], {
+      env: { ...process.env, HOME: home },
       stdin: new Blob([JSON.stringify({ tool_name: "Agent", tool_input: {} })]),
       stdout: "pipe",
       stderr: "pipe",
     });
     expect(await shipped.exited).toBe(2);
     expect(await new Response(shipped.stderr).text()).toContain("temp-model");
+    expect(readFileSync(pidLog, "utf8").trim().split("\n")).toEqual([String(shipped.pid)]);
+  });
 
+  test("fails a non-callable hedgeHook export through the installed run.sh without running it as a child", async () => {
+    const engine = copyEngineRunner();
     const bad = join(engine, "packs/base/hooks/bad-export.ts");
     writeFileSync(bad, `export const hedgeHook = 1;\nif (import.meta.main) console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: "child" } }));\n`);
-    const badHome = temp.make("bad-home-");
-    mkdirSync(join(badHome, ".config/hedge/hooks/PreToolUse"), { recursive: true });
-    symlinkSync(bad, join(badHome, ".config/hedge/hooks/PreToolUse/bad-export.ts"));
-    const failed = Bun.spawn([process.execPath, join(engine, "packs/base/hooks/run.ts"), "claude", "PreToolUse"], {
-      env: { ...process.env, HOME: badHome },
+    const home = temp.make("bad-home-");
+    const installed = installRunner(home, join(engine, "packs/base/hooks"));
+    symlinkSync(bad, join(installed, "PreToolUse/bad-export.ts"));
+    const failed = Bun.spawn(["/bin/sh", join(installed, "run.sh"), "claude", "PreToolUse"], {
+      env: { ...process.env, HOME: home },
       stdin: new Blob(["{}"]),
       stdout: "pipe",
       stderr: "pipe",
