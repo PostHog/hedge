@@ -282,9 +282,11 @@ export async function humanStepsLeft(plan: Plan, options: { home: string; run?: 
       ),
   );
   let timedOut = false;
-  void options.giveUp.then(() => {
+  const giveUpSettled = options.giveUp.then(() => {
     timedOut = true;
   });
+  await Promise.race([giveUpSettled, Promise.resolve()]);
+  if (timedOut) return { failing: [], unchecked: [...plan.human] };
   const outcomes = new Array<"passes" | "fails" | "unchecked">(plan.human.length).fill("unchecked");
   let next = 0;
   const checkOne = async (index: number) => {
@@ -676,27 +678,28 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
           writeSync(entry.fd, "\n");
           stillAlive = true;
         } catch {}
-        const sweepTag = entry.targetExited ? undefined : entry.tag;
+        const ownGroupOnly = Boolean(entry.targetExited);
+        const sweepTag = ownGroupOnly ? undefined : entry.tag;
         if (stillAlive) {
-          killSessionSync(entry.pid, "SIGKILL", sweepTag, spare);
+          killSessionSync(entry.pid, "SIGKILL", sweepTag, spare, ownGroupOnly);
           try {
             process.kill(entry.pid, "SIGKILL");
           } catch {}
           if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
-            killSessionSync(entry.holderPid, "SIGKILL", sweepTag, spare);
+            killSessionSync(entry.holderPid, "SIGKILL", sweepTag, spare, ownGroupOnly);
             try {
               process.kill(entry.holderPid, "SIGKILL");
             } catch {}
-            killDeadSessionSync(entry.holderPid, sweepTag, false, spare);
+            killDeadSessionSync(entry.holderPid, sweepTag, false, spare, ownGroupOnly);
           }
         } else {
-          killDeadSessionSync(entry.pid, sweepTag, false, spare);
+          killDeadSessionSync(entry.pid, sweepTag, false, spare, ownGroupOnly);
           if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
-            killSessionSync(entry.holderPid, "SIGKILL", sweepTag, spare);
+            killSessionSync(entry.holderPid, "SIGKILL", sweepTag, spare, ownGroupOnly);
             try {
               process.kill(entry.holderPid, "SIGKILL");
             } catch {}
-            killDeadSessionSync(entry.holderPid, sweepTag, false, spare);
+            killDeadSessionSync(entry.holderPid, sweepTag, false, spare, ownGroupOnly);
           }
         }
         removeSpareAsync(spare);
@@ -1006,9 +1009,9 @@ async function runDetached(command: string[], env: Record<string, string | undef
         if (child?.signalCode !== null || (!sawResult && supCode !== 128 && supCode !== 143)) {
           if (owned.guardFd !== undefined) await waitForFdClosed(owned.guardFd, 500);
           const spareFile = resolveProbeSpare(owned);
-          await killDeadSession(owned.pid, sawResult ? undefined : owned.tag, true, spareFile);
+          await killDeadSession(owned.pid, sawResult ? undefined : owned.tag, true, spareFile, sawResult);
           if (owned.runnerPid !== undefined) {
-            await killDeadSession(owned.runnerPid, sawResult ? undefined : owned.tag, false, spareFile);
+            await killDeadSession(owned.runnerPid, sawResult ? undefined : owned.tag, false, spareFile, sawResult);
           }
         }
       },

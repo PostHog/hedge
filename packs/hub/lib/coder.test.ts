@@ -1,7 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, symlinkSync, watch, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { createPipe } from "../../../src/reconciler/probe-supervisor.ts";
 import { watchEntries, type WatchClock } from "../../../src/reconciler/probe-watchdog.ts";
 import { tempDirs } from "../../../src/testing/git.ts";
 import { withBoxLock } from "./box-lock.ts";
@@ -668,18 +667,22 @@ await fastCapture(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; while true; do kill
   }
 });
 
-test("watchdog kills a real stopped process group when its controlled clock reaches delayMs", async () => {
+test("watchdog kills a real stopped process group when its controlled clock reaches delayMs and exits early when the supervisor dies", async () => {
+  const supervisorPath = join(import.meta.dir, "../../../src/reconciler/probe-supervisor.ts");
   const dir = temp.make("hedge-watchdog-clock-");
   const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
   expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
   const started = Bun.file(ready).text();
   const holderGone = Bun.file(gone).text();
-  const pipe = createPipe();
-  expect(pipe).toBeDefined();
-  const child = Bun.spawn(
-    ["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; while true; do kill -STOP 0; done', "probe", gone, ready],
-    { stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true },
-  );
+  const payload = JSON.stringify({
+    command: ["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; while true; do kill -STOP 0; done', "probe", gone, ready],
+    controlFd: 3,
+  });
+  const sup = Bun.spawn([process.execPath, supervisorPath, payload], {
+    stdio: ["ignore", "pipe", "ignore", "pipe"],
+    detached: true,
+  });
+  const aliveFd = sup.stdio[3] as number;
   let now = 0;
   let reachedBeforeDeadline!: () => void;
   const beforeDeadline = new Promise<void>((resolve) => (reachedBeforeDeadline = resolve));
@@ -699,20 +702,43 @@ test("watchdog kills a real stopped process group when its controlled clock reac
   try {
     targetPid = Number((await started).trim());
     expect(targetPid).toBeGreaterThan(0);
-    const watching = watchEntries([{ pid: child.pid, fd: pipe!.writeFd, delayMs: 150 }], clock);
+    const watching = watchEntries([{ pid: sup.pid, fd: aliveFd, delayMs: 150 }], clock);
     await beforeDeadline;
     expect(() => process.kill(targetPid, 0)).not.toThrow();
     releaseDeadline();
     await watching;
     expect(await holderGone).toBe("");
+    expect(await sup.exited).not.toBe(0);
   } finally {
-    try { closeSync(pipe!.readFd); } catch {}
-    try { closeSync(pipe!.writeFd); } catch {}
+    try { closeSync(aliveFd); } catch {}
+    try { process.kill(-sup.pid, "SIGCONT"); } catch {}
+    try { process.kill(-sup.pid, "SIGKILL"); } catch {}
     if (targetPid > 0) {
-      try { process.kill(-child.pid, "SIGCONT"); } catch {}
-      try { process.kill(-child.pid, "SIGKILL"); } catch {}
+      try { process.kill(targetPid, "SIGCONT"); } catch {}
+      try { process.kill(targetPid, "SIGKILL"); } catch {}
     }
-    try { child.kill("SIGKILL"); } catch {}
+    try { sup.kill("SIGKILL"); } catch {}
+  }
+
+  const fastPayload = JSON.stringify({ command: ["sh", "-c", "exit 0"], controlFd: 3 });
+  const fastSup = Bun.spawn([process.execPath, supervisorPath, fastPayload], {
+    stdio: ["ignore", "pipe", "ignore", "pipe"],
+    detached: true,
+  });
+  const fastFd = fastSup.stdio[3] as number;
+  try {
+    expect(await fastSup.exited).toBe(0);
+    let slept = false;
+    await watchEntries([{ pid: fastSup.pid, fd: fastFd, delayMs: 60_000 }], {
+      now: () => 0,
+      sleep: async () => {
+        slept = true;
+      },
+    });
+    expect(slept).toBe(false);
+  } finally {
+    try { closeSync(fastFd); } catch {}
+    try { fastSup.kill("SIGKILL"); } catch {}
   }
 });
 

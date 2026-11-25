@@ -113,7 +113,7 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
     const spare = resolveSpare(entry);
     try {
       if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
-        await killDeadSession(entry.holderPid, sweepTag, false, spare);
+        await killDeadSession(entry.holderPid, sweepTag, false, spare, reported);
       }
     } finally {
       removeSpare(entry);
@@ -124,14 +124,14 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
     try {
       if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
         const spare = resolveSpare(entry);
-        const targets = await discoverTargets(entry.holderPid, sweepTag, spare);
+        const targets = await discoverTargets(entry.holderPid, sweepTag, spare, reported);
         if (holderAlive(entry)) {
           signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.holderPid);
           try {
             process.kill(entry.holderPid, "SIGKILL");
           } catch {}
         }
-        await killDeadSession(entry.holderPid, sweepTag, false, resolveSpare(entry));
+        await killDeadSession(entry.holderPid, sweepTag, false, resolveSpare(entry), reported);
       }
     } finally {
       closeEntry(entry);
@@ -141,7 +141,7 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
   const sweepDead = async (entry: WatchEntry, reported: boolean, waitHolder = false) => {
     const sweepTag = entry.tag && !reported ? entry.tag : undefined;
     try {
-      await killDeadSession(entry.pid, sweepTag, false, resolveSpare(entry));
+      await killDeadSession(entry.pid, sweepTag, false, resolveSpare(entry), reported);
       if (waitHolder && entry.holderFd !== undefined && holderAlive(entry)) {
         await waitForFdClosed(entry.holderFd, 200);
         if (holderAlive(entry)) {
@@ -220,7 +220,7 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
       await Promise.all(
         deadRunners.map(({ entry, reported }) => {
           const sweepTag = entry.tag && !reported ? entry.tag : undefined;
-          return killDeadSession(entry.pid, sweepTag, false, resolveSpare(entry));
+          return killDeadSession(entry.pid, sweepTag, false, resolveSpare(entry), reported);
         }),
       );
     }
@@ -239,11 +239,12 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
           let sweptDead = false;
           try {
             if (alive(entry.fd)) {
-              const initialTag = entry.tag && !resultReported(entry) ? entry.tag : undefined;
-              let targets = await discoverTargets(entry.pid, initialTag, resolveSpare(entry));
+              const initialReported = resultReported(entry);
+              const initialTag = entry.tag && !initialReported ? entry.tag : undefined;
+              let targets = await discoverTargets(entry.pid, initialTag, resolveSpare(entry), initialReported);
               if (alive(entry.fd)) {
-                if (initialTag && resultReported(entry)) {
-                  targets = await discoverTargets(entry.pid, undefined, resolveSpare(entry));
+                if (!initialReported && resultReported(entry)) {
+                  targets = await discoverTargets(entry.pid, undefined, resolveSpare(entry), true);
                 }
                 if (alive(entry.fd)) {
                   signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.pid);
