@@ -744,6 +744,65 @@ describe("fetchSource", () => {
     expect(recovered.stale).toContain("could not fetch main");
     expect(await spawnGit(dir, "rev-parse", "HEAD")).toBe(v1);
   });
+
+  test("keeps distinct pin namespaces across packs and packs.git, trailing carriage returns, paths containing ' of ', and repairs null-commit metadata", async () => {
+    const parent = temp.make("edge-repos-");
+    const initPackRepo = async (dir: string, summary: string) => {
+      mkdirSync(dir, { recursive: true });
+      await spawnGit(dir, "init", "-q", "-b", "main");
+      writePack(dir, summary);
+      await spawnGit(dir, "add", ".");
+      await spawnGit(dir, "commit", "-q", "-m", "v1");
+      return await spawnGit(dir, "rev-parse", "HEAD");
+    };
+
+    const packsDir = join(parent, "packs");
+    const packsGitDir = join(parent, "packs.git");
+    const thirdDir = join(parent, "third");
+    const shaA = await initPackRepo(packsDir, "Plain packs.");
+    const shaB = await initPackRepo(packsGitDir, "Dotgit packs.");
+    const shaC = await initPackRepo(thirdDir, "Third packs.");
+    const cache = temp.make("cache-dotgit-");
+    expect("error" in (await fetchSource({ name: "team", repo: packsDir, ref: shaA }, cache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo: packsGitDir, ref: shaB }, cache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo: thirdDir, ref: shaC }, cache))).toBe(false);
+    const cross = await fetchSource({ name: "team", repo: packsGitDir, ref: shaA }, cache);
+    expect("error" in cross).toBe(true);
+
+    const crDir = join(parent, "repo\r");
+    const plainCrDir = join(parent, "repo");
+    const shaCr = await initPackRepo(crDir, "CR repo.");
+    const shaPlain = await initPackRepo(plainCrDir, "No CR repo.");
+    const crCache = temp.make("cache-cr-");
+    const gotCr = await fetchSource({ name: "team", repo: crDir, ref: shaCr }, crCache);
+    if ("error" in gotCr) throw new Error(gotCr.error);
+    expect(gotCr.packs[0]?.manifest.summary).toBe("CR repo.");
+    const gotPlain = await fetchSource({ name: "team", repo: plainCrDir, ref: shaPlain }, crCache);
+    if ("error" in gotPlain) throw new Error(gotPlain.error);
+    expect(gotPlain.packs[0]?.manifest.summary).toBe("No CR repo.");
+    const crossCr = await fetchSource({ name: "team", repo: plainCrDir, ref: shaCr }, crCache);
+    if ("error" in crossCr) throw new Error(crossCr.error);
+    expect(crossCr.packs[0]?.manifest.summary).toBe("No CR repo.");
+    expect(crossCr.stale).toContain(`could not fetch ${shaCr}`);
+
+    const ofDir = join(parent, "end of path");
+    await initPackRepo(ofDir, "Of path repo.");
+    const ofCache = temp.make("cache-of-");
+    expect("error" in (await fetchSource({ name: "team", repo: ofDir, ref: "main" }, ofCache))).toBe(false);
+    rmSync(ofDir, { recursive: true, force: true });
+    const ofFallback = await fetchSource({ name: "team", repo: ofDir, ref: "main" }, ofCache);
+    if ("error" in ofFallback) throw new Error(ofFallback.error);
+    expect(ofFallback.packs[0]?.manifest.summary).toBe("Of path repo.");
+    expect(ofFallback.stale).toContain("could not fetch main");
+
+    const repairRepo = await packRepo("Repairable.");
+    const repairCache = temp.make("cache-null-commit-");
+    expect("error" in (await fetchSource({ name: "team", repo: repairRepo, ref: "main" }, repairCache))).toBe(false);
+    writeFileSync(join(repairCache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo: repairRepo, ref: "main", commit: null }) + "\n");
+    const repaired = await fetchSource({ name: "team", repo: repairRepo, ref: "main" }, repairCache);
+    if ("error" in repaired) throw new Error(repaired.error);
+    expect(repaired.packs[0]?.manifest.summary).toBe("Repairable.");
+  });
 });
 
 describe("inside a Git hook of another repository", () => {

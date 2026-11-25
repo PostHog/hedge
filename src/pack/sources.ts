@@ -71,7 +71,11 @@ async function restoreCheckout(dir: string, before: CheckoutState | undefined): 
 async function resolvedRepoUrl(dir: string, repo: string) {
   if (!existsSync(join(dir, ".git"))) return repo;
   const read = await git(dir, "ls-remote", "--get-url", repo);
-  const url = read.rawStdout.replace(/\r?\n$/, "");
+  const url = read.rawStdout.endsWith("\n")
+    ? process.platform === "win32" && read.rawStdout.endsWith("\r\n")
+      ? read.rawStdout.slice(0, -2)
+      : read.rawStdout.slice(0, -1)
+    : read.rawStdout;
   return read.ok && url ? url : repo;
 }
 
@@ -81,10 +85,11 @@ const canonicalFetchHeadUrl = (url: string) =>
     .replace(/\/+$/, "")
     .replace(/\.git$/i, "");
 
-async function fetchHeadRepo(dir: string, commit: string): Promise<string | undefined> {
+async function fetchHeadRepo(dir: string, commit: unknown): Promise<string | undefined> {
+  if (typeof commit !== "string" || !commitSha.test(commit)) return undefined;
   const raw = await readFile(join(dir, ".git", "FETCH_HEAD"), "utf8").catch(() => "");
-  const first = raw.split(/\r?\n/, 1)[0] ?? "";
-  const match = first.match(/^([0-9a-f]{40})\t[^\t]*\t.* of ([\s\S]+)$/i);
+  const first = (process.platform === "win32" ? raw.split(/\r?\n/, 1)[0] : raw.split("\n", 1)[0]) ?? "";
+  const match = first.match(/^([0-9a-f]{40})\t[^\t]*\t(?:[^\t]*? )?of ([\s\S]+)$/i);
   if (!match || match[1]!.toLowerCase() !== commit.toLowerCase()) return undefined;
   return match[2];
 }
@@ -94,22 +99,25 @@ function fetchHeadMatches(fetchedUrl: string, candidate: string) {
 }
 
 async function goodMatchesEffective(dir: string, good: Good | undefined, repo: string, effectiveRepo: string): Promise<boolean> {
-  if (!good || good.repo !== repo) return false;
-  if (typeof good.resolved === "string") return good.resolved === effectiveRepo;
-  const fetchedUrl = await fetchHeadRepo(dir, good.commit);
+  if (!verifiedGoodCommit(good) || good!.repo !== repo) return false;
+  if (typeof good!.resolved === "string") return good!.resolved === effectiveRepo;
+  const fetchedUrl = await fetchHeadRepo(dir, good!.commit);
   if (fetchedUrl !== undefined) return fetchHeadMatches(fetchedUrl, effectiveRepo);
   return effectiveRepo === repo;
 }
 
-async function previousVerifiedRepo(dir: string, before: Good | undefined, effectiveBefore: string): Promise<string | undefined> {
-  if (!before || typeof before.repo !== "string") return undefined;
-  if (typeof before.resolved === "string") return before.resolved;
-  const fetchedUrl = await fetchHeadRepo(dir, before.commit);
+async function previousVerifiedRepo(dir: string, before: Good | undefined): Promise<string | undefined> {
+  if (!verifiedGoodCommit(before)) return undefined;
+  if (typeof before!.resolved === "string") return before!.resolved;
+  const beforeEffective = await resolvedRepoUrl(dir, before!.repo);
+  const fetchedUrl = await fetchHeadRepo(dir, before!.commit);
   if (fetchedUrl !== undefined) {
-    if (fetchHeadMatches(fetchedUrl, effectiveBefore)) return effectiveBefore;
-    return fetchHeadMatches(fetchedUrl, before.repo) ? before.repo : undefined;
+    if (fetchedUrl === beforeEffective) return beforeEffective;
+    if (fetchedUrl === before!.repo) return before!.repo;
+    if (fetchHeadMatches(fetchedUrl, beforeEffective)) return beforeEffective;
+    return fetchHeadMatches(fetchedUrl, before!.repo) ? before!.repo : undefined;
   }
-  return effectiveBefore === before.repo ? before.repo : undefined;
+  return beforeEffective === before!.repo ? before!.repo : undefined;
 }
 
 async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Promise<FetchedSource> {
@@ -119,7 +127,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
   const good = await lastGood(dir);
   const before = await currentCheckout(dir);
   const effectiveBefore = await resolvedRepoUrl(dir, repo);
-  const prevRepo = await previousVerifiedRepo(dir, good, effectiveBefore);
+  const prevRepo = await previousVerifiedRepo(dir, good);
   const preserveBefore =
     before !== undefined &&
     (!good || before.commit !== good.commit) &&
@@ -430,7 +438,7 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
   const head = `refs/heads/${branch}`;
   const effectiveRepo = await resolvedRepoUrl(dir, repo);
   const target = (await resolvedRepoUrl(dir, effectiveRepo)) === effectiveRepo ? effectiveRepo : repo;
-  const prevRepo = await previousVerifiedRepo(dir, await lastGood(dir), effectiveRepo);
+  const prevRepo = await previousVerifiedRepo(dir, await lastGood(dir));
   const listed = await git(dir, "ls-remote", target, head);
   if (!listed.ok) return { state: "failed", say: `could not reach ${ref.repo}: ${listed.stderr}` };
   const commit = listed.stdout.split("\n").map((line) => line.split("\t")).find(([, name]) => name === head)?.[0];
