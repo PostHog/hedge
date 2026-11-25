@@ -510,14 +510,14 @@ async function readSupervisorResult(stdout: ReadableStream<Uint8Array>, onFirstC
 }
 
 async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal, onResult?: (signal: AbortSignal, code: number) => void) {
-  if (!command.length || (command[0]!.includes("/") && !existsSync(command[0]!))) return 127;
-  let child: { pid: number; exited: Promise<number>; stdout: ReadableStream<Uint8Array>; unref(): void } | undefined;
+  if (!command.length) return 127;
+  let child: { pid: number; exited: Promise<number>; stdout: ReadableStream<Uint8Array>; kill(signal?: NodeJS.Signals): void; unref(): void } | undefined;
   let stopSignal: NodeJS.Signals | undefined;
   let reaped = false;
   const endGroup = (name: NodeJS.Signals = "SIGTERM") => {
     stopSignal ??= name;
     if (!child || reaped) return;
-    try { process.kill(child.pid, name); } catch {}
+    try { child.kill(name); } catch {}
   };
   const onAbort = () => endGroup("SIGTERM");
   const interrupted = (name: NodeJS.Signals) => {
@@ -546,6 +546,9 @@ async function runDetached(command: string[], env: Record<string, string | undef
       stderr: "ignore",
       env,
       detached: true,
+    });
+    void child.exited.then(() => {
+      reaped = true;
     });
     if (stopSignal || signal.aborted) endGroup(stopSignal ?? "SIGTERM");
     const status = await readSupervisorResult(child.stdout, (code) => onResult?.(signal, code));

@@ -642,8 +642,49 @@ describe("a leading hedge in a pack's commands", () => {
 });
 
 describe("humanStepsLeft", () => {
-  test("runs 35 passing probes cleanly under bounded concurrency", async () => {
+  test("caps concurrent probes to 8 while earlier probes stay open, and runs 35 passing probes cleanly", async () => {
     const home = temp.make("home-");
+    const slots = 8;
+    const readyFifos = Array.from({ length: slots + 1 }, (_, i) => join(home, `ready-${i}`));
+    const gateFifos = Array.from({ length: slots }, (_, i) => join(home, `gate-${i}`));
+    expect(Bun.spawnSync(["mkfifo", ...readyFifos, ...gateFifos]).exitCode).toBe(0);
+    const readers = readyFifos.map((path) => {
+      const proc = Bun.spawn(["cat", path], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+      return { proc, text: new Response(proc.stdout).text() };
+    });
+    const extraMarker = join(home, "started-extra");
+    const heldHuman = Array.from({ length: slots }, (_, i) => ({
+      id: `held-${i}`,
+      pack: "team",
+      say: `Held ${i}.`,
+      probe: ["sh", "-c", 'echo ok > "$1"; cat "$2" >/dev/null', "probe", readyFifos[i]!, gateFifos[i]!],
+    }));
+    const extraHuman = {
+      id: "extra",
+      pack: "team",
+      say: "Extra.",
+      probe: ["sh", "-c", 'echo ok > "$1"; echo ok > "$2"', "probe", extraMarker, readyFifos[slots]!],
+    };
+    const writers: Array<{ kill(signal?: NodeJS.Signals): void }> = [];
+    const release = async (path: string) => {
+      const proc = Bun.spawn(["sh", "-c", 'printf "go\\n" > "$1"', "writer", path], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+      writers.push(proc);
+      await proc.exited;
+    };
+    try {
+      const pending = humanStepsLeft(plan({ human: [...heldHuman, extraHuman] }), { home, giveUp: new Promise<void>(() => {}) });
+      await Promise.all(readers.slice(0, slots).map((r) => r.text));
+      expect(existsSync(extraMarker)).toBe(false);
+      await release(gateFifos[0]!);
+      expect((await readers[slots]!.text).trim()).toBe("ok");
+      expect(existsSync(extraMarker)).toBe(true);
+      await Promise.all(gateFifos.slice(1).map(release));
+      expect(await pending).toEqual({ failing: [], unchecked: [] });
+    } finally {
+      for (const r of readers) try { r.proc.kill("SIGKILL"); } catch {}
+      for (const w of writers) try { w.kill("SIGKILL"); } catch {}
+    }
+
     const trueBin = Bun.which("true")!;
     const human = Array.from({ length: 35 }, (_, idx) => ({ id: `step-${idx}`, pack: "team", say: `Step ${idx}.`, probe: [trueBin] }));
     const result = await humanStepsLeft(plan({ human }), { home, giveUp: new Promise<void>(() => {}) });

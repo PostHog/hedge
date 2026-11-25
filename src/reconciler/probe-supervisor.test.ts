@@ -76,11 +76,16 @@ await supervise(${JSON.stringify(command)}, {
     const entry = { fire, cancelled: false };
     timers.push(entry);
     write("armed");
-    return () => { entry.cancelled = true; };
+    return () => {
+      if (!entry.cancelled) {
+        entry.cancelled = true;
+        write("disarmed");
+      }
+    };
   },
   onSignal: (signal, handler) => void process.on(signal, handler),
   reportResult: (code) => write("result:" + code),
-  reportCleanup: () => {},
+  reportCleanup: () => write("cleanup"),
   exit: (code) => process.exit(code),
 });
 `;
@@ -97,10 +102,12 @@ await supervise(${JSON.stringify(command)}, {
   let armedCount = 0;
   let exited = false;
   let reported: number | undefined;
-  const resultWaiters: Array<(code: number) => void> = [];
+  let cleanedUp = false;
+  const cleanupWaiters: Array<() => void> = [];
   void proc.exited.then(() => {
     exited = true;
     for (const waiter of armedWaiters.splice(0)) waiter();
+    for (const waiter of cleanupWaiters.splice(0)) waiter();
   });
   void (async () => {
     for (;;) {
@@ -114,15 +121,19 @@ await supervise(${JSON.stringify(command)}, {
           const waiter = armedWaiters.shift();
           if (waiter) waiter();
           else armedCount++;
+        } else if (line === "disarmed") {
+          if (armedCount > 0) armedCount--;
+        } else if (line === "cleanup") {
+          cleanedUp = true;
+          for (const waiter of cleanupWaiters.splice(0)) waiter();
         } else if (line.startsWith("result:")) {
           reported = Number(line.slice("result:".length));
-          for (const waiter of resultWaiters.splice(0)) waiter(reported);
         }
       }
     }
   })();
-  const waitResult = () =>
-    reported !== undefined ? Promise.resolve(reported) : new Promise<number>((resolve) => resultWaiters.push(resolve));
+  const waitCleanup = () =>
+    cleanedUp || exited ? Promise.resolve() : new Promise<void>((resolve) => cleanupWaiters.push(resolve));
   const waitArmed = () =>
     armedCount > 0
       ? (armedCount--, Promise.resolve(true))
@@ -161,7 +172,7 @@ await supervise(${JSON.stringify(command)}, {
     } catch {}
     proc.kill("SIGKILL");
   };
-  return { proc, advance, drain, waitResult, releaseScan, cleanup };
+  return { proc, advance, drain, waitArmed, waitCleanup, releaseScan, cleanup };
 }
 
 function mkfifo(...paths: string[]) {
@@ -385,6 +396,7 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
       const childPid = Number((await started2).trim());
       expect(childPid).toBeGreaterThan(0);
       await fifoWrite(gate2, "go\n");
+      await stubbornSup.waitCleanup();
       expect(() => process.kill(childPid, 0)).not.toThrow();
       await stubbornSup.advance();
       expect(await holderGone2).toBe("");
@@ -394,42 +406,62 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
     }
   });
 
-  test("publishes the probe exit status while descendant scanning is still blocked, exits cleanly once none remain, bounds stalled scans, and forwards SIGINT during scan", async () => {
-    const sup = spawnControlledSupervisor(["sh", "-c", "exit 7"], { holdScan: true });
+  test("escalates stalled descendant scans through SIGTERM before SIGKILL and forwards SIGINT arriving during scan", async () => {
+    const dir = temp.make("sup-stalled-scan-");
+    const [ready, leaderGate, termSaw, termGate, termDone, gone] = [
+      join(dir, "ready"),
+      join(dir, "leader-gate"),
+      join(dir, "term-saw"),
+      join(dir, "term-gate"),
+      join(dir, "term-done"),
+      join(dir, "gone"),
+    ];
+    mkfifo(ready, leaderGate, termSaw, termGate, termDone, gone);
+    const started = fifoRead(ready);
+    const sawTerm = fifoRead(termSaw);
+    const sawDone = fifoRead(termDone);
+    const closed = fifoRead(gone);
+    const childScript = `trap 'echo got-term > ${JSON.stringify(termSaw)}; cat ${JSON.stringify(termGate)} >/dev/null; echo term-done > ${JSON.stringify(termDone)}; exit 0' TERM; exec 3>${JSON.stringify(gone)}; echo $$ > ${JSON.stringify(ready)}; sleep 30 3>&- & wait`;
+    const leaderScript = `import { readFileSync } from "node:fs";
+Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore", "ignore", "ignore"] });
+readFileSync(${JSON.stringify(leaderGate)}, "utf8");
+process.exit(7);`;
+    const stalled = spawnControlledSupervisor([process.execPath, "-e", leaderScript], { holdScan: true });
     try {
-      expect(await sup.waitResult()).toBe(7);
-      sup.releaseScan();
-      expect(await sup.proc.exited).toBe(7);
-    } finally {
-      sup.cleanup();
-    }
-
-    const stalled = spawnControlledSupervisor(["sh", "-c", "exit 7"], { holdScan: true });
-    try {
-      expect(await stalled.waitResult()).toBe(7);
+      const childPid = Number((await started).trim());
+      expect(childPid).toBeGreaterThan(0);
+      await fifoWrite(leaderGate, "go\n");
       await stalled.advance();
-      expect(await stalled.proc.exited).not.toBe(0);
+      expect((await sawTerm).trim()).toBe("got-term");
+      expect(() => process.kill(childPid, 0)).not.toThrow();
+      await fifoWrite(termGate, "go\n");
+      expect((await sawDone).trim()).toBe("term-done");
+      expect(await closed).toBe("");
+      await stalled.drain();
     } finally {
       stalled.cleanup();
     }
 
     const dir3 = temp.make("sup-scan-sigint-");
-    const [ready3, leaderGate3, intSaw3, intGate3, intDone3, gone3] = [
+    const [ready3, leaderGate3, leaderGone3, intSaw3, intGate3, intDone3, gone3] = [
       join(dir3, "ready"),
       join(dir3, "leader-gate"),
+      join(dir3, "leader-gone"),
       join(dir3, "int-saw"),
       join(dir3, "int-gate"),
       join(dir3, "int-done"),
       join(dir3, "gone"),
     ];
     const prematureTerm3 = join(dir3, "premature-term");
-    mkfifo(ready3, leaderGate3, intSaw3, intGate3, intDone3, gone3);
+    mkfifo(ready3, leaderGate3, leaderGone3, intSaw3, intGate3, intDone3, gone3);
     const started3 = fifoRead(ready3);
+    const leaderClosed3 = fifoRead(leaderGone3);
     const sawInt3 = fifoRead(intSaw3);
     const sawDone3 = fifoRead(intDone3);
     const closed3 = fifoRead(gone3);
     const childScript3 = `trap 'echo term > ${JSON.stringify(prematureTerm3)}' TERM; trap 'echo got-int > ${JSON.stringify(intSaw3)}; cat ${JSON.stringify(intGate3)} >/dev/null; echo int-done > ${JSON.stringify(intDone3)}; exit 0' INT; exec 3>${JSON.stringify(gone3)}; echo $$ > ${JSON.stringify(ready3)}; sleep 30 3>&- & wait`;
-    const leaderScript3 = `import { readFileSync } from "node:fs";
+    const leaderScript3 = `import { openSync, readFileSync } from "node:fs";
+openSync(${JSON.stringify(leaderGone3)}, "w");
 Bun.spawn(["sh", "-c", ${JSON.stringify(childScript3)}], { stdio: ["ignore", "ignore", "ignore"] });
 readFileSync(${JSON.stringify(leaderGate3)}, "utf8");
 process.exit(0);`;
@@ -438,7 +470,8 @@ process.exit(0);`;
       const childPid = Number((await started3).trim());
       expect(childPid).toBeGreaterThan(0);
       await fifoWrite(leaderGate3, "go\n");
-      expect(await scanInt.waitResult()).toBe(0);
+      expect(await leaderClosed3).toBe("");
+      await scanInt.waitArmed();
       scanInt.proc.kill("SIGINT");
       expect((await sawInt3).trim()).toBe("got-int");
       scanInt.releaseScan();

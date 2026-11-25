@@ -1,4 +1,5 @@
-import { closeSync, existsSync, readdirSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, writeSync } from "node:fs";
+import { readdir, readFile } from "node:fs/promises";
 
 export type StopSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT";
 export type Timer = (ms: number, fire: () => void) => () => void;
@@ -25,13 +26,13 @@ const realTimer: Timer = (ms, fire) => {
 export async function hasOtherGroupMembers(pgid = process.pid): Promise<boolean> {
   if (process.platform === "linux") {
     try {
-      for (const entry of readdirSync("/proc")) {
+      for (const entry of await readdir("/proc")) {
         if (!/^\d+$/.test(entry)) continue;
         const pid = Number(entry);
         if (pid === pgid) continue;
         let stat: string;
         try {
-          stat = readFileSync(`/proc/${entry}/stat`, "utf8");
+          stat = await readFile(`/proc/${entry}/stat`, "utf8");
         } catch {
           continue;
         }
@@ -177,21 +178,31 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
   if (!stop) {
     host.reportResult(code);
     scanning = true;
-    armHard();
+    cancelHard = host.timer(graceMs, () => {
+      cancelHard = undefined;
+      if (finished || !scanning) return;
+      scanning = false;
+      if (!stop) {
+        armHard();
+        forwardGroup("SIGTERM");
+      }
+      host.reportCleanup();
+    });
     const hasPeers = await host.hasOtherMembers();
+    const stillScanning = scanning;
     scanning = false;
-    if (finished) return settled;
+    if (finished || !stillScanning) return settled;
     if (!hasPeers) {
       exit(code);
       return settled;
     }
-    host.reportCleanup();
     if (!stop) {
       cancelHard?.();
       cancelHard = undefined;
       armHard();
       forwardGroup("SIGTERM");
     }
+    host.reportCleanup();
   }
   return settled;
 }

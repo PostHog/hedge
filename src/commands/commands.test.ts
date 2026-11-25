@@ -285,32 +285,28 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
 
   test("reports a failing human step that exits nonzero even when the deadline fires while its background child is still cleaning up", async () => {
     const { home } = await machineWithProfile();
-    const [childReady, ready, sawTerm, trapGate, gone] = [
+    const [childReady, ready, sawTerm, gone] = [
       join(home, "child-ready"),
       join(home, "ready"),
       join(home, "saw-term"),
-      join(home, "trap-gate"),
       join(home, "gone"),
     ];
-    expect(Bun.spawnSync(["mkfifo", childReady, ready, sawTerm, trapGate, gone]).exitCode).toBe(0);
+    expect(Bun.spawnSync(["mkfifo", childReady, ready, sawTerm, gone]).exitCode).toBe(0);
     const childBin = join(home, "stray-child.sh");
     writeFileSync(
       childBin,
-      '#!/bin/sh\ntrap \'echo term > "$3"; cat "$4" >/dev/null; exit 0\' TERM\nexec 3>"$1"\necho $$ > "$2"\nsleep 30 3>&- & wait\n',
+      '#!/bin/sh\ntrap \'echo term > "$3"; exit 0\' TERM\nexec 3>"$1"\necho $$ > "$2"\nsleep 30 3>&- & wait\n',
       { mode: 0o755 },
     );
     await withTeamPack(home, {
       workflows: [flow("allowlist")],
-      human: [humanStep("allowlist", `${JSON.stringify(childBin)} "$HOME/gone" "$HOME/child-ready" "$HOME/saw-term" "$HOME/trap-gate" & pid=$(cat "$HOME/child-ready"); echo "$pid" > "$HOME/ready"; exit 7`, "allowlist")],
+      human: [humanStep("allowlist", `${JSON.stringify(childBin)} "$HOME/gone" "$HOME/child-ready" "$HOME/saw-term" & pid=$(cat "$HOME/child-ready"); echo "$pid" > "$HOME/ready"; exit 7`, "allowlist")],
     });
     const [started, gotTerm, holderGone] = [fifoRead(ready), fifoRead(sawTerm), fifoRead(gone)];
     const deadlineDuringCleanup = { now: () => 0, sleep: async () => void (await gotTerm) };
     try {
       const output = (await hedge(home, ["packs"], 0, { clock: deadlineDuringCleanup })).output;
       expect(output).toContain(`  ~ team  Team rules.\n      Workflows: allowlist needs setup\n${needsSetup}`);
-      const release = Bun.spawn(["sh", "-c", 'printf "go\\n" > "$1"', "writer", trapGate], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-      activeHelpers.push(release);
-      await release.exited;
       expect(await holderGone).toBe("");
     } finally {
       await endHolder(started);
@@ -393,13 +389,13 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
 
   test("propagates pack-level human prerequisite timeouts to dependent workflows and prints both hints when another probe fails", async () => {
     const { home } = await machineWithProfile();
-    const [ready, gone] = [join(home, "ready"), join(home, "gone")];
-    expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+    const [ready, gone, allowSup] = [join(home, "ready"), join(home, "gone"), join(home, "allow-sup")];
+    expect(Bun.spawnSync(["mkfifo", ready, gone, allowSup]).exitCode).toBe(0);
     await withTeamPack(home, {
       workflows: [flow("allowlist"), flow("sync")],
       human: [
-        { id: "allowlist", say: "Set up allowlist.", probe: ["/nonexistent-hedge-probe"], workflow: "allowlist" },
-        humanStep("sign-in", blockedProbe("-")),
+        humanStep("allowlist", 'echo "$PPID" > "$HOME/allow-sup"; exit 1', "allowlist"),
+        humanStep("sign-in", `sup=$(cat "$HOME/allow-sup"); while kill -0 "$sup" 2>/dev/null; do sleep 0.01; done; ${blockedProbe("-")}`),
       ],
       steps: [{ id: "sync-step", workflow: "sync", after: "sign-in", run: ["true"] }],
     });
