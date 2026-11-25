@@ -204,9 +204,16 @@ describe("which calls enqueue or merge", () => {
   test.each([["\r/trunk merge"], ["\v/trunk merge"], ["\uFEFF/trunk merge"], ["\u00A0\u2028/trunk merge"]])("a T3 body that T3 trims to /trunk merge counts as one: %j", (body) => {
     const pr = { repository: "example/product", number: 7 };
     expect(mcp("mcp__t3-code__pull_request_respond", { ...pr, body })).toEqual({ targets: [target("example/product", 7)] });
-    expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "comment", body }).refusal).toBe(otherEndpointReason);
     expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "comment", comments: [{ path: "a.ts", line: 1, body }] }).refusal).toBe(otherEndpointReason);
     expect(mcp("mcp__t3-code__pull_request_respond", { ...pr, reviewThreadId: "thread-1", body }).refusal).toBe(otherEndpointReason);
+  });
+
+  test("a T3 call is read only in the fields T3 posts, each as T3 posts it", () => {
+    const pr = { repository: "example/product", number: 7 };
+    expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "comment", body: "\r/trunk merge" })).toEqual({ targets: [] });
+    expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "comment", body: "Looks good.", comments: [{ path: "a.ts", line: 1, body: "Nit.", note: "/trunk merge" }] })).toEqual({ targets: [] });
+    expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "comment", body: "Looks good.", summary: "/trunk merge" })).toEqual({ targets: [] });
+    expect(mcp("mcp__t3-code__pull_request_respond", { ...pr, body: "Fixed.", note: "/trunk merge" })).toEqual({ targets: [] });
   });
 
   test("a T3 reply with a null reviewThreadId, which T3 posts as a PR comment, is gated as one", () => {
