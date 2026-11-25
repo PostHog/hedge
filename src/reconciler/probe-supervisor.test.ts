@@ -94,12 +94,9 @@ await supervise(${JSON.stringify(command)}, {
   let armedCount = 0;
   let exited = false;
   let reported: number | undefined;
-  let cleanedUp = false;
-  const cleanupWaiters: Array<() => void> = [];
   void proc.exited.then(() => {
     exited = true;
     for (const waiter of armedWaiters.splice(0)) waiter();
-    for (const waiter of cleanupWaiters.splice(0)) waiter();
   });
   void (async () => {
     for (;;) {
@@ -115,17 +112,12 @@ await supervise(${JSON.stringify(command)}, {
           else armedCount++;
         } else if (line === "disarmed") {
           if (armedCount > 0) armedCount--;
-        } else if (line === "cleanup") {
-          cleanedUp = true;
-          for (const waiter of cleanupWaiters.splice(0)) waiter();
         } else if (line.startsWith("result:")) {
           reported = Number(line.slice("result:".length));
         }
       }
     }
   })();
-  const waitCleanup = () =>
-    cleanedUp || exited ? Promise.resolve() : new Promise<void>((resolve) => cleanupWaiters.push(resolve));
   const waitArmed = () =>
     armedCount > 0
       ? (armedCount--, Promise.resolve(true))
@@ -152,19 +144,13 @@ await supervise(${JSON.stringify(command)}, {
     const code = await proc.exited;
     return reported ?? code;
   };
-  const releaseScan = () => {
-    try {
-      proc.stdin.write("release-scan\n");
-      proc.stdin.flush();
-    } catch {}
-  };
   const cleanup = () => {
     try {
       process.kill(-proc.pid, "SIGKILL");
     } catch {}
     proc.kill("SIGKILL");
   };
-  return { proc, advance, drain, waitArmed, waitCleanup, releaseScan, cleanup };
+  return { proc, advance, drain, waitArmed, cleanup };
 }
 
 function mkfifo(...paths: string[]) {
@@ -371,24 +357,31 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
     }
 
     const dir2 = temp.make("sup-orphan-");
-    const [ready2, gate2, gone2] = [join(dir2, "ready"), join(dir2, "gate"), join(dir2, "gone")];
-    mkfifo(ready2, gate2, gone2);
+    const [ready2, gate2, leaderGone2, gone2] = [
+      join(dir2, "ready"),
+      join(dir2, "gate"),
+      join(dir2, "leader-gone"),
+      join(dir2, "gone"),
+    ];
+    mkfifo(ready2, gate2, leaderGone2, gone2);
     const started2 = fifoRead(ready2);
+    const leaderClosed2 = fifoRead(leaderGone2);
     const holderGone2 = fifoRead(gone2);
     const stubbornChild = `trap "" HUP TERM; exec 3>${JSON.stringify(gone2)}; echo $$ > ${JSON.stringify(ready2)}; exec sleep 30`;
     const stubbornSup = spawnControlledSupervisor([
       "sh",
       "-c",
-      'sh -c "$1" & cat "$2" >/dev/null; exit 0',
+      'exec 4>"$3"; sh -c "$1" 4>&- & cat "$2" >/dev/null; exit 0',
       "probe",
       stubbornChild,
       gate2,
+      leaderGone2,
     ]);
     try {
       const childPid = Number((await started2).trim());
       expect(childPid).toBeGreaterThan(0);
       await fifoWrite(gate2, "go\n");
-      await stubbornSup.waitCleanup();
+      expect(await leaderClosed2).toBe("");
       expect(() => process.kill(childPid, 0)).not.toThrow();
       await stubbornSup.advance();
       expect(await holderGone2).toBe("");
@@ -419,7 +412,6 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
       await fifoWrite(gate, "go\n");
       const grandPid = Number((await grandStarted).trim());
       expect(grandPid).toBeGreaterThan(0);
-      await sup.waitCleanup();
       expect(() => process.kill(grandPid, 0)).not.toThrow();
       await sup.advance();
       expect(await grandClosed).toBe("");

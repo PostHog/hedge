@@ -7,18 +7,21 @@ export const graceMs = 150;
 export const interruptGraceMs = 300;
 
 export type SupervisorHost = {
-  spawn: (command: string[]) => { exited: Promise<number> };
+  spawn: (command: string[]) => { pid?: number; exited: Promise<number>; kill?: (signal?: NodeJS.Signals) => void };
   killGroup: (signal: NodeJS.Signals) => void;
-  hasGroupMembers?: () => boolean;
+  hasGroupMembers?: (targetPid?: number) => Promise<boolean> | boolean;
   timer: Timer;
   onSignal: (signal: StopSignal, handler: () => void) => void;
+  reportTarget?: (pid: number) => void;
   reportResult: (code: number) => void;
   reportCleanup: () => void;
   exit: (code: number) => void;
 };
 
-function hasOtherGroupMember(): boolean {
+async function hasOtherGroupMember(targetPid?: number): Promise<boolean> {
   const self = process.pid;
+  const groups = new Set<number>([self]);
+  if (targetPid !== undefined && targetPid !== self) groups.add(targetPid);
   if (process.platform === "linux") {
     try {
       for (const name of readdirSync("/proc")) {
@@ -34,7 +37,7 @@ function hasOtherGroupMember(): boolean {
         const closeParen = stat.lastIndexOf(")");
         if (closeParen === -1) continue;
         const fields = stat.slice(closeParen + 2).split(" ");
-        if (Number(fields[2]) === self) return true;
+        if (groups.has(Number(fields[2]))) return true;
       }
       return false;
     } catch {
@@ -42,15 +45,15 @@ function hasOtherGroupMember(): boolean {
     }
   }
   try {
-    const ps = Bun.spawnSync(["ps", "-eo", "pid=,pgid="], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-    if (ps.exitCode !== 0) return true;
-    const text = ps.stdout.toString();
+    const ps = Bun.spawn(["ps", "-eo", "pid=,pgid="], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    const [text, code] = await Promise.all([new Response(ps.stdout).text(), ps.exited]);
+    if (code !== 0) return true;
     for (const line of text.split("\n")) {
       const parts = line.trim().split(/\s+/);
       if (parts.length < 2) continue;
       const pid = Number(parts[0]);
       const pgid = Number(parts[1]);
-      if (pgid === self && pid !== self && pid !== ps.pid) return true;
+      if (groups.has(pgid) && pid !== self && pid !== ps.pid) return true;
     }
     return false;
   } catch {
@@ -68,7 +71,7 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
   const settled = new Promise<number>((resolve) => (resolveDone = resolve));
 
   let stop: StopSignal | undefined;
-  let target: { exited: Promise<number> } | undefined;
+  let target: { pid?: number; exited: Promise<number>; kill?: (signal?: NodeJS.Signals) => void } | undefined;
   let leaderDone = false;
   let finished = false;
   let cancelInterrupt: (() => void) | undefined;
@@ -150,6 +153,7 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
     exit(127);
     return settled;
   }
+  if (target.pid !== undefined) host.reportTarget?.(target.pid);
 
   if (stop) {
     arm(stop);
@@ -160,12 +164,15 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
   leaderDone = true;
   if (finished) return settled;
   if (!stop) {
-    if (host.hasGroupMembers && !host.hasGroupMembers()) {
-      host.reportResult(code);
-      exit(code);
-      return settled;
-    }
     host.reportResult(code);
+    if (host.hasGroupMembers) {
+      const hasMembers = await host.hasGroupMembers(target.pid);
+      if (finished) return settled;
+      if (!stop && !hasMembers) {
+        exit(code);
+        return settled;
+      }
+    }
     armHard();
     forwardGroup("SIGTERM");
     host.reportCleanup();
@@ -195,9 +202,32 @@ if (import.meta.main) {
       if (typeof record.graceMs === "number" && record.graceMs >= 0) cleanupGraceMs = record.graceMs;
     }
   } catch {}
+  let spawnedTarget: ReturnType<typeof Bun.spawn> | undefined;
+  let targetReaped = false;
+  let ownPgidActive = false;
   await supervise(command, {
-    spawn: (argv) => Bun.spawn(argv, { stdio: ["ignore", "ignore", "ignore"] }),
+    spawn: (argv) => {
+      const proc = Bun.spawn(argv, { stdio: ["ignore", "ignore", "ignore"] });
+      spawnedTarget = proc;
+      void proc.exited.finally(() => {
+        targetReaped = true;
+        if (proc.pid !== process.pid) {
+          try {
+            process.kill(-proc.pid, 0);
+            ownPgidActive = true;
+          } catch {
+            ownPgidActive = false;
+          }
+        }
+      });
+      return proc;
+    },
     killGroup: (signal) => {
+      if (spawnedTarget && (!targetReaped || ownPgidActive)) {
+        try {
+          process.kill(-spawnedTarget.pid, signal);
+        } catch {}
+      }
       try {
         process.kill(-process.pid, signal);
       } catch {}
@@ -205,6 +235,11 @@ if (import.meta.main) {
     hasGroupMembers: hasOtherGroupMember,
     timer: realTimer,
     onSignal: (signal, handler) => void handlers.set(signal, handler),
+    reportTarget: (pid) => {
+      try {
+        writeSync(1, `target:${pid}\n`);
+      } catch {}
+    },
     reportResult: (code) => {
       try {
         writeSync(1, `${code}\n`);

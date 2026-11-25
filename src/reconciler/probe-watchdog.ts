@@ -1,6 +1,6 @@
 import { closeSync, writeSync } from "node:fs";
 
-type WatchEntry = { pid: number; fd: number; delayMs: number };
+type WatchEntry = { pid: number; targetPid?: number; fd: number; delayMs: number };
 
 const alive = (fd: number) => {
   try {
@@ -46,6 +46,14 @@ if (import.meta.main) {
       const left = entry.delayMs - elapsed;
       if (left <= 0) {
         if (alive(entry.fd)) {
+          if (typeof entry.targetPid === "number") {
+            try {
+              process.kill(-entry.targetPid, "SIGKILL");
+            } catch {}
+            try {
+              process.kill(entry.targetPid, "SIGKILL");
+            } catch {}
+          }
           try {
             process.kill(-entry.pid, "SIGKILL");
           } catch {}

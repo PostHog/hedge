@@ -489,21 +489,28 @@ const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
 let activeSupervisors = 0;
 const supervisorWaiters: Array<() => void> = [];
 
-type LiveProbe = { pid: number; aliveFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
+type LiveProbe = { pid: number; targetPid?: number; aliveFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
 type ActiveRunner = { stop: (name: NodeJS.Signals) => void };
 const activeRunners = new Set<ActiveRunner>();
 const allLiveProbes = new Set<LiveProbe>();
 let interruptHandlersAttached = false;
 
 function handOffWatchdog(probes: Iterable<LiveProbe>) {
-  const batch: Array<{ pid: number; fd: number; delayMs: number }> = [];
+  const batch: Array<{ pid: number; targetPid?: number; fd: number; delayMs: number }> = [];
   for (const probe of probes) {
     if (probe.aliveFd === undefined) continue;
-    batch.push({ pid: probe.pid, fd: probe.aliveFd, delayMs: probe.delayMs });
+    batch.push({ pid: probe.pid, ...(probe.targetPid !== undefined ? { targetPid: probe.targetPid } : {}), fd: probe.aliveFd, delayMs: probe.delayMs });
     probe.aliveFd = undefined;
   }
   if (!batch.length) return;
-  const payload = JSON.stringify(batch.map((entry, index) => ({ pid: entry.pid, fd: index + 3, delayMs: entry.delayMs })));
+  const payload = JSON.stringify(
+    batch.map((entry, index) => ({
+      pid: entry.pid,
+      ...(entry.targetPid !== undefined ? { targetPid: entry.targetPid } : {}),
+      fd: index + 3,
+      delayMs: entry.delayMs,
+    })),
+  );
   try {
     const watchdog = Bun.spawn(bunScript(probeWatchdog, payload), {
       stdio: ["ignore", "ignore", "ignore", ...batch.map((entry) => entry.fd)],
@@ -577,7 +584,11 @@ async function acquireSupervisorSlot(signal: AbortSignal): Promise<(() => void) 
   };
 }
 
-async function readSupervisorResult(stdout: ReadableStream<Uint8Array>, onFirstCode: (code: number) => void): Promise<{ code?: number; cleanup: boolean }> {
+async function readSupervisorResult(
+  stdout: ReadableStream<Uint8Array>,
+  onFirstCode: (code: number) => void,
+  onTarget?: (pid: number) => void,
+): Promise<{ code?: number; cleanup: boolean }> {
   const reader = stdout.getReader();
   const decoder = new TextDecoder();
   let buf = "";
@@ -591,7 +602,10 @@ async function readSupervisorResult(stdout: ReadableStream<Uint8Array>, onFirstC
       for (let nl = buf.indexOf("\n"); nl !== -1; nl = buf.indexOf("\n")) {
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
-        if (code === undefined && /^\d+$/.test(line)) {
+        if (line.startsWith("target:")) {
+          const pid = Number(line.slice("target:".length));
+          if (Number.isInteger(pid) && pid > 0) onTarget?.(pid);
+        } else if (code === undefined && /^\d+$/.test(line)) {
           code = Number(line);
           onFirstCode(code);
         } else if (line === "cleanup") {
@@ -613,6 +627,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
   let probe: LiveProbe | undefined;
   let stopSignal: NodeJS.Signals | undefined;
   let reaped = false;
+  let reportedResult = false;
   const delayFor = (name: NodeJS.Signals) => (cleanupGraceMs ?? graceMs) + (name === "SIGINT" || name === "SIGQUIT" ? interruptGraceMs : 0) + 100;
   let lastSignal: NodeJS.Signals | undefined;
   const endGroup = (name: NodeJS.Signals = "SIGTERM") => {
@@ -620,6 +635,11 @@ async function runDetached(command: string[], env: Record<string, string | undef
     if (!child || reaped || lastSignal === name) return;
     lastSignal = name;
     if (probe) probe.delayMs = Math.max(probe.delayMs, delayFor(name));
+    if (probe?.targetPid !== undefined) {
+      try {
+        process.kill(-probe.targetPid, "SIGCONT");
+      } catch {}
+    }
     try {
       process.kill(-child.pid, "SIGCONT");
     } catch {}
@@ -665,8 +685,27 @@ async function runDetached(command: string[], env: Record<string, string | undef
     syncInterruptHandlers();
     handedToExit = true;
     const owned = probe;
-    void child.exited.finally(() => {
-      reaped = true;
+    void child.exited.then(
+      (supCode) => {
+        reaped = true;
+        if (!reportedResult && supCode !== 128 && supCode !== 143) {
+          if (owned.targetPid !== undefined) {
+            try {
+              process.kill(-owned.targetPid, "SIGKILL");
+            } catch {}
+            try {
+              process.kill(owned.targetPid, "SIGKILL");
+            } catch {}
+          }
+          try {
+            process.kill(-owned.pid, "SIGKILL");
+          } catch {}
+        }
+      },
+      () => {
+        reaped = true;
+      },
+    ).finally(() => {
       if (owned.aliveFd !== undefined) {
         try {
           closeSync(owned.aliveFd);
@@ -679,7 +718,16 @@ async function runDetached(command: string[], env: Record<string, string | undef
       releaseSlot();
     });
     if (stopSignal || signal.aborted) endGroup(stopSignal ?? "SIGTERM");
-    const status = await readSupervisorResult(child.stdout as ReadableStream<Uint8Array>, (code) => onResult?.(signal, code));
+    const status = await readSupervisorResult(
+      child.stdout as ReadableStream<Uint8Array>,
+      (code) => {
+        reportedResult = true;
+        onResult?.(signal, code);
+      },
+      (pid) => {
+        owned.targetPid = pid;
+      },
+    );
     if (status.code !== undefined && status.cleanup) {
       child.unref();
       return status.code;
