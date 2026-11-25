@@ -309,6 +309,19 @@ test("a judge that passed shows that the gate fails now when CI turns red after 
   expect(block(pr.githubBody())).toContain(`| Proof judge | an independent model reads the evidence against the diff | ✅ passed at \`${short(head)}\`, but the gate fails now | |`);
 });
 
+test("a check that a person passes after a passing gate leaves the gate passing on the receipt", async () => {
+  const { pr, head } = await provedPr();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...JSON.parse(pr.env.HEDGE_SETTINGS!), "pull-requests.personChecks": "example/product=Visual Review gate / storybook" });
+  pr.required("main", [{ context: "test" }, { context: "Visual Review gate / storybook", integration_id: 7 }]);
+  pr.githubApp("product", 7);
+  pr.ci([{ name: "test", bucket: "pass" }]);
+  pr.statuses([{ context: "Visual Review gate / storybook", state: "failure", by: "product[bot]" }]);
+  expect((await pr.hedge("gate")).code).toBe(0);
+  pr.statuses([{ context: "Visual Review gate / storybook", state: "success", by: "product[bot]" }]);
+  expect((await pr.hedge("receipt")).code).toBe(0);
+  expect(block(pr.githubBody())).toContain(`| Proof judge | an independent model reads the evidence against the diff | ✅ passed at \`${short(head)}\` | |`);
+});
+
 test("evidence reused and then carried across a base merge shows the lines of the commit that ran it", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "greet new members\n");

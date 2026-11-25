@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### A check that a person passes no longer turns into a ci gap
+
+- A new setting, `pull-requests.personChecks`, lists the required checks that
+  a person passes on GitHub, as owner/name=check pairs, such as
+  `PostHog/posthog=Visual Review gate / storybook`. No CI produces their
+  result: someone accepts the visual change.
+- `hedge proof gate` does not wait on such a check, does not count it red,
+  and does not ask for a ci gap on it. This holds only when the PR's own
+  base requires the check pinned to an app, requires its context once and
+  no other check of its workflow, and no other app runs a check of its name.
+- The CI line names such a check without its result, so a person passing it
+  later leaves the gate as it was. GitHub still holds the merge until the
+  person passes it.
+
 ### The merge card line names what the hold needs
 
 - When an agent accepted a gap, the `merge card:` line of `hedge proof gate`
