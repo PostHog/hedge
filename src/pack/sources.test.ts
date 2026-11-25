@@ -297,46 +297,30 @@ describe("fetchSource", () => {
     expect(fetched).toMatchObject({ error: expect.stringContaining("could not fetch v1") });
   });
 
-  test("ignores a malformed pins file or malformed last-good record and fetches cleanly", async () => {
+  test("ignores a malformed last-good record and fetches cleanly", async () => {
     const repo = await packRepo("Team rules v1.");
     const commit1 = await spawnGit(repo, "rev-parse", "HEAD");
-    writePack(repo, "Team rules v2.");
-    await spawnGit(repo, "commit", "-q", "-am", "v2");
-    const commit2 = await spawnGit(repo, "rev-parse", "HEAD");
     const cache = temp.make("cache-");
     await fetchSource({ name: "team", repo, ref: commit1 }, cache);
-    await fetchSource({ name: "team", repo, ref: commit2 }, cache);
-
-    const pinsFile = join(cache, "team", ".git", "hedge-pins.json");
-    const repoHash = createHash("sha256").update(repo).digest("hex");
-    writeFileSync(pinsFile, JSON.stringify({ repoHash, commits: commit1 }));
-    rmSync(repo, { recursive: true, force: true });
-    const offlineInvalidShape = await fetchSource({ name: "team", repo, ref: commit1 }, cache);
-    if ("error" in offlineInvalidShape) throw new Error(offlineInvalidShape.error);
-    expect(offlineInvalidShape.packs[0]?.manifest.summary).toBe("Team rules v2.");
-    expect(offlineInvalidShape.stale).toContain(`could not fetch ${commit1}`);
 
     const freshRepo = await packRepo("Fresh rules.");
     const freshCommit = await spawnGit(freshRepo, "rev-parse", "HEAD");
     writeFileSync(join(cache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo: 42 }));
-    writeFileSync(pinsFile, "{not valid json");
     const fetchedCorrupt = await fetchSource({ name: "team", repo: freshRepo, ref: freshCommit }, cache);
     if ("error" in fetchedCorrupt) throw new Error(fetchedCorrupt.error);
     expect([fetchedCorrupt.packs[0]?.manifest.summary, fetchedCorrupt.stale]).toEqual(["Fresh rules.", undefined]);
   });
 
-  test("keeps hedge-source.json and hedge-pins.json private (0600) across atomic updates", async () => {
+  test("keeps hedge-source.json private (0600) across atomic updates", async () => {
     const repo = await packRepo("Private creds repo.");
     const commit = await spawnGit(repo, "rev-parse", "HEAD");
     const cache = temp.make("cache-");
     await fetchSource({ name: "team", repo, ref: commit }, cache);
     const sourceFile = join(cache, "team", ".git", "hedge-source.json");
-    const pinsFile = join(cache, "team", ".git", "hedge-pins.json");
     expect(statSync(sourceFile).mode & 0o777).toBe(0o600);
-    expect(statSync(pinsFile).mode & 0o777).toBe(0o600);
   });
 
-  test("preserves verified pin history across repository switches, pre-upgrade caches, and git gc", async () => {
+  test("preserves verified pin history across repository switches, pre-ref legacy caches, and git gc", async () => {
     const repoA = await packRepo("Repo A v1.");
     const commitA1 = await spawnGit(repoA, "rev-parse", "HEAD");
     const repoB = await packRepo("Repo B v1.");
@@ -344,7 +328,7 @@ describe("fetchSource", () => {
     const cache = temp.make("cache-");
 
     await fetchSource({ name: "team", repo: repoA, ref: commitA1 }, cache);
-    rmSync(join(cache, "team", ".git", "hedge-pins.json"), { force: true });
+    rmSync(join(cache, "team", ".git", "refs", "hedge"), { recursive: true, force: true });
     await fetchSource({ name: "team", repo: repoB, ref: commitB1 }, cache);
 
     const cacheRepo = join(cache, "team");
@@ -357,28 +341,24 @@ describe("fetchSource", () => {
     expect([offlineA1.packs[0]?.manifest.summary, offlineA1.stale]).toEqual(["Repo A v1.", undefined]);
   });
 
-  test("preserves an unexpected nonempty directory at hedge-pins.json while fetching cleanly", async () => {
+  test("does not report success when a stale Git ref lock prevents recording a pinned commit", async () => {
     const repo = await packRepo("Team rules v1.");
-    const commit = await spawnGit(repo, "rev-parse", "HEAD");
+    const commit1 = await spawnGit(repo, "rev-parse", "HEAD");
+    writePack(repo, "Team rules v2.");
+    await spawnGit(repo, "commit", "-q", "-am", "v2");
+    const commit2 = await spawnGit(repo, "rev-parse", "HEAD");
     const cache = temp.make("cache-");
-    const ref = { name: "team", repo, ref: commit };
-    await fetchSource(ref, cache);
+    await fetchSource({ name: "team", repo, ref: commit1 }, cache);
 
-    const pinsDir = join(cache, "team", ".git", "hedge-pins.json");
-    const keepFile = join(pinsDir, "keep.txt");
-    rmSync(pinsDir, { force: true });
-    mkdirSync(pinsDir);
-    writeFileSync(keepFile, "do not delete");
+    const hash = createHash("sha256").update(repo).digest("hex");
+    const refDir = join(cache, "team", ".git", "refs", "hedge", "pins", hash);
+    mkdirSync(refDir, { recursive: true });
+    writeFileSync(join(refDir, `${commit2}.lock`), "");
 
-    const pinned = await fetchSource(ref, cache);
-    if ("error" in pinned) throw new Error(pinned.error);
-    expect([pinned.packs[0]?.manifest.summary, pinned.stale]).toEqual(["Team rules v1.", undefined]);
-    expect(readFileSync(keepFile, "utf8")).toBe("do not delete");
-
-    const branch = await fetchSource({ name: "team", repo, ref: "main" }, cache);
-    if ("error" in branch) throw new Error(branch.error);
-    expect([branch.packs[0]?.manifest.summary, branch.stale]).toEqual(["Team rules v1.", undefined]);
-    expect(readFileSync(keepFile, "utf8")).toBe("do not delete");
+    const blocked = await fetchSource({ name: "team", repo, ref: commit2 }, cache);
+    if ("error" in blocked) throw new Error(blocked.error);
+    expect(blocked.packs[0]?.manifest.summary).toBe("Team rules v1.");
+    expect(blocked.stale).toContain(`could not record ${commit2}`);
   });
 
   test("records pinned history even for a relative repository path named after an Object property", async () => {
@@ -443,7 +423,7 @@ describe("fetchSource", () => {
     const cache = temp.make("cache-");
     await fetchSource({ name: "team", repo, ref: first }, cache);
     writeFileSync(join(cache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo, ref: first, commit: first }));
-    rmSync(join(cache, "team", ".git", "hedge-pins.json"), { force: true });
+    rmSync(join(cache, "team", ".git", "refs", "hedge"), { recursive: true, force: true });
     await fetchSource({ name: "team", repo, ref: second }, cache);
     writeFileSync(join(cache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo, ref: second, commit: second }));
     rmSync(repo, { recursive: true, force: true });
