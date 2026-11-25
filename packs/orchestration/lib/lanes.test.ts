@@ -3,7 +3,7 @@ import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { startT3Stub, ToolRefusal, type T3Fixture, type T3Stub } from "../../base/lib/t3/testing.ts";
-import { linkedEnvironment, linkedItem, linkedThread, linkedTools, minutesAgo, now, shellThread } from "./testing.ts";
+import { fakeGitHub, linkedEnvironment, linkedItem, linkedThread, linkedTools, minutesAgo, now, shellThread } from "./testing.ts";
 import { needsHuman, runLanes } from "./lanes.ts";
 import type { Discussion, IssueNode } from "./wayfinder.ts";
 
@@ -96,32 +96,21 @@ test("hedge lanes finds each lane on this machine or a linked environment and na
   expect(t3.toolCalls.every(({ args }) => args.environmentId === "env-linked")).toBe(true);
 });
 
-test("hedge lanes runs as a pack command against GitHub through gh and the local T3 server", async () => {
-  const t3 = await stub({ ...fixture, tools: linkedTools([linkedThread("mcp:linked-finished", { status: "completed", items: [linkedItem("assistant_message", "Done.")] })]) });
-  const bin = join(t3.home, "bin");
-  await mkdir(bin);
-  const graph = (value: unknown) => JSON.stringify({ data: { repository: { issue: value } } });
-  const graphIssue = (node: IssueNode): Record<string, unknown> => ({
-    number: node.number, title: node.title, state: node.state, repository: { nameWithOwner: node.repository },
-    assignees: { nodes: node.assignees.map((login) => ({ login })) }, labels: { nodes: node.labels.map((name) => ({ name })) },
-    blockedBy: { nodes: [] }, subIssuesSummary: { total: node.childCount }, subIssues: { nodes: node.children.map(graphIssue) },
-  });
-  const graphDiscussion = (value: Discussion) => ({ body: value.body, comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: value.comments.map(({ author, ...rest }) => ({ author: { login: author }, ...rest })) } });
-  const shown = [{ number: 2, thread: "mcp:local-lane" }, { number: 6, thread: "linked-finished" }];
-  await writeFile(join(bin, "issue-1.json"), graph(graphIssue({ ...map, childCount: 2, children: shown.map(issue) })));
-  for (const ticket of shown) await writeFile(join(bin, `discussion-${ticket.number}.json`), graph(graphDiscussion(discussion(ticket))));
-  await writeFile(join(bin, "gh"), `#!/bin/sh
-for arg; do case "$arg" in number=*) number=\${arg#number=} ;; *subIssues*) kind=issue ;; esac; done
-cat "$(dirname "$0")/\${kind:-discussion}-$number.json"
-`);
-  await chmod(join(bin, "gh"), 0o755);
+test("hedge lanes runs as a pack command against GitHub through gh and the local T3 server, over GraphQL and, once its rate limit is spent, over REST", async () => {
+  const notice = "hedge: GitHub's GraphQL rate limit is spent, so this command reads issues over REST.\n";
+  for (const graphqlError of [undefined, "API rate limit already exceeded for user ID 1."]) {
+    const t3 = await stub({ ...fixture, tools: linkedTools([linkedThread("mcp:linked-finished", { status: "completed", items: [linkedItem("assistant_message", "Done.")] })]) });
+    const shown = [{ number: 2, thread: "mcp:local-lane" }, { number: 6, thread: "linked-finished" }];
+    const discussions = Object.fromEntries(shown.map((ticket) => [`acme/maps#${ticket.number}`, discussion(ticket)]));
+    const bin = await fakeGitHub(t3.home, { issues: [{ ...map, childCount: 2, children: shown.map(issue) }], discussions, graphqlError, restPageSize: 1 });
 
-  const child = Bun.spawn(["bun", command, "acme/maps#1", "--stall", "60"], { env: { ...Bun.env, HOME: t3.home, PATH: `${bin}:${Bun.env.PATH}`, HEDGE_SETTINGS: "{}" }, stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+    const child = Bun.spawn(["bun", command, "acme/maps#1", "--stall", "60"], { env: { ...Bun.env, HOME: t3.home, PATH: `${bin}:${Bun.env.PATH}`, HEDGE_SETTINGS: "{}" }, stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
 
-  expect(stderr).toBe("");
-  expect(stdout).toBe(`${[expected(hostname())[0], expected(hostname())[1], expected(hostname())[5]].join("\n")}\n`);
-  expect(code).toBe(1);
+    expect(stderr).toBe(graphqlError ? notice : "");
+    expect(stdout).toBe(`${[expected(hostname())[0], expected(hostname())[1], expected(hostname())[5]].join("\n")}\n`);
+    expect(code).toBe(1);
+  }
 });
 
 async function laneReport(fixture: T3Fixture, laneTickets: Ticket[]) {

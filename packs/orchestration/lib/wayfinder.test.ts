@@ -53,18 +53,24 @@ test("the Orchestration pack hardcodes no repository, owner, or tracker", async 
   expect(hits.flat()).toEqual([]);
 });
 
-test("reads that run at once and all meet the spent GraphQL rate limit print the REST notice once", async () => {
+test("reads that run at once and all meet the spent GraphQL rate limit each get their discussion over REST, and print the REST notice once", async () => {
   const home = await mkdtemp(join(tmpdir(), "hedge-wayfinder-"));
   try {
     const repository = "acme/maps";
-    const tickets = [2, 3, 4, 5].map((number) => issueNode(repository, number));
-    const bin = await fakeGitHub(home, { issues: [issueNode(repository, 1, { children: tickets })], graphqlError: "API rate limit already exceeded for user ID 1." });
+    const numbers = [2, 3, 4, 5];
+    const tickets = numbers.map((number) => issueNode(repository, number));
+    const discussions = Object.fromEntries(numbers.map((number) => [`${repository}#${number}`, {
+      body: `Ticket ${number}.`,
+      comments: [{ author: "ada", body: `Thread: \`mcp:lane-${number}\``, url: `https://github.com/${repository}/issues/${number}#c`, createdAt: "2026-11-02T09:00:00Z", updatedAt: "2026-11-02T09:00:00Z" }],
+    }]));
+    const bin = await fakeGitHub(home, { issues: [issueNode(repository, 1, { children: tickets })], discussions, graphqlError: "API rate limit already exceeded for user ID 1." });
     const script = `import { fetchDiscussionFromGitHub } from ${JSON.stringify(join(import.meta.dir, "wayfinder.ts"))};
-await Promise.all([2, 3, 4, 5].map((number) => fetchDiscussionFromGitHub("acme", "maps", number)));`;
+console.log(JSON.stringify(await Promise.all(${JSON.stringify(numbers)}.map((number) => fetchDiscussionFromGitHub("acme", "maps", number)))));`;
     const child = Bun.spawn(["bun", "--eval", script], { env: { ...Bun.env, HOME: home, PATH: `${bin}:${Bun.env.PATH}` }, stdout: "pipe", stderr: "pipe" });
-    const [stderr, code] = await Promise.all([new Response(child.stderr).text(), child.exited]);
+    const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
 
     expect({ stderr, code }).toEqual({ stderr: "hedge: GitHub's GraphQL rate limit is spent, so this command reads issues over REST.\n", code: 0 });
+    expect(JSON.parse(stdout)).toEqual(numbers.map((number) => discussions[`${repository}#${number}`]));
   } finally {
     await rm(home, { recursive: true, force: true });
   }

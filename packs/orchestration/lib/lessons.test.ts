@@ -142,6 +142,17 @@ test("hedge lessons runs as a pack command with the tracker and rollout log from
   expect(result).toEqual({ stdout: `${[...failures, "", ...signals(hostname(), log)].join("\n")}\n`, stderr: "", code: 0 });
 });
 
+test("hedge lessons reads the map, its tickets and their comments over REST, with the same report, when GitHub's GraphQL rate limit is spent", async () => {
+  const home = await temporaryHome();
+  const log = await writeLedger(home);
+  const bin = await fakeGitHub(home, { ...fixture, graphqlError: "API rate limit already exceeded for user ID 1.", restPageSize: 1 });
+  const settings = { "orchestration.tracker": repository, "orchestration.rolloutLog": "~/rollouts.jsonl" };
+
+  const result = await runPackCommand("lessons", ["#1"], { HOME: home, PATH: `${bin}:${Bun.env.PATH}`, HEDGE_SETTINGS: JSON.stringify(settings) });
+
+  expect(result).toEqual({ stdout: `${[...failures, "", ...signals(hostname(), log)].join("\n")}\n`, stderr: "hedge: GitHub's GraphQL rate limit is spent, so this command reads issues over REST.\n", code: 0 });
+});
+
 test("hedge lessons skips malformed rollout rows with a warning that names the file and line, and still reports", async () => {
   const home = await temporaryHome();
   const log = await writeLedger(home);

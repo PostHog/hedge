@@ -118,9 +118,10 @@ if [ "$2" != graphql ]; then
       '.[]') form=ndjson; [ -n "\${GH_FORCE_TTY:-}" ] && form=pretty ;;
       *) echo "fake gh: no fake for --jq $jq" >&2; exit 1 ;;
     esac
-    pages="$base.page-001"
-    [ -n "\${paginate:-}" ] && pages=$(ls "$base".page-*.json | sed 's/[.]json$//')
-    for page in $pages; do cat "$page.$form"; done
+    for page in "$base".page-*.json; do
+      cat "\${page%.json}.$form" || exit 1
+      [ -n "\${paginate:-}" ] || break
+    done
     exit 0
   fi
   [ -f "$base.json" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }

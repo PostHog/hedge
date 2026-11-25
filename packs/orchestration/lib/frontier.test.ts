@@ -146,7 +146,7 @@ test("hedge frontier reads the map over REST, every page of it, with the same re
   ]);
 });
 
-test("hedge frontier over REST gives the same report when gh pretty-prints for a terminal and when GitHub leaves out the issue summaries", async () => {
+test("hedge frontier over REST gives the same report, reading each path once, when gh pretty-prints for a terminal and when GitHub leaves out the issue summaries", async () => {
   for (const [fields, env] of [[{}, { GH_FORCE_TTY: "120" }], [{ restWithoutSummaries: true }, {}]] as const) {
     const home = await temporaryHome();
     const bin = await fakeGitHub(home, { ...mapFixture("acme/maps"), graphqlError: rateLimited, restPageSize: 1, ...fields });
@@ -154,6 +154,8 @@ test("hedge frontier over REST gives the same report when gh pretty-prints for a
     const result = await runPackCommand("frontier", ["acme/maps#1"], { HOME: home, PATH: `${bin}:${Bun.env.PATH}`, HEDGE_SETTINGS: "{}", ...env });
 
     expect(result).toEqual({ stdout: `${expected("acme/maps")}\n`, stderr: restNotice, code: 0 });
+    const reads = (await readFile(join(bin, "rest.log"), "utf8")).split("\n").filter(Boolean);
+    expect(reads).toEqual([...new Set(reads)]);
   }
 });
 
