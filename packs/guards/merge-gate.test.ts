@@ -213,6 +213,14 @@ describe("which calls enqueue or merge", () => {
     expect(mcp("mcp__t3-code__pull_request_respond", { repository: "example/product", number: 7, reviewThreadId: null, body: "/trunk merge" })).toEqual({ targets: [target("example/product", 7)] });
   });
 
+  test("input nested too deep for a recursive walk is still read, so the hook cannot crash and let the call through", () => {
+    const deep = (inside: unknown) => JSON.parse(`${"[".repeat(200_000)}${JSON.stringify(inside)}${"]".repeat(200_000)}`);
+    const pr = { repository: "example/product", number: 7 };
+    expect(mcp("mcp__t3-code__pull_request_merge", { ...pr, expectedHeadSha: head, junk: deep(null) })).toEqual({ targets: [target("example/product", 7)] });
+    expect(mcp("mcp__t3-code__pull_request_respond", { ...pr, junk: deep("/trunk merge") })).toEqual({ targets: [target("example/product", 7)] });
+    expect(mcp("mcp__github__add_issue_comment", { owner: "example", repo: "product", issue_number: 7, junk: deep("/trunk merge") })).toEqual({ targets: [target("example/product", 7)] });
+  });
+
   test("a T3 call checks the PR T3 merges, not one that a GitHub-style key beside it names", () => {
     const decoys = { pull_number: 9, pullNumber: 9, owner: "own", repo: "tooling", repository_full_name: "own/tooling" };
     expect(mcp("mcp__t3-code__pull_request_merge", { ...decoys, repository: "example/product", number: 7, expectedHeadSha: head })).toEqual({ targets: [target("example/product", 7)] });

@@ -247,8 +247,16 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   return elsewhere(sent, raw);
 }
 
-const strings = (value: unknown): string[] =>
-  typeof value === "string" ? [value] : Array.isArray(value) ? value.flatMap(strings) : value && typeof value === "object" ? Object.values(value).flatMap(strings) : [];
+function strings(value: unknown): string[] {
+  const found: string[] = [];
+  const pending = [value];
+  while (pending.length) {
+    const next = pending.pop();
+    if (typeof next === "string") found.push(next);
+    else if (next && typeof next === "object") for (const inner of Object.values(next)) pending.push(inner);
+  }
+  return found;
+}
 
 const reads = /(?:^|_|__)(?:get|list|search|read|fetch)(?:_|$)/i;
 const repositoryKeys = ["repository_full_name", "repo_full_name", "full_name", "repository", "nameWithOwner"];
@@ -274,8 +282,8 @@ function mcpIntent(tool: string, input: Record<string, unknown>): MergeIntent {
   const merges = /merge/i.test(name) && !/disable|update_pull_request_branch/i.test(name);
   const t3 = t3Tool.test(tool);
   const writesComment = /comment|review|respond/i.test(name) && (!t3 || name.startsWith("pull_request_"));
-  const texts = t3 ? strings(input).flatMap((text) => [text, text.trim()]) : strings(input);
-  if (!merges && !(writesComment && texts.some((text) => enqueueLine.test(text)))) return { targets: [] };
+  const sent = () => t3 ? strings(input).flatMap((text) => [text, text.trim()]) : strings(input);
+  if (!merges && !(writesComment && sent().some((text) => enqueueLine.test(text)))) return { targets: [] };
   if (!merges && (/review/i.test(name) || input.reviewThreadId != null)) return { targets: [], refusal: otherEndpointReason };
   const named = t3 ? t3Pr(input) : mcpPr(input);
   return named ? { targets: [{ ...named, via: merges ? tool : `${tool} comment` }] } : { targets: [], refusal: unnamedReason(merges ? "merges a PR" : "posts `/trunk merge`") };
