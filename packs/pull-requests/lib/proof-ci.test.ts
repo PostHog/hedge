@@ -1,4 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
+import { rmSync } from "node:fs";
+import { join } from "node:path";
 import { checkout, cleanFixtures, reviewHead, settings } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
@@ -471,13 +473,13 @@ test("a person passing a listed check after the gate leaves the gate's CI line a
   expect(before.ci.checks).toEqual(["build (app 1): pass"]);
 });
 
-test("a failed app lookup for the bot of a listed check leaves CI known and the gate passing", async () => {
+test("the gate does not ask GitHub for the app of a bot that posted only a listed check", async () => {
   const pr = await personChecked();
   pr.githubApp("product", { error: "HTTP 503: Service Unavailable" });
   pr.ci([{ name: "build", bucket: "pass" }]);
   pr.statuses([{ context: "Visual Review gate / storybook", state: "failure", by: "product[bot]" }]);
   const gate = await pr.hedge("gate");
-  expect(ciLine(gate.output)).toBe(`ci: green, 1 required check(s) pass; ${personLine}; not required: failing: Visual Review gate / storybook`);
+  expect(ciLine(gate.output)).toBe(`ci: green, 1 required check(s) pass; ${personLine}`);
   expect(gate.code).toBe(0);
 });
 
@@ -496,7 +498,16 @@ test("a failing check of a listed check's name from another app still prints as 
   pr.ci([{ name: "build", bucket: "pass" }, { name: "Visual Review gate / storybook", bucket: "fail", app: 9 }]);
   pr.statuses([{ context: "Visual Review gate / storybook", state: "failure", by: "product[bot]" }]);
   const gate = await pr.hedge("gate");
-  expect(ciLine(gate.output)).toBe(`ci: green, 1 required check(s) pass; ${personLine}; not required: failing: Visual Review gate / storybook`);
+  expect(ciLine(gate.output)).toBe(`ci: green, 1 required check(s) pass; not required: failing: Visual Review gate / storybook; ${personLine}`);
+});
+
+test("on a draft, another app's failing check of a listed check's name still keeps its workflow's missing check required", async () => {
+  const { pr } = await reviewed();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.personChecks": "example/product=CI / Approval" });
+  pr.pullRequestState({ draft: true });
+  pr.required("main", [{ context: "CI / Approval", integration_id: 9 }, { context: "CI / Test", integration_id: 7 }]);
+  pr.ci([{ name: "CI / Lint", bucket: "pass", app: 7 }, { name: "CI / Approval", bucket: "fail", app: 7 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe(`ci: pending, required not reported yet: CI / Test; not required: failing: CI / Approval; a person passes it on GitHub, so the gate does not wait on it: CI / Approval`);
 });
 
 test("on a draft, a listed check does not decide whether a missing check of its workflow is withheld", async () => {
@@ -506,4 +517,62 @@ test("on a draft, a listed check does not decide whether a missing check of its 
   pr.required("main", [{ context: "CI / Approval" }, { context: "CI / Test" }]);
   pr.ci([{ name: "CI / Approval", bucket: "pass" }]);
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: CI / Test; a person passes it on GitHub, so the gate does not wait on it: CI / Approval");
+});
+
+const changedAfterMerge = { id: 11, updatedAt: "2026-10-25T10:39:53.621+01:00" };
+const changedBeforeMerge = { id: 11, updatedAt: "2026-10-25T08:00:00Z" };
+
+test("a merged PR is not held to a required check that never reported on it when its ruleset changed after the merge", async () => {
+  const { pr } = await reviewed();
+  pr.pullRequestState({ merged: true });
+  pr.required("main", [{ context: "test" }, { context: "Visual Review gate / storybook", integration_id: 7 }], { ruleset: changedAfterMerge });
+  const landed = await pr.hedge("gate", "--landed");
+  expect(ciLine(landed.output)).toBe("ci: green, 1 required check(s) pass; not judged, never reported and its ruleset changed after the merge: Visual Review gate / storybook");
+  expect(landed.code).toBe(0);
+});
+
+test("a check from a ruleset that changed after the merge still fails a merged PR when it reported a failure", async () => {
+  const { pr } = await reviewed();
+  pr.pullRequestState({ merged: true });
+  pr.required("main", [{ context: "test" }], { ruleset: changedAfterMerge });
+  pr.ci([{ name: "test", bucket: "fail" }]);
+  expect(ciLine((await pr.hedge("gate", "--landed")).output)).toStartWith("ci: red, required failing: test");
+});
+
+test("a merged PR still waits on a required check that never reported when its ruleset is unchanged since the merge", async () => {
+  const { pr } = await reviewed();
+  pr.pullRequestState({ merged: true });
+  pr.required("main", [{ context: "test" }, { context: "Visual Review gate / storybook" }], { ruleset: changedBeforeMerge });
+  expect(ciLine((await pr.hedge("gate", "--landed")).output)).toBe("ci: pending, required not reported yet: Visual Review gate / storybook");
+});
+
+test("a merged PR still waits on a missing check that classic protection requires too, or whose ruleset GitHub does not show", async () => {
+  const { pr } = await reviewed();
+  pr.pullRequestState({ merged: true });
+  pr.required("main", [{ context: "deploy" }, { context: "storybook" }], { ruleset: { id: 12, updatedAt: changedAfterMerge.updatedAt }, classic: ["deploy"] });
+  rmSync(join(pr.repository, "../github/ruleset-12"));
+  expect(ciLine((await pr.hedge("gate", "--landed")).output)).toBe("ci: pending, required not reported yet: deploy, storybook");
+});
+
+test("an open PR waits on a missing required check whatever its ruleset's age", async () => {
+  const { pr } = await reviewed();
+  pr.required("main", [{ context: "test" }, { context: "storybook" }], { ruleset: changedAfterMerge });
+  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: storybook");
+});
+
+test("classic protection that pins a check to one app leaves the waiver of the same check pinned to another app by a changed ruleset", async () => {
+  const { pr } = await reviewed();
+  pr.pullRequestState({ merged: true });
+  pr.required("main", [{ context: "storybook", integration_id: 7 }], { ruleset: changedAfterMerge, classic: [{ context: "storybook", app: 9 }] });
+  pr.ci([{ name: "storybook", bucket: "pass", app: 9 }]);
+  expect(ciLine((await pr.hedge("gate", "--landed")).output)).toBe("ci: green, 1 required check(s) pass; not judged, never reported and its ruleset changed after the merge: storybook");
+});
+
+test("the landed gate reads the required checks fresh, so classic protection added since an earlier gate still holds a missing check", async () => {
+  const { pr } = await reviewed();
+  pr.required("main", [{ context: "test" }, { context: "storybook" }], { ruleset: changedAfterMerge });
+  await pr.hedge("gate");
+  pr.required("main", [{ context: "test" }, { context: "storybook" }], { ruleset: changedAfterMerge, classic: ["storybook"] });
+  pr.pullRequestState({ merged: true });
+  expect(ciLine((await pr.hedge("gate", "--landed")).output)).toBe("ci: pending, required not reported yet: storybook");
 });
