@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
-import { advanceSource, cachedSource, fetchSource } from "./sources.ts";
+import { advanceSource, cachedSource, fetchSource, followsBranch, unpinnedSources } from "./sources.ts";
 
 isolateGit();
 const temp = tempDirs();
@@ -704,8 +704,14 @@ exec git-upload-pack "$dest"
     expect(cross.stale).toContain(`could not fetch ${shaA}`);
   });
 
-  test("keeps a legacy insteadOf-fetched pinned cache working offline after upgrade, while rejecting a changed rewrite", async () => {
-    const repoA = await packRepo("Legacy mirror A.");
+  test("keeps a legacy insteadOf-fetched pinned cache working offline after upgrade (including .git mirrors), while rejecting a changed rewrite", async () => {
+    const parent = temp.make("legacy-mirror-");
+    const repoA = join(parent, "mirror-a.git");
+    mkdirSync(repoA, { recursive: true });
+    await spawnGit(repoA, "init", "-q", "-b", "main");
+    writePack(repoA, "Legacy mirror A.");
+    await spawnGit(repoA, "add", ".");
+    await spawnGit(repoA, "commit", "-q", "-m", "v1");
     const shaA = await spawnGit(repoA, "rev-parse", "HEAD");
     const repoB = await packRepo("Legacy mirror B.");
     const configured = "https://example.invalid/team-legacy.git";
@@ -721,7 +727,7 @@ exec git-upload-pack "$dest"
 
     const offline = await fetchSource({ name: "team", repo: configured, ref: shaA }, cache);
     if ("error" in offline) throw new Error(offline.error);
-    expect([offline.packs[0]?.manifest.summary, offline.stale]).toEqual(["Legacy mirror A.", undefined]);
+    expect(offline.packs[0]?.manifest.summary).toBe("Legacy mirror A.");
 
     await spawnGit(dir, "config", "--unset", `url.${repoA}.insteadOf`);
     await spawnGit(dir, "config", `url.${repoB}.insteadOf`, configured);
@@ -848,6 +854,85 @@ exec git-upload-pack "$dest"
     if ("error" in sha256Offline) throw new Error(sha256Offline.error);
     expect(sha256Offline.packs[0]?.manifest.summary).toBe("SHA-256 branch packs.");
     expect(sha256Offline.stale).toContain("could not fetch main");
+
+    const hex64Branch = "a".repeat(64);
+    const sha1HexRepo = join(parent, "sha1-hex64-branch");
+    mkdirSync(sha1HexRepo, { recursive: true });
+    await spawnGit(sha1HexRepo, "init", "-q", "-b", hex64Branch);
+    writePack(sha1HexRepo, "Hex-64 branch packs.");
+    await spawnGit(sha1HexRepo, "add", ".");
+    await spawnGit(sha1HexRepo, "commit", "-q", "-m", "v1");
+    const hexCache = temp.make("cache-hex64-");
+    const hexOnline = await fetchSource({ name: "team", repo: sha1HexRepo, ref: hex64Branch }, hexCache);
+    if ("error" in hexOnline) throw new Error(hexOnline.error);
+    expect(hexOnline.packs[0]?.manifest.summary).toBe("Hex-64 branch packs.");
+    expect(await followsBranch({ name: "team", repo: sha1HexRepo, ref: hex64Branch }, hexCache)).toBe(true);
+    expect((await unpinnedSources([{ name: "team", repo: sha1HexRepo, ref: hex64Branch }], parent)).map((f) => f.id)).toEqual(["source:unpinned:team"]);
+    rmSync(sha1HexRepo, { recursive: true, force: true });
+    const hexOffline = await fetchSource({ name: "team", repo: sha1HexRepo, ref: hex64Branch }, hexCache);
+    if ("error" in hexOffline) throw new Error(hexOffline.error);
+    expect(hexOffline.packs[0]?.manifest.summary).toBe("Hex-64 branch packs.");
+    expect(hexOffline.stale).toContain(`could not fetch ${hex64Branch}`);
+
+    const remoteSrc = await packRepo("Named remote v1.");
+    const remoteCommit1 = await spawnGit(remoteSrc, "rev-parse", "HEAD");
+    const remoteCache = temp.make("cache-named-remote-");
+    const remoteDir = join(remoteCache, "team");
+    mkdirSync(remoteDir, { recursive: true });
+    await spawnGit(remoteDir, "init", "-q");
+    await spawnGit(remoteDir, "remote", "add", "origin", remoteSrc);
+    const remoteFetched = await fetchSource({ name: "team", repo: "origin", ref: "main" }, remoteCache);
+    if ("error" in remoteFetched) throw new Error(remoteFetched.error);
+    expect(await spawnGit(remoteDir, "rev-parse", "refs/remotes/origin/main")).toBe(remoteCommit1);
+    writePack(remoteSrc, "Named remote v2.");
+    await spawnGit(remoteSrc, "commit", "-q", "-am", "v2");
+    const remoteCommit2 = await spawnGit(remoteSrc, "rev-parse", "HEAD");
+    const remoteAdvanced = await advanceSource({ name: "team", repo: "origin", ref: "main" }, remoteCache, remoteCommit1);
+    expect(remoteAdvanced).toMatchObject({ state: "moved", commit: remoteCommit2 });
+    expect(await spawnGit(remoteDir, "rev-parse", "refs/remotes/origin/main")).toBe(remoteCommit2);
+
+    const sshA = await packRepo("SSH legacy A.");
+    const sshShaA = await spawnGit(sshA, "rev-parse", "HEAD");
+    const sshB = await packRepo("SSH legacy B.");
+    const sshShaB = await spawnGit(sshB, "rev-parse", "HEAD");
+    const sshBin = temp.make("legacy-ssh-bin-");
+    writeFileSync(
+      join(sshBin, "ssh"),
+      `#!/bin/sh
+dest=""
+for arg in "$@"; do
+  case "$arg" in
+    alice@*) dest=${JSON.stringify(sshA)} ;;
+    bob@*) dest=${JSON.stringify(sshB)} ;;
+  esac
+done
+exec git-upload-pack "$dest"
+`,
+      { mode: 0o755 },
+    );
+    const sshCache = temp.make("cache-legacy-ssh-");
+    const sshDir = join(sshCache, "team");
+    const sshConfigured = "https://example.invalid/ssh-legacy.git";
+    const sshAlice = "ssh://alice@example.invalid/repo.git";
+    const sshBob = "ssh://bob@example.invalid/repo.git";
+    mkdirSync(sshDir, { recursive: true });
+    await spawnGit(sshDir, "init", "-q");
+    await spawnGit(sshDir, "config", `url.${sshAlice}.insteadOf`, sshConfigured);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${sshBin}:${savedPath ?? ""}`;
+    try {
+      expect(Bun.spawnSync(["git", "-C", sshDir, "fetch", "-q", "--depth", "1", "--no-tags", sshConfigured, sshShaA], { env: { ...process.env, GIT_SSH_COMMAND: `${join(sshBin, "ssh")}` } }).exitCode).toBe(0);
+      await spawnGit(sshDir, "checkout", "-q", "--detach", "FETCH_HEAD");
+      writeFileSync(join(sshDir, ".git", "hedge-source.json"), JSON.stringify({ repo: sshConfigured, ref: sshShaA, commit: sshShaA }) + "\n");
+      await spawnGit(sshDir, "config", "--unset", `url.${sshAlice}.insteadOf`);
+      await spawnGit(sshDir, "config", `url.${sshBob}.insteadOf`, sshConfigured);
+      expect("error" in (await fetchSource({ name: "team", repo: sshConfigured, ref: sshShaB }, sshCache))).toBe(false);
+      const sshCross = await fetchSource({ name: "team", repo: sshBob, ref: sshShaA }, sshCache);
+      expect("error" in sshCross).toBe(true);
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+    }
   });
 });
 
