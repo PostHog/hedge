@@ -358,7 +358,7 @@ describe("fetchSource", () => {
     expect([offlineA1.packs[0]?.manifest.summary, offlineA1.stale]).toEqual(["Repo A v1.", undefined]);
   });
 
-  test("does not migrate a malformed legacy record whose ref and commit SHAs disagree", async () => {
+  test("does not trust or migrate a malformed legacy record whose ref and commit SHAs disagree", async () => {
     const repoA = await packRepo("Repo A v1.");
     const commitA1 = await spawnGit(repoA, "rev-parse", "HEAD");
     const repoB = await packRepo("Repo B v1.");
@@ -368,12 +368,16 @@ describe("fetchSource", () => {
     await legacyPinnedCache(cache, "team", repoA, commitA1);
     await fetchSource({ name: "team", repo: repoB, ref: commitB1 }, cache);
     writeFileSync(join(cache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo: repoB, ref: commitB1, commit: commitA1 }) + "\n");
-    await fetchSource({ name: "team", repo: repoB, ref: "main" }, cache);
 
-    const bogus = await fetchSource({ name: "team", repo: repoB, ref: commitA1 }, cache);
-    if ("error" in bogus) throw new Error(bogus.error);
-    expect(bogus.packs[0]?.manifest.summary).toBe("Repo B v1.");
-    expect(bogus.stale).toContain(`could not fetch ${commitA1}`);
+    const directHit = await fetchSource({ name: "team", repo: repoB, ref: commitA1 }, cache);
+    if ("error" in directHit) throw new Error(directHit.error);
+    expect(directHit.stale).toContain(`could not fetch ${commitA1}`);
+
+    await fetchSource({ name: "team", repo: repoB, ref: "main" }, cache);
+    const afterBranch = await fetchSource({ name: "team", repo: repoB, ref: commitA1 }, cache);
+    if ("error" in afterBranch) throw new Error(afterBranch.error);
+    expect(afterBranch.packs[0]?.manifest.summary).toBe("Repo B v1.");
+    expect(afterBranch.stale).toContain(`could not fetch ${commitA1}`);
   });
 
   test("does not report success when Git cannot record a pin ref during fetch or refresh", async () => {

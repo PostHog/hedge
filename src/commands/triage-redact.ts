@@ -107,7 +107,7 @@ function replaceKnown(text: string, entries: KnownName[], transform?: (value: st
         variants.push(transform(entry.text));
         if (!entry.text.startsWith("/")) {
           const prefixed = transform(`/${entry.text}`);
-          if (prefixed.startsWith("/")) variants.push(prefixed.slice(1));
+          variants.push(prefixed.startsWith("/") ? prefixed.slice(1) : prefixed);
         }
       }
       return [...new Set(variants.filter((variant) => variant.length >= minLength && !exempt?.has(variant)))].map((variant) => ({ text: variant, as: safeAs }));
@@ -115,7 +115,9 @@ function replaceKnown(text: string, entries: KnownName[], transform?: (value: st
   const exemptAlt = exempt?.size ? [...exempt].sort((a, b) => b.length - a.length).map(escape).join("|") : "";
   for (const name of spellings.sort((a, b) => b.text.length - a.text.length)) {
     const flags = name.text.length < 4 ? "g" : "gi";
-    const pattern = `(?<![\\w-])${escape(name.text)}(?![\\w-])`;
+    const left = /^[\w-]/.test(name.text) ? "(?<![\\w-])" : "";
+    const right = /[\w-]$/.test(name.text) ? "(?![\\w-])" : "";
+    const pattern = `${left}${escape(name.text)}${right}`;
     if (exemptAlt) {
       result = result.replace(new RegExp(`${pattern}|${exemptAlt}`, flags), (match) => (exempt!.has(match) ? match : name.as));
     } else {

@@ -192,9 +192,9 @@ const commitSha = /^[0-9a-f]{40}$/i;
 const githubRepoPattern = /^(?:[a-z][a-z0-9+.-]*:\/\/(?:[^/@\s]+@)?(?:(?:ssh|www)\.)?github\.com(?::\d+)?\/|(?:[^/@:\s]+@)?(?:(?:ssh|www)\.)?github\.com:)(.+)$/i;
 
 const repoKey = (repo: string) => {
-  const url = repoUrl(repo).replace(/\.git$/, "");
+  const url = repoUrl(repo);
   const github = url.match(githubRepoPattern)?.[1];
-  return github ? github.toLowerCase() : url;
+  return github ? github.replace(/\.git$/i, "").toLowerCase() : url;
 };
 
 export async function unpinnedSources(refs: SourceRef[], profileDir: string): Promise<Finding[]> {
@@ -210,9 +210,8 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string): Pr
 async function checkedOutFromCache(dir: string, repo: string, ref: SourceRef, good: Good | undefined) {
   const commit = ref.ref.toLowerCase();
   if (!commitSha.test(commit)) return false;
-  const fetchedHere =
-    (good?.repo === repo && typeof good.commit === "string" && good.commit.toLowerCase() === commit) ||
-    (await hasPinRef(dir, repo, commit));
+  const goodPin = pinnedCommit(good);
+  const fetchedHere = (goodPin?.repo === repo && goodPin.commit === commit) || (await hasPinRef(dir, repo, commit));
   if (!fetchedHere) return false;
   return (await git(dir, "checkout", "-q", "--detach", commit)).ok;
 }
