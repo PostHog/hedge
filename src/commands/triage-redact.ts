@@ -53,6 +53,7 @@ const canonMaskRules: Rule[] = [
   ...ciStandardMaskRules,
 ];
 const contextualSecretRules: Rule[] = secretRules.slice(8);
+const preRandomAllRules: Rule[] = [...secretRules, ...standardRules];
 const allRules: Rule[] = [...secretRules, ...standardRules, randomRule];
 const preRandomRules: Rule[] = [...contextualSecretRules, ...standardRules];
 
@@ -168,16 +169,13 @@ type AcRule = {
   right: 0 | 1 | 2;
   as: string;
   owner?: KnownName;
-  exempt?: boolean;
   ambiguous?: boolean;
   regex?: RegExp;
-  verifyPattern?: string;
-  verifyRegex?: RegExp;
+  verify?: (slice: string) => boolean;
 };
 
 type AcAutomaton = {
   ci: boolean;
-  hasExempt: boolean;
   next: Array<Map<number, number>>;
   fail: Int32Array;
   dict: Int32Array;
@@ -312,9 +310,7 @@ function buildAc(rules: AcRule[], ci: boolean): AcAutomaton | undefined {
   if (!rules.length) return undefined;
   const next: Array<Map<number, number>> = [new Map()];
   const out: Array<AcRule[] | undefined> = [undefined];
-  let hasExempt = false;
   for (const rule of rules) {
-    if (rule.exempt) hasExempt = true;
     const key = ci ? foldCase(rule.text) : rule.text;
     let state = 0;
     for (let i = 0; i < key.length; i++) {
@@ -347,7 +343,7 @@ function buildAc(rules: AcRule[], ci: boolean): AcAutomaton | undefined {
       queue.push(v);
     }
   }
-  return { ci, hasExempt, next, fail, dict, out };
+  return { ci, next, fail, dict, out };
 }
 
 function pushStreamingSpan(spans: MatchSpan[], start: number, end: number, len: number, as: string, allowPartialMerge: boolean) {
@@ -364,39 +360,126 @@ function pushStreamingSpan(spans: MatchSpan[], start: number, end: number, len: 
   spans.push({ start, end, len, as });
 }
 
-function findAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?: KnownName): MatchSpan[] {
+function findAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?: KnownName, allowPartialMerge = true): MatchSpan[] {
   if (!ac || !text.length) return [];
   const spans: MatchSpan[] = [];
-  const exemptSpans: MatchSpan[] = [];
   let state = 0;
   for (let i = 0; i < text.length; i++) {
     const code = ac.ci ? foldCharCode(text, i) : text.charCodeAt(i);
     while (state !== 0 && !ac.next[state]!.has(code)) state = ac.fail[state]!;
     state = ac.next[state]!.get(code) ?? 0;
     const end = i + 1;
-    let gotNonExempt = false;
+    let gotHit = false;
     for (let u = ac.out[state] ? state : ac.dict[state]!; u !== 0; u = ac.dict[u]!) {
       for (const rule of ac.out[u]!) {
+        if (gotHit) break;
         if (skipOwner && rule.owner === skipOwner) continue;
-        if (rule.exempt) {
-          const start = end - rule.len;
-          exemptSpans.push({ start, end, len: rule.len, as: rule.as, exempt: true });
-          continue;
-        }
-        if (gotNonExempt) continue;
         const start = end - rule.len;
         if (!isLeftOk(text, start, rule.left) || !isRightOk(text, end, rule.right)) continue;
         if (rule.ambiguous && !(rule.regex ??= new RegExp(`^${escape(rule.text)}$`, "i")).test(text.slice(start, end))) continue;
-        gotNonExempt = true;
-        pushStreamingSpan(spans, start, end, rule.len, rule.as, !ac.hasExempt);
+        gotHit = true;
+        pushStreamingSpan(spans, start, end, rule.len, rule.as, allowPartialMerge);
       }
-      if (gotNonExempt && !ac.hasExempt) break;
+      if (gotHit) break;
     }
   }
-  return exemptSpans.length ? [...spans, ...exemptSpans] : spans;
+  return spans;
 }
 
-function findCanonAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?: KnownName): MatchSpan[] {
+function overlapsAny(intervals: Array<{ start: number; end: number }>, start: number, end: number): boolean {
+  let lo = 0;
+  let hi = intervals.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (intervals[mid]!.end <= start) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo < intervals.length && intervals[lo]!.start < end;
+}
+
+function findExemptOverlaps(
+  exempt: Set<string> | undefined,
+  text: string,
+  sensitiveSpans: MatchSpan[],
+): MatchSpan[] {
+  if (!exempt?.size || !sensitiveSpans.length || !text.length) return [];
+  let maxExemptLen = 0;
+  for (const label of exempt) {
+    if (label.length > maxExemptLen) maxExemptLen = label.length;
+  }
+  if (maxExemptLen === 0) return [];
+  const ordered = [...sensitiveSpans].sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const span of ordered) {
+    const prev = merged.at(-1);
+    if (prev && span.start <= prev.end) {
+      if (span.end > prev.end) prev.end = span.end;
+    } else {
+      merged.push({ start: span.start, end: span.end });
+    }
+  }
+  const pad = maxExemptLen - 1;
+  const windows: Array<{ start: number; end: number }> = [];
+  for (const interval of merged) {
+    const start = Math.max(0, interval.start - pad);
+    const end = Math.min(text.length, interval.end + pad);
+    const prev = windows.at(-1);
+    if (prev && start <= prev.end) {
+      if (end > prev.end) prev.end = end;
+    } else {
+      windows.push({ start, end });
+    }
+  }
+  const angleExempt = new Set<string>();
+  const otherExempt: string[] = [];
+  for (const label of exempt) {
+    if (!label.length) continue;
+    if (/^<[^<>\r\n]+>$/.test(label)) angleExempt.add(label);
+    else otherExempt.push(label);
+  }
+  const presentSet = new Set<string>();
+  const angleRe = /<[^<>\r\n]+>/g;
+  for (const win of windows) {
+    const slice = text.slice(win.start, win.end);
+    if (angleExempt.size) {
+      angleRe.lastIndex = 0;
+      for (let m = angleRe.exec(slice); m !== null; m = angleRe.exec(slice)) {
+        if (angleExempt.has(m[0])) presentSet.add(m[0]);
+      }
+    }
+    for (const label of otherExempt) {
+      if (!presentSet.has(label) && slice.includes(label)) presentSet.add(label);
+    }
+  }
+  if (!presentSet.size) return [];
+  const exemptAc = buildAc(
+    [...presentSet].map((label) => ({ text: label, len: label.length, left: 0 as const, right: 0 as const, as: label })),
+    false,
+  );
+  if (!exemptAc) return [];
+  const out: MatchSpan[] = [];
+  for (const win of windows) {
+    let state = 0;
+    for (let i = win.start; i < win.end; i++) {
+      const code = text.charCodeAt(i);
+      while (state !== 0 && !exemptAc.next[state]!.has(code)) state = exemptAc.fail[state]!;
+      state = exemptAc.next[state]!.get(code) ?? 0;
+      const end = i + 1;
+      for (let u = exemptAc.out[state] ? state : exemptAc.dict[state]!; u !== 0; u = exemptAc.dict[u]!) {
+        for (const rule of exemptAc.out[u]!) {
+          const start = end - rule.len;
+          if (start < win.start) continue;
+          if (overlapsAny(merged, start, end)) {
+            out.push({ start, end, len: rule.len, as: rule.as, exempt: true });
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function findCanonAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?: KnownName, allowPartialMerge = true): MatchSpan[] {
   if (!ac || !text.length) return [];
   const { text: canonText, edits } = canonicalizeWithMap(text);
   const spans: MatchSpan[] = [];
@@ -417,9 +500,9 @@ function findCanonAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?:
         if (oStart < 0 || oEnd <= oStart) continue;
         if (!isLeftOk(text, oStart, rule.left) || !isRightOk(text, oEnd, rule.right)) continue;
         const slice = text.slice(oStart, oEnd);
-        if (rule.verifyPattern && !(rule.verifyRegex ??= new RegExp(`^(?:${rule.verifyPattern})$`, "i")).test(slice)) continue;
+        if (rule.verify && !rule.verify(slice)) continue;
         gotHit = true;
-        pushStreamingSpan(spans, oStart, oEnd, oEnd - oStart, rule.as, true);
+        pushStreamingSpan(spans, oStart, oEnd, oEnd - oStart, rule.as, allowPartialMerge);
       }
       if (gotHit) break;
     }
@@ -431,9 +514,181 @@ type FlexHit = { start: number; end: number; masked: string };
 
 const flexLiteralLimit = 8;
 
-function expandFlexMask(text: string): { literals: string[]; pattern?: string } | undefined {
+function eqCi(a: string, aStart: number, b: string, bStart: number, len: number): boolean {
+  if (aStart + len > a.length || bStart + len > b.length) return false;
+  for (let k = 0; k < len; k++) {
+    const ca = a.charCodeAt(aStart + k);
+    const cb = b.charCodeAt(bStart + k);
+    if (ca === cb) continue;
+    if (ca < 128 && cb < 128) {
+      const ua = ca >= 97 && ca <= 122 ? ca - 32 : ca;
+      const ub = cb >= 97 && cb <= 122 ? cb - 32 : cb;
+      if (ua !== ub) return false;
+    } else if (foldCharCode(a, aStart + k) !== foldCharCode(b, bStart + k)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function collectInnerFlexHits(ruleIdx: number, text: string, mStart: number, mEnd: number, hits: FlexHit[]) {
+  if (ruleIdx === 2) {
+    for (let p = mStart + 1; p + 20 <= mEnd; p++) {
+      if (text.charCodeAt(p) !== 45) continue;
+      if (eqCi(text, p + 1, "sk-", 0, 3)) {
+        hits.push({ start: p + 1, end: mEnd, masked: "<key>" });
+      }
+    }
+    return;
+  }
+  if (ruleIdx === 3) {
+    for (let p = mStart + 1; p + 16 <= mEnd; p++) {
+      if (text.charCodeAt(p) !== 45) continue;
+      if (eqCi(text, p + 1, "xapp-", 0, 5)) {
+        hits.push({ start: p + 1, end: mEnd, masked: "<token>" });
+      } else if (eqCi(text, p + 1, "xox", 0, 3) && text.charCodeAt(p + 5) === 45) {
+        const ch = text.charCodeAt(p + 4) | 32;
+        if (ch === 97 || ch === 98 || ch === 112 || ch === 111 || ch === 115 || ch === 114) {
+          hits.push({ start: p + 1, end: mEnd, masked: "<token>" });
+        }
+      }
+    }
+    return;
+  }
+  if (ruleIdx === 5) {
+    const dot1 = text.indexOf(".", mStart);
+    if (dot1 === -1 || dot1 >= mEnd) return;
+    for (let p = mStart + 1; p + 12 <= dot1; p++) {
+      if (text.charCodeAt(p) !== 45) continue;
+      if (eqCi(text, p + 1, "eyj", 0, 3)) {
+        hits.push({ start: p + 1, end: mEnd, masked: "<token>" });
+      }
+    }
+  }
+}
+
+type CompiledCluster =
+  | { kind: "single"; start: number; end: number; masked: string }
+  | { kind: "sameEnd"; start: number; end: number; starts: number[]; masks: string[][] }
+  | { kind: "general"; start: number; end: number; hits: FlexHit[] };
+
+function matchGeneralCluster(
+  slice: string,
+  startPos: number,
+  text: string,
+  cStart: number,
+  cEnd: number,
+  hits: FlexHit[],
+  out: Set<number>,
+) {
+  const stack: Array<[number, number]> = [[cStart, startPos]];
+  const seen = new Set<string>([`${cStart}:${startPos}`]);
+  while (stack.length > 0 && seen.size <= 4096) {
+    const [tPos, sPos] = stack.pop()!;
+    const tailLen = cEnd - tPos;
+    if (eqCi(slice, sPos, text, tPos, tailLen)) out.add(sPos + tailLen);
+    for (const hit of hits) {
+      if (hit.start < tPos) continue;
+      const gapLen = hit.start - tPos;
+      if (!eqCi(slice, sPos, text, tPos, gapLen)) continue;
+      const afterGap = sPos + gapLen;
+      if (!eqCi(slice, afterGap, hit.masked, 0, hit.masked.length)) continue;
+      const nextS = afterGap + hit.masked.length;
+      if (hit.end === cEnd) {
+        out.add(nextS);
+      } else {
+        const key = `${hit.end}:${nextS}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          stack.push([hit.end, nextS]);
+        }
+      }
+    }
+  }
+}
+
+function buildClusterVerifier(text: string, clusters: Array<{ start: number; end: number; hits: FlexHit[] }>): (slice: string) => boolean {
+  const compiled: CompiledCluster[] = clusters.map((cluster) => {
+    if (cluster.hits.length === 1) {
+      return { kind: "single", start: cluster.start, end: cluster.end, masked: cluster.hits[0]!.masked };
+    }
+    if (cluster.hits.every((item) => item.end === cluster.end)) {
+      const byStart = new Map<number, Set<string>>();
+      for (const item of cluster.hits) {
+        let set = byStart.get(item.start);
+        if (!set) {
+          set = new Set();
+          byStart.set(item.start, set);
+        }
+        set.add(item.masked);
+      }
+      const starts = [...byStart.keys()].sort((a, b) => a - b);
+      return { kind: "sameEnd", start: cluster.start, end: cluster.end, starts, masks: starts.map((st) => [...byStart.get(st)!]) };
+    }
+    return { kind: "general", start: cluster.start, end: cluster.end, hits: cluster.hits };
+  });
+
+  return (slice: string) => {
+    let positions = [0];
+    let prevEnd = 0;
+    for (const cluster of compiled) {
+      const gapLen = cluster.start - prevEnd;
+      const afterGap: number[] = [];
+      for (const p of positions) {
+        if (eqCi(slice, p, text, prevEnd, gapLen)) afterGap.push(p + gapLen);
+      }
+      if (!afterGap.length) return false;
+      const nextSet = new Set<number>();
+      if (cluster.kind === "single") {
+        const litLen = cluster.end - cluster.start;
+        for (const p of afterGap) {
+          if (eqCi(slice, p, cluster.masked, 0, cluster.masked.length)) nextSet.add(p + cluster.masked.length);
+          if (eqCi(slice, p, text, cluster.start, litLen)) nextSet.add(p + litLen);
+        }
+      } else if (cluster.kind === "sameEnd") {
+        for (const startPos of afterGap) {
+          let cur = startPos;
+          let ok = true;
+          let tPos = cluster.start;
+          for (let s = 0; s < cluster.starts.length; s++) {
+            const st = cluster.starts[s]!;
+            const segLen = st - tPos;
+            if (!eqCi(slice, cur, text, tPos, segLen)) {
+              ok = false;
+              break;
+            }
+            cur += segLen;
+            tPos = st;
+            for (const msk of cluster.masks[s]!) {
+              if (eqCi(slice, cur, msk, 0, msk.length)) nextSet.add(cur + msk.length);
+            }
+          }
+          if (ok) {
+            const tailLen = cluster.end - tPos;
+            if (eqCi(slice, cur, text, tPos, tailLen)) nextSet.add(cur + tailLen);
+          }
+        }
+      } else {
+        for (const startPos of afterGap) {
+          matchGeneralCluster(slice, startPos, text, cluster.start, cluster.end, cluster.hits, nextSet);
+        }
+      }
+      if (!nextSet.size) return false;
+      positions = [...nextSet];
+      prevEnd = cluster.end;
+    }
+    const tailLen = text.length - prevEnd;
+    for (const p of positions) {
+      if (p + tailLen === slice.length && eqCi(slice, p, text, prevEnd, tailLen)) return true;
+    }
+    return false;
+  };
+}
+
+function expandFlexMask(text: string): { literals: string[]; verify?: (slice: string) => boolean } | undefined {
   const hits: FlexHit[] = [];
-  for (const [regex, replacement] of ciFlexRules) {
+  for (let r = 0; r < ciFlexRules.length; r++) {
+    const [regex, replacement] = ciFlexRules[r]!;
     regex.lastIndex = 0;
     const single = new RegExp(regex.source, regex.flags.replace("g", ""));
     for (let match = regex.exec(text); match !== null; match = regex.exec(text)) {
@@ -441,11 +696,17 @@ function expandFlexMask(text: string): { literals: string[]; pattern?: string } 
         regex.lastIndex++;
         continue;
       }
+      const mStart = match.index;
+      const mEnd = mStart + match[0].length;
       const masked = match[0].replace(single, replacement as string);
       if (masked !== match[0]) {
-        hits.push({ start: match.index, end: match.index + match[0].length, masked });
+        hits.push({ start: mStart, end: mEnd, masked });
+        collectInnerFlexHits(r, text, mStart, mEnd, hits);
       }
-      regex.lastIndex = match.index + 1;
+      if (r === 11) {
+        const innerSlash = text.indexOf("/", mStart + 1);
+        if (innerSlash !== -1 && innerSlash < mEnd) regex.lastIndex = innerSlash;
+      }
     }
   }
   if (!hits.length) return undefined;
@@ -517,64 +778,7 @@ function expandFlexMask(text: string): { literals: string[]; pattern?: string } 
     return { literals: variants.map((v) => `${v}${tail}`) };
   }
 
-  const buildRange = (from: number, to: number, list: FlexHit[], branchDepth: number): string => {
-    let out = "";
-    let pos = from;
-    let i = 0;
-    while (i < list.length) {
-      const h = list[i]!;
-      if (h.start < pos || h.end > to) {
-        i++;
-        continue;
-      }
-      if (h.start > pos) out += escape(text.slice(pos, h.start));
-      let cEnd = h.end;
-      let j = i + 1;
-      while (j < list.length && list[j]!.start < cEnd) {
-        if (list[j]!.end <= to && list[j]!.end > cEnd) cEnd = list[j]!.end;
-        j++;
-      }
-      const cluster = list.slice(i, j).filter((item) => item.end <= cEnd);
-      if (cluster.length === 1) {
-        const lit = escape(text.slice(h.start, h.end));
-        const msk = escape(h.masked);
-        out += msk === lit ? lit : `(?:${msk}|${lit})`;
-      } else if (cluster.every((item) => item.end === cEnd)) {
-        const byStart = new Map<number, Set<string>>();
-        for (const item of cluster) {
-          let set = byStart.get(item.start);
-          if (!set) {
-            set = new Set();
-            byStart.set(item.start, set);
-          }
-          set.add(escape(item.masked));
-        }
-        const starts = [...byStart.keys()].sort((a, b) => a - b);
-        let tail = escape(text.slice(starts.at(-1)!, cEnd));
-        for (let s = starts.length - 1; s >= 0; s--) {
-          const st = starts[s]!;
-          const gap = s + 1 < starts.length ? escape(text.slice(st, starts[s + 1]!)) : "";
-          const alts = [...byStart.get(st)!, `${gap}${tail}`];
-          tail = alts.length === 1 ? alts[0]! : `(?:${alts.join("|")})`;
-        }
-        out += tail;
-      } else if (branchDepth < 8) {
-        const first = cluster[0]!;
-        const afterFirst = cluster.filter((item) => item.start >= first.end);
-        const skippingFirst = cluster.slice(1);
-        const withHit = `${escape(first.masked)}${buildRange(first.end, cEnd, afterFirst, branchDepth + (afterFirst.length ? 1 : 0))}`;
-        const withoutHit = buildRange(first.start, cEnd, skippingFirst, branchDepth + (first.end < cEnd ? 1 : 0));
-        out += withHit === withoutHit ? withHit : `(?:${withHit}|${withoutHit})`;
-      } else {
-        out += escape(text.slice(h.start, cEnd));
-      }
-      pos = cEnd;
-      i = j;
-    }
-    if (pos < to) out += escape(text.slice(pos, to));
-    return out;
-  };
-  return { literals: [], pattern: buildRange(0, text.length, all, 0) };
+  return { literals: [], verify: buildClusterVerifier(text, clusters) };
 }
 
 const unsafeForBatch = /-----BEGIN|["'\0\r\n]|[:=]\s*$/i;
@@ -604,7 +808,7 @@ function batchTransform(inputs: string[], transform: (value: string) => string):
   return out;
 }
 
-function compileSpellings(entries: KnownName[], transform?: (value: string) => string, exempt?: Set<string>, presentExempt?: string[]): CompiledMatcher {
+function compileSpellings(entries: KnownName[], transform?: (value: string) => string, exempt?: Set<string>): CompiledMatcher {
   const validEntries = entries.filter((entry) => typeof entry.text === "string" && typeof entry.as === "string" && entry.text.length >= (entry.after ? 1 : 2));
   const entryBases = validEntries.map((entry) => {
     const minLength = entry.after ? 1 : 2;
@@ -619,6 +823,7 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
       for (const variant of item.baseVariants) {
         inputs.push(variant);
         if (!variant.startsWith("/")) inputs.push(`/${variant}`);
+        if (/^[\w.-]+\/[\w.-]+/.test(variant)) inputs.push(`private repo ${variant}`);
       }
     }
     transformed = batchTransform(inputs, transform);
@@ -632,6 +837,10 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
           if (!variant.startsWith("/")) {
             const prefixed = transformed?.get(`/${variant}`) ?? transform(`/${variant}`);
             variants.push(prefixed.startsWith("/") ? prefixed.slice(1) : prefixed);
+          }
+          if (/^[\w.-]+\/[\w.-]+/.test(variant)) {
+            const prefixed = transformed?.get(`private repo ${variant}`) ?? transform(`private repo ${variant}`);
+            if (prefixed.startsWith("private repo ")) variants.push(prefixed.slice("private repo ".length));
           }
         }
       }
@@ -689,11 +898,11 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
         for (const literal of expanded.literals) {
           addLiteralRule(literal, name.as, true, name.owner);
         }
-        if (expanded.pattern) {
+        if (expanded.verify) {
           const left: 0 | 1 = /^[~<]/.test(name.text) ? 0 : 1;
           const right: 0 | 1 | 2 = /[>]$/.test(name.text) ? 0 : name.text.startsWith("The pack source ") ? 2 : 1;
           const canonKey = canonicalizeWithMap(name.text).text;
-          const dedupKey = `${left}:${right}:${foldCase(canonKey)}:${expanded.pattern}`;
+          const dedupKey = `${left}:${right}:${foldCase(canonKey)}:${foldCase(name.text)}`;
           if (canonKey.length >= 4 && !canonSeen.has(dedupKey)) {
             canonSeen.add(dedupKey);
             canonRules.push({
@@ -703,17 +912,12 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
               right,
               as: name.as,
               owner: name.owner,
-              verifyPattern: expanded.pattern,
+              verify: expanded.verify,
             });
           }
         }
       }
     }
-  }
-
-  for (const label of presentExempt ?? []) {
-    if (ciRules.length) ciRules.push({ text: label, len: label.length, left: 0, right: 0, as: label, exempt: true });
-    if (csRules.length) csRules.push({ text: label, len: label.length, left: 0, right: 0, as: label, exempt: true });
   }
 
   return {
@@ -775,12 +979,14 @@ function applySpans(text: string, spans: MatchSpan[], exempt?: Set<string>, onMa
 
 function applySpellings(text: string, matcher: CompiledMatcher, exempt?: Set<string>, skipOwner?: KnownName, onMatch?: (match: string, as: string) => string) {
   if (!matcher.ciAc && !matcher.csAc && !matcher.canonAc) return text;
-  const spans = [
-    ...findAcSpans(matcher.ciAc, text, skipOwner),
-    ...findCanonAcSpans(matcher.canonAc, text, skipOwner),
-    ...findAcSpans(matcher.csAc, text, skipOwner),
+  const allowPartialMerge = !exempt?.size;
+  const sensitive = [
+    ...findAcSpans(matcher.ciAc, text, skipOwner, allowPartialMerge),
+    ...findCanonAcSpans(matcher.canonAc, text, skipOwner, allowPartialMerge),
+    ...findAcSpans(matcher.csAc, text, skipOwner, allowPartialMerge),
   ];
-  return applySpans(text, spans, exempt, onMatch);
+  const exemptSpans = findExemptOverlaps(exempt, text, sensitive);
+  return applySpans(text, exemptSpans.length ? [...sensitive, ...exemptSpans] : sensitive, exempt, onMatch);
 }
 
 const deferToAfter = new RegExp(
@@ -824,7 +1030,7 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     ...builtInLabels,
     ...valid.map((entry) => entry.as).filter((label) => /^<devbox \d+>$/.test(label)),
   ]);
-  const rawAllSpellings = compileSpellings(allEntries, undefined, undefined, [...sanitizeExempt]);
+  const rawAllSpellings = compileSpellings(allEntries);
   const sanitizeOne = (value: string, skipOwner?: KnownName) => {
     let current = value;
     for (let pass = 0; pass < 4; pass++) {
@@ -969,34 +1175,23 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
 
   const sanitizedAfter = after.map((entry) => ({ ...entry, as: sanitizeLabel(entry) }));
   const exempt = new Set([...redactorLabels, ...labels, ...sanitizedAfter.map((entry) => entry.as)]);
-  const angleExempt = new Set<string>();
-  const otherExempt: string[] = [];
-  for (const label of exempt) {
-    if (/^<[^<>\r\n]+>$/.test(label)) angleExempt.add(label);
-    else otherExempt.push(label);
-  }
-  const presentSet = new Set<string>();
-  for (const match of expanded.matchAll(/<[^<>\r\n]+>/g)) {
-    if (angleExempt.has(match[0])) presentSet.add(match[0]);
-  }
-  for (const label of otherExempt) {
-    if (expanded.includes(label)) presentSet.add(label);
-  }
-  const presentExempt = [...presentSet].sort((a, b) => b.length - a.length);
-  const afterTransform = (value: string) => applyRules(stripHome(value), allRules);
+  const afterTransform = (value: string) => applyRules(stripHome(value), preRandomAllRules);
   const afterEntries = sanitizedAfter.flatMap((entry) => {
     const ciHome = stripHomeCi(entry.text);
     return ciHome !== entry.text && ciHome !== stripHome(entry.text) ? [entry, { ...entry, text: ciHome }] : [entry];
   });
-  const afterSpellings = compileSpellings(afterEntries, afterTransform, exempt, presentExempt);
+  const afterSpellings = compileSpellings(afterEntries, afterTransform, exempt);
+  const allowPartialMerge = !exempt.size;
   const afterSpans = [
-    ...findAcSpans(afterSpellings.ciAc, expanded),
-    ...findCanonAcSpans(afterSpellings.canonAc, expanded),
-    ...findAcSpans(afterSpellings.csAc, expanded),
+    ...findAcSpans(afterSpellings.ciAc, expanded, undefined, allowPartialMerge),
+    ...findCanonAcSpans(afterSpellings.canonAc, expanded, undefined, allowPartialMerge),
+    ...findAcSpans(afterSpellings.csAc, expanded, undefined, allowPartialMerge),
   ];
+  const combined = [...primarySpans, ...afterSpans];
+  const exemptSpans = findExemptOverlaps(exempt, expanded, combined);
   const mergedOriginals: string[] = [];
   const mergedLabels: string[] = [];
-  const merged = applySpans(expanded, [...primarySpans, ...afterSpans], exempt, (match, as) => {
+  const merged = applySpans(expanded, exemptSpans.length ? [...combined, ...exemptSpans] : combined, exempt, (match, as) => {
     const index = mergedOriginals.length;
     mergedOriginals.push(match);
     mergedLabels.push(as);

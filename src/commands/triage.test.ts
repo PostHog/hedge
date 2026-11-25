@@ -267,6 +267,7 @@ describe("hedge triage", () => {
               { name: "noras-mbp", repo: "acme/host-alias-packs", ref: "main" },
               { name: "bad-numeric", repo: 12345, ref: "main" },
               { name: "team-m", repo: "session", ref: "main" },
+              { name: "team-n", repo: "acme/team/secret:nested", ref: "main" },
             ],
           },
         },
@@ -291,6 +292,7 @@ describe("hedge triage", () => {
         "GET https://example.com/cb?token=prefix/work/repo/query-secret-suffix",
         "fetched acme/host-alias-packs from mirror",
         "unlabeled AbCdEfGhIj1234+/work/repo/KlMnOpQrSt5678 end",
+        "Created the private repo acme/team/secret:nested",
       ].join("\n") + "\n",
     );
     const result = await triageWithRealGit(home, ["--send"]);
@@ -310,7 +312,8 @@ describe("hedge triage", () => {
     expect(issue.input).toContain("https://example.com/cb?token=<redacted>");
     expect(issue.input).toContain("fetched <<this machine> source> from mirror");
     expect(issue.input).toContain("unlabeled <secret> end");
-    for (const leaked of ["correct-horse-battery-staple", "live-session-secret-value", "super-secret-value", "alice", "topsecret", "secret-owner", "secret-repo", "internal-release", keyLikeAlias, "private-project", "customer.internal", "embargoed-release", "top-secret", "private-release", "secret-home-branch", "project.git", "/work/private", "super-secret-suffix", "query-secret-suffix", "noras-mbp", "AbCdEfGhIj1234", "KlMnOpQrSt5678"]) expect(issue.input).not.toContain(leaked);
+    expect(issue.input).toContain("Created the private repo <team-n source>");
+    for (const leaked of ["correct-horse-battery-staple", "live-session-secret-value", "super-secret-value", "alice", "topsecret", "secret-owner", "secret-repo", "internal-release", keyLikeAlias, "private-project", "customer.internal", "embargoed-release", "top-secret", "private-release", "secret-home-branch", "project.git", "/work/private", "super-secret-suffix", "query-secret-suffix", "noras-mbp", "AbCdEfGhIj1234", "KlMnOpQrSt5678", "secret:nested"]) expect(issue.input).not.toContain(leaked);
   });
 
   test("redacts unpinned source aliases and repos from an inherited HEDGE_PROFILE_DIR without disclosing its alias or engine fork", async () => {
@@ -985,6 +988,11 @@ describe("hedge triage", () => {
         { text: "A.INTERNAL/b.internal/C.INTERNAL/d.internal/secret-branch", as: "<branch>", after: true },
       ]),
     ).toBe("hit <branch>");
+    expect(
+      redact("Created the private repo acme/team/secret:nested", "/Users/alice", [
+        { text: "acme/team/secret:nested", as: "<custom source>" },
+      ]),
+    ).toBe("Created the private repo <custom source>");
   });
 });
 

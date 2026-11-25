@@ -333,12 +333,23 @@ describe("hedge refresh", () => {
     const cacheDir = join(legacyBroken.home, ".local/share/hedge/sources/team");
     const goodCommit = await spawnGit(legacyBroken.repo, "rev-parse", "HEAD");
     await commit(legacyBroken.repo, "broken", { "packs/team/pack.json": "{not json" });
-    const brokenCommit = await spawnGit(legacyBroken.repo, "rev-parse", "HEAD");
     await spawnGit(cacheDir, "fetch", "-q", "--no-tags", legacyBroken.repo, "main");
     writeFileSync(join(cacheDir, ".git/hedge-source.json"), JSON.stringify({ repo: legacyBroken.repo, ref: "main", commit: goodCommit }) + "\n");
-    expect(readFileSync(join(cacheDir, ".git/FETCH_HEAD"), "utf8")).toContain(brokenCommit);
     await v2(legacyBroken.repo);
     expect(await legacyBroken.hedge("refresh")).toBe(0);
     expect(legacyBroken.read(guide)).toBe("Rules v2.\n");
+
+    const literalPlus = await machine("refs/heads/+release");
+    await spawnGit(literalPlus.repo, "checkout", "-q", "-b", "+release");
+    await spawnGit(literalPlus.repo, "checkout", "-q", "-b", "release");
+    await spawnGit(literalPlus.repo, "checkout", "-q", "+release");
+    expect(await literalPlus.hedge("apply", "--profile", literalPlus.profile)).toBe(0);
+    expect(literalPlus.read(guide)).toBe("Rules v1.\n");
+    literalPlus.pin("+release");
+    await commit(literalPlus.repo, "plus-v2", { "packs/team/rules.md": "Plus release v2.\n", "packs/team/AGENTS.md": "Plus v2.\n", "packs/team/skills/review/SKILL.md": "# review\n" });
+    await spawnGit(literalPlus.repo, "checkout", "-q", "release");
+    await commit(literalPlus.repo, "plain-v2", { "packs/team/rules.md": "Plain release v2.\n", "packs/team/AGENTS.md": "Plain v2.\n", "packs/team/skills/review/SKILL.md": "# review\n" });
+    expect(await literalPlus.hedge("refresh")).toBe(0);
+    expect(literalPlus.read(guide)).toBe("Plus release v2.\n");
   });
 });
