@@ -35,7 +35,7 @@ async function fifoWrite(path: string, content: string): Promise<void> {
 
 function spawnControlledSupervisor(command: string[]) {
   const harness = `
-import { supervise } from ${JSON.stringify(supervisorPath)};
+import { hasOtherGroupMember, killSessionSync, supervise } from ${JSON.stringify(supervisorPath)};
 const timers = [];
 const write = (line) => process.stdout.write(line + "\\n");
 const reader = Bun.stdin.stream().getReader();
@@ -59,11 +59,31 @@ void (async () => {
     }
   }
 })();
+let spawnedTarget;
+let targetReaped = false;
+let ownPgidActive = false;
 await supervise(${JSON.stringify(command)}, {
-  spawn: (argv) => Bun.spawn(argv, { stdio: ["ignore", "ignore", "ignore"] }),
-  killGroup: (signal) => {
-    try { process.kill(-process.pid, signal); } catch {}
+  spawn: (argv) => {
+    const proc = Bun.spawn(argv, { stdio: ["ignore", "ignore", "ignore"] });
+    spawnedTarget = proc;
+    void proc.exited.finally(() => {
+      targetReaped = true;
+      if (proc.pid !== process.pid) {
+        try {
+          process.kill(-proc.pid, 0);
+          ownPgidActive = true;
+        } catch {
+          ownPgidActive = false;
+        }
+      }
+    });
+    return proc;
   },
+  killGroup: (signal) => {
+    const activeTarget = spawnedTarget && (!targetReaped || ownPgidActive) ? spawnedTarget.pid : undefined;
+    killSessionSync(process.pid, signal, activeTarget);
+  },
+  hasGroupMembers: hasOtherGroupMember,
   timer: (_ms, fire) => {
     const entry = { fire, cancelled: false };
     timers.push(entry);
@@ -406,18 +426,30 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
     const grandBin = join(dir, "grand.sh");
     writeFileSync(grandBin, '#!/bin/sh\ntrap "" HUP TERM\nexec 3>"$1"\necho $$ > "$2"\nexec sleep 30\n', { mode: 0o755 });
     const childScript = `trap '${grandBin} ${grandGone} ${grandReady} & exit 0' TERM; echo $$ > ${JSON.stringify(ready)}; sleep 30 & wait`;
-    const sup = spawnControlledSupervisor(["sh", "-c", 'sh -c "$1" & cat "$2" >/dev/null; exit 0', "probe", childScript, gate]);
+    const payload = JSON.stringify({
+      command: ["sh", "-c", 'sh -c "$1" & cat "$2" >/dev/null; exit 0', "probe", childScript, gate],
+      graceMs: 25,
+    });
+    const proc = Bun.spawn([process.execPath, supervisorPath, payload], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+      detached: true,
+    });
     try {
       expect(Number((await started).trim())).toBeGreaterThan(0);
       await fifoWrite(gate, "go\n");
       const grandPid = Number((await grandStarted).trim());
       expect(grandPid).toBeGreaterThan(0);
-      expect(() => process.kill(grandPid, 0)).not.toThrow();
-      await sup.advance();
       expect(await grandClosed).toBe("");
-      expect(await sup.drain()).toBe(0);
+      const stdout = await new Response(proc.stdout).text();
+      await proc.exited;
+      expect(stdout.split("\n").some((line) => line.trim() === "0")).toBe(true);
     } finally {
-      sup.cleanup();
+      try {
+        process.kill(-proc.pid, "SIGKILL");
+      } catch {}
+      proc.kill("SIGKILL");
     }
   });
 });

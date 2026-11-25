@@ -42,16 +42,19 @@ const realTimer: Timer = (ms, fire) => {
 
 export const orphanGraceSeconds = 10;
 
-function holdingLocks(argv: string[], locked: boolean, timeoutMs: number): string[] {
-  if (!locked) return argv;
+function holdingLocks(argv: string[], locks: number[], timeoutMs: number): string[] {
+  if (!locks.length) return argv;
+  const holdFd = locks.length + 3;
+  const closed = locks.map((_, index) => `${index + 3}>&-`).join(" ");
+  const shell = holdFd >= 10 ? (Bun.which("bash") ?? "/bin/sh") : "/bin/sh";
   return [
     "timeout",
     "-s",
     "KILL",
     String(Math.ceil(timeoutMs / 1000) + orphanGraceSeconds),
-    "/bin/sh",
+    shell,
     "-c",
-    '(while read -r _ <&3; do :; done) </dev/null >/dev/null 2>&1 & exec "$@" 3<&-',
+    `(while read -r _ <&${holdFd}; do :; done) </dev/null >/dev/null 2>&1 ${closed} & exec "$@" ${closed} ${holdFd}<&-`,
     "hedge-box-lock",
     ...argv,
   ];
@@ -179,7 +182,7 @@ export function captureWith(timer: Timer): Capture {
       if (stopped) {
         stopChild();
       } else {
-        live.send({ argv: holdingLocks(argv, locks.length > 0, timeoutMs), locked: locks.length > 0 });
+        live.send({ argv: holdingLocks(argv, locks, timeoutMs), lockCount: locks.length });
       }
       let hardKill: ReturnType<typeof setTimeout> | undefined;
       let forceExpired = false;

@@ -1,4 +1,5 @@
 import { closeSync, writeSync } from "node:fs";
+import { killSessionSync } from "./probe-supervisor.ts";
 
 type WatchEntry = { pid: number; targetPid?: number; fd: number; delayMs: number };
 
@@ -16,6 +17,16 @@ const close = (fd: number) => {
     closeSync(fd);
   } catch {}
 };
+
+async function isDirectChild(parentPid: number, childPid: number): Promise<boolean> {
+  try {
+    const ps = Bun.spawn(["ps", "-o", "ppid=", "-p", String(childPid)], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    const [text, code] = await Promise.all([new Response(ps.stdout).text(), ps.exited]);
+    return code === 0 && Number(text.trim()) === parentPid;
+  } catch {
+    return false;
+  }
+}
 
 if (import.meta.main) {
   let entries: WatchEntry[] = [];
@@ -46,20 +57,16 @@ if (import.meta.main) {
       const left = entry.delayMs - elapsed;
       if (left <= 0) {
         if (alive(entry.fd)) {
-          if (typeof entry.targetPid === "number") {
+          const verifiedTarget =
+            process.platform !== "linux" && typeof entry.targetPid === "number" && (await isDirectChild(entry.pid, entry.targetPid))
+              ? entry.targetPid
+              : undefined;
+          if (alive(entry.fd)) {
+            killSessionSync(entry.pid, "SIGKILL", verifiedTarget);
             try {
-              process.kill(-entry.targetPid, "SIGKILL");
-            } catch {}
-            try {
-              process.kill(entry.targetPid, "SIGKILL");
+              process.kill(entry.pid, "SIGKILL");
             } catch {}
           }
-          try {
-            process.kill(-entry.pid, "SIGKILL");
-          } catch {}
-          try {
-            process.kill(entry.pid, "SIGKILL");
-          } catch {}
         }
         close(entry.fd);
         pending.delete(entry);

@@ -10,7 +10,7 @@ import { hublessReason, listedPack } from "./resolve.ts";
 import { wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
 import { withLegacyNames } from "../legacy.ts";
 import { bunScript } from "../runner/bun.ts";
-import { graceMs, interruptGraceMs } from "./probe-supervisor.ts";
+import { graceMs, interruptGraceMs, killSessionSync } from "./probe-supervisor.ts";
 
 export type AdapterContext = { home: string; dryRun: boolean; adopt: string[]; adoptFrom?: string[] };
 export type AdapterResult = { actions: Action[]; findings: Finding[]; blocked?: boolean; failed?: boolean };
@@ -511,14 +511,24 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
       delayMs: entry.delayMs,
     })),
   );
+  let handedOff = false;
   try {
     const watchdog = Bun.spawn(bunScript(probeWatchdog, payload), {
       stdio: ["ignore", "ignore", "ignore", ...batch.map((entry) => entry.fd)],
       detached: true,
     });
     watchdog.unref();
+    handedOff = true;
   } catch {
   } finally {
+    if (!handedOff) {
+      for (const entry of batch) {
+        killSessionSync(entry.pid, "SIGKILL");
+        try {
+          process.kill(entry.pid, "SIGKILL");
+        } catch {}
+      }
+    }
     for (const entry of batch) {
       try {
         closeSync(entry.fd);
@@ -635,14 +645,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
     if (!child || reaped || lastSignal === name) return;
     lastSignal = name;
     if (probe) probe.delayMs = Math.max(probe.delayMs, delayFor(name));
-    if (probe?.targetPid !== undefined) {
-      try {
-        process.kill(-probe.targetPid, "SIGCONT");
-      } catch {}
-    }
-    try {
-      process.kill(-child.pid, "SIGCONT");
-    } catch {}
+    killSessionSync(child.pid, "SIGCONT");
     try {
       child.kill(name);
     } catch {}
@@ -689,17 +692,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
       (supCode) => {
         reaped = true;
         if (!reportedResult && supCode !== 128 && supCode !== 143) {
-          if (owned.targetPid !== undefined) {
-            try {
-              process.kill(-owned.targetPid, "SIGKILL");
-            } catch {}
-            try {
-              process.kill(owned.targetPid, "SIGKILL");
-            } catch {}
-          }
-          try {
-            process.kill(-owned.pid, "SIGKILL");
-          } catch {}
+          killSessionSync(owned.pid, "SIGKILL");
         }
       },
       () => {

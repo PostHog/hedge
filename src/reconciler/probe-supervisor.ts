@@ -18,10 +18,49 @@ export type SupervisorHost = {
   exit: (code: number) => void;
 };
 
-async function hasOtherGroupMember(targetPid?: number): Promise<boolean> {
+export function sessionGroupsLinux(sessionId: number): number[] {
+  const groups = new Set<number>();
+  try {
+    for (const name of readdirSync("/proc")) {
+      if (!/^\d+$/.test(name)) continue;
+      let stat: string;
+      try {
+        stat = readFileSync(`/proc/${name}/stat`, "utf8");
+      } catch {
+        continue;
+      }
+      const closeParen = stat.lastIndexOf(")");
+      if (closeParen === -1) continue;
+      const fields = stat.slice(closeParen + 2).split(" ");
+      if (Number(fields[3]) === sessionId) {
+        const pgrp = Number(fields[2]);
+        if (pgrp > 0) groups.add(pgrp);
+      }
+    }
+  } catch {}
+  return [...groups];
+}
+
+export function killSessionSync(sessionId: number, signal: NodeJS.Signals, activeTargetPgid?: number): void {
+  if (process.platform === "linux") {
+    for (const pgrp of sessionGroupsLinux(sessionId)) {
+      if (pgrp === sessionId) continue;
+      try {
+        process.kill(-pgrp, signal);
+      } catch {}
+    }
+  } else if (activeTargetPgid !== undefined && activeTargetPgid !== sessionId) {
+    try {
+      process.kill(-activeTargetPgid, signal);
+    } catch {}
+  }
+  try {
+    process.kill(-sessionId, signal);
+  } catch {}
+}
+
+export async function hasOtherGroupMember(targetPid?: number): Promise<boolean> {
   const self = process.pid;
-  const groups = new Set<number>([self]);
-  if (targetPid !== undefined && targetPid !== self) groups.add(targetPid);
   if (process.platform === "linux") {
     try {
       for (const name of readdirSync("/proc")) {
@@ -37,13 +76,15 @@ async function hasOtherGroupMember(targetPid?: number): Promise<boolean> {
         const closeParen = stat.lastIndexOf(")");
         if (closeParen === -1) continue;
         const fields = stat.slice(closeParen + 2).split(" ");
-        if (groups.has(Number(fields[2]))) return true;
+        if (Number(fields[3]) === self || Number(fields[2]) === self) return true;
       }
       return false;
     } catch {
       return true;
     }
   }
+  const groups = new Set<number>([self]);
+  if (targetPid !== undefined && targetPid !== self) groups.add(targetPid);
   try {
     const ps = Bun.spawn(["ps", "-eo", "pid=,pgid="], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
     const [text, code] = await Promise.all([new Response(ps.stdout).text(), ps.exited]);
@@ -73,6 +114,7 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
   let stop: StopSignal | undefined;
   let target: { pid?: number; exited: Promise<number>; kill?: (signal?: NodeJS.Signals) => void } | undefined;
   let leaderDone = false;
+  let normalCleanupStarted = false;
   let finished = false;
   let cancelInterrupt: (() => void) | undefined;
   let cancelHard: (() => void) | undefined;
@@ -134,7 +176,7 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
       if (forwarded.has(sig)) return;
       if (!stop) stop = sig;
       if (!target) return exit(128);
-      if (leaderDone) {
+      if (leaderDone && normalCleanupStarted) {
         if (sig === "SIGTERM" || sig === "SIGHUP") {
           armHard();
           forwardGroup(sig);
@@ -167,12 +209,14 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
     host.reportResult(code);
     if (host.hasGroupMembers) {
       const hasMembers = await host.hasGroupMembers(target.pid);
-      if (finished) return settled;
-      if (!stop && !hasMembers) {
+      if (finished || stop) return settled;
+      if (!hasMembers) {
         exit(code);
         return settled;
       }
     }
+    if (stop) return settled;
+    normalCleanupStarted = true;
     armHard();
     forwardGroup("SIGTERM");
     host.reportCleanup();
@@ -223,14 +267,8 @@ if (import.meta.main) {
       return proc;
     },
     killGroup: (signal) => {
-      if (spawnedTarget && (!targetReaped || ownPgidActive)) {
-        try {
-          process.kill(-spawnedTarget.pid, signal);
-        } catch {}
-      }
-      try {
-        process.kill(-process.pid, signal);
-      } catch {}
+      const activeTarget = spawnedTarget && (!targetReaped || ownPgidActive) ? spawnedTarget.pid : undefined;
+      killSessionSync(process.pid, signal, activeTarget);
     },
     hasGroupMembers: hasOtherGroupMember,
     timer: realTimer,
