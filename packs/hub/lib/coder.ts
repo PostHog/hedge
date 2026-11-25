@@ -198,7 +198,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     };
     let child: ReturnType<typeof Bun.spawn> | undefined;
     const tag = crypto.randomUUID();
-    const inheritedSpare = (env ?? process.env)[spareEnvVar] || undefined;
+    const inheritedSpare = env?.[spareEnvVar] || process.env[spareEnvVar] || undefined;
     const sparePipe = inheritedSpare ? undefined : createPipe();
     if (sparePipe) setCloexec(sparePipe.readFd, true);
     let spareReadClosed = false;
@@ -371,18 +371,20 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     try {
       const command = holdingLocks(argv, locks, timeoutMs, env?.PATH ?? process.env.PATH ?? "");
       const childEnv = env ?? process.env;
-      const fullTag = appendTag(childEnv[tagEnvVar], tag);
+      const fullTag = appendTag(childEnv[tagEnvVar] ?? process.env[tagEnvVar], tag);
       const envEntries: Array<[string, string]> = [];
       for (const [k, v] of Object.entries(childEnv)) {
-        if (v !== undefined && k !== tagEnvVar) envEntries.push([k, v]);
+        if (v !== undefined && k !== tagEnvVar && k !== spareEnvVar) envEntries.push([k, v]);
       }
       envEntries.push([tagEnvVar, tag]);
+      if (inheritedSpare) envEntries.push([spareEnvVar, inheritedSpare]);
       const controlFdIndex = 3 + locks.length;
       const resultFdIndex = controlFdIndex + 1;
       const configFdIndex = controlFdIndex + 2;
       const spareFdIndex = sparePipe ? configFdIndex + 1 : undefined;
       const supEnv = supervisorEnv(fullTag);
       if (inheritedSpare) supEnv[spareEnvVar] = inheritedSpare;
+      else delete supEnv[spareEnvVar];
       const extraArgs = spareFdIndex !== undefined ? [String(spareFdIndex)] : [];
       const extraStdio = sparePipe ? [sparePipe.writeFd] : [];
       child = Bun.spawn(

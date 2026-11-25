@@ -1,5 +1,5 @@
 import { closeSync, writeSync } from "node:fs";
-import { discoverTargetsSync, drainControlFd, enableChildSubreaper, encodeSpareLine, killSession, ownTag, readFdChunk, recordSparedProcess, redirectStdioOutputsToNull, removeSpareFile, setCloexec, shieldGroupSignals, spareEnvVar, spareFilePath, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { discoverTargets, discoverTargetsLinux, discoverTargetsSync, drainControlFd, enableChildSubreaper, encodeSpareLine, killSession, ownTag, readFdChunk, recordSparedProcess, redirectStdioOutputsToNull, removeSpareFile, setCloexec, shieldGroupSignals, signalTargets, spareEnvVar, spareFilePath, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
 type StartConfig = { argv: string[]; env?: Record<string, string>; envEntries?: Array<[string, string]>; spareTag?: string; spareHome?: string };
 
@@ -39,9 +39,24 @@ const killAll = (removeOwnSpare = false) => {
         target.kill("SIGKILL");
       } catch {}
     }
-    if (removeOwnSpare && !inheritedSpare && sparePath) removeSpareFile(sparePath);
     process.exit(137);
   };
+  if (removeOwnSpare && !inheritedSpare && sparePath) {
+    if (process.platform === "linux") {
+      const targets = discoverTargetsLinux(process.pid, runTag, undefined, sparePath);
+      removeSpareFile(sparePath);
+      signalTargets(targets, "SIGKILL", process.pid);
+      finish();
+      return;
+    }
+    void discoverTargets(process.pid, runTag, sparePath)
+      .then((targets) => {
+        removeSpareFile(sparePath);
+        signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", process.pid);
+      })
+      .finally(finish);
+    return;
+  }
   const done = killSession(process.pid, "SIGKILL", runTag, undefined, sparePath);
   if (done && typeof (done as Promise<void>).then === "function") {
     void (done as Promise<void>).finally(finish);

@@ -1521,14 +1521,15 @@ await Bun.sleep(30_000);`;
     const outerStarted = fifoRead(outerReady);
     const outerClosed = fifoRead(outerGone);
     const { captureWith, timedOut } = await import("../../packs/hub/lib/coder.ts");
-    const { spareEnvVar, spareFilePath, removeSpareFile } = await import("./probe-supervisor.ts");
-    const spareFile = spareFilePath(crypto.randomUUID());
     const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
     const daemonScript = `const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 d.unref();
 process.exit(0);`;
     const outerScript = `import { capture } from ${JSON.stringify(coderPath)};
-const res = await capture([process.execPath, "-e", ${JSON.stringify(daemonScript)}], { timeoutMs: 5_000 });
+const res = await capture([process.execPath, "-e", ${JSON.stringify(daemonScript)}], {
+  env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR },
+  timeoutMs: 5_000,
+});
 if (res.code !== 0) process.exit(2);
 const hold = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "outer", ${JSON.stringify(outerGone)}, ${JSON.stringify(outerReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 await hold.exited;`;
@@ -1541,7 +1542,6 @@ await hold.exited;`;
         return () => {};
       }, 0);
       const running = capture([process.execPath, "-e", outerScript], {
-        env: { ...process.env, [spareEnvVar]: spareFile },
         timeoutMs: 30_000,
       });
       [daemonPid, outerPid] = (await Promise.all([daemonStarted, outerStarted])).map((s) => Number(s.trim())) as [number, number];
@@ -1555,7 +1555,6 @@ await hold.exited;`;
     } finally {
       if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
       if (outerPid > 0) try { process.kill(outerPid, "SIGKILL"); } catch {}
-      removeSpareFile(spareFile);
       await daemonClosed.catch(() => {});
     }
 
