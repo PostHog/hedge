@@ -169,7 +169,13 @@ function knownNames(hostname: string, machine: MachineFile | undefined, profile:
   const publicSourceNames = new Set(defaultSources.map((source) => source.name));
   for (const source of [...(machine?.setup?.draft?.sources ?? []), ...(profile?.sources ?? [])]) {
     if (typeof source.name === "string" && !publicSourceNames.has(source.name)) names.push({ text: `The pack source ${source.name}`, as: "The pack source <private source>" });
-    if (typeof source.ref === "string" && !/^[0-9a-f]{40}$/i.test(source.ref) && source.ref !== "main" && source.ref !== "master") names.push({ text: source.ref, as: "<branch>", after: true });
+    if (typeof source.ref === "string" && !/^[0-9a-f]{40}$/i.test(source.ref)) {
+      const shortRef = source.ref.replace(/^refs\/heads\//, "");
+      if (shortRef !== "main" && shortRef !== "master") {
+        names.push({ text: source.ref, as: "<branch>", after: true });
+        if (shortRef !== source.ref) names.push({ text: shortRef, as: "<branch>", after: true });
+      }
+    }
     if (publicRepos.has(source.repo)) continue;
     names.push({ text: source.repo, as: `<${source.name} source>` });
   }

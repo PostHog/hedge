@@ -296,14 +296,14 @@ describe("fetchSource", () => {
     expect(fetched).toMatchObject({ error: expect.stringContaining("could not fetch v1") });
   });
 
-  test("ignores a malformed pins file in the cache and fetches cleanly", async () => {
+  test("ignores a malformed pins file or malformed last-good record and fetches cleanly", async () => {
     const repo = await packRepo("Team rules v1.");
     const commit = await spawnGit(repo, "rev-parse", "HEAD");
     const cache = temp.make("cache-");
     const ref = { name: "team", repo, ref: commit };
     await fetchSource(ref, cache);
-    writeFileSync(join(cache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo, ref: "main", commit: "0".repeat(40) }));
-    writeFileSync(join(cache, "team", ".git", "hedge-pins.json"), JSON.stringify({ repo, commits: "bad" }));
+    writeFileSync(join(cache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo: 42 }));
+    writeFileSync(join(cache, "team", ".git", "hedge-pins.json"), JSON.stringify({ repoHash: "bad", commits: "bad" }));
     const fetched = await fetchSource(ref, cache);
     if ("error" in fetched) throw new Error(fetched.error);
     expect([fetched.packs[0]?.manifest.summary, fetched.stale]).toEqual(["Team rules v1.", undefined]);
@@ -325,6 +325,41 @@ describe("fetchSource", () => {
     const offline = await fetchSource({ name: "team", repo: "constructor", ref: commit }, cache);
     if ("error" in offline) throw new Error(offline.error);
     expect([offline.packs[0]?.manifest.summary, offline.stale]).toEqual(["Proto rules.", undefined]);
+  });
+
+  test("does not share pin history across repository URLs that differ only by SSH username", async () => {
+    const repo = await packRepo("Account A.");
+    const commit = await spawnGit(repo, "rev-parse", "HEAD");
+    const cache = temp.make("cache-");
+    const alice = "ssh://alice@example.invalid/repo.git";
+    const bob = "ssh://bob@example.invalid/repo.git";
+    const env = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: `url.${repo}.insteadOf`, GIT_CONFIG_VALUE_0: alice };
+    Object.assign(process.env, env);
+    try {
+      const first = await fetchSource({ name: "team", repo: alice, ref: commit }, cache);
+      if ("error" in first) throw new Error(first.error);
+      expect(first.packs[0]?.manifest.summary).toBe("Account A.");
+    } finally {
+      delete process.env.GIT_CONFIG_COUNT;
+      delete process.env.GIT_CONFIG_KEY_0;
+      delete process.env.GIT_CONFIG_VALUE_0;
+    }
+    const repoB = await packRepo("Account B.");
+    const commitB = await spawnGit(repoB, "rev-parse", "HEAD");
+    Object.assign(process.env, { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: `url.${repoB}.insteadOf`, GIT_CONFIG_VALUE_0: bob });
+    try {
+      const second = await fetchSource({ name: "team", repo: bob, ref: commitB }, cache);
+      if ("error" in second) throw new Error(second.error);
+      expect(second.packs[0]?.manifest.summary).toBe("Account B.");
+      const cross = await fetchSource({ name: "team", repo: bob, ref: commit }, cache);
+      if ("error" in cross) throw new Error(cross.error);
+      expect(cross.packs[0]?.manifest.summary).toBe("Account B.");
+      expect(cross.stale).toContain(`could not fetch ${commit}`);
+    } finally {
+      delete process.env.GIT_CONFIG_COUNT;
+      delete process.env.GIT_CONFIG_KEY_0;
+      delete process.env.GIT_CONFIG_VALUE_0;
+    }
   });
 
   test("preserves a pre-upgrade pinned commit after applying a second pin, and keeps pin history across an older binary write", async () => {
