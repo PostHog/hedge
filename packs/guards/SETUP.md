@@ -30,7 +30,9 @@ start off. Ask with your question tool, in one call:
 for the person's gate override at that head. Turn it on only when the person
 proves PRs with the Quality gates pack: add `--workflows merge-gate=on`.
 Repositories that merge without the gate, such as their own tooling, go in
-`--set guards.merge-gate-exempt=<owner/name or owner/*, ...>`.
+`--set guards.merge-gate-exempt=<owner/name or owner/*, ...>`. In every
+repository, these included, a head with a proof gap that an agent accepted
+waits for the person's merge word for that head.
 
 When the person adds Claude allow rules that let agents request reviewers or
 post `/trunk merge` without the auto-mode review, list the same rules, one per

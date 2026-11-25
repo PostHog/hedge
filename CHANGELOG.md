@@ -16,6 +16,40 @@
   later leaves the gate as it was. GitHub still holds the merge until the
   person passes it.
 
+### The merge card line, and a hold on gaps the agent accepted
+
+- A passing `hedge proof gate` prints one `merge card:` line, and
+  `hedge proof receipt` prints it too: the merge-risk grade and door, with
+  "one-way door" spelled out, the review rounds and final reads and how many
+  ran past the review budget, each gap with who accepted it and why, each item
+  under Known issues, and the minutes from opened to ready and from ready to
+  this line. Copy it onto the merge card.
+- The receipt writes the same summary at the top of its section of the PR
+  body, as a **Merge card** line without the minutes to the card.
+- A read past the budget now counts on the user's `--override` too. It does
+  not take one of the agent's 3 reads.
+- A gate pass records the gaps that an agent accepted with 🤖 decisions. The
+  merge-gate hook refuses an enqueue or merge of that head until the person
+  chooses "Merge" on a merge card that names the PR, its full head sha, and
+  each held decision as the refusal names it, its id with every proof kind
+  it accepts, such as `d-1a2b3c4d for live-run/prod-shape`:
+  `hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full head sha>: merge card'`.
+  The recorder refuses any other choice, and a question without that head.
+  The answer lifts only the decisions its question named that way,
+  so a gap that a decision accepts later still shows on a card. A push leaves
+  it behind. A gate override for the head lifts the hold too.
+- The hold covers repositories in `guards.merge-gate-exempt` too, which still
+  need no gate pass. There, the hook reads the decision ledger on every merge,
+  and refuses it when the ledger cannot be read. A 🤖 gap decision of the PR
+  holds it until a gate pass at its head that read that decision shows no
+  such gap.
+- While the decision ledger cannot be read, the hook now refuses every
+  enqueue and merge, since it cannot tell whether a gap an agent accepted
+  holds the head. Before, a gate pass on this machine let it through.
+- `hedge proof gate` saves its run and shares its pass before it reads the
+  PR's timeline for the card line, so a slow GitHub read cannot keep a pass
+  from counting.
+
 ### The landed gate survives a renamed required check, and the thread query costs less
 
 - `hedge proof gate --landed` no longer waits on a required check that never

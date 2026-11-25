@@ -12,6 +12,7 @@ import { checkPlacement, GuardRefusal, keepBody, placeReceipt, receiptHash, rend
 import { fitPage, gatherPage, PageTooLarge, renderPage } from "./proof-receipt-page.ts";
 import { handlerPublisher, type Published, type PublishRequest } from "./proof-receipt-publisher.ts";
 import { reviewDisplay } from "./proof-review-display.ts";
+import { mergeCardBlock, mergeCardLine, readTimeline } from "./proof-merge-card.ts";
 
 export type ReceiptContext = GateContext & { print: (text: string) => void };
 
@@ -60,9 +61,17 @@ export async function runReceipt(head: ProofIdentity, items: string[] | undefine
   const notChecked = items ?? await readNotChecked(home, head);
   const covered = decisions.filter((decision) => covers(decision, head));
   const reviews = await receiptReviews(head, home);
+  const timeline = readTimeline(head, first, context.run);
+  const passed = gated && summary.code === 0;
+  const card = passed ? mergeCardBlock({ summary, body: first.body, timeline }) : undefined;
+  const done = (line: string) => {
+    if (passed) print(mergeCardLine({ ref: head, summary, body: first.body, timeline }, context.now?.() ?? new Date()));
+    print(line);
+    return 0;
+  };
   let rendered: ReturnType<typeof renderSection>;
   try {
-    rendered = renderSection({ summary, gated, landed: first.state === "merged", display, notChecked, reviews, screenshots: await screenshotFiles(summary) });
+    rendered = renderSection({ summary, gated, landed: first.state === "merged", display, notChecked, reviews, screenshots: await screenshotFiles(summary), ...card ? { card } : {} });
   } catch (error) { if (error instanceof GuardRefusal) { print(error.message); return 2; } throw error; }
   for (const warning of rendered.warnings) print(warning);
   const title = `Proof receipt: ${head.repository}#${head.pr}`;
@@ -88,8 +97,7 @@ export async function runReceipt(head: ProofIdentity, items: string[] | undefine
     if (!publish && await readFile(local, "utf8").catch(() => undefined) !== content) await saveLocal();
     if (items) await recordNotChecked(home, head, items);
     await recordBody();
-    print("receipt current");
-    return 0;
+    return done("receipt current");
   }
   let published: Published | undefined;
   if (publish && request) {
@@ -104,6 +112,5 @@ export async function runReceipt(head: ProofIdentity, items: string[] | undefine
   if (readBody(head, context).body !== intended) throw new Error("The PR body reads back different from the one hedge wrote. Check the body by hand, then run the receipt again");
   if (items) await recordNotChecked(home, head, items);
   await recordBody();
-  print(`receipt written at ${short(head.commit)}${published ? `: ${published.url}` : ""}`);
-  return 0;
+  return done(`receipt written at ${short(head.commit)}${published ? `: ${published.url}` : ""}`);
 }

@@ -74,6 +74,8 @@ test("the body section shows each owed proof, the review and the judge in the te
   const section = block(body);
   expect(body.replace(section, "")).toBe(template.replace("- [x] I ticked this box\n\n", "- [x] I ticked this box\n\n\n\n"));
   expect(section.split("\n").slice(1, -1)).toEqual([
+    expect.stringMatching(/^\*\*Merge card:\*\* medium, two-way door · 1 round · gaps: cross-version \(👤 the user d-[0-9a-f]+\) · no known issues · minutes not known$/),
+    "",
     "| Proof | What ran | Result | Commit |",
     "| --- | --- | --- | --- |",
     `| live-run | Sent a test email to the sandbox inbox | Delivered in one attempt | \`${short(head)}\` |`,
