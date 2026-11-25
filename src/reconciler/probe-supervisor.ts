@@ -1189,6 +1189,7 @@ if (import.meta.main) {
   let holder = false;
   let guardFd: number | undefined;
   let holderFd: number | undefined;
+  let holderExitFd: number | undefined;
   let innerResultFd: number | undefined;
   try {
     const raw = Bun.argv[2] ?? (await Bun.stdin.text());
@@ -1206,6 +1207,7 @@ if (import.meta.main) {
         holder?: unknown;
         guardFd?: unknown;
         holderFd?: unknown;
+        holderExitFd?: unknown;
         innerResultFd?: unknown;
       };
       if (record.command.every((arg) => typeof arg === "string")) command = record.command as string[];
@@ -1223,6 +1225,7 @@ if (import.meta.main) {
       if (record.holder === true) holder = true;
       if (typeof record.guardFd === "number" && Number.isInteger(record.guardFd) && record.guardFd >= 3) guardFd = record.guardFd;
       if (typeof record.holderFd === "number" && Number.isInteger(record.holderFd) && record.holderFd >= 3) holderFd = record.holderFd;
+      if (typeof record.holderExitFd === "number" && Number.isInteger(record.holderExitFd) && record.holderExitFd >= 3) holderExitFd = record.holderExitFd;
       if (typeof record.innerResultFd === "number" && Number.isInteger(record.innerResultFd) && record.innerResultFd >= 3) innerResultFd = record.innerResultFd;
     }
   } catch {}
@@ -1230,6 +1233,7 @@ if (import.meta.main) {
     enableChildSubreaper();
     shieldGroupSignals();
     for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) process.on(sig, () => {});
+    if (holderExitFd !== undefined) setCloexec(holderExitFd, true);
     const closeFd = (fd: number | undefined) => {
       if (fd === undefined) return;
       try {

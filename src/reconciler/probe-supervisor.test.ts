@@ -1302,7 +1302,7 @@ await capture([process.execPath, "-e", ${JSON.stringify(outerScript)}], { timeou
     }
   });
 
-  test("kills an adopted detached env -i worker when either the Linux probe runner or outer holder is SIGKILLed", async () => {
+  test("kills an adopted detached env -i worker when any enclosing Linux probe supervisor layer is SIGKILLed", async () => {
     if (process.platform !== "linux") return;
     const { readFileSync } = await import("node:fs");
     const envBin = Bun.which("env") ?? "/usr/bin/env";
@@ -1313,8 +1313,17 @@ await capture([process.execPath, "-e", ${JSON.stringify(outerScript)}], { timeou
       const closeParen = stat.lastIndexOf(")");
       return Number(stat.slice(closeParen + 2).split(" ")[1]);
     };
-    for (const killOuterHolder of [false, true]) {
-      const dir = temp.make(`sup-sigkill-adopted-${killOuterHolder ? "holder" : "runner"}-`);
+    const supervisorAncestors = (pid: number) => {
+      const out: number[] = [];
+      let cur = parentOf(pid);
+      while (cur > 1 && cur !== process.pid && out.length < 8) {
+        out.push(cur);
+        cur = parentOf(cur);
+      }
+      return out;
+    };
+    const runAndKillLayer = async (layerIndex: number): Promise<number> => {
+      const dir = temp.make(`sup-sigkill-adopted-${layerIndex}-`);
       const [workerReady, workerGone, helperDone] = [join(dir, "worker-ready"), join(dir, "worker-gone"), join(dir, "helper-done")];
       mkfifo(workerReady, workerGone, helperDone);
       const started = fifoRead(workerReady);
@@ -1356,17 +1365,111 @@ await Bun.sleep(30_000);`;
         const [rawWorker] = await Promise.all([started, adopted]);
         workerPid = Number(rawWorker.trim());
         expect(workerPid).toBeGreaterThan(0);
-        const runnerPid = parentOf(workerPid);
-        expect(runnerPid).toBeGreaterThan(1);
-        const victimPid = killOuterHolder ? parentOf(runnerPid) : runnerPid;
-        expect(victimPid).toBeGreaterThan(1);
+        const ancestors = supervisorAncestors(workerPid);
+        expect(ancestors.length).toBeGreaterThan(0);
+        const victimPid = ancestors[Math.min(layerIndex, ancestors.length - 1)]!;
         process.kill(victimPid, "SIGKILL");
         const res = await pending;
         expect(res.unchecked.map((step) => step.id)).toEqual(["adopted"]);
         expect(await closed).toBe("");
+        return ancestors.length;
       } finally {
         if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
       }
+    };
+    const depth = await runAndKillLayer(0);
+    for (let layer = 1; layer < depth; layer++) {
+      await runAndKillLayer(layer);
+    }
+  });
+
+  test("preserves a spared env -i worker during stalled capture fallback and keeps spareFile intact while a holder fd stays open", async () => {
+    const dir = temp.make("sup-stalled-capture-spare-");
+    const envBin = Bun.which("env") ?? "/usr/bin/env";
+    const shBin = Bun.which("sh") ?? "/bin/sh";
+    const [daemonReady, daemonGone, outerReady, outerGone] = [
+      join(dir, "daemon-ready"),
+      join(dir, "daemon-gone"),
+      join(dir, "outer-ready"),
+      join(dir, "outer-gone"),
+    ];
+    mkfifo(daemonReady, daemonGone, outerReady, outerGone);
+    const daemonStarted = fifoRead(daemonReady);
+    const daemonClosed = fifoRead(daemonGone);
+    const outerStarted = fifoRead(outerReady);
+    const outerClosed = fifoRead(outerGone);
+    const { captureWith, timedOut } = await import("../../packs/hub/lib/coder.ts");
+    const { createPipe, spareEnvVar, spareFilePath, removeSpareFile } = await import("./probe-supervisor.ts");
+    const { existsSync, writeFileSync } = await import("node:fs");
+    const spareFile = spareFilePath(crypto.randomUUID());
+    const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
+    const daemonScript = `const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+d.unref();
+process.exit(0);`;
+    const outerScript = `import { capture } from ${JSON.stringify(coderPath)};
+const res = await capture([process.execPath, "-e", ${JSON.stringify(daemonScript)}], { timeoutMs: 5_000 });
+if (res.code !== 0) process.exit(2);
+const hold = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "outer", ${JSON.stringify(outerGone)}, ${JSON.stringify(outerReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await hold.exited;`;
+    let fireTimeout!: () => void;
+    let daemonPid = 0;
+    let outerPid = 0;
+    try {
+      const capture = captureWith((_ms, fire) => {
+        fireTimeout = fire;
+        return () => {};
+      }, 0);
+      const running = capture([process.execPath, "-e", outerScript], {
+        env: { ...process.env, [spareEnvVar]: spareFile },
+        timeoutMs: 30_000,
+      });
+      [daemonPid, outerPid] = (await Promise.all([daemonStarted, outerStarted])).map((s) => Number(s.trim())) as [number, number];
+      expect(daemonPid).toBeGreaterThan(0);
+      expect(outerPid).toBeGreaterThan(0);
+      fireTimeout();
+      const result = await running;
+      expect(result.code).toBe(timedOut);
+      expect(await outerClosed).toBe("");
+      expect(() => process.kill(daemonPid, 0)).not.toThrow();
+    } finally {
+      if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
+      if (outerPid > 0) try { process.kill(outerPid, "SIGKILL"); } catch {}
+      removeSpareFile(spareFile);
+      await daemonClosed.catch(() => {});
+    }
+
+    const holderSpare = join(dir, "holder.spare");
+    writeFileSync(holderSpare, "pid:999999\n");
+    const runnerPipe = createPipe();
+    const holderPipe = createPipe();
+    expect(runnerPipe).toBeDefined();
+    expect(holderPipe).toBeDefined();
+    closeSync(runnerPipe!.readFd);
+    let now = 0;
+    let ticks = 0;
+    let sawStillPresent = false;
+    try {
+      await watchEntries(
+        [{ pid: 999_999, fd: runnerPipe!.writeFd, holderPid: 999_998, holderFd: holderPipe!.readFd, delayMs: 200, spareFile: holderSpare }],
+        {
+          now: () => now,
+          sleep: async (ms) => {
+            ticks++;
+            if (ticks === 1) {
+              sawStillPresent = existsSync(holderSpare);
+              closeSync(holderPipe!.writeFd);
+            }
+            now += ms;
+          },
+        },
+      );
+      expect(sawStillPresent).toBe(true);
+      expect(existsSync(holderSpare)).toBe(false);
+    } finally {
+      try { closeSync(runnerPipe!.writeFd); } catch {}
+      try { closeSync(holderPipe!.readFd); } catch {}
+      try { closeSync(holderPipe!.writeFd); } catch {}
+      removeSpareFile(holderSpare);
     }
   });
 });

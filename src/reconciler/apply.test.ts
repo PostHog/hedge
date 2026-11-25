@@ -836,37 +836,58 @@ process.exit(0);`;
 import { join } from "node:path";
 import { humanStepsLeft } from ${JSON.stringify(applyPath)};
 const dir = ${JSON.stringify(dir)};
-const [afterReady, holdGone] = [join(dir, "after-ready"), join(dir, "hold-gone")];
-if (Bun.spawnSync(["mkfifo", afterReady, holdGone]).exitCode !== 0) process.exit(2);
+const [afterReady, holdGone, fastDaemonReady, fastDaemonGone] = [
+  join(dir, "after-ready"),
+  join(dir, "hold-gone"),
+  join(dir, "fast-daemon-ready"),
+  join(dir, "fast-daemon-gone"),
+];
+if (Bun.spawnSync(["mkfifo", afterReady, holdGone, fastDaemonReady, fastDaemonGone]).exitCode !== 0) process.exit(2);
 const afterStarted = Bun.file(afterReady).text();
 const holdsClosed = Bun.file(holdGone).text();
+const fastDaemonStarted = Bun.file(fastDaemonReady).text();
+const fastDaemonClosed = Bun.file(fastDaemonGone).text();
 const marker = ${JSON.stringify(marker)};
+const fastScript = \`const d = Bun.spawn(["sh", "-c", 'trap "echo hit > "$1"" TERM INT; exec 3>"$2"; echo $$ > "$3"; exec sleep 30', "fast-daemon", \${JSON.stringify(marker)}, \${JSON.stringify(fastDaemonGone)}, \${JSON.stringify(fastDaemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" }); d.unref(); process.exit(0);\`;
 let fireReal;
-const pending = humanStepsLeft({
-  machine: { schema: 1, role: "linux" },
-  os: process.platform === "darwin" ? "darwin" : "linux",
-  ai: "both",
-  packs: [],
-  workflows: [],
-  files: [],
-  config: [],
-  owners: {},
-  jobs: [],
-  human: [
-    { id: "fast-done", pack: "team", say: "Fast.", probe: ["sh", "-c", 'trap "echo hit > \\"$1\\"" TERM INT; exit 0', "fast", marker] },
-    ...Array.from({ length: 7 }, (_, i) => ({ id: "hold-" + i, pack: "team", say: "Hold.", probe: ["sh", "-c", 'exec 3>"$1"; exec sleep 30', "hold-" + i, holdGone] })),
-    { id: "after-fast", pack: "team", say: "After.", probe: ["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "after-fast", holdGone, afterReady] },
-  ],
-  steps: [], checks: [], commands: {}, handlers: {}, models: [], settings: {}, unanswered: [], ask: [], dropped: [],
-}, { home: dir, giveUp: new Promise((resolve) => (fireReal = resolve)), graceMs: 0 });
-const afterPid = Number((await afterStarted).trim());
-if (!(afterPid > 0)) process.exit(3);
-fireReal();
-const realResult = await pending;
-const closed = await holdsClosed;
-const expected = [...Array.from({ length: 7 }, (_, i) => "hold-" + i), "after-fast"];
-const ok = realResult.failing.length === 0 && JSON.stringify(realResult.unchecked.map((s) => s.id)) === JSON.stringify(expected) && closed === "" && !existsSync(marker);
-process.exit(ok ? 0 : 4);`;
+let fastDaemonPid = 0;
+try {
+  const pending = humanStepsLeft({
+    machine: { schema: 1, role: "linux" },
+    os: process.platform === "darwin" ? "darwin" : "linux",
+    ai: "both",
+    packs: [],
+    workflows: [],
+    files: [],
+    config: [],
+    owners: {},
+    jobs: [],
+    human: [
+      { id: "fast-done", pack: "team", say: "Fast.", probe: [process.execPath, "-e", fastScript] },
+      ...Array.from({ length: 7 }, (_, i) => ({ id: "hold-" + i, pack: "team", say: "Hold.", probe: ["sh", "-c", 'exec 3>"$1"; exec sleep 30', "hold-" + i, holdGone] })),
+      { id: "after-fast", pack: "team", say: "After.", probe: ["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "after-fast", holdGone, afterReady] },
+    ],
+    steps: [], checks: [], commands: {}, handlers: {}, models: [], settings: {}, unanswered: [], ask: [], dropped: [],
+  }, { home: dir, giveUp: new Promise((resolve) => (fireReal = resolve)), graceMs: 0 });
+  const [rawAfter, rawFastDaemon] = await Promise.all([afterStarted, fastDaemonStarted]);
+  const afterPid = Number(rawAfter.trim());
+  fastDaemonPid = Number(rawFastDaemon.trim());
+  if (!(afterPid > 0) || !(fastDaemonPid > 0)) process.exit(3);
+  fireReal();
+  const realResult = await pending;
+  const closed = await holdsClosed;
+  let fastAlive = false;
+  try {
+    process.kill(fastDaemonPid, 0);
+    fastAlive = true;
+  } catch {}
+  const expected = [...Array.from({ length: 7 }, (_, i) => "hold-" + i), "after-fast"];
+  const ok = realResult.failing.length === 0 && JSON.stringify(realResult.unchecked.map((s) => s.id)) === JSON.stringify(expected) && closed === "" && fastAlive && !existsSync(marker);
+  process.exit(ok ? 0 : 4);
+} finally {
+  if (fastDaemonPid > 0) try { process.kill(fastDaemonPid, "SIGKILL"); } catch {}
+  await fastDaemonClosed.catch(() => {});
+}`;
     const child = Bun.spawn([process.execPath, "-e", script], { stdin: "ignore", stdout: "ignore", stderr: "inherit" });
     expect(await child.exited).toBe(0);
     expect(existsSync(marker)).toBe(false);

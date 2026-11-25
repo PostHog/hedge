@@ -1,7 +1,17 @@
 import { closeSync, writeSync } from "node:fs";
-import { discoverTargets, killDeadSession, probeResultReported, removeSpareFile, signalTargets } from "./probe-supervisor.ts";
+import { discoverTargets, drainControlFd, killDeadSession, probeResultReported, removeSpareFile, signalTargets, waitForFdClosed } from "./probe-supervisor.ts";
 
-export type WatchEntry = { pid: number; fd: number; delayMs: number; tag?: string; resultFd?: number; spareFile?: string; holderPid?: number };
+export type WatchEntry = {
+  pid: number;
+  fd: number;
+  delayMs: number;
+  tag?: string;
+  resultFd?: number;
+  spareFile?: string;
+  keepSpareFile?: boolean;
+  holderPid?: number;
+  holderFd?: number;
+};
 export type WatchClock = { now: () => number; sleep: (ms: number) => Promise<void> };
 
 const alive = (fd: number) => {
@@ -27,6 +37,8 @@ const realClock: WatchClock = {
 export async function watchEntries(entries: WatchEntry[], clock: WatchClock = realClock): Promise<void> {
   const started = clock.now();
   const pending = new Set(entries);
+  const runnerDead = new Set<WatchEntry>();
+  const runnerReported = new Map<WatchEntry, boolean>();
   const resultState = new Map<WatchEntry, "reported" | "closed">();
   const resultReported = (entry: WatchEntry): boolean => {
     const known = resultState.get(entry);
@@ -47,34 +59,127 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
     return false;
   };
   const closeEntry = (entry: WatchEntry) => {
-    close(entry.fd);
+    if (entry.fd >= 0) {
+      close(entry.fd);
+      entry.fd = -1;
+    }
     if (entry.resultFd !== undefined) {
       close(entry.resultFd);
       entry.resultFd = undefined;
     }
+    if (entry.holderFd !== undefined) {
+      close(entry.holderFd);
+      entry.holderFd = undefined;
+    }
   };
-  const sweepDead = async (entry: WatchEntry, reported: boolean) => {
+  const removeSpare = (entry: WatchEntry) => {
+    if (!entry.keepSpareFile) removeSpareFile(entry.spareFile);
+  };
+  const holderAlive = (entry: WatchEntry): boolean => {
+    if (entry.holderFd === undefined) return false;
+    if (drainControlFd(entry.holderFd).closed) {
+      close(entry.holderFd);
+      entry.holderFd = undefined;
+      return false;
+    }
+    return true;
+  };
+  const sweepHolderAndSpare = async (entry: WatchEntry, reported: boolean) => {
     const sweepTag = entry.tag && !reported ? entry.tag : undefined;
     try {
-      await killDeadSession(entry.pid, sweepTag, false, entry.spareFile);
-      if (entry.holderPid !== undefined) {
+      if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
         await killDeadSession(entry.holderPid, sweepTag, false, entry.spareFile);
       }
     } finally {
-      removeSpareFile(entry.spareFile);
+      removeSpare(entry);
+    }
+  };
+  const killLiveHolder = async (entry: WatchEntry, reported: boolean) => {
+    const sweepTag = entry.tag && !reported ? entry.tag : undefined;
+    try {
+      if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
+        const targets = await discoverTargets(entry.holderPid, sweepTag, entry.spareFile);
+        if (holderAlive(entry)) {
+          signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.holderPid);
+          try {
+            process.kill(entry.holderPid, "SIGKILL");
+          } catch {}
+        }
+        await killDeadSession(entry.holderPid, sweepTag, false, entry.spareFile);
+      }
+    } finally {
+      closeEntry(entry);
+      removeSpare(entry);
+    }
+  };
+  const sweepDead = async (entry: WatchEntry, reported: boolean, waitHolder = false) => {
+    const sweepTag = entry.tag && !reported ? entry.tag : undefined;
+    try {
+      await killDeadSession(entry.pid, sweepTag, false, entry.spareFile);
+      if (waitHolder && entry.holderFd !== undefined && holderAlive(entry)) {
+        await waitForFdClosed(entry.holderFd, 200);
+        if (holderAlive(entry)) {
+          await killLiveHolder(entry, reported);
+          return;
+        }
+      }
+      await sweepHolderAndSpare(entry, reported);
+    } finally {
+      removeSpare(entry);
     }
   };
   while (pending.size > 0) {
     const elapsed = clock.now() - started;
     let nextWake = Number.POSITIVE_INFINITY;
     const due: WatchEntry[] = [];
+    const dueHolders: Array<{ entry: WatchEntry; reported: boolean }> = [];
     const dead: Array<{ entry: WatchEntry; reported: boolean }> = [];
+    const deadRunners: Array<{ entry: WatchEntry; reported: boolean }> = [];
+    const deadHolders: Array<{ entry: WatchEntry; reported: boolean }> = [];
     for (const entry of [...pending]) {
+      if (runnerDead.has(entry)) {
+        const reported = runnerReported.get(entry) ?? false;
+        if (!holderAlive(entry)) {
+          closeEntry(entry);
+          pending.delete(entry);
+          deadHolders.push({ entry, reported });
+          continue;
+        }
+        const left = entry.delayMs - elapsed;
+        if (left <= 0) {
+          pending.delete(entry);
+          dueHolders.push({ entry, reported });
+        } else if (left < nextWake) {
+          nextWake = left;
+        }
+        continue;
+      }
       if (!alive(entry.fd)) {
         const reported = resultReported(entry);
-        closeEntry(entry);
-        pending.delete(entry);
-        dead.push({ entry, reported });
+        if (entry.fd >= 0) {
+          close(entry.fd);
+          entry.fd = -1;
+        }
+        if (entry.resultFd !== undefined) {
+          close(entry.resultFd);
+          entry.resultFd = undefined;
+        }
+        runnerDead.add(entry);
+        runnerReported.set(entry, reported);
+        if (!holderAlive(entry)) {
+          closeEntry(entry);
+          pending.delete(entry);
+          dead.push({ entry, reported });
+        } else {
+          deadRunners.push({ entry, reported });
+          const left = entry.delayMs - elapsed;
+          if (left <= 0) {
+            pending.delete(entry);
+            dueHolders.push({ entry, reported });
+          } else if (left < nextWake) {
+            nextWake = left;
+          }
+        }
         continue;
       }
       const left = entry.delayMs - elapsed;
@@ -85,8 +190,22 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
         nextWake = left;
       }
     }
+    if (deadRunners.length > 0) {
+      await Promise.all(
+        deadRunners.map(({ entry, reported }) => {
+          const sweepTag = entry.tag && !reported ? entry.tag : undefined;
+          return killDeadSession(entry.pid, sweepTag, false, entry.spareFile);
+        }),
+      );
+    }
     if (dead.length > 0) {
       await Promise.all(dead.map(({ entry, reported }) => sweepDead(entry, reported)));
+    }
+    if (deadHolders.length > 0) {
+      await Promise.all(deadHolders.map(({ entry, reported }) => sweepHolderAndSpare(entry, reported)));
+    }
+    if (dueHolders.length > 0) {
+      await Promise.all(dueHolders.map(({ entry, reported }) => killLiveHolder(entry, reported)));
     }
     if (due.length > 0) {
       await Promise.all(
@@ -106,22 +225,22 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
                     process.kill(entry.pid, "SIGKILL");
                   } catch {}
                   sweptDead = true;
-                  await sweepDead(entry, resultReported(entry));
+                  await sweepDead(entry, resultReported(entry), true);
                 } else {
                   sweptDead = true;
-                  await sweepDead(entry, resultReported(entry));
+                  await sweepDead(entry, resultReported(entry), true);
                 }
               } else {
                 sweptDead = true;
-                await sweepDead(entry, resultReported(entry));
+                await sweepDead(entry, resultReported(entry), true);
               }
             } else {
               sweptDead = true;
-              await sweepDead(entry, resultReported(entry));
+              await sweepDead(entry, resultReported(entry), true);
             }
           } finally {
             closeEntry(entry);
-            if (!sweptDead) removeSpareFile(entry.spareFile);
+            if (!sweptDead) removeSpare(entry);
           }
         }),
       );
@@ -145,7 +264,9 @@ if (import.meta.main) {
           typeof (item as WatchEntry).delayMs === "number" &&
           ((item as WatchEntry).resultFd === undefined || typeof (item as WatchEntry).resultFd === "number") &&
           ((item as WatchEntry).spareFile === undefined || typeof (item as WatchEntry).spareFile === "string") &&
-          ((item as WatchEntry).holderPid === undefined || typeof (item as WatchEntry).holderPid === "number"),
+          ((item as WatchEntry).keepSpareFile === undefined || typeof (item as WatchEntry).keepSpareFile === "boolean") &&
+          ((item as WatchEntry).holderPid === undefined || typeof (item as WatchEntry).holderPid === "number") &&
+          ((item as WatchEntry).holderFd === undefined || typeof (item as WatchEntry).holderFd === "number"),
       );
     }
   } catch {}

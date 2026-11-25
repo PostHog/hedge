@@ -147,6 +147,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     };
     let child: ReturnType<typeof Bun.spawn> | undefined;
     const tag = crypto.randomUUID();
+    const spareFile = (env ?? process.env)[spareEnvVar] || undefined;
     let controlFd: number | undefined;
     let stopped = false;
     let supervisorReaped = false;
@@ -166,10 +167,10 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     const killGroups = () => {
       if (!child) return;
       if (!supervisorReaped) {
-        killSessionSync(child.pid, "SIGKILL", tag);
+        killSessionSync(child.pid, "SIGKILL", tag, spareFile);
         return;
       }
-      const sweep = killDeadSession(child.pid, tag, true);
+      const sweep = killDeadSession(child.pid, tag, true, spareFile);
       if (sweep && typeof (sweep as Promise<void>).then === "function") tagSweep = sweep as Promise<void>;
     };
     const stopChild = () => {
@@ -205,7 +206,15 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         setCloexec(fd, false);
         let handedOff = false;
         try {
-          const payload = JSON.stringify([{ pid: child.pid, tag, fd: 3, delayMs: supervisorGraceMs }]);
+          const payload = JSON.stringify([
+            {
+              pid: child.pid,
+              tag,
+              ...(spareFile ? { spareFile, keepSpareFile: true } : {}),
+              fd: 3,
+              delayMs: supervisorGraceMs,
+            },
+          ]);
           const watchdog = Bun.spawn(bunScript(probeWatchdog, payload), {
             env: watchdogEnv(),
             stdio: ["ignore", "ignore", "ignore", fd],
@@ -216,7 +225,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         } catch {
         } finally {
           if (!handedOff) {
-            killSessionSync(child.pid, "SIGKILL", tag);
+            killSessionSync(child.pid, "SIGKILL", tag, spareFile);
             try {
               child.kill("SIGKILL");
             } catch {}
@@ -227,9 +236,9 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         }
       } else if (child) {
         if (supervisorReaped) {
-          killDeadSessionSync(child.pid, tag, true);
+          killDeadSessionSync(child.pid, tag, true, spareFile);
         } else {
-          killSessionSync(child.pid, "SIGKILL", tag);
+          killSessionSync(child.pid, "SIGKILL", tag, spareFile);
           try {
             child.kill("SIGKILL");
           } catch {}
@@ -373,8 +382,8 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           }
         }
         if (tagSweep) await tagSweep;
-        else if (supervisorReaped && forceExpired) await killDeadSession(live.pid, tag, true);
-        else if (!supervisorReaped) await killSession(live.pid, "SIGKILL", tag);
+        else if (supervisorReaped && forceExpired) await killDeadSession(live.pid, tag, true, spareFile);
+        else if (!supervisorReaped) await killSession(live.pid, "SIGKILL", tag, undefined, spareFile);
         return timeoutResult(timeoutMs, stdout);
       }
       cancel();

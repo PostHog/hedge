@@ -511,25 +511,29 @@ const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
 let activeSupervisors = 0;
 const supervisorWaiters: Array<() => void> = [];
 
-type LiveProbe = { pid: number; runnerPid?: number; tag: string; spareFile: string; handedOff?: boolean; targetPid?: number; targetExited?: boolean; aliveFd?: number; resultFd?: number; guardFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
+type LiveProbe = { pid: number; runnerPid?: number; tag: string; spareFile: string; handedOff?: boolean; targetPid?: number; targetExited?: boolean; aliveFd?: number; resultFd?: number; guardFd?: number; holderExitFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
 type ActiveRunner = { stop: (name: NodeJS.Signals) => void };
 const activeRunners = new Set<ActiveRunner>();
 const allLiveProbes = new Set<LiveProbe>();
 let interruptHandlersAttached = false;
 
 function handOffWatchdog(probes: Iterable<LiveProbe>) {
-  const batch: Array<{ pid: number; holderPid?: number; tag: string; spareFile: string; probe: LiveProbe; targetPid?: number; targetExited?: boolean; fd: number; resultFd?: number; delayMs: number }> = [];
+  const batch: Array<{ pid: number; holderPid?: number; holderFd?: number; tag: string; spareFile: string; probe: LiveProbe; targetPid?: number; targetExited?: boolean; fd: number; resultFd?: number; delayMs: number }> = [];
   for (const probe of probes) {
     if (probe.aliveFd === undefined) continue;
     let targetExited = Boolean(probe.targetExited);
     const resultFd = probe.resultFd;
     probe.resultFd = undefined;
+    const holderFd = probe.holderExitFd;
+    probe.holderExitFd = undefined;
     if (!targetExited && resultFd !== undefined && probeResultReported(resultFd) === "reported") {
       targetExited = true;
     }
+    const holderPid = probe.runnerPid !== undefined || holderFd !== undefined ? probe.pid : undefined;
     batch.push({
       pid: probe.runnerPid ?? probe.pid,
-      ...(probe.runnerPid !== undefined ? { holderPid: probe.pid } : {}),
+      ...(holderPid !== undefined ? { holderPid } : {}),
+      ...(holderFd !== undefined ? { holderFd } : {}),
       tag: probe.tag,
       spareFile: probe.spareFile,
       probe,
@@ -552,9 +556,15 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
         resultFd = extraFds.length + 3;
         extraFds.push(entry.resultFd);
       }
+      let holderFd: number | undefined;
+      if (entry.holderFd !== undefined) {
+        holderFd = extraFds.length + 3;
+        extraFds.push(entry.holderFd);
+      }
       return {
         pid: entry.pid,
         ...(entry.holderPid !== undefined ? { holderPid: entry.holderPid } : {}),
+        ...(holderFd !== undefined ? { holderFd } : {}),
         ...(entry.targetExited ? {} : { tag: entry.tag }),
         spareFile: entry.spareFile,
         fd,
@@ -589,10 +599,22 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
           try {
             process.kill(entry.pid, "SIGKILL");
           } catch {}
-          if (entry.holderPid !== undefined) killDeadSessionSync(entry.holderPid, sweepTag, false, entry.spareFile);
+          if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
+            killSessionSync(entry.holderPid, "SIGKILL", sweepTag, entry.spareFile);
+            try {
+              process.kill(entry.holderPid, "SIGKILL");
+            } catch {}
+            killDeadSessionSync(entry.holderPid, sweepTag, false, entry.spareFile);
+          }
         } else {
           killDeadSessionSync(entry.pid, sweepTag, false, entry.spareFile);
-          if (entry.holderPid !== undefined) killDeadSessionSync(entry.holderPid, sweepTag, false, entry.spareFile);
+          if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
+            killSessionSync(entry.holderPid, "SIGKILL", sweepTag, entry.spareFile);
+            try {
+              process.kill(entry.holderPid, "SIGKILL");
+            } catch {}
+            killDeadSessionSync(entry.holderPid, sweepTag, false, entry.spareFile);
+          }
         }
         removeSpareFile(entry.spareFile);
       }
@@ -604,6 +626,11 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
       if (entry.resultFd !== undefined) {
         try {
           closeSync(entry.resultFd);
+        } catch {}
+      }
+      if (entry.holderFd !== undefined) {
+        try {
+          closeSync(entry.holderFd);
         } catch {}
       }
     }
@@ -779,6 +806,16 @@ async function runDetached(command: string[], env: Record<string, string | undef
       closeSync(guardPipe.writeFd);
     } catch {}
   };
+  const holderExitPipe = useLinuxHolder ? createPipe() : undefined;
+  if (holderExitPipe) setCloexec(holderExitPipe.readFd, true);
+  let holderExitWriteClosed = false;
+  const closeHolderExitWrite = () => {
+    if (!holderExitPipe || holderExitWriteClosed) return;
+    holderExitWriteClosed = true;
+    try {
+      closeSync(holderExitPipe.writeFd);
+    } catch {}
+  };
   try {
     const tag = crypto.randomUUID();
     const spareFile = spareFilePath(tag);
@@ -798,6 +835,11 @@ async function runDetached(command: string[], env: Record<string, string | undef
       payloadGuardFd = 4 + extraStdio.length;
       extraStdio.push(guardPipe.writeFd);
     }
+    let payloadHolderExitFd: number | undefined;
+    if (holderExitPipe) {
+      payloadHolderExitFd = 4 + extraStdio.length;
+      extraStdio.push(holderExitPipe.writeFd);
+    }
     const payload = {
       command,
       env: targetEnv,
@@ -806,6 +848,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
       ...(useLinuxHolder ? { holder: true } : {}),
       ...(payloadResultFd !== undefined ? { resultFd: payloadResultFd } : {}),
       ...(payloadGuardFd !== undefined ? { guardFd: payloadGuardFd } : {}),
+      ...(payloadHolderExitFd !== undefined ? { holderExitFd: payloadHolderExitFd } : {}),
       ...(cleanupGraceMs === undefined ? {} : { graceMs: cleanupGraceMs }),
     };
     const encoded = JSON.stringify(payload);
@@ -816,6 +859,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
     });
     closeResultWrite();
     closeGuardWrite();
+    closeHolderExitWrite();
     const aliveFd = typeof child.stdio[3] === "number" ? child.stdio[3] : undefined;
     probe = {
       pid: child.pid,
@@ -824,6 +868,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
       aliveFd,
       ...(resultPipe ? { resultFd: resultPipe.readFd } : {}),
       ...(guardPipe ? { guardFd: guardPipe.readFd } : {}),
+      ...(holderExitPipe ? { holderExitFd: holderExitPipe.readFd } : {}),
       delayMs: (cleanupGraceMs ?? graceMs) + discoverySlackMs + 100,
       stop: endGroup,
     };
@@ -881,6 +926,12 @@ async function runDetached(command: string[], env: Record<string, string | undef
         } catch {}
         owned.guardFd = undefined;
       }
+      if (owned.holderExitFd !== undefined) {
+        try {
+          closeSync(owned.holderExitFd);
+        } catch {}
+        owned.holderExitFd = undefined;
+      }
       if (!owned.handedOff) removeSpareFile(owned.spareFile);
       allLiveProbes.delete(owned);
       live?.delete(owned);
@@ -902,6 +953,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
   } catch {
     closeResultWrite();
     closeGuardWrite();
+    closeHolderExitWrite();
     if (!handedToExit) {
       if (resultPipe) {
         try {
@@ -911,6 +963,11 @@ async function runDetached(command: string[], env: Record<string, string | undef
       if (guardPipe) {
         try {
           closeSync(guardPipe.readFd);
+        } catch {}
+      }
+      if (holderExitPipe) {
+        try {
+          closeSync(holderExitPipe.readFd);
         } catch {}
       }
       releaseSlot();
