@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadPacks } from "./manifest.ts";
 import { tryLock, waitLock } from "../lock.ts";
@@ -174,20 +175,47 @@ function endsWithDotGit(pathBuf: Buffer): boolean {
   return pathBuf.length >= 4 && pathBuf.subarray(pathBuf.length - 4).equals(dotGitBuf);
 }
 
+function isAsciiHexByte(byte: number): boolean {
+  return (byte >= 0x30 && byte <= 0x39) || (byte >= 0x41 && byte <= 0x46) || (byte >= 0x61 && byte <= 0x66);
+}
+
 function decodePercentBytes(buf: Buffer): Buffer {
   const out: number[] = [];
   for (let i = 0; i < buf.length; i++) {
-    if (buf[i] === 0x25 && i + 2 < buf.length) {
-      const hex = buf.subarray(i + 1, i + 3).toString("ascii");
-      if (/^[0-9a-f]{2}$/i.test(hex)) {
-        out.push(Number.parseInt(hex, 16));
-        i += 2;
-        continue;
-      }
+    if (buf[i] === 0x25 && i + 2 < buf.length && isAsciiHexByte(buf[i + 1]!) && isAsciiHexByte(buf[i + 2]!)) {
+      out.push(Number.parseInt(String.fromCharCode(buf[i + 1]!, buf[i + 2]!), 16));
+      i += 2;
+      continue;
     }
     out.push(buf[i]!);
   }
   return Buffer.from(out);
+}
+
+function expandTildeBytes(rawBytes: Buffer): Buffer {
+  if (rawBytes[0] !== 0x7e) return rawBytes;
+  const slash = rawBytes.indexOf(slashByte);
+  const rest = slash === -1 ? Buffer.alloc(0) : rawBytes.subarray(slash);
+  if (slash === 1 || rawBytes.length === 1) {
+    const home = process.env.HOME || homedir();
+    return home ? Buffer.concat([Buffer.from(home, "utf8"), rest]) : rawBytes;
+  }
+  const user = rawBytes.subarray(1, slash === -1 ? rawBytes.length : slash).toString("utf8");
+  if (!user || user.includes(":")) return rawBytes;
+  try {
+    const passwd = readFileSync("/etc/passwd", "utf8");
+    for (const line of passwd.split("\n")) {
+      const fields = line.split(":");
+      if (fields[0] === user && fields[5]) return Buffer.concat([Buffer.from(fields[5], "utf8"), rest]);
+    }
+  } catch {}
+  return rawBytes;
+}
+
+function stripTrailingSlashBytes(buf: Buffer): Buffer {
+  let end = buf.length;
+  while (end > 1 && buf[end - 1] === slashByte) end--;
+  return end === buf.length ? buf : buf.subarray(0, end);
 }
 
 function encodeCanonicalLocal(resolvedBuf: Buffer, asFileUrl: boolean): string {
@@ -201,21 +229,23 @@ function encodeCanonicalLocal(resolvedBuf: Buffer, asFileUrl: boolean): string {
   return decodeRepoBytes(Buffer.concat([filePrefixBuf, resolvedBuf]));
 }
 
-function parseLocalRepoBytes(dir: string, effective: string): { resolved: Buffer; asFileUrl: boolean } | undefined {
+function parseLocalRepoBytes(dir: string, effective: string): { base: Buffer; rawPath: Buffer; asFileUrl: boolean } | undefined {
   if (!effective) return undefined;
   if (process.platform === "win32") return undefined;
   const rawBytes = effective.startsWith("\0raw:") ? Buffer.from(effective.slice(5), "hex") : Buffer.from(effective, "utf8");
-  const asciiHead = rawBytes.subarray(0, 16).toString("latin1");
+  const asciiHead = rawBytes.subarray(0, 7).toString("latin1");
   if (/^file:\/\//i.test(asciiHead)) {
-    const rest = rawBytes.subarray(/^file:\/\/localhost/i.test(asciiHead) ? 16 : 7);
-    if (rest[0] !== slashByte) return undefined;
-    const pathBytes = decodePercentBytes(rest);
-    return { resolved: resolvePosixPathBytes(Buffer.from("/"), pathBytes), asFileUrl: true };
+    const afterScheme = rawBytes.subarray(7);
+    const firstSlash = afterScheme.indexOf(slashByte);
+    if (firstSlash === -1) return undefined;
+    const pathBytes = decodePercentBytes(afterScheme.subarray(firstSlash));
+    return { base: Buffer.from("/"), rawPath: pathBytes, asFileUrl: true };
   }
   const latin = rawBytes.toString("latin1");
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(latin) || /^[^/\\]+:/.test(latin)) return undefined;
-  const baseBuf = rawBytes[0] === slashByte ? Buffer.from("/") : resolvePosixPathBytes(Buffer.from("/"), Buffer.from(resolve(dir), "utf8"));
-  return { resolved: resolvePosixPathBytes(baseBuf, rawBytes), asFileUrl: false };
+  const expanded = expandTildeBytes(rawBytes);
+  const base = expanded[0] === slashByte ? Buffer.from("/") : resolvePosixPathBytes(Buffer.from("/"), Buffer.from(resolve(dir), "utf8"));
+  return { base, rawPath: expanded, asFileUrl: false };
 }
 
 function canonicalLocalRepo(dir: string, effective: string, goodDigest?: string): string {
@@ -239,10 +269,13 @@ function canonicalLocalRepo(dir: string, effective: string, goodDigest?: string)
   }
   const parsed = parseLocalRepoBytes(dir, effective);
   if (!parsed) return effective;
-  const { resolved, asFileUrl } = parsed;
+  const { base, rawPath, asFileUrl } = parsed;
+  const resolved = resolvePosixPathBytes(base, rawPath);
   const primary = encodeCanonicalLocal(resolved, asFileUrl);
-  if (isGitDirBytes(resolved) || endsWithDotGit(resolved)) return primary;
-  const dotGitResolved = resolvePosixPathBytes(Buffer.from("/"), Buffer.concat([resolved, dotGitBuf]));
+  if (isGitDirBytes(resolved)) return primary;
+  const trimmedRaw = stripTrailingSlashBytes(rawPath);
+  if (endsWithDotGit(trimmedRaw)) return primary;
+  const dotGitResolved = resolvePosixPathBytes(base, Buffer.concat([trimmedRaw, dotGitBuf]));
   const dotGitEncoded = encodeCanonicalLocal(dotGitResolved, asFileUrl);
   if (isGitDirBytes(dotGitResolved)) return dotGitEncoded;
   if (goodDigest !== undefined && repoDigest(primary) !== goodDigest && repoDigest(dotGitEncoded) === goodDigest) {
@@ -836,14 +869,15 @@ async function recordHistoryRef(dir: string, repoHash: string, commit: string, f
     .filter((line) => gitHash.test(line));
   if (!commits.length) return undefined;
   if (commits.length <= inlineHistoryPinLimit) {
-    const existingPinsRes = await git(dir, "for-each-ref", "--format=%(refname)", `refs/hedge/pins/${repoHash}/`);
+    const targetRefs = commits.map((oid) => pinRef(repoHash, oid));
+    const existingPinsRes = await git(dir, "for-each-ref", "--format=%(refname)", ...targetRefs);
     const existingPins = new Set(
       existingPinsRes.ok ? existingPinsRes.stdout.split("\n").map((line) => line.trim()).filter(Boolean) : [],
     );
     const toCreate: Array<{ ref: string; oid: string }> = [];
-    for (const oid of commits) {
-      const targetRef = pinRef(repoHash, oid);
-      if (!existingPins.has(targetRef)) toCreate.push({ ref: targetRef, oid });
+    for (let i = 0; i < commits.length; i++) {
+      const targetRef = targetRefs[i]!;
+      if (!existingPins.has(targetRef)) toCreate.push({ ref: targetRef, oid: commits[i]! });
     }
     if (!toCreate.length) return undefined;
     const cmds = toCreate.map((item) => `update ${item.ref} ${item.oid}\n`).join("");
@@ -1121,7 +1155,8 @@ async function checkout(dir: string, repo: string, ref: string, savedFetchHead: 
     if (init256.ok) fetched = await fetchExact(dir, repo, ref, true);
   }
   if (!fetched.ok || !fetched.oid) {
-    await restoreFetchHead(dir, savedFetchHead);
+    if (freshInit) await rm(join(dir, ".git"), { recursive: true, force: true }).catch(() => {});
+    else await restoreFetchHead(dir, savedFetchHead);
     return { effectiveRepo, error: fetched.stderr || "could not fetch commit" };
   }
   if ((await resolvedRepoUrl(dir, repo, goodDigest)) !== effectiveRepo) {

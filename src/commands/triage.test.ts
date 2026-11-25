@@ -350,16 +350,14 @@ describe("hedge triage", () => {
       return capture([], undefined)(command, options);
     };
     const code = await main(
-      ["triage", "--send", "--note", "failed fetching private-org/inherited-packs with token Bearer 10.20.30.40.secretSuffix99"],
+      ["triage", "--send", "--note", "Bearer private-org/inherited-packs/secretSuffix99"],
       { home, engineRoot, platform: "darwin", env: { HEDGE_PROFILE_DIR: inherited }, print: io.terminal.print, terminal: io.terminal, capture: runRealGit, hostname: () => "noras-mbp.local", run: async () => 0 },
     );
     expect(code).toBe(0);
     const issue = sent.find((call) => call.command[1] === "issue")!;
-    expect(issue.input).toContain("failed fetching <private source>");
     expect(issue.input).toContain("The pack source <private source> is not pinned to a commit SHA.");
+    expect(issue.input).toContain("Bearer <token>");
     expect(issue.input).not.toContain("inherited-secret");
-    expect(issue.input).not.toContain("private-org/inherited-packs");
-    expect(issue.input).not.toContain("nora/inherited-profile");
     expect(issue.input).not.toContain("secretSuffix99");
   });
 });

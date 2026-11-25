@@ -4,7 +4,7 @@ import { join, resolve as resolvePath } from "node:path";
 import { loadPacks } from "./pack/manifest.ts";
 import { cachedSource, fetchSource, sourceCache, unpinnedSources, withoutUserinfo } from "./pack/sources.ts";
 import { cannotTell } from "./pack/types.ts";
-import type { AvailableSource, CatalogEntry, FetchedSource, Finding, LoadedPack, MachineFile, Plan, Profile, Report, SourceRef } from "./pack/types.ts";
+import type { AvailableSource, CatalogEntry, FetchedSource, Finding, LoadedPack, MachineFile, Plan, Report, SourceRef } from "./pack/types.ts";
 import { loadMachine, loadProfile, pullProfile, saveMachine, thisMachine } from "./profile/profile.ts";
 import { engineAdapters } from "./adapters/index.ts";
 import { apply, check, filesAdapter, type Adapter, type Issuer, type Runner } from "./reconciler/apply.ts";
@@ -158,28 +158,18 @@ async function runSetup(args: string[], options: CliOptions) {
 }
 
 async function triage(args: string[], options: CliOptions) {
-  let inspectedProfile: { dir: string; profile: Profile } | undefined;
   const doctor = async () => {
     const lines: string[] = [];
     const collect = (line: string) => void lines.push(line);
     try {
-      await reconcile("doctor", [], { ...options, print: collect, fail: collect }, (info) => { inspectedProfile = info; });
+      await reconcile("doctor", [], { ...options, print: collect, fail: collect });
     } catch (error) {
       collect(`hedge: ${error instanceof Error ? error.message : String(error)}`);
     }
     return lines;
   };
   try {
-    return await triageCommand(args, {
-      home: options.home,
-      engineRoot: options.engineRoot,
-      platform: options.platform,
-      terminal: options.terminal ?? { ...ttyTerminal(), print: options.print },
-      capture: options.capture ?? spawnRunner,
-      hostname: (options.hostname ?? hostname)(),
-      doctorProfile: () => inspectedProfile,
-      doctor,
-    });
+    return await triageCommand(args, { home: options.home, engineRoot: options.engineRoot, platform: options.platform, terminal: options.terminal ?? { ...ttyTerminal(), print: options.print }, capture: options.capture ?? spawnRunner, hostname: (options.hostname ?? hostname)(), doctor });
   } catch (error) {
     if (!(error instanceof FlagError)) throw error;
     options.print(`hedge triage: ${error.message}`);
@@ -187,7 +177,7 @@ async function triage(args: string[], options: CliOptions) {
   }
 }
 
-async function reconcile(command: "apply" | "doctor", args: string[], options: CliOptions, onProfile?: (info: { dir: string; profile: Profile }) => void) {
+async function reconcile(command: "apply" | "doctor", args: string[], options: CliOptions) {
   const flags = parseFlags(args);
   const doctor = command === "doctor";
   if (flags.toDo && !doctor) throw new Error("unknown option --to-do");
@@ -195,7 +185,7 @@ async function reconcile(command: "apply" | "doctor", args: string[], options: C
   const holds = () => fleetOf(options).holds(options.home, options.platform);
   const held = await holds();
   if (held.length && !preview) return printReport({ ok: false, actions: [], findings: held, humanLeft: [] }, command, options.print, false), 1;
-  const { plan, sources, refs, remember } = await loadPlan(options, flags.profile, { fetch: !preview, inherit: preview, onProfile }).catch((error: unknown) => {
+  const { plan, sources, refs, remember } = await loadPlan(options, flags.profile, { fetch: !preview, inherit: preview }).catch((error: unknown) => {
     printFindings(held, options.print);
     throw error;
   });
@@ -549,7 +539,7 @@ function hedgeCopy(home: string, dir: string): string {
 }
 
 /** withPack resolves the plan as if the profile also had that pack on, for the undo of one of its steps. */
-async function loadPlan(options: CliOptions, profileFlag: string | undefined, mode: { fetch: boolean; inherit?: boolean; pull?: boolean; withPack?: string; fetched?: FetchedSource[]; onProfile?: (info: { dir: string; profile: Profile }) => void }): Promise<{ plan: Plan; sources: FetchedSource[]; refs: SourceRef[]; remember: () => Promise<void> }> {
+async function loadPlan(options: CliOptions, profileFlag: string | undefined, mode: { fetch: boolean; inherit?: boolean; pull?: boolean; withPack?: string; fetched?: FetchedSource[] }): Promise<{ plan: Plan; sources: FetchedSource[]; refs: SourceRef[]; remember: () => Promise<void> }> {
   const saved = await loadMachine(options.home);
   const inherited = mode.inherit && !profileFlag ? options.env?.HEDGE_PROFILE_DIR : undefined;
   const given = profileFlag ? resolvePath(profileFlag) : inherited ? resolvePath(inherited) : saved?.profileDir;
@@ -558,7 +548,6 @@ async function loadPlan(options: CliOptions, profileFlag: string | undefined, mo
   const machine: MachineFile = { ...thisMachine(saved, options.platform, options.env ?? {}, (options.hostname ?? hostname)()), profileDir };
   if (mode.pull) await pullProfile(profileDir), refuseLinkedProfile(profileDir);
   const loaded = await loadProfile(profileDir);
-  mode.onProfile?.({ dir: profileDir, profile: loaded });
   const profile = mode.withPack && !loaded.packs.includes(mode.withPack) ? { ...loaded, packs: [...loaded.packs, mode.withPack] } : loaded;
   const cache = sourceCache(options.home);
   const known = (ref: SourceRef) => mode.fetched?.find((source) => source.ref.name === ref.name && !("error" in source));

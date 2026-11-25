@@ -1209,6 +1209,69 @@ esac
     const ordAfterInit = await fetchSource({ name: "team", repo: ordPlain, ref: ordSha }, ordCache);
     expect("error" in ordAfterInit).toBe(true);
 
+    const aliasRoot = temp.make("alias-dotgit-");
+    const aliasTarget = join(aliasRoot, "target");
+    const aliasDotGit = join(aliasRoot, "alias.git");
+    const targetDotGit = join(aliasRoot, "target.git");
+    mkdirSync(aliasTarget, { recursive: true });
+    for (const [repoDir, summary] of [
+      [aliasDotGit, "Alias dotgit repo."],
+      [targetDotGit, "Target dotgit repo."],
+    ] as const) {
+      mkdirSync(repoDir, { recursive: true });
+      await spawnGit(repoDir, "init", "-q", "-b", "main");
+      writePack(repoDir, summary);
+      await spawnGit(repoDir, "add", ".");
+      await spawnGit(repoDir, "commit", "-q", "-m", "v1");
+    }
+    const aliasSha = await spawnGit(aliasDotGit, "rev-parse", "HEAD");
+    const aliasLink = join(aliasRoot, "alias");
+    symlinkSync(aliasTarget, aliasLink);
+    const aliasCache = temp.make("cache-alias-dotgit-");
+    const loadedAlias = await fetchSource({ name: "team", repo: aliasLink, ref: aliasSha }, aliasCache);
+    if ("error" in loadedAlias) throw new Error(loadedAlias.error);
+    expect([loadedAlias.packs[0]?.manifest.summary, loadedAlias.stale]).toEqual(["Alias dotgit repo.", undefined]);
+    const wrongTarget = await fetchSource({ name: "team", repo: targetDotGit, ref: aliasSha }, aliasCache);
+    expect("error" in wrongTarget).toBe(true);
+
+    const authRoot = temp.make("file-auth-mirror-");
+    const authLink = join(authRoot, "mirror");
+    symlinkSync(repoA, authLink);
+    const authUrl = `file://example.invalid${authLink}`;
+    const authCache = temp.make("cache-file-auth-");
+    const authFirst = await fetchSource({ name: "team", repo: authUrl, ref: shaA }, authCache);
+    if ("error" in authFirst) throw new Error(authFirst.error);
+    rmSync(authLink);
+    symlinkSync(repoB, authLink);
+    const authSecond = await fetchSource({ name: "team", repo: authUrl, ref: shaA }, authCache);
+    expect("error" in authSecond).toBe(true);
+
+    const retryRoot = temp.make("sha256-retry-");
+    const hex64 = "a".repeat(64);
+    const lateSha1 = join(retryRoot, "late-sha1");
+    const lateSha1Cache = temp.make("cache-late-sha1-");
+    expect("error" in (await fetchSource({ name: "team", repo: lateSha1, ref: hex64 }, lateSha1Cache))).toBe(true);
+    mkdirSync(lateSha1, { recursive: true });
+    await spawnGit(lateSha1, "init", "-q", "-b", hex64);
+    writePack(lateSha1, "Late SHA-1 hex64 branch.");
+    await spawnGit(lateSha1, "add", ".");
+    await spawnGit(lateSha1, "commit", "-q", "-m", "v1");
+    const loadedLateSha1 = await fetchSource({ name: "team", repo: lateSha1, ref: hex64 }, lateSha1Cache);
+    if ("error" in loadedLateSha1) throw new Error(loadedLateSha1.error);
+    expect(loadedLateSha1.packs[0]?.manifest.summary).toBe("Late SHA-1 hex64 branch.");
+
+    const lateSha256 = join(retryRoot, "late-sha256");
+    const lateSha256Cache = temp.make("cache-late-sha256-");
+    expect("error" in (await fetchSource({ name: "team", repo: lateSha256, ref: "main" }, lateSha256Cache))).toBe(true);
+    mkdirSync(lateSha256, { recursive: true });
+    await spawnGit(lateSha256, "init", "-q", "--object-format=sha256", "-b", "main");
+    writePack(lateSha256, "Late SHA-256 main.");
+    await spawnGit(lateSha256, "add", ".");
+    await spawnGit(lateSha256, "commit", "-q", "-m", "v1");
+    const loadedLateSha256 = await fetchSource({ name: "team", repo: lateSha256, ref: "main" }, lateSha256Cache);
+    if ("error" in loadedLateSha256) throw new Error(loadedLateSha256.error);
+    expect(loadedLateSha256.packs[0]?.manifest.summary).toBe("Late SHA-256 main.");
+
     if (process.platform === "linux") {
       const rawRoot = temp.make("raw-bytes-symlink-");
       const targetA = Buffer.concat([Buffer.from(`${rawRoot}/repo-`), Buffer.from([0xff])]);

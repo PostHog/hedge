@@ -20,7 +20,6 @@ export type TriageContext = {
   hostname: string;
   /** Runs hedge doctor and returns what it printed. */
   doctor(): Promise<string[]>;
-  doctorProfile?(): { dir: string; profile: Profile } | undefined;
   now?: Date;
 };
 
@@ -75,15 +74,7 @@ export async function triageReport(context: TriageContext, note?: string): Promi
     firstLine(context, ["git", "config", "--global", "user.name"]),
     machine?.profileDir ? firstLine(context, ["git", "-C", machine.profileDir, "remote", "get-url", "origin"]) : Promise.resolve(undefined),
   ]);
-  const inspected = context.doctorProfile?.();
-  const doctorOrigin =
-    inspected && inspected.dir !== machine?.profileDir
-      ? await firstLine(context, ["git", "-C", inspected.dir, "remote", "get-url", "origin"])
-      : undefined;
-  const known = [
-    ...knownNames(context.hostname, machine, profile, gitName, origin),
-    ...(inspected ? knownNames(context.hostname, undefined, inspected.profile, undefined, doctorOrigin, true) : []),
-  ];
+  const known = knownNames(context.hostname, machine, profile, gitName, origin);
   const clean = (text: string) => redact(scrubUnpinnedAdvisory(text), context.home, known);
   const described = note?.trim() ? clean(note.trim()) : "Not described.";
   const facts = clean([...setupLines(machine, failure, timings), "", "## Versions", "", ...versions].join("\n"));
@@ -169,7 +160,7 @@ function scrubUnpinnedAdvisory(text: string): string {
   );
 }
 
-function knownNames(hostname: string, machine: MachineFile | undefined, profile: Profile | undefined, gitName: string | undefined, origin: string | undefined, anonymousSources = false): KnownName[] {
+function knownNames(hostname: string, machine: MachineFile | undefined, profile: Profile | undefined, gitName: string | undefined, origin: string | undefined): KnownName[] {
   const names: KnownName[] = [];
   const profileRepo = origin?.match(/github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?$/)?.[1];
   if (profileRepo) names.push({ text: profileRepo, as: "<profile repo>" });
@@ -183,10 +174,7 @@ function knownNames(hostname: string, machine: MachineFile | undefined, profile:
   const devboxes = [...new Set([...(machine?.devboxes ?? []), ...(profile?.devboxes ?? [])])].filter((host) => host !== profile?.hub);
   devboxes.forEach((host, index) => names.push({ text: host, as: `<devbox ${index + 1}>` }));
   const publicRepos = new Set([engineRepo, ...defaultSources.map((source) => source.repo)]);
-  for (const source of [...(machine?.setup?.draft?.sources ?? []), ...(profile?.sources ?? [])]) {
-    if (typeof source.repo !== "string" || publicRepos.has(source.repo)) continue;
-    names.push({ text: source.repo, as: anonymousSources ? "<private source>" : `<${source.name} source>` });
-  }
+  for (const source of [...(machine?.setup?.draft?.sources ?? []), ...(profile?.sources ?? [])]) if (!publicRepos.has(source.repo)) names.push({ text: source.repo, as: `<${source.name} source>` });
   if (gitName) names.push({ text: gitName, as: "<name>" });
   return names;
 }
