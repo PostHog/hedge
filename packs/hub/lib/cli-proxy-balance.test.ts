@@ -325,3 +325,35 @@ test("a subscription that bills extra usage turns off while a window is full and
   await balance({ fetch: plain.fetch, managementKey, now, dryRun: false, pausedPath, log: () => {} });
   expect(statusWrites(plain.calls)).toEqual([]);
 });
+
+test("the hub keeps its exempt Claude subscription enabled at quota and resumes it if the balancer already paused it", async () => {
+  const home = roleHome(temp.make("hedge-balance-"), "hub");
+  const proxy = join(home, ".local/share/hedge-cli-proxy");
+  const state = join(home, ".local/state/hedge");
+  mkdirSync(proxy, { recursive: true });
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(proxy, "management.env"), `MANAGEMENT_PASSWORD=${managementKey}\n`);
+  writeFileSync(join(proxy, "allow-extra-usage.json"), JSON.stringify(["exempt-auth-index", "manual-auth-index"]));
+  const pausedPath = join(state, "cli-proxy-paused.json");
+  writeFileSync(pausedPath, JSON.stringify(["exempt.json"]));
+
+  const exempt = { name: "exempt.json", provider: "claude", auth_index: "exempt-auth-index", priority: 2 };
+  const guarded = { name: "guarded.json", provider: "claude", auth_index: "exempt-auth-index-other", priority: 0 };
+  const manual = { name: "manual.json", provider: "claude", auth_index: "manual-auth-index", priority: 0, disabled: true };
+  const full = { seven_day: { utilization: 100, resets_at: new Date(now + day).toISOString() }, extra_usage: { is_enabled: true } };
+  const usage = { [exempt.auth_index]: full, [guarded.auth_index]: full, [manual.auth_index]: full };
+  const run = async (files: unknown[]) => {
+    const { fetch, calls } = managementApi({ strategy: "fill-first", files, usage });
+    expect(await balanceCommand([], { home, fetch, now: () => now, ledger: false, env: {}, log: () => {} })).toBe(0);
+    return calls;
+  };
+  const statusWrites = (calls: Call[]) => calls.filter((call) => call.path === "auth-files/status").map((call) => call.body);
+
+  const first = await run([{ ...exempt, disabled: true }, guarded, manual]);
+  expect(statusWrites(first)).toEqual([{ name: guarded.name, disabled: true }, { name: exempt.name, disabled: false }]);
+  expect(first.find((call) => call.path === "auth-files/fields")?.body).toEqual({ name: exempt.name, priority: 0 });
+  expect(JSON.parse(readFileSync(pausedPath, "utf8"))).toEqual([guarded.name]);
+
+  const next = await run([{ ...exempt, priority: 0 }, { ...guarded, disabled: true }, manual]);
+  expect(statusWrites(next)).toEqual([]);
+});
