@@ -440,18 +440,24 @@ const undoRunner = (run: Runner, step: LedgerStep): Runner => (command) => run(c
 /** Runs commands with the plan's home directory as HOME, so a step installs into the home it applies to, and with the plan's profile, so a nested hedge reads the profile this run applies or checks. */
 function spawnRunner(home: string, profileDir: string | undefined): Runner {
   return async (command, env = {}, signal) => {
-    try {
-      const child = Bun.spawn(command, { stdout: "ignore", stderr: "ignore", env: withLegacyNames({ ...Bun.env, HOME: home, ...(profileDir ? { HEDGE_PROFILE_DIR: profileDir } : {}), ...env }), ...(signal ? { detached: true } : {}) });
-      return await stoppedBy(signal, child);
-    } catch {
-      return 127;
+    const childEnv = withLegacyNames({ ...Bun.env, HOME: home, ...(profileDir ? { HEDGE_PROFILE_DIR: profileDir } : {}), ...env });
+    if (!signal) {
+      try {
+        return await Bun.spawn(command, { stdout: "ignore", stderr: "ignore", env: childEnv }).exited;
+      } catch {
+        return 127;
+      }
     }
+    return await runDetached(command, childEnv, signal);
   };
 }
 
-async function stoppedBy(signal: AbortSignal | undefined, child: { pid: number; exited: Promise<number> }) {
-  if (!signal) return await child.exited;
+async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal) {
+  let child: { pid: number; exited: Promise<number> } | undefined;
+  let stopped = false;
   const endGroup = () => {
+    stopped = true;
+    if (!child) return;
     try { process.kill(-child.pid, "SIGTERM"); } catch {}
   };
   const interrupted = (name: NodeJS.Signals) => {
@@ -465,9 +471,16 @@ async function stoppedBy(signal: AbortSignal | undefined, child: { pid: number; 
   };
   signal.addEventListener("abort", endGroup, { once: true });
   process.on("SIGINT", interrupted).on("SIGTERM", interrupted);
-  if (signal.aborted) endGroup();
+  if (signal.aborted) {
+    release();
+    return 124;
+  }
   try {
+    child = Bun.spawn(command, { stdout: "ignore", stderr: "ignore", env, detached: true });
+    if (stopped || signal.aborted) endGroup();
     return await child.exited;
+  } catch {
+    return 127;
   } finally {
     release();
   }
