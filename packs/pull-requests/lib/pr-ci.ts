@@ -215,15 +215,15 @@ function notRequired(entries: Entry[], { countRunning = true } = {}) {
   return parts.length ? `; not required: ${parts.join("; ")}` : "";
 }
 
-const reportOf = (check: RequiredCheck) => (entry: Entry) => entry.name === check.context && (entry.status || check.appId === undefined || entry.appId === check.appId);
+const reportOf = (check: RequiredCheck) => (entry: Entry) => entry.name.toLowerCase() === check.context.toLowerCase() && (entry.status || entry.appId === check.appId);
 
 function personPassed(required: RequiredCheck[], entries: Entry[], listed: Set<string>) {
   const alone = (check: RequiredCheck) => {
     const workflow = workflowOf(check.context);
     return required.every((other) => other === check || (other.context !== check.context && (workflow === undefined || !other.context.startsWith(workflow))));
   };
-  const onlyItsOwn = (check: RequiredCheck) => entries.every((entry) => entry.name !== check.context || reportOf(check)(entry));
-  return required.filter((check) => listed.has(check.context) && alone(check) && onlyItsOwn(check));
+  const onlyItsOwn = (check: RequiredCheck) => entries.every((entry) => entry.name.toLowerCase() !== check.context.toLowerCase() || reportOf(check)(entry));
+  return required.filter((check) => check.appId !== undefined && listed.has(check.context) && alone(check) && onlyItsOwn(check));
 }
 
 function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boolean): CiResult {

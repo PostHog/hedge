@@ -574,3 +574,20 @@ test("the landed gate reads the required checks fresh, so classic protection add
   pr.pullRequestState({ merged: true });
   expect(ciLine((await pr.hedge("gate", "--landed")).output)).toBe("ci: pending, required not reported yet: storybook");
 });
+
+test("a listed check that no app is pinned to still holds the gate", async () => {
+  const { pr } = await reviewed();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.personChecks": "example/product=Visual Review gate / storybook" });
+  pr.required("main", [{ context: "Visual Review gate / storybook" }, { context: "build" }]);
+  pr.ci([{ name: "build", bucket: "pass" }, { name: "Visual Review gate / storybook", bucket: "pass", app: 7 }, { name: "Visual Review gate / storybook", bucket: "fail", app: 9 }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: red, required failing: Visual Review gate / storybook");
+});
+
+test("a status of a listed check in other letter case leaves the CI line and check list too", async () => {
+  const pr = await personChecked();
+  pr.ci([{ name: "build", bucket: "pass" }]);
+  pr.statuses([{ context: "visual review gate / storybook", state: "failure", by: "product[bot]" }]);
+  const gate = JSON.parse((await pr.hedge("gate", "--json")).output);
+  expect(gate.ci.line).toBe(`ci: green, 1 required check(s) pass; ${personLine}`);
+  expect(gate.ci.checks).toEqual(["build (app 1): pass"]);
+});

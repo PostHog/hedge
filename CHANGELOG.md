@@ -10,8 +10,8 @@
   result: someone accepts the visual change.
 - `hedge proof gate` does not wait on such a check, does not count it red,
   and does not ask for a ci gap on it. This holds only when the PR's own
-  base requires the check, requires its context once, requires no other
-  check of its workflow, and no other app runs a check of its name.
+  base requires the check pinned to an app, requires its context once and
+  no other check of its workflow, and no other app runs a check of its name.
 - The CI line names such a check without its result, so a person passing it
   later leaves the gate as it was. GitHub still holds the merge until the
   person passes it.
