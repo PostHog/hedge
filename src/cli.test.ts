@@ -450,6 +450,44 @@ describe("hedge doctor and pack sources", () => {
     expect(doctor.code).toBe(0);
     expect(doctor.output).toContain("Note: The pack source team is not pinned to a commit SHA.");
   });
+
+  test("accepts a 64-character SHA-256 commit pin and still notes a 40-character hex branch as unpinned", async () => {
+    const sha256Repo = temp.make("sha256-doctor-repo-");
+    await spawnGit(sha256Repo, "init", "-q", "--object-format=sha256", "-b", "main");
+    mkdirSync(join(sha256Repo, "packs/team"), { recursive: true });
+    writeFileSync(join(sha256Repo, "packs/team/pack.json"), JSON.stringify({ schema: 1, name: "team", summary: "SHA-256 packs." }));
+    await spawnGit(sha256Repo, "add", ".");
+    await spawnGit(sha256Repo, "commit", "-q", "-m", "v1");
+    const sha256Commit = await spawnGit(sha256Repo, "rev-parse", "HEAD");
+    const home = temp.make("home-");
+    const cacheDir = join(home, ".local/share/hedge/sources/team");
+    mkdirSync(cacheDir, { recursive: true });
+    await spawnGit(cacheDir, "init", "-q", "--object-format=sha256");
+    const profile = profileDir();
+    const file = join(profile, "hedge.json");
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), sources: [{ name: "team", repo: sha256Repo, ref: sha256Commit }] }));
+    expect(await hedge(["apply", "--profile", profile], home)).toMatchObject({ code: 0 });
+    expect(await hedge(["doctor"], home)).toEqual({ code: 0, output: "Everything matches your profile." });
+
+    const hex40Branch = "c".repeat(40);
+    const sha256Hex40 = temp.make("sha256-hex40-doctor-");
+    await spawnGit(sha256Hex40, "init", "-q", "--object-format=sha256", "-b", hex40Branch);
+    mkdirSync(join(sha256Hex40, "packs/team"), { recursive: true });
+    writeFileSync(join(sha256Hex40, "packs/team/pack.json"), JSON.stringify({ schema: 1, name: "team", summary: "Hex-40 branch." }));
+    await spawnGit(sha256Hex40, "add", ".");
+    await spawnGit(sha256Hex40, "commit", "-q", "-m", "v1");
+    const home2 = temp.make("home-");
+    const cacheDir2 = join(home2, ".local/share/hedge/sources/team");
+    mkdirSync(cacheDir2, { recursive: true });
+    await spawnGit(cacheDir2, "init", "-q", "--object-format=sha256");
+    const profile2 = profileDir();
+    const file2 = join(profile2, "hedge.json");
+    writeFileSync(file2, JSON.stringify({ ...JSON.parse(readFileSync(file2, "utf8")), sources: [{ name: "team", repo: sha256Hex40, ref: hex40Branch }] }));
+    expect(await hedge(["apply", "--profile", profile2], home2)).toMatchObject({ code: 0 });
+    const doctor2 = await hedge(["doctor"], home2);
+    expect(doctor2.code).toBe(0);
+    expect(doctor2.output).toContain("Note: The pack source team is not pinned to a commit SHA.");
+  });
 });
 
 describe("a profile source that would run code it does not ship", () => {

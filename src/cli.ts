@@ -210,7 +210,7 @@ async function reconcile(command: "apply" | "doctor", args: string[], options: C
     const drifted = await drift(plan, report.humanLeft);
     report.findings.push(...drifted);
     if (drifted.some((finding) => finding.repair)) report.ok = false;
-    report.findings.push(...(await unpinnedSources(refs, plan.machine.profileDir!)));
+    report.findings.push(...(await unpinnedSources(refs, plan.machine.profileDir!, sourceCache(options.home))));
   }
   if (held.length) report.findings.unshift(...held), (report.ok = false);
   const notice = doctor ? await readNotice(options.home) : undefined;

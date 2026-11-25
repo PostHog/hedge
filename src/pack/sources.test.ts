@@ -215,7 +215,7 @@ describe("fetchSource", () => {
     expect([fetched.packs[0]?.manifest.summary, fetched.stale]).toEqual(["Team rules v1.", undefined]);
   });
 
-  test("loads the pinned commit of a cache that an older Hedge wrote without reaching the source", async () => {
+  test("falls back as stale offline on a cache that an older Hedge wrote until verified online", async () => {
     const repo = await packRepo("Legacy rules v1.");
     const commit = await spawnGit(repo, "rev-parse", "HEAD");
     const cache = temp.make("cache-");
@@ -223,7 +223,8 @@ describe("fetchSource", () => {
     rmSync(repo, { recursive: true, force: true });
     const fetched = await fetchSource({ name: "team", repo, ref: commit }, cache);
     if ("error" in fetched) throw new Error(fetched.error);
-    expect([fetched.packs[0]?.manifest.summary, fetched.stale]).toEqual(["Legacy rules v1.", undefined]);
+    expect(fetched.packs[0]?.manifest.summary).toBe("Legacy rules v1.");
+    expect(fetched.stale).toContain(`could not fetch ${commit}`);
   });
 
   test("loads a commit pinned in capitals from the cache without reaching the source", async () => {
@@ -407,7 +408,8 @@ describe("fetchSource", () => {
     try {
       const reapplied = await fetchSource({ name: "team", repo, ref: commit }, cache);
       if ("error" in reapplied) throw new Error(reapplied.error);
-      expect([reapplied.packs[0]?.manifest.summary, reapplied.stale]).toEqual(["Legacy pinned v1.", undefined]);
+      expect(reapplied.packs[0]?.manifest.summary).toBe("Legacy pinned v1.");
+      expect(reapplied.stale).toContain(`could not fetch ${commit}`);
 
       const fallback = await fetchSource({ name: "team", repo, ref: "main" }, cache);
       if ("error" in fallback) throw new Error(fallback.error);
@@ -628,13 +630,27 @@ describe("fetchSource", () => {
       join(bin, "ssh"),
       `#!/bin/sh
 dest=""
-for arg in "$@"; do
-  case "$arg" in
-    alice@*) dest=${JSON.stringify(repoA)} ;;
-    bob@*) dest=${JSON.stringify(repoB)} ;;
+host=""
+cmd=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o|-p|-i|-l) shift 2 ;;
+    -*) shift ;;
+    *)
+      if [ -z "$host" ]; then host="$1"; else cmd="$1"; fi
+      shift
+      ;;
   esac
 done
-exec git-upload-pack "$dest"
+case "$host" in
+  alice@example.invalid) dest=${JSON.stringify(repoA)} ;;
+  bob@example.invalid) dest=${JSON.stringify(repoB)} ;;
+  *) echo "unexpected host: $host" >&2; exit 1 ;;
+esac
+case "$cmd" in
+  *"git-upload-pack"*"/repo.git"*) exec git-upload-pack "$dest" ;;
+  *) echo "unexpected command: $cmd" >&2; exit 1 ;;
+esac
 `,
       { mode: 0o755 },
     );
@@ -926,13 +942,27 @@ exec git-upload-pack "$dest"
       join(sshBin, "ssh"),
       `#!/bin/sh
 dest=""
-for arg in "$@"; do
-  case "$arg" in
-    alice@*) dest=${JSON.stringify(sshA)} ;;
-    bob@*) dest=${JSON.stringify(sshB)} ;;
+host=""
+cmd=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o|-p|-i|-l) shift 2 ;;
+    -*) shift ;;
+    *)
+      if [ -z "$host" ]; then host="$1"; else cmd="$1"; fi
+      shift
+      ;;
   esac
 done
-exec git-upload-pack "$dest"
+case "$host" in
+  alice@example.invalid) dest=${JSON.stringify(sshA)} ;;
+  bob@example.invalid) dest=${JSON.stringify(sshB)} ;;
+  *) echo "unexpected host: $host" >&2; exit 1 ;;
+esac
+case "$cmd" in
+  *"git-upload-pack"*"/repo.git"*) exec git-upload-pack "$dest" ;;
+  *) echo "unexpected command: $cmd" >&2; exit 1 ;;
+esac
 `,
       { mode: 0o755 },
     );
@@ -1054,6 +1084,48 @@ exec git-upload-pack "$dest"
       chmodSync(unreadableFh, 0o600);
     }
     expect(await followsBranch({ name: "team", repo: unreadableRepo, ref: "main" }, unreadableCache)).toBe(true);
+
+    const bomCache = temp.make("cache-bom-");
+    const bomRepo = join(bomCache, "team", "\ufeffrepo");
+    const plainBomRepo = join(bomCache, "team", "repo");
+    const bomSha = await initPackRepo(bomRepo, "BOM repo.");
+    const plainBomSha = await initPackRepo(plainBomRepo, "Plain BOM sibling.");
+    expect("error" in (await fetchSource({ name: "team", repo: "\ufeffrepo", ref: bomSha }, bomCache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo: "repo", ref: plainBomSha }, bomCache))).toBe(false);
+    rmSync(plainBomRepo, { recursive: true, force: true });
+    const bomCross = await fetchSource({ name: "team", repo: "repo", ref: bomSha }, bomCache);
+    if ("error" in bomCross) throw new Error(bomCross.error);
+    expect(bomCross.packs[0]?.manifest.summary).toBe("Plain BOM sibling.");
+    expect(bomCross.stale).toContain(`could not fetch ${bomSha}`);
+
+    const spellRepo = await packRepo("Main good.");
+    await spawnGit(spellRepo, "checkout", "-q", "-b", "release");
+    writeFileSync(join(spellRepo, "packs/team/pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Broken release." }));
+    await spawnGit(spellRepo, "commit", "-q", "-am", "broken release");
+    const spellCache = temp.make("cache-branch-spell-");
+    expect("error" in (await fetchSource({ name: "team", repo: spellRepo, ref: "main" }, spellCache))).toBe(false);
+    const brokenRelease = await fetchSource({ name: "team", repo: spellRepo, ref: "release" }, spellCache);
+    if ("error" in brokenRelease) throw new Error(brokenRelease.error);
+    expect(brokenRelease.stale).toContain("does not load");
+    rmSync(spellRepo, { recursive: true, force: true });
+    const offlineRespell = await fetchSource({ name: "team", repo: spellRepo, ref: "refs/heads/release" }, spellCache);
+    if ("error" in offlineRespell) throw new Error(offlineRespell.error);
+    expect(offlineRespell.stale).toContain("could not fetch refs/heads/release");
+    expect(await followsBranch({ name: "team", repo: spellRepo, ref: "release" }, spellCache)).toBe(true);
+    expect(await followsBranch({ name: "team", repo: spellRepo, ref: "refs/heads/release" }, spellCache)).toBe(true);
+
+    const hex40Branch = "b".repeat(40);
+    const hex40Repo = join(parent, "sha1-hex40-branch");
+    mkdirSync(hex40Repo, { recursive: true });
+    await spawnGit(hex40Repo, "init", "-q", "-b", hex40Branch);
+    writePack(hex40Repo, "Hex-40 branch packs.");
+    await spawnGit(hex40Repo, "add", ".");
+    await spawnGit(hex40Repo, "commit", "-q", "-m", "v1");
+    const hex40Cache = temp.make("cache-hex40-");
+    const hex40Online = await fetchSource({ name: "team", repo: hex40Repo, ref: `refs/heads/${hex40Branch}` }, hex40Cache);
+    if ("error" in hex40Online) throw new Error(hex40Online.error);
+    expect(await followsBranch({ name: "team", repo: hex40Repo, ref: hex40Branch }, hex40Cache)).toBe(true);
+    expect(await followsBranch({ name: "team", repo: hex40Repo, ref: `refs/heads/${hex40Branch}` }, hex40Cache)).toBe(true);
   });
 });
 

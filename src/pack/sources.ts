@@ -80,7 +80,6 @@ async function resolvedRepoUrl(dir: string, repo: string) {
 }
 
 const gitHash = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
-const commitSha = /^[0-9a-f]{40}$/i;
 
 async function repoHashLength(dir: string): Promise<number> {
   if (!existsSync(join(dir, ".git"))) return 40;
@@ -95,11 +94,6 @@ const canonicalFetchHeadUrl = (url: string) =>
     .replace(/^[^/@:\s]+@/, "")
     .replace(/\/+$/, "")
     .replace(/\.git$/i, "");
-
-const isPlainHttps = (url: string) => /^https:\/\//i.test(url) && !/^https:\/\/[^/@\s]+@/i.test(url);
-
-const unambiguousLegacyMatch = (fetchedUrl: string, candidate: string, allowHttpsDotGit: boolean) =>
-  fetchedUrl === candidate || (allowHttpsDotGit && isPlainHttps(candidate) && fetchedUrl === candidate.replace(/\.git$/i, ""));
 
 async function fetchHeadRepo(dir: string, commit: unknown): Promise<string | undefined> {
   if (typeof commit !== "string" || !gitHash.test(commit)) return undefined;
@@ -141,8 +135,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
   let fetchError: string | undefined;
   let fetchedNew = false;
   let savedFetchHead: SavedFetchHead | undefined;
-  const cachedHit = await checkedOutFromCache(dir, repo, effectiveBefore, ref, good);
-  if (cachedHit === "miss") {
+  if (!(await checkedOutFromCache(dir, repo, effectiveBefore, ref, good))) {
     savedFetchHead = await snapshotFetchHead(dir);
     fetchedNew = true;
     const fetched = await checkout(dir, repo, ref.ref, savedFetchHead);
@@ -152,10 +145,6 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
   if (!fetchError) {
     const loaded = await load(dir, loadLimitMs);
     if (!("error" in loaded)) {
-      if (cachedHit === "legacy") {
-        await chmod(goodPath(dir), 0o600).catch(() => {});
-        return { ref, dir, packs: loaded.packs };
-      }
       const saveError = await saveGood(dir, {
         repo,
         ref: ref.ref,
@@ -230,7 +219,7 @@ async function fallBack(ref: SourceRef, dir: string, repo: string, effectiveRepo
   }
   const loaded = await load(dir, loadLimitMs);
   if ("error" in loaded) return { ref, error: reason };
-  const keepAskedBranch = good.ref !== ref.ref && (askedBranch || (good.asked === ref.ref && Boolean(good.askedBranch)));
+  const keepAskedBranch = good.ref !== ref.ref && (askedBranch || (branchName(good.asked) === branchName(ref.ref) && Boolean(good.askedBranch)));
   const nextGood: Good = {
     repo: good.repo,
     ref: good.ref,
@@ -361,8 +350,13 @@ const repoKey = (repo: string) => {
   return github ? github.replace(/\.git$/i, "").toLowerCase() : url;
 };
 
-export async function unpinnedSources(refs: SourceRef[], profileDir: string): Promise<Finding[]> {
-  const unpinned = refs.filter((ref) => !commitSha.test(ref.ref));
+export async function unpinnedSources(refs: SourceRef[], profileDir: string, cacheRoot?: string): Promise<Finding[]> {
+  const unpinned: SourceRef[] = [];
+  for (const ref of refs) {
+    const hashLen = cacheRoot ? await repoHashLength(join(cacheRoot, ref.name)) : 40;
+    const pinned = isCommitPin(ref.ref, hashLen) && !(cacheRoot && (await followsBranch(ref, cacheRoot)));
+    if (!pinned) unpinned.push(ref);
+  }
   if (!unpinned.length) return [];
   const origin = await git(profileDir, "config", "--get", "remote.origin.url").then((read) => read.stdout, () => "");
   const ownRepo = (ref: SourceRef) => origin !== "" && repoKey(ref.repo) === repoKey(origin);
@@ -371,27 +365,15 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string): Pr
     .map((ref) => ({ id: `source:unpinned:${ref.name}`, pack: "engine", say: `The pack source ${ref.name} is not pinned to a commit SHA. Pin its ref in hedge.json, so each apply loads the same packs, even offline.` }));
 }
 
-type CacheHit = "miss" | "verified" | "legacy";
-
-async function checkedOutFromCache(dir: string, repo: string, effectiveRepo: string, ref: SourceRef, good: Good | undefined): Promise<CacheHit> {
-  if (!existsSync(join(dir, ".git"))) return "miss";
+async function checkedOutFromCache(dir: string, repo: string, effectiveRepo: string, ref: SourceRef, good: Good | undefined): Promise<boolean> {
+  if (!existsSync(join(dir, ".git"))) return false;
   const commit = ref.ref.toLowerCase();
   const hashLen = await repoHashLength(dir);
-  if (!isCommitPin(commit, hashLen)) return "miss";
+  if (!isCommitPin(commit, hashLen)) return false;
   const goodCommit = verifiedGoodCommit(good);
-  let hit: CacheHit = "miss";
-  if (await hasPinRef(dir, effectiveRepo, commit)) {
-    hit = "verified";
-  } else if (goodCommit?.commit === commit && good?.repo === repo) {
-    if (typeof good.resolved === "string") {
-      if (good.resolved === effectiveRepo) hit = "verified";
-    } else if (effectiveRepo === repo) {
-      const fetched = await fetchHeadRepo(dir, good.commit);
-      if (fetched !== undefined && unambiguousLegacyMatch(fetched, effectiveRepo, true)) hit = "legacy";
-    }
-  }
-  if (hit === "miss") return "miss";
-  return (await git(dir, "checkout", "-q", "--detach", commit)).ok ? hit : "miss";
+  const verifiedGoodMatch = goodCommit?.commit === commit && good?.repo === repo && typeof good.resolved === "string" && good.resolved === effectiveRepo;
+  if (!verifiedGoodMatch && !(await hasPinRef(dir, effectiveRepo, commit))) return false;
+  return (await git(dir, "checkout", "-q", "--detach", commit)).ok;
 }
 
 type SavedFetchHead = { kind: "content"; text: string } | { kind: "missing" } | { kind: "unreadable" };
@@ -431,9 +413,10 @@ async function checkout(dir: string, repo: string, ref: string, savedFetchHead: 
 async function git(dir: string, ...args: string[]) {
   const env = { ...withoutRepoEnv(), GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "true", SSH_ASKPASS: "true", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" };
   const process = Bun.spawn(["git", "-C", dir, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env, timeout: fetchTimeoutMs });
-  const [code, stdout, stderr] = await Promise.all([process.exited, new Response(process.stdout).text(), new Response(process.stderr).text()]);
+  const [code, rawBytes, stderr] = await Promise.all([process.exited, new Response(process.stdout).arrayBuffer(), new Response(process.stderr).text()]);
+  const rawStdout = new TextDecoder("utf-8", { ignoreBOM: true }).decode(rawBytes);
   const message = process.signalCode ? `git timed out after ${fetchTimeoutMs / 1000} seconds` : (stderr.trim().split("\n").at(-1) ?? "");
-  return { ok: code === 0, stdout: stdout.trim(), rawStdout: stdout, stderr: message };
+  return { ok: code === 0, stdout: rawStdout.trim(), rawStdout, stderr: message };
 }
 
 export function sourceCache(home: string) {
@@ -451,8 +434,6 @@ async function fetchHeadIsBranch(dir: string, ref: string): Promise<boolean> {
 
 export async function followsBranch(ref: SourceRef, cacheRoot: string) {
   const dir = join(cacheRoot, ref.name);
-  const hashLen = await repoHashLength(dir);
-  if (isCommitPin(ref.ref, hashLen)) return false;
   const good = await lastGood(dir);
   const branch = branchName(ref.ref);
   if (!good || !branch) return false;
