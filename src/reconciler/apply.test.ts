@@ -795,7 +795,7 @@ process.exit(0);`;
     }
   });
 
-  test("marks a timed-out custom probe unchecked even when its abort handler synchronously resolves 0", async () => {
+  test("marks a timed-out custom probe unchecked even when its abort handler synchronously resolves 0 or rejects with AbortError, and does not abort already-completed probes", async () => {
     const home = temp.make("home-sync-abort-runner-");
     let fireGiveUp!: () => void;
     const step = { id: "sync-abort", pack: "team", say: "Sync abort.", probe: ["true"] };
@@ -812,5 +812,31 @@ process.exit(0);`;
     });
     expect(result.failing).toEqual([]);
     expect(result.unchecked.map((item) => item.id)).toEqual(["sync-abort"]);
+
+    let fireReject!: () => void;
+    let completedAborted = false;
+    const fastStep = { id: "fast-done", pack: "team", say: "Fast.", probe: ["fast"] };
+    const rejectStep = { id: "reject-abort", pack: "team", say: "Reject.", probe: ["slow"] };
+    const rejectResult = await humanStepsLeft(plan({ human: [fastStep, rejectStep] }), {
+      home,
+      giveUp: new Promise<void>((resolve) => {
+        fireReject = resolve;
+      }),
+      run: (cmd, _env, signal) => {
+        if (cmd[0] === "fast") {
+          signal?.addEventListener("abort", () => {
+            completedAborted = true;
+          });
+          return Promise.resolve(0);
+        }
+        return new Promise<number>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+          queueMicrotask(() => fireReject());
+        });
+      },
+    });
+    expect(rejectResult.failing).toEqual([]);
+    expect(rejectResult.unchecked.map((item) => item.id)).toEqual(["reject-abort"]);
+    expect(completedAborted).toBe(false);
   });
 });

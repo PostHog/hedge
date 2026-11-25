@@ -283,7 +283,7 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string, deadLeade
           matched.add(row.pid);
           grew = true;
         } else if (matched.has(row.ppid)) {
-          const foreignCompleted = Boolean(tag && row.envTag && !envMatchesAnyTag(row.envTag, activeTags));
+          const foreignCompleted = Boolean(tag && row.envTag && row.sid === row.pid && !envMatchesAnyTag(row.envTag, activeTags));
           if (!foreignCompleted) {
             matched.add(row.pid);
             grew = true;
@@ -491,7 +491,7 @@ function buildTargetsFromPs(
           matched.add(row.pid);
           grew = true;
         } else if (matched.has(row.ppid)) {
-          const foreignCompleted = Boolean(tag && row.envTag && !envMatchesAnyTag(row.envTag, activeTags));
+          const foreignCompleted = Boolean(tag && row.envTag && sessionIdDarwin(row.pid) === row.pid && !envMatchesAnyTag(row.envTag, activeTags));
           if (!foreignCompleted) {
             matched.add(row.pid);
             grew = true;

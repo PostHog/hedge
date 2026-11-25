@@ -834,10 +834,10 @@ await Bun.sleep(30_000);`;
     const holdClosed = fifoRead(holdGone);
     const daemonScript = `const c = Bun.spawn(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 c.unref();
-await Bun.write(${JSON.stringify(probeDone)}, "done\\n");
 process.exit(0);`;
     const applyPath = join(import.meta.dir, "apply.ts");
     const runnerScript = `import { humanStepsLeft } from ${JSON.stringify(applyPath)};
+const extraHolds = Array.from({ length: 6 }, (_, i) => ({ id: \`hold-extra-\${i}\`, pack: "team", say: "Hold.", probe: ["sh", "-c", "exec sleep 30"] }));
 await humanStepsLeft({
   machine: { schema: 1, role: "linux" },
   os: process.platform,
@@ -851,6 +851,8 @@ await humanStepsLeft({
   human: [
     { id: "fast", pack: "team", say: "Fast.", probe: [process.execPath, "-e", ${JSON.stringify(daemonScript)}] },
     { id: "hold", pack: "team", say: "Hold.", probe: ["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "hold", ${JSON.stringify(holdGone)}, ${JSON.stringify(holdReady)}] },
+    ...extraHolds,
+    { id: "after-fast", pack: "team", say: "After fast.", probe: ["sh", "-c", 'echo done > "$1"; exec sleep 30', "after", ${JSON.stringify(probeDone)}] },
   ],
   steps: [],
   checks: [],
@@ -880,6 +882,63 @@ await humanStepsLeft({
       runner.kill("SIGKILL");
       await runner.exited.catch(() => {});
       await daemonClosed.catch(() => {});
+    }
+  });
+
+  test("stops an abandoned nested capture command when its helper dies early", async () => {
+    const dir = temp.make("sup-abandoned-nested-capture-");
+    const [cmdReady, cmdGone, helperPidFile] = [join(dir, "cmd-ready"), join(dir, "cmd-gone"), join(dir, "helper-pid")];
+    mkfifo(cmdReady, cmdGone, helperPidFile);
+    const cmdStarted = fifoRead(cmdReady);
+    const cmdClosed = fifoRead(cmdGone);
+    const helperStarted = fifoRead(helperPidFile);
+    const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
+    const { humanStepsLeft } = await import("./apply.ts");
+    const helperScript = `import { capture } from ${JSON.stringify(coderPath)};
+await Bun.write(${JSON.stringify(helperPidFile)}, String(process.pid) + "\\n");
+await capture(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "nested", ${JSON.stringify(cmdGone)}, ${JSON.stringify(cmdReady)}], { timeoutMs: 30_000 });`;
+    const probeScript = `const h = Bun.spawn([process.execPath, "-e", ${JSON.stringify(helperScript)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await h.exited;
+await Bun.sleep(30_000);`;
+    let fireDeadline!: () => void;
+    let helperPid = 0;
+    let cmdPid = 0;
+    try {
+      const pending = humanStepsLeft(
+        {
+          machine: { schema: 1, role: "linux" },
+          os: process.platform === "darwin" ? "darwin" : "linux",
+          ai: "both",
+          packs: [],
+          workflows: [],
+          files: [],
+          config: [],
+          owners: {},
+          jobs: [],
+          human: [{ id: "abandoned", pack: "team", say: "Abandoned.", probe: [process.execPath, "-e", probeScript] }],
+          steps: [],
+          checks: [],
+          commands: {},
+          handlers: {},
+          models: [],
+          settings: {},
+          unanswered: [],
+          ask: [],
+          dropped: [],
+        },
+        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 0 },
+      );
+      [helperPid, cmdPid] = (await Promise.all([helperStarted, cmdStarted])).map((s) => Number(s.trim())) as [number, number];
+      expect(helperPid).toBeGreaterThan(0);
+      expect(cmdPid).toBeGreaterThan(0);
+      process.kill(helperPid, "SIGKILL");
+      expect(await cmdClosed).toBe("");
+      fireDeadline();
+      const res = await pending;
+      expect(res.unchecked.map((step) => step.id)).toEqual(["abandoned"]);
+    } finally {
+      if (helperPid > 0) try { process.kill(helperPid, "SIGKILL"); } catch {}
+      if (cmdPid > 0) try { process.kill(cmdPid, "SIGKILL"); } catch {}
     }
   });
 

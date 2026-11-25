@@ -271,11 +271,21 @@ export async function humanStepsLeft(plan: Plan, options: { home: string; run?: 
     const step = plan.human[index]!;
     const deadline = new AbortController();
     let aborted = false;
-    const result = run(step.probe, {}, deadline.signal).then((code) => {
-      if (aborted && options.run) return "unchecked" as const;
-      return code === supervisorSpawnFailed ? ("unchecked" as const) : code === 0 ? ("passes" as const) : ("fails" as const);
-    });
+    let settled = false;
+    const result = run(step.probe, {}, deadline.signal).then(
+      (code) => {
+        settled = true;
+        if (aborted && options.run) return "unchecked" as const;
+        return code === supervisorSpawnFailed ? ("unchecked" as const) : code === 0 ? ("passes" as const) : ("fails" as const);
+      },
+      (error) => {
+        settled = true;
+        if (aborted) return "unchecked" as const;
+        throw error;
+      },
+    );
     const late = options.giveUp.then(async () => {
+      if (settled) return "passes" as const;
       const code = reported.get(deadline.signal);
       aborted = true;
       deadline.abort();

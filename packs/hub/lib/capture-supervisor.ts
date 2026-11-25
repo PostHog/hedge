@@ -66,13 +66,20 @@ const watchControl = (fd: number, initialBuf = "") => {
       }
     } catch {}
     if (!sawKill && !killing) {
+      if (!targetReaped) {
+        killAll();
+        return;
+      }
       process.exit(targetCode ?? 0);
     }
   })();
 };
 
 process.on("disconnect", () => {
-  if (!readingControl) process.exit(targetCode ?? 0);
+  if (!readingControl) {
+    if (!targetReaped) killAll();
+    else process.exit(targetCode ?? 0);
+  }
 });
 
 process.on("message", async (message: unknown) => {

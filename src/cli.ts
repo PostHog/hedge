@@ -36,7 +36,7 @@ import { importFleet, isCopyOf } from "./import-fleet.ts";
 import { fleetAdapter, type FleetAdapter } from "./adapters/fleet/adapter.ts";
 
 /** env: the environment that tells a Coder workspace apart; tests pass their own. */
-export type CliOptions = { home: string; engineRoot: string; launchedFrom?: string; platform: NodeJS.Platform; env?: Record<string, string | undefined>; print: (line: string) => void; fail?: (line: string) => void; run?: Runner; terminal?: Terminal; apply?: (profileDir: string, skip?: string[]) => Promise<number>; setup?: Pick<SetupOptions, "machine" | "fetchSource" | "doctor" | "env" | "timeZone" | "clock">; clock?: Clock; adapters?: () => Adapter[]; hostname?: () => string; stdin?: () => ReadableStream<Uint8Array>; capture?: CommandRunner; become?: Become; interactive?: boolean };
+export type CliOptions = { home: string; engineRoot: string; launchedFrom?: string; platform: NodeJS.Platform; env?: Record<string, string | undefined>; print: (line: string) => void; fail?: (line: string) => void; run?: Runner; terminal?: Terminal; apply?: (profileDir: string, skip?: string[]) => Promise<number>; setup?: Pick<SetupOptions, "machine" | "fetchSource" | "doctor" | "env" | "timeZone" | "clock">; clock?: Clock; probeGraceMs?: number; adapters?: () => Adapter[]; hostname?: () => string; stdin?: () => ReadableStream<Uint8Array>; capture?: CommandRunner; become?: Become; interactive?: boolean };
 
 const usage = `Hedge: one setup for T3 Code, agents, and your workflows
 
@@ -243,7 +243,7 @@ async function change(command: keyof typeof changes | "hub", args: string[], opt
     machine: { ...realMachine, ...options.setup?.machine },
     print: options.print,
     apply: () => applyProfile(profileDir, options),
-    humanStepsLeft: () => humanStepsLeft(plan, { home: options.home, run: options.run, giveUp: (options.clock ?? { sleep: Bun.sleep }).sleep(probeLimitMs) }),
+    humanStepsLeft: () => humanStepsLeft(plan, { home: options.home, run: options.run, giveUp: (options.clock ?? { sleep: Bun.sleep }).sleep(probeLimitMs), ...(options.probeGraceMs === undefined ? {} : { graceMs: options.probeGraceMs }) }),
   };
   try {
     return await (command === "hub" ? hubCommand(args, { ...context, home: options.home }) : changes[command](args, context));
