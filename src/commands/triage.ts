@@ -166,7 +166,13 @@ function knownNames(hostname: string, machine: MachineFile | undefined, profile:
   const devboxes = [...new Set([...(machine?.devboxes ?? []), ...(profile?.devboxes ?? [])])].filter((host) => host !== profile?.hub);
   devboxes.forEach((host, index) => names.push({ text: host, as: `<devbox ${index + 1}>` }));
   const publicRepos = new Set([engineRepo, ...defaultSources.map((source) => source.repo)]);
-  for (const source of [...(machine?.setup?.draft?.sources ?? []), ...(profile?.sources ?? [])]) if (!publicRepos.has(source.repo)) names.push({ text: source.repo, as: `<${source.name} source>` });
+  const publicSourceNames = new Set(defaultSources.map((source) => source.name));
+  for (const source of [...(machine?.setup?.draft?.sources ?? []), ...(profile?.sources ?? [])]) {
+    if (publicRepos.has(source.repo)) continue;
+    names.push({ text: source.repo, as: `<${source.name} source>` });
+    if (!publicSourceNames.has(source.name)) names.push({ text: `The pack source ${source.name}`, as: "The pack source <private source>" });
+    if (!/^[0-9a-f]{40}$/i.test(source.ref) && source.ref !== "main" && source.ref !== "master") names.push({ text: source.ref, as: "<branch>" });
+  }
   if (gitName) names.push({ text: gitName, as: "<name>" });
   return names;
 }

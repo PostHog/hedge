@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
-import { cachedSource, fetchSource } from "./sources.ts";
+import { cachedSource, fetchSource, followsBranch } from "./sources.ts";
 
 isolateGit();
 const temp = tempDirs();
@@ -294,6 +294,30 @@ describe("fetchSource", () => {
     await fetchSource({ name: "team", repo: await packRepo("Old repo."), ref: "v1" }, cache);
     const fetched = await fetchSource({ name: "team", repo: join(temp.make(), "moved"), ref: "v1" }, cache);
     expect(fetched).toMatchObject({ error: expect.stringContaining("could not fetch v1") });
+  });
+
+  test("ignores a malformed pinned field in the cache record and fetches cleanly", async () => {
+    const repo = await packRepo("Team rules v1.");
+    const commit = await spawnGit(repo, "rev-parse", "HEAD");
+    const cache = temp.make("cache-");
+    const ref = { name: "team", repo, ref: commit };
+    await fetchSource(ref, cache);
+    writeFileSync(join(cache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo, ref: "main", commit: "0".repeat(40), pinned: "bad" }));
+    const fetched = await fetchSource(ref, cache);
+    if ("error" in fetched) throw new Error(fetched.error);
+    expect([fetched.packs[0]?.manifest.summary, fetched.stale]).toEqual(["Team rules v1.", undefined]);
+  });
+
+  test("follows a branch across refs/heads/ respellings and after a fallback", async () => {
+    const repo = await packRepo("Team rules v1.");
+    const cache = temp.make("cache-");
+    const main = { name: "team", repo, ref: "main" };
+    await fetchSource(main, cache);
+    expect(await followsBranch({ ...main, ref: "refs/heads/main" }, cache)).toBe(true);
+    const goodFile = join(cache, "team", ".git", "hedge-source.json");
+    const good = JSON.parse(readFileSync(goodFile, "utf8")) as Record<string, unknown>;
+    writeFileSync(goodFile, JSON.stringify({ ...good, ref: "old-branch", asked: "refs/heads/main" }));
+    expect(await followsBranch(main, cache)).toBe(true);
   });
 });
 

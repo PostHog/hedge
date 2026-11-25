@@ -133,16 +133,18 @@ async function lastGood(dir: string): Promise<Good | undefined> {
   }
 }
 
+const pinnedCommits = (good: Good | undefined) => (Array.isArray(good?.pinned) ? good.pinned.filter((commit): commit is string => typeof commit === "string") : []);
+
 async function saveGood(dir: string, good: Good) {
   const before = await lastGood(dir);
-  const kept = before?.repo === good.repo ? (before.pinned ?? []) : [];
+  const kept = before?.repo === good.repo ? pinnedCommits(before) : [];
   const pinned = commitSha.test(good.ref) && !kept.includes(good.commit) ? [...kept, good.commit] : kept;
   await writeFile(goodPath(dir), JSON.stringify({ ...good, ...(pinned.length ? { pinned } : {}) }) + "\n");
 }
 
 const commitSha = /^[0-9a-f]{40}$/i;
 
-const repoKey = (repo: string) => repoUrl(repo).replace(/^.*github\.com[:/]/i, "").replace(/\.git$/, "").toLowerCase();
+const repoKey = (repo: string) => repoUrl(repo).replace(/^.*(?:ssh\.)?github\.com(?::\d+)?[:/]/i, "").replace(/\.git$/, "").toLowerCase();
 
 export async function unpinnedSources(refs: SourceRef[], profileDir: string): Promise<Finding[]> {
   const unpinned = refs.filter((ref) => !commitSha.test(ref.ref));
@@ -151,12 +153,12 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string): Pr
   const ownRepo = (ref: SourceRef) => origin !== "" && repoKey(ref.repo) === repoKey(origin);
   return unpinned
     .filter((ref) => !ownRepo(ref))
-    .map((ref) => ({ id: `source:unpinned:${ref.name}`, pack: "engine", say: `The pack source ${ref.name} follows ${ref.ref}. Pin its ref in hedge.json to a commit SHA, so each apply loads the same packs, even offline.` }));
+    .map((ref) => ({ id: `source:unpinned:${ref.name}`, pack: "engine", say: `The pack source ${ref.name} is not pinned to a commit SHA. Pin its ref in hedge.json, so each apply loads the same packs, even offline.` }));
 }
 
 async function checkedOutFromCache(dir: string, repo: string, ref: SourceRef, good: Good | undefined) {
   const commit = ref.ref.toLowerCase();
-  const fetchedHere = good?.repo === repo && (good.commit === commit || good.pinned?.includes(commit));
+  const fetchedHere = good?.repo === repo && (good.commit === commit || pinnedCommits(good).includes(commit));
   if (!commitSha.test(commit) || !fetchedHere) return false;
   return (await git(dir, "checkout", "-q", "--detach", commit)).ok;
 }
@@ -183,10 +185,15 @@ export function sourceCache(home: string) {
   return join(home, ".local", "share", "hedge", "sources");
 }
 
+const branchName = (ref: string) => ref.replace(/^refs\/heads\//, "");
+
 export async function followsBranch(ref: SourceRef, cacheRoot: string) {
-  if ((await lastGood(join(cacheRoot, ref.name)))?.ref !== ref.ref) return false;
+  if (commitSha.test(ref.ref)) return false;
+  const good = await lastGood(join(cacheRoot, ref.name));
+  const branch = branchName(ref.ref);
+  if (!good || (branchName(good.ref) !== branch && (!good.asked || branchName(good.asked) !== branch))) return false;
+  if (good.asked && branchName(good.asked) === branch) return true;
   const fetched = await readFile(join(cacheRoot, ref.name, ".git", "FETCH_HEAD"), "utf8").catch(() => "");
-  const branch = ref.ref.replace(/^refs\/heads\//, "");
   return fetched.split("\n")[0]?.includes(`\tbranch '${branch}' of `) ?? false;
 }
 

@@ -380,7 +380,7 @@ describe("hedge doctor and pack sources", () => {
     const home = await applied(() => ({ name: "team", repo: "someone/team", ref: "main" }));
     expect(await hedge(["doctor"], home)).toEqual({
       code: 0,
-      output: "Note: The pack source team follows main. Pin its ref in hedge.json to a commit SHA, so each apply loads the same packs, even offline.\nEverything matches your profile.",
+      output: "Note: The pack source team is not pinned to a commit SHA. Pin its ref in hedge.json, so each apply loads the same packs, even offline.\nEverything matches your profile.",
     });
   });
 
@@ -396,7 +396,7 @@ describe("hedge doctor and pack sources", () => {
     const file = join(profile, "hedge.json");
     writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), sources: [{ name: "team", repo: "someone/team", ref: "main" }] }));
     process.env.PATH = temp.make("no-git-");
-    expect((await hedge(["doctor"], home)).output).toContain("Note: The pack source team follows main.");
+    expect((await hedge(["doctor"], home)).output).toContain("Note: The pack source team is not pinned to a commit SHA.");
   });
 
   test("passes without git on a profile with no sources", async () => {
@@ -406,7 +406,7 @@ describe("hedge doctor and pack sources", () => {
     expect(await hedge(["doctor"], home)).toEqual({ code: 0, output: "Everything matches your profile." });
   });
 
-  for (const origin of ["git@github.com:Someone/profile.git", "https://github.com/someone/Profile"]) {
+  for (const origin of ["git@github.com:Someone/profile.git", "https://github.com/someone/Profile", "ssh://git@ssh.github.com:443/someone/Profile.git"]) {
     test(`says nothing of a source in the profile's own repository at ${origin}, which cannot pin its own commit`, async () => {
       const home = await applied(() => ({ name: "own", repo: "someone/profile", ref: "main" }), origin);
       expect(await hedge(["doctor"], home)).toEqual({ code: 0, output: "Everything matches your profile." });
