@@ -360,6 +360,45 @@ describe("hedge triage", () => {
     expect(issue.input).not.toContain("inherited-secret");
     expect(issue.input).not.toContain("secretSuffix99");
   });
+
+  test("preserves full repository path redaction when a local source path contains the unpinned advisory wording", async () => {
+    const home = temp.make("home-advisory-path-");
+    const profileDir = join(home, "profile");
+    const repoPath = join(home, "secret-folder", "The pack source team is not pinned to a commit SHA.", "packs");
+    mkdirSync(profileDir, { recursive: true });
+    writeFileSync(
+      join(profileDir, "hedge.json"),
+      JSON.stringify({
+        schema: 1,
+        engine: { repo: "PostHog/hedge", ref: "v1", channel: "release" },
+        sources: [{ name: "team", repo: repoPath, ref: "main" }],
+        packs: [],
+        plan: "both",
+        settings: {},
+        workflows: {},
+      }),
+    );
+    mkdirSync(join(home, ".config/hedge"), { recursive: true });
+    writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "mac", name: "box", profileDir }));
+    const sent: Sent[] = [];
+    const io = scripted([]);
+    const code = await main(["triage", "--send", "--note", `failed cloning ${repoPath}`], {
+      home,
+      engineRoot,
+      platform: "darwin",
+      env: {},
+      print: io.terminal.print,
+      terminal: io.terminal,
+      capture: capture(sent),
+      hostname: () => "box.local",
+      run: async () => 0,
+    });
+    expect(code).toBe(0);
+    const issue = sent.find((call) => call.command[1] === "issue")!;
+    expect(issue.input).not.toContain("secret-folder");
+    expect(issue.input).toContain("failed cloning <team source>");
+    expect(issue.input).toContain("Note: The pack source <private source> is not pinned to a commit SHA.");
+  });
 });
 
 describe("hedge setup and triage", () => {

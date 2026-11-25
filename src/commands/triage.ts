@@ -75,10 +75,10 @@ export async function triageReport(context: TriageContext, note?: string): Promi
     machine?.profileDir ? firstLine(context, ["git", "-C", machine.profileDir, "remote", "get-url", "origin"]) : Promise.resolve(undefined),
   ]);
   const known = knownNames(context.hostname, machine, profile, gitName, origin);
-  const clean = (text: string) => redact(scrubUnpinnedAdvisory(text), context.home, known);
+  const clean = (text: string) => redact(text, context.home, known);
   const described = note?.trim() ? clean(note.trim()) : "Not described.";
   const facts = clean([...setupLines(machine, failure, timings), "", "## Versions", "", ...versions].join("\n"));
-  const checked = clean(doctor.join("\n")).split("\n");
+  const checked = clean(doctor.join("\n")).split("\n").map(scrubUnpinnedAdvisory);
   const head = ["## What happened", "", described, "", "## Setup", "", facts, "", "## hedge doctor", "", fence(checked), "", ""].join("\n");
   const ending = "\n\nMade by `hedge triage`.";
   const transcript = transcriptTail(context.home, transcriptLines);
@@ -154,9 +154,10 @@ async function firstLine(context: TriageContext, command: string[]) {
 
 const publicSourceNames = new Set(defaultSources.map((source) => source.name));
 
-function scrubUnpinnedAdvisory(text: string): string {
-  return text.replace(/(The pack source )(\S+)( is not pinned to a commit SHA\.)/g, (match, prefix, name, suffix) =>
-    publicSourceNames.has(name) ? match : `${prefix}<private source>${suffix}`,
+function scrubUnpinnedAdvisory(line: string): string {
+  return line.replace(
+    /^(Note: The pack source )(.+)( is not pinned to a commit SHA\. Pin its ref in hedge\.json, so each apply loads the same packs, even offline\.)$/,
+    (match, prefix, name, suffix) => (publicSourceNames.has(name) ? match : `${prefix}<private source>${suffix}`),
   );
 }
 

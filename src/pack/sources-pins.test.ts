@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { main } from "../cli.ts";
 import { engineRoot } from "../setup/testing.ts";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
-import { advanceSource, cachedSource, fetchSource, followsBranch } from "./sources.ts";
+import { advanceSource, cachedSource, fetchSource, followsBranch, unpinnedSources } from "./sources.ts";
 
 isolateGit();
 const temp = tempDirs();
@@ -23,6 +23,18 @@ async function packRepo(summary: string) {
 function writePack(dir: string, summary: string) {
   mkdirSync(join(dir, "packs", "team"), { recursive: true });
   writeFileSync(join(dir, "packs", "team", "pack.json"), JSON.stringify({ schema: 1, name: "team", summary }));
+}
+
+async function initRepo(dir: string) {
+  mkdirSync(dir, { recursive: true });
+  await spawnGit(dir, "init", "-q", "-b", "main");
+}
+
+async function commitPack(dir: string, _pack: string, summary: string) {
+  writePack(dir, summary);
+  await spawnGit(dir, "add", ".");
+  await spawnGit(dir, "commit", "-q", "-m", summary);
+  return await spawnGit(dir, "rev-parse", "HEAD");
 }
 
 async function tsRepo(files: Record<string, string>) {
@@ -1355,6 +1367,152 @@ esac
     const offlineMid = await fetchSource({ name: "team", repo, ref: cMid }, cache);
     if ("error" in offlineMid) throw new Error(offlineMid.error);
     expect([offlineMid.packs[0]?.manifest.summary, offlineMid.stale]).toEqual(["Bulk 131.", undefined]);
+  });
+
+  test("preserves literal %00 symlink names in file URLs and ignores empty .git directories like Git enter_repo", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("pct-nul-empty-git-");
+    const repoA = join(root, "repo");
+    const realParent = join(root, "alt", "nested");
+    const repoB = join(root, "alt", "repo");
+    mkdirSync(realParent, { recursive: true });
+    await initRepo(repoA);
+    const shaA = await commitPack(repoA, "team", "Direct repo.");
+    await initRepo(repoB);
+    const shaB = await commitPack(repoB, "team", "Symlinked %00 repo.");
+    symlinkSync(realParent, join(root, "%00"));
+
+    const cache = temp.make("cache-pct-nul-");
+    const viaNulUrl = `file://${root}/%00/../repo`;
+    const first = await fetchSource({ name: "team", repo: viaNulUrl, ref: shaB }, cache);
+    if ("error" in first) throw new Error(first.error);
+    expect([first.packs[0]?.manifest.summary, first.stale]).toEqual(["Symlinked %00 repo.", undefined]);
+    const directUrl = `file://${root}/repo`;
+    const wrong = await fetchSource({ name: "team", repo: directUrl, ref: shaB }, cache);
+    expect("error" in wrong).toBe(true);
+
+    const emptyRoot = temp.make("empty-dot-git-");
+    const candidate = join(emptyRoot, "packs");
+    const sibling = join(emptyRoot, "packs.git");
+    const third = join(emptyRoot, "third");
+    mkdirSync(join(candidate, ".git"), { recursive: true });
+    await initRepo(sibling);
+    const siblingSha = await commitPack(sibling, "team", "Sibling repo.");
+    await initRepo(third);
+    const thirdSha = await commitPack(third, "team", "Third repo.");
+
+    const emptyCache = temp.make("cache-empty-dot-git-");
+    const fromSibling = await fetchSource({ name: "team", repo: candidate, ref: siblingSha }, emptyCache);
+    if ("error" in fromSibling) throw new Error(fromSibling.error);
+    expect([fromSibling.packs[0]?.manifest.summary, fromSibling.stale]).toEqual(["Sibling repo.", undefined]);
+
+    const fromThird = await fetchSource({ name: "team", repo: third, ref: thirdSha }, emptyCache);
+    if ("error" in fromThird) throw new Error(fromThird.error);
+    expect([fromThird.packs[0]?.manifest.summary, fromThird.stale]).toEqual(["Third repo.", undefined]);
+
+    rmSync(candidate, { recursive: true, force: true });
+    await initRepo(candidate);
+    await commitPack(candidate, "team", "Replacement repo.");
+    const replacementCheck = await fetchSource({ name: "team", repo: candidate, ref: siblingSha }, emptyCache);
+    expect("error" in replacementCheck).toBe(true);
+  });
+
+  test("deepening a cache from a full repository does not retroactively attribute ancestors to an earlier shallow refresh", async () => {
+    const fullRepo = temp.make("full-history-repo-");
+    await initRepo(fullRepo);
+    const c1 = await commitPack(fullRepo, "team", "Ancestor C1.");
+    const c2 = await commitPack(fullRepo, "team", "Shallow base C2.");
+    const c3 = await commitPack(fullRepo, "team", "Shallow tip C3.");
+
+    const shallowRepo = temp.make("shallow-history-repo-");
+    await spawnGit(shallowRepo, "init", "-q", "-b", "main");
+    await spawnGit(shallowRepo, "fetch", "-q", "--depth", "1", fullRepo, c2);
+    await spawnGit(shallowRepo, "checkout", "-q", "-B", "main", "FETCH_HEAD");
+
+    const cache = temp.make("cache-shallow-deepen-");
+    const loadedC2 = await fetchSource({ name: "team", repo: shallowRepo, ref: "main" }, cache);
+    if ("error" in loadedC2) throw new Error(loadedC2.error);
+    expect(loadedC2.packs[0]?.manifest.summary).toBe("Shallow base C2.");
+
+    await spawnGit(shallowRepo, "fetch", "-q", "--depth", "2", fullRepo, c3);
+    await spawnGit(shallowRepo, "checkout", "-q", "-B", "main", "FETCH_HEAD");
+    const moved = await advanceSource({ name: "team", repo: shallowRepo, ref: "main" }, cache, c2);
+    expect(moved.state).toBe("moved");
+
+    const loadedFull = await fetchSource({ name: "team", repo: fullRepo, ref: c1 }, cache);
+    if ("error" in loadedFull) throw new Error(loadedFull.error);
+    expect(loadedFull.packs[0]?.manifest.summary).toBe("Ancestor C1.");
+
+    rmSync(shallowRepo, { recursive: true, force: true });
+    const spoofed = await fetchSource({ name: "team", repo: shallowRepo, ref: c1 }, cache);
+    expect("error" in spoofed).toBe(true);
+  });
+
+  test("does not treat a cached refs/heads/<SHA> branch as the same ref as a +<SHA> commit pin", async () => {
+    const repo = temp.make("sha-branch-vs-plus-pin-");
+    await initRepo(repo);
+    const c1 = await commitPack(repo, "team", "Pinned commit C1.");
+    const c2 = await commitPack(repo, "team", "Moving branch C2.");
+    await spawnGit(repo, "branch", c1, c2);
+
+    const cache = temp.make("cache-sha-branch-plus-");
+    const profileDir = temp.make("profile-sha-branch-plus-");
+    const asBranch = await fetchSource({ name: "team", repo, ref: `refs/heads/${c1}` }, cache);
+    if ("error" in asBranch) throw new Error(asBranch.error);
+    expect(asBranch.packs[0]?.manifest.summary).toBe("Moving branch C2.");
+
+    const plusPinRef = { name: "team", repo, ref: `+${c1}` };
+    expect(await followsBranch(plusPinRef, cache)).toBe(false);
+    expect(await unpinnedSources([plusPinRef], profileDir, cache)).toEqual([]);
+    expect(await followsBranch({ name: "team", repo, ref: `+refs/heads/${c1}` }, cache)).toBe(true);
+    expect((await unpinnedSources([{ name: "team", repo, ref: `+refs/heads/${c1}` }], profileDir, cache)).length).toBe(1);
+
+    const loadedPin = await fetchSource(plusPinRef, cache);
+    if ("error" in loadedPin) throw new Error(loadedPin.error);
+    expect(loadedPin.packs[0]?.manifest.summary).toBe("Pinned commit C1.");
+  });
+
+  test("switches an existing source cache cleanly between SHA-1 and SHA-256 repositories and keeps the old cache intact on failure", async () => {
+    const sha1Repo = temp.make("switch-sha1-repo-");
+    await initRepo(sha1Repo);
+    const sha1Commit = await commitPack(sha1Repo, "team", "SHA-1 pack.");
+
+    const sha256Repo = temp.make("switch-sha256-repo-");
+    await spawnGit(sha256Repo, "init", "-q", "-b", "main", "--object-format=sha256");
+    await spawnGit(sha256Repo, "config", "user.email", "test@example.com");
+    await spawnGit(sha256Repo, "config", "user.name", "Test");
+    const sha256Commit = await commitPack(sha256Repo, "team", "SHA-256 pack.");
+    expect(sha256Commit.length).toBe(64);
+
+    const brokenSha256Repo = temp.make("switch-broken-sha256-repo-");
+    await spawnGit(brokenSha256Repo, "init", "-q", "-b", "main", "--object-format=sha256");
+    await spawnGit(brokenSha256Repo, "config", "user.email", "test@example.com");
+    await spawnGit(brokenSha256Repo, "config", "user.name", "Test");
+    mkdirSync(join(brokenSha256Repo, "packs/team"), { recursive: true });
+    writeFileSync(join(brokenSha256Repo, "packs/team/pack.json"), "{ broken json");
+    await spawnGit(brokenSha256Repo, "add", ".");
+    await spawnGit(brokenSha256Repo, "commit", "-qm", "broken");
+    const brokenSha256Commit = await spawnGit(brokenSha256Repo, "rev-parse", "HEAD");
+
+    const cache = temp.make("cache-format-switch-");
+    const first = await fetchSource({ name: "team", repo: sha1Repo, ref: sha1Commit }, cache);
+    if ("error" in first) throw new Error(first.error);
+    expect(first.packs[0]?.manifest.summary).toBe("SHA-1 pack.");
+
+    const failedSwitch = await fetchSource({ name: "team", repo: brokenSha256Repo, ref: brokenSha256Commit }, cache);
+    expect("error" in failedSwitch).toBe(true);
+
+    const stillSha1 = await fetchSource({ name: "team", repo: sha1Repo, ref: sha1Commit }, cache);
+    if ("error" in stillSha1) throw new Error(stillSha1.error);
+    expect([stillSha1.packs[0]?.manifest.summary, stillSha1.stale]).toEqual(["SHA-1 pack.", undefined]);
+
+    const toSha256 = await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, cache);
+    if ("error" in toSha256) throw new Error(toSha256.error);
+    expect([toSha256.packs[0]?.manifest.summary, toSha256.stale]).toEqual(["SHA-256 pack.", undefined]);
+
+    const backToSha1 = await fetchSource({ name: "team", repo: sha1Repo, ref: sha1Commit }, cache);
+    if ("error" in backToSha1) throw new Error(backToSha1.error);
+    expect([backToSha1.packs[0]?.manifest.summary, backToSha1.stale]).toEqual(["SHA-1 pack.", undefined]);
   });
 
 });
