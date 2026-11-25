@@ -191,7 +191,7 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string): ProcTarg
       const closeParen = stat.lastIndexOf(")");
       if (closeParen === -1) continue;
       const fields = stat.slice(closeParen + 2).split(" ");
-      if (fields[0] === "Z") continue;
+      if (!includeDetached && fields[0] === "Z" && Number(fields[17]) <= 1) continue;
       const ppid = Number(fields[1]);
       const pgrp = Number(fields[2]);
       const sid = Number(fields[3]);

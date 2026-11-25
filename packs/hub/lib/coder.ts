@@ -128,6 +128,9 @@ export function captureWith(timer: Timer): Capture {
           } catch {}
         }
         try {
+          child.send("kill");
+        } catch {}
+        try {
           process.kill(-child.pid, "SIGCONT");
         } catch {}
         return;
@@ -243,6 +246,7 @@ export function captureWith(timer: Timer): Capture {
         }
         return timeoutResult(timeoutMs, stdout);
       }
+      cancel();
       if (!supervisorReaped) {
         try {
           live.send("done");
