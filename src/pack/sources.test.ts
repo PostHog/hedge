@@ -1362,7 +1362,44 @@ print(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=d, env=env).deco
       if ("error" in crossRaw) throw new Error(crossRaw.error);
       expect(crossRaw.packs[0]?.manifest.summary).toBe("Raw byte 0x81.");
       expect(crossRaw.stale).toContain(`could not fetch ${rawShaA}`);
+
+      const rawLegacyCache = temp.make("cache-raw-legacy-");
+      const rawLegacyDir = join(rawLegacyCache, "team");
+      mkdirSync(rawLegacyDir, { recursive: true });
+      await spawnGit(rawLegacyDir, "init", "-q");
+      const rawLegacyCfg = Buffer.concat([
+        Buffer.from("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n[url \""),
+        pathA,
+        Buffer.from(`"]\n\tinsteadOf = ${rawConfigured}\n`),
+      ]);
+      writeFileSync(join(rawLegacyDir, ".git", "config"), rawLegacyCfg);
+      await spawnGit(rawLegacyDir, "fetch", "-q", "--depth", "1", "--no-tags", rawConfigured, "main");
+      await spawnGit(rawLegacyDir, "checkout", "-q", "--detach", "FETCH_HEAD");
+      writeFileSync(join(rawLegacyDir, ".git", "hedge-source.json"), JSON.stringify({ repo: rawConfigured, ref: "main", commit: rawShaA, asked: 42 }) + "\n");
+      rmSync(pathA, { recursive: true, force: true });
+      const rawLegacyFirst = await fetchSource({ name: "team", repo: rawConfigured, ref: "main" }, rawLegacyCache);
+      if ("error" in rawLegacyFirst) throw new Error(rawLegacyFirst.error);
+      expect(rawLegacyFirst.packs[0]?.manifest.summary).toBe("Raw byte 0x80.");
+      const rawLegacySecond = await fetchSource({ name: "team", repo: rawConfigured, ref: "main" }, rawLegacyCache);
+      if ("error" in rawLegacySecond) throw new Error(rawLegacySecond.error);
+      expect(rawLegacySecond.packs[0]?.manifest.summary).toBe("Raw byte 0x80.");
     }
+
+    const switchRepoA = await packRepo("Switch repo A.");
+    const switchRepoB = await packRepo("Switch repo B.");
+    await spawnGit(switchRepoB, "checkout", "-q", "-b", "release");
+    writeFileSync(join(switchRepoB, "packs/team/pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Broken B release." }));
+    await spawnGit(switchRepoB, "commit", "-q", "-am", "broken B release");
+    const switchCache = temp.make("cache-switch-asked-");
+    expect("error" in (await fetchSource({ name: "team", repo: switchRepoA, ref: "main" }, switchCache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo: switchRepoB, ref: "release" }, switchCache))).toBe(true);
+    const cachedWrongRef = await cachedSource({ name: "team", repo: switchRepoA, ref: "release" }, switchCache);
+    expect("error" in cachedWrongRef).toBe(true);
+
+    const unreachableRepoB = join(temp.make("unreachable-b-"), "missing-repo");
+    expect("error" in (await fetchSource({ name: "team", repo: unreachableRepoB, ref: "main" }, switchCache))).toBe(true);
+    expect(await followsBranch({ name: "team", repo: unreachableRepoB, ref: "main" }, switchCache)).toBe(false);
+    expect(await followsBranch({ name: "team", repo: switchRepoA, ref: "main" }, switchCache)).toBe(true);
   });
 });
 

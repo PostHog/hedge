@@ -17,7 +17,8 @@ export type Clock = { sleep(ms: number): Promise<void> };
 
 const realClock: Clock = { sleep: (ms) => Bun.sleep(ms) };
 
-type Good = { repo: string; ref: string; commit: string; branch?: boolean; peeled?: boolean; asked?: string; askedBranch?: boolean; askedRepo?: string; askedResolved?: string; resolved?: string };
+type BlockedSwitch = { repo: string; resolved: string };
+type Good = { repo: string; ref: string; commit: string; branch?: boolean; peeled?: boolean; asked?: string; askedBranch?: boolean; blocked?: BlockedSwitch[]; resolved?: string };
 
 export const withoutUserinfo = (text: string) => text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi, "$1");
 
@@ -129,7 +130,7 @@ async function fetchHeadEntry(dir: string, refs?: Array<string | undefined>): Pr
   const desc = line[2]!;
   const descOffset = first.length - desc.length;
   for (const ref of refs ?? []) {
-    if (!ref) continue;
+    if (typeof ref !== "string" || !ref) continue;
     const short = ref.replace(/^refs\/(?:heads|tags)\//, "");
     for (const prefix of [`branch '${short}' of `, `tag '${short}' of `, `'${short}' of `, `'${ref}' of `]) {
       const latinPrefix = Buffer.from(prefix, "utf8").toString("latin1");
@@ -293,32 +294,22 @@ async function fallBack(ref: SourceRef, dir: string, repo: string, effectiveRepo
     verifiedGoodCommit(good) !== undefined &&
     good.repo === repo &&
     (typeof good.resolved === "string" ? good.resolved === effectiveRepo : legacyFallback);
-  const recordFailedAsk = async () => {
-    if (!good || askedBranch === undefined) return;
-    const updated: Good = {
-      ...good,
-      asked: ref.ref,
-      askedBranch,
-      askedRepo: repo,
-      askedResolved: effectiveRepo,
-    };
-    if (
-      updated.asked !== good.asked ||
-      updated.askedBranch !== good.askedBranch ||
-      updated.askedRepo !== good.askedRepo ||
-      updated.askedResolved !== good.askedResolved
-    ) {
-      await writeAtomic(goodPath(dir), JSON.stringify(updated) + "\n").catch(() => {});
-    }
+  const recordBlocked = async () => {
+    if (!good) return;
+    const existing = Array.isArray(good.blocked)
+      ? good.blocked.filter((entry): entry is BlockedSwitch => !!entry && typeof entry.repo === "string" && typeof entry.resolved === "string")
+      : [];
+    if (existing.some((entry) => entry.repo === repo && entry.resolved === effectiveRepo)) return;
+    const updated: Good = { ...good, blocked: [...existing, { repo, resolved: effectiveRepo }] };
+    await writeAtomic(goodPath(dir), JSON.stringify(updated) + "\n").catch(() => {});
   };
   if (!effectiveMatch || !good) {
     await restoreCheckout(dir, before);
-    await recordFailedAsk();
+    await recordBlocked();
     return { ref, error: reason };
   }
   if (preserveBefore) {
     await restoreCheckout(dir, before);
-    await recordFailedAsk();
     return { ref, error: reason };
   }
   if (before?.branch) {
@@ -330,13 +321,7 @@ async function fallBack(ref: SourceRef, dir: string, repo: string, effectiveRepo
   }
   const loaded = await load(dir, loadLimitMs);
   if ("error" in loaded) return { ref, error: reason };
-  const sameAskedRepo = good.askedRepo === undefined || (good.askedRepo === repo && (good.askedResolved === undefined || good.askedResolved === effectiveRepo));
-  const nextAskedBranch =
-    askedBranch !== undefined
-      ? askedBranch
-      : sameAskedRepo && branchName(good.asked) === branchName(ref.ref)
-        ? good.askedBranch
-        : undefined;
+  const nextAskedBranch = askedBranch !== undefined ? askedBranch : branchName(good.asked) === branchName(ref.ref) ? good.askedBranch : undefined;
   const recordAsked = good.ref !== ref.ref || (nextAskedBranch !== undefined && nextAskedBranch !== good.branch);
   const nextGood: Good = {
     repo: good.repo,
@@ -345,19 +330,15 @@ async function fallBack(ref: SourceRef, dir: string, repo: string, effectiveRepo
     ...(good.branch === undefined ? {} : { branch: good.branch }),
     ...(good.peeled ? { peeled: true } : {}),
     ...(recordAsked ? { asked: ref.ref } : {}),
-    ...(recordAsked && nextAskedBranch !== undefined ? { askedBranch: nextAskedBranch, askedRepo: repo, askedResolved: effectiveRepo } : {}),
+    ...(recordAsked && nextAskedBranch !== undefined ? { askedBranch: nextAskedBranch } : {}),
+    ...(Array.isArray(good.blocked) && good.blocked.length ? { blocked: good.blocked } : {}),
     ...(typeof good.resolved === "string" ? { resolved: good.resolved } : {}),
   };
   let saveError: string | undefined;
   if (typeof good.resolved === "string") {
     saveError = await saveGood(dir, nextGood);
     if (saveError) await writeAtomic(goodPath(dir), JSON.stringify(nextGood) + "\n").catch(() => {});
-  } else if (
-    nextGood.asked !== good.asked ||
-    nextGood.askedBranch !== good.askedBranch ||
-    nextGood.askedRepo !== good.askedRepo ||
-    nextGood.askedResolved !== good.askedResolved
-  ) {
+  } else if (nextGood.asked !== good.asked || nextGood.askedBranch !== good.askedBranch) {
     await writeAtomic(goodPath(dir), JSON.stringify(nextGood) + "\n").catch(() => {});
   }
   const why = saveError && !reason.includes(saveError) ? `${reason}; ${saveError}` : reason;
@@ -401,7 +382,7 @@ const repoDigest = (repo: string) => createHash("sha256").update(repo).digest("h
 
 const pinRef = (repo: string, commit: string) => `refs/hedge/pins/${repoDigest(repo)}/${commit.toLowerCase()}`;
 
-async function writeAtomic(path: string, content: string, mode = 0o600) {
+async function writeAtomic(path: string, content: string | Uint8Array, mode = 0o600) {
   const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
   try {
     await writeFile(temp, content, { mode });
@@ -439,8 +420,7 @@ async function saveGood(dir: string, good: Good): Promise<string | undefined> {
     before.peeled === good.peeled &&
     before.asked === good.asked &&
     before.askedBranch === good.askedBranch &&
-    before.askedRepo === good.askedRepo &&
-    before.askedResolved === good.askedResolved &&
+    JSON.stringify(before.blocked) === JSON.stringify(good.blocked) &&
     before.resolved === good.resolved;
   const currentCommit = verifiedGoodCommit(good);
   if (currentCommit) {
@@ -525,13 +505,13 @@ async function checkedOutFromCache(dir: string, repo: string, effectiveRepo: str
   return (await git(dir, "checkout", "-q", "--detach", target)).ok;
 }
 
-type SavedFetchHead = { kind: "content"; text: string; mode: number } | { kind: "missing" } | { kind: "unreadable" };
+type SavedFetchHead = { kind: "content"; bytes: Buffer; mode: number } | { kind: "missing" } | { kind: "unreadable" };
 
 async function snapshotFetchHead(dir: string): Promise<SavedFetchHead> {
   const path = join(dir, ".git", "FETCH_HEAD");
   try {
-    const [text, info] = await Promise.all([readFile(path, "utf8"), stat(path)]);
-    return { kind: "content", text, mode: info.mode & 0o777 };
+    const [bytes, info] = await Promise.all([readFile(path), stat(path)]);
+    return { kind: "content", bytes, mode: info.mode & 0o777 };
   } catch (error) {
     return (error as NodeJS.ErrnoException)?.code === "ENOENT" ? { kind: "missing" } : { kind: "unreadable" };
   }
@@ -540,9 +520,9 @@ async function snapshotFetchHead(dir: string): Promise<SavedFetchHead> {
 async function restoreFetchHead(dir: string, saved: SavedFetchHead) {
   const path = join(dir, ".git", "FETCH_HEAD");
   if (saved.kind === "content") {
-    const current = await readFile(path, "utf8").catch(() => undefined);
-    if (current === saved.text) return;
-    await writeAtomic(path, saved.text, saved.mode).catch(() => {});
+    const current = await readFile(path).catch(() => undefined);
+    if (current && current.equals(saved.bytes)) return;
+    await writeAtomic(path, saved.bytes, saved.mode).catch(() => {});
   } else if (saved.kind === "missing") {
     await rm(path, { force: true }).catch(() => {});
   }
@@ -597,10 +577,11 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
   const branch = branchName(ref.ref);
   const repo = repoUrl(ref.repo);
   if (!good || !branch) return false;
-  const sameAskedRepo =
-    good.askedRepo === undefined ||
-    (good.askedRepo === repo && (typeof good.askedResolved !== "string" || (await resolvedRepoUrl(dir, repo)) === good.askedResolved));
-  if (sameAskedRepo && branchName(good.asked) === branch) {
+  if (Array.isArray(good.blocked) && good.blocked.length) {
+    const effective = await resolvedRepoUrl(dir, repo);
+    if (good.blocked.some((entry) => entry && entry.repo === repo && entry.resolved === effective)) return false;
+  }
+  if (branchName(good.asked) === branch) {
     if (good.askedBranch === true) return true;
     if (good.askedBranch === false) return false;
   }
@@ -609,7 +590,7 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
     if (good.branch === false) return false;
     return fetchHeadIsBranch(dir, ref.ref);
   }
-  if (!sameAskedRepo || branchName(good.asked) !== branch) return false;
+  if (branchName(good.asked) !== branch) return false;
   return fetchHeadIsBranch(dir, ref.ref);
 }
 
