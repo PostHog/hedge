@@ -29,8 +29,8 @@ const standardRules: Rule[] = [
 ];
 
 const randomRule: Rule = [/[A-Za-z0-9+/_-]{32,}={0,2}/g, (text) => (looksRandom(text) ? "<secret>" : text)];
-const fixedSecretRules: Rule[] = secretRules.slice(0, 6);
-const contextualSecretRules: Rule[] = secretRules.slice(7);
+const fixedSecretRules: Rule[] = [...secretRules.slice(0, 6), secretRules[7]!];
+const contextualSecretRules: Rule[] = secretRules.slice(8);
 const allRules: Rule[] = [...secretRules, ...standardRules, randomRule];
 const preRandomRules: Rule[] = [...contextualSecretRules, ...standardRules];
 
@@ -155,7 +155,12 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
   const csMap = new Map<string, { as: string; owner: KnownName }>();
   for (const name of raw) {
     const left = name.after && /^[~<]/.test(name.text) ? "" : "(?<![\\w-])";
-    const right = name.after && /[>]$/.test(name.text) ? "" : "(?![\\w-])";
+    const right =
+      name.after && /[>]$/.test(name.text)
+        ? ""
+        : name.after && name.text.startsWith("The pack source ")
+          ? "(?![\\w/:-]|\\.[A-Za-z0-9])"
+          : "(?![\\w-])";
     const pattern = `${left}${escape(name.text)}${right}`;
     if (name.text.length < 4) {
       if (!csMap.has(name.text)) {
@@ -354,7 +359,7 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
           const lead = match.index === runEnd ? (orig.match(/^[A-Za-z0-9+/_-]+={0,2}/)?.[0] ?? "") : "";
           flush(lead);
           prevBoundaryEnd = match.index + match[0].length;
-          prevTail = orig.match(/[A-Za-z0-9+/_-]+$/)?.[0] ?? "";
+          prevTail = trailingTokenRun(orig);
           continue;
         }
       }
@@ -395,16 +400,16 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
 
   const result = passOne(text);
   const sanitizedAfter = after.map((entry) => ({ ...entry, as: sanitizeLabel(entry) }));
-  const phraseAfter = sanitizedAfter.filter((entry) => entry.text.startsWith("The pack source "));
-  const valueAfter = sanitizedAfter.filter((entry) => !entry.text.startsWith("The pack source "));
   const exempt = new Set([...redactorLabels, ...labels, ...sanitizedAfter.map((entry) => entry.as)]);
   const presentExempt = [...exempt].filter((label) => result.includes(label)).sort((a, b) => b.length - a.length);
-  const valueAfterSpellings = compileSpellings(valueAfter, passOne, exempt, presentExempt);
-  const afterValues = applySpellings(result, valueAfterSpellings, exempt);
-  if (!phraseAfter.length) return afterValues;
-  const phraseExempt = [...exempt].filter((label) => afterValues.includes(label)).sort((a, b) => b.length - a.length);
-  const phraseSpellings = compileSpellings(phraseAfter, passOne, exempt, phraseExempt);
-  return applySpellings(afterValues, phraseSpellings, exempt);
+  const afterSpellings = compileSpellings(sanitizedAfter, passOne, exempt, presentExempt);
+  return applySpellings(result, afterSpellings, exempt);
+}
+
+function trailingTokenRun(text: string): string {
+  let i = text.length;
+  while (i > 0 && /[A-Za-z0-9+/_-]/.test(text[i - 1]!)) i--;
+  return i === text.length ? "" : text.slice(i);
 }
 
 function escape(text: string) {

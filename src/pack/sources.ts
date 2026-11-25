@@ -431,6 +431,23 @@ async function recordPinRef(dir: string, repo: string, oid: string): Promise<str
   return updated.ok ? undefined : updated.stderr || "could not record pinned commit";
 }
 
+async function recordPinRefs(dir: string, repo: string, oids: string[]): Promise<string | undefined> {
+  const unique = [...new Set(oids.map((oid) => oid.toLowerCase()).filter((oid) => gitHash.test(oid)))];
+  if (!unique.length) return undefined;
+  const lines = unique.map((oid) => `update ${pinRef(repo, oid)} ${oid}\n`).join("");
+  const env = { ...withoutRepoEnv(), GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "true", SSH_ASKPASS: "true", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" };
+  const proc = Bun.spawn(["git", "-C", dir, "update-ref", "--stdin"], {
+    stdin: new TextEncoder().encode(lines),
+    stdout: "ignore",
+    stderr: "pipe",
+    env,
+    timeout: fetchTimeoutMs,
+  });
+  const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+  if (code === 0) return undefined;
+  return (proc.signalCode ? `git timed out after ${fetchTimeoutMs / 1000} seconds` : stderr.trim().split("\n").at(-1)) || "could not record pinned commits";
+}
+
 async function saveGood(dir: string, good: Good): Promise<string | undefined> {
   const before = await lastGood(dir);
   const unchanged =
@@ -678,6 +695,8 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     await restoreFetchHead(dir, savedFetchHead);
     return rewritten(tip);
   }
+  const listedCommits = await git(dir, "rev-list", `${from}..${tip}`);
+  const refreshPins = listedCommits.ok ? listedCommits.stdout.split("\n").map((line) => line.trim()).filter(Boolean) : [tip];
   const before = await currentCheckout(dir);
   const moved = await git(dir, "checkout", "-q", "--detach", tip);
   if (!moved.ok) {
@@ -698,7 +717,8 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     await restoreFetchHead(dir, savedFetchHead);
     return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} changed checkout HEAD while loading` };
   }
-  const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolved: effectiveRepo });
+  const pinError = await recordPinRefs(dir, effectiveRepo, refreshPins);
+  const saveError = pinError ?? (await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolved: effectiveRepo }));
   if (saveError) {
     if (before) await restoreCheckout(dir, before);
     else if ((await git(dir, "checkout", "-q", "--detach", from)).ok) clearLoadedModules(dir);

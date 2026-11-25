@@ -813,6 +813,52 @@ describe("hedge triage", () => {
       expect(overlapTitle).not.toContain(leaked);
       expect(overlapBody).not.toContain(leaked);
     }
+
+    const schemeHome = temp.make("home-scheme-source-");
+    const schemeProfile = temp.make("profile-scheme-source-");
+    writeFileSync(
+      join(schemeProfile, "hedge.json"),
+      JSON.stringify({
+        schema: 1,
+        engine: { repo: "PostHog/hedge", ref: "main", channel: "track" },
+        sources: [{ name: "secret-alias", repo: "https", ref: "source" }],
+        packs: [],
+        plan: "both",
+        settings: {},
+        workflows: {},
+      }),
+    );
+    const schemeSent: Sent[] = [];
+    const schemeIo = scripted([]);
+    const schemeCode = await main(
+      ["triage", "--send", "--note", "https://alice:SyntheticUrlPass123@example.com/repo"],
+      {
+        home: schemeHome,
+        engineRoot,
+        platform: "darwin",
+        env: { HEDGE_PROFILE_DIR: schemeProfile },
+        print: schemeIo.terminal.print,
+        terminal: schemeIo.terminal,
+        capture: async (command, options = {}) => {
+          schemeSent.push({ command, ...(options.input === undefined ? {} : { input: options.input }) });
+          if (command[0] === "git") return spawnRunner(command, options);
+          return capture([], undefined)(command, options);
+        },
+        hostname: () => "noras-mbp.local",
+        run: async () => 0,
+      },
+    );
+    expect(schemeCode).toBe(0);
+    const schemeIssue = schemeSent.find((call) => call.command[1] === "issue")!;
+    const schemeTitle = schemeIssue.command[schemeIssue.command.indexOf("--title") + 1]!;
+    const schemeBody = schemeIssue.input!;
+    expect(schemeTitle).toContain("<credentials>@example.com/repo");
+    expect(schemeBody).toContain("<credentials>@example.com/repo");
+    expect(schemeBody).toContain("The pack <branch> <private source> is not pinned to a commit SHA.");
+    for (const leaked of ["SyntheticUrlPass123", "secret-alias"]) {
+      expect(schemeTitle).not.toContain(leaked);
+      expect(schemeBody).not.toContain(leaked);
+    }
   });
 });
 
