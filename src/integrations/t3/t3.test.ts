@@ -253,7 +253,7 @@ test("only the user's own messages and question answers in T3 count as their wor
   expect(new Set(words.map((word) => word.at))).toEqual(new Set(["2026-10-25T07:02:00Z"]));
 });
 
-test("an Antigravity card answer reads as the chosen option's label to the question its header asks, and a note the user typed in its other field replaces the pick", async () => {
+test("an Antigravity card answer reads as the chosen option's label to the question its header asks, and a note the user typed in its other field replaces the pick as typed words that answer no card", async () => {
   const option = (label: string, value: string) => ({ label, description: label, value });
   const card = (id: string, request: string, prompts: string[], answers: Record<string, string | string[]>) => {
     const placeholder = prompts.length === 1 ? "The agent has a question." : `The agent has ${prompts.length} questions.`;
@@ -279,7 +279,7 @@ test("an Antigravity card answer reads as the chosen option's label to the quest
     card("c5", "r5", ["Accept the panel gap of example/product#6?"], { q1: "3", q1_other: "" }),
     card("c6", "r6", ["Accept the panel gap of example/product#7?"], { q1_other: "Accept once CI is green" }),
   ];
-  items.at(-1)!.item.questions[0]!.options = [option("Keep the gap open", "3"), option("Accept the panel gap", "3")];
+  items.find(({ item }) => item.id === "c5")!.item.questions[0]!.options = [option("Keep the gap open", "3"), option("Accept the panel gap", "3")];
   const events = t3EventStore([
     { thread: "mcp:thread-1", request: "r1", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000001" },
     { thread: "mcp:thread-1", request: "r2", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000002" },
@@ -296,13 +296,13 @@ test("an Antigravity card answer reads as the chosen option's label to the quest
 
   const words = await readThreadWords(client as never, "thread-1", events);
 
-  expect(words.map((word) => [word.id, word.text, word.answered])).toEqual([
-    ["c1:0", "Accept the panel gap (Recommended)", "Accept the panel gap of example/product#1?"],
-    ["c1:2", "Keep the gap open", "Accept the panel gap of example/product#2?"],
-    ["c2:0", "Only once CI is green", "Accept the panel gap of example/product#3?"],
-    ["c3:0", "Keep the gap open", "Accept the panel gap of example/product#4?"],
-    ["c5:0", "3", "Accept the panel gap of example/product#6?"],
-    ["c6:0", "Accept once CI is green", "Accept the panel gap of example/product#7?"],
+  expect(words.map((word) => [word.id, word.text, word.answered, word.source])).toEqual([
+    ["c1:0", "Accept the panel gap (Recommended)", "Accept the panel gap of example/product#1?", "question"],
+    ["c1:2", "Keep the gap open", "Accept the panel gap of example/product#2?", "question"],
+    ["c2:1", "Only once CI is green", "Accept the panel gap of example/product#3?", "typed"],
+    ["c3:0", "Keep the gap open", "Accept the panel gap of example/product#4?", "question"],
+    ["c5:0", "3", "Accept the panel gap of example/product#6?", "question"],
+    ["c6:0", "Accept once CI is green", "Accept the panel gap of example/product#7?", "typed"],
   ]);
 });
 

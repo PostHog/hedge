@@ -125,7 +125,7 @@ export async function readThreadWords(client: T3HttpClient, value: string, state
     const answer = item.type === "user_input_request" && answeredInClient().has(item.requestId ?? "") ? item.questionAnswer : undefined;
     Object.entries(answer?.answers ?? {}).forEach(([question, chosen], index) => {
       const card = cardAnswer(item.questions ?? [], answer!, question, chosen);
-      if (card) words.push({ thread: threadId, id: `${item.id}:${index}`, text: card.text, answered: card.answered.slice(0, answeredCap), at: item.updatedAt ?? item.startedAt, source: "question" });
+      if (card) words.push({ thread: threadId, id: `${item.id}:${index}`, text: card.text, answered: card.answered.slice(0, answeredCap), at: item.updatedAt ?? item.startedAt, source: card.source });
     });
   }
   return words;
@@ -134,18 +134,18 @@ export async function readThreadWords(client: T3HttpClient, value: string, state
 const otherSuffix = "_other";
 const questionCountPlaceholder = /^The agent has (?:a question|\d+ questions)\.$/u;
 
-function cardAnswer(questions: CardQuestion[], { questionTextById, answers }: QuestionAnswer, id: string, chosen: string | string[]) {
+function cardAnswer(questions: CardQuestion[], { questionTextById, answers }: QuestionAnswer, id: string, chosen: string | string[]): Pick<ThreadWord, "text" | "answered" | "source"> | undefined {
   const byId = (wanted: string) => questions.find((question) => question.id === wanted);
   const asked = byId(id);
   const otherOf = id.endsWith(otherSuffix) && asked && !asked.options?.length ? byId(id.slice(0, -otherSuffix.length)) : undefined;
   if (otherOf) {
-    const note = otherOf.id in answers ? undefined : noteIn(asked!, chosen);
-    return note === undefined ? undefined : { text: note, answered: promptOf(otherOf, questionTextById[otherOf.id]) };
+    const note = noteIn(asked!, chosen);
+    return note === undefined ? undefined : { text: note, answered: promptOf(otherOf, questionTextById[otherOf.id]), source: "typed" };
   }
   const other = byId(`${id}${otherSuffix}`);
-  const note = other && !other.options?.length ? noteIn(other, answers[other.id] ?? "") : undefined;
+  if (other && !other.options?.length && noteIn(other, answers[other.id] ?? "") !== undefined) return undefined;
   const labels = [chosen].flat().map((value) => onlyLabelOf(asked?.options ?? [], value));
-  return { text: note ?? labels.join(", "), answered: asked ? promptOf(asked, questionTextById[id]) : questionTextById[id] ?? id };
+  return { text: labels.join(", "), answered: asked ? promptOf(asked, questionTextById[id]) : questionTextById[id] ?? id, source: "question" };
 }
 
 function onlyLabelOf(options: NonNullable<CardQuestion["options"]>, value: string) {
