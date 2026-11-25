@@ -79,6 +79,8 @@ async function resolvedRepoUrl(dir: string, repo: string) {
   return read.ok && url ? url : repo;
 }
 
+const networkRepoUrl = /^(?:(?:https?|ssh|git):\/\/|[^/@:\s]+@[^/:]+:)/i;
+
 const canonicalFetchHeadUrl = (url: string) =>
   withoutUserinfo(url)
     .replace(/^[^/@:\s]+@/, "")
@@ -89,20 +91,22 @@ async function fetchHeadRepo(dir: string, commit: unknown): Promise<string | und
   if (typeof commit !== "string" || !commitSha.test(commit)) return undefined;
   const raw = await readFile(join(dir, ".git", "FETCH_HEAD"), "utf8").catch(() => "");
   const first = (process.platform === "win32" ? raw.split(/\r?\n/, 1)[0] : raw.split("\n", 1)[0]) ?? "";
-  const match = first.match(/^([0-9a-f]{40})\t[^\t]*\t(?:[^\t]*? )?of ([\s\S]+)$/i);
+  const match = first.match(/^([0-9a-f]{40}|[0-9a-f]{64})\t[^\t]*\t(?:[^\t]*? )?of ([\s\S]+)$/i);
   if (!match || match[1]!.toLowerCase() !== commit.toLowerCase()) return undefined;
   return match[2];
 }
 
-function fetchHeadMatches(fetchedUrl: string, candidate: string) {
-  return fetchedUrl === candidate || fetchedUrl === canonicalFetchHeadUrl(candidate);
+function fetchHeadMatches(fetchedUrl: string, candidate: string, allowCanonical = true) {
+  return fetchedUrl === candidate || (allowCanonical && fetchedUrl === canonicalFetchHeadUrl(candidate));
 }
 
 async function goodMatchesEffective(dir: string, good: Good | undefined, repo: string, effectiveRepo: string): Promise<boolean> {
   if (!verifiedGoodCommit(good) || good!.repo !== repo) return false;
   if (typeof good!.resolved === "string") return good!.resolved === effectiveRepo;
   const fetchedUrl = await fetchHeadRepo(dir, good!.commit);
-  if (fetchedUrl !== undefined) return fetchHeadMatches(fetchedUrl, effectiveRepo);
+  if (fetchedUrl !== undefined) {
+    return fetchHeadMatches(fetchedUrl, effectiveRepo, effectiveRepo === repo || networkRepoUrl.test(effectiveRepo));
+  }
   return effectiveRepo === repo;
 }
 
@@ -114,8 +118,10 @@ async function previousVerifiedRepo(dir: string, before: Good | undefined): Prom
   if (fetchedUrl !== undefined) {
     if (fetchedUrl === beforeEffective) return beforeEffective;
     if (fetchedUrl === before!.repo) return before!.repo;
-    if (fetchHeadMatches(fetchedUrl, beforeEffective)) return beforeEffective;
-    return fetchHeadMatches(fetchedUrl, before!.repo) ? before!.repo : undefined;
+    if (beforeEffective === before!.repo && fetchHeadMatches(fetchedUrl, before!.repo)) return before!.repo;
+    if (networkRepoUrl.test(beforeEffective) && fetchHeadMatches(fetchedUrl, beforeEffective)) return beforeEffective;
+    if (networkRepoUrl.test(before!.repo) && fetchHeadMatches(fetchedUrl, before!.repo)) return before!.repo;
+    return undefined;
   }
   return beforeEffective === before!.repo ? before!.repo : undefined;
 }
@@ -333,7 +339,7 @@ const verifiedGoodCommit = (record: Good | undefined, overrideRepo?: string) => 
   return { repo: effective, commit: record.commit.toLowerCase() };
 };
 
-const commitSha = /^[0-9a-f]{40}$/i;
+const commitSha = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 
 const githubRepoPattern = /^(?:https:\/\/(?:[^/@\s]+@)?(?:www\.)?github\.com(?::443)?\/|ssh:\/\/(?:[^/@\s]+@)?(?:github\.com(?::22)?|ssh\.github\.com(?::443)?)\/|git:\/\/github\.com(?::9418)?\/|(?:[^/@:\s]+@)?github\.com:)(.+)$/i;
 

@@ -98,9 +98,14 @@ function encodeUri(text: string) {
   }
 }
 
-type CompiledSpelling = { text: string; as: string; regex: RegExp; owner: KnownName };
+type CompiledMatcher = {
+  ciRegex?: RegExp;
+  ciMap: Map<string, { as: string; owner: KnownName }>;
+  csRegex?: RegExp;
+  csMap: Map<string, { as: string; owner: KnownName }>;
+};
 
-function compileSpellings(entries: KnownName[], transform?: (value: string) => string, exempt?: Set<string>): CompiledSpelling[] {
+function compileSpellings(entries: KnownName[], transform?: (value: string) => string, exempt?: Set<string>, presentExempt?: string[]): CompiledMatcher {
   const raw = entries
     .filter((entry) => typeof entry.text === "string" && typeof entry.as === "string" && entry.text.length >= (entry.after ? 1 : 2))
     .flatMap((entry) => {
@@ -122,26 +127,53 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
       }));
     })
     .sort((a, b) => b.text.length - a.text.length);
-  const exemptAlt = exempt?.size ? [...exempt].sort((a, b) => b.length - a.length).map(escape).join("|") : "";
-  return raw.map((name) => {
-    const flags = name.text.length < 4 ? "g" : "gi";
-    const left = name.after && /^[~<]/.test(name.text) ? "" : /^[\w-]/.test(name.text) ? "(?<![\\w-])" : "(?<![\\w-])";
+
+  const ciItems: Array<{ len: number; pattern: string; exempt?: boolean }> = [];
+  const csItems: Array<{ len: number; pattern: string; exempt?: boolean }> = [];
+  const ciMap = new Map<string, { as: string; owner: KnownName }>();
+  const csMap = new Map<string, { as: string; owner: KnownName }>();
+  for (const name of raw) {
+    const left = name.after && /^[~<]/.test(name.text) ? "" : "(?<![\\w-])";
     const right = name.after && /[>]$/.test(name.text) ? "" : "(?![\\w-])";
     const pattern = `${left}${escape(name.text)}${right}`;
-    const regex = new RegExp(exemptAlt ? `${pattern}|${exemptAlt}` : pattern, flags);
-    return { text: name.text, as: name.as, regex, owner: name.owner };
-  });
+    if (name.text.length < 4) {
+      if (!csMap.has(name.text)) {
+        csMap.set(name.text, { as: name.as, owner: name.owner });
+        csItems.push({ len: name.text.length, pattern });
+      }
+    } else {
+      const key = name.text.toLowerCase();
+      if (!ciMap.has(key)) {
+        ciMap.set(key, { as: name.as, owner: name.owner });
+        ciItems.push({ len: name.text.length, pattern });
+      }
+    }
+  }
+  const byLen = (a: { len: number; exempt?: boolean }, b: { len: number; exempt?: boolean }) => b.len - a.len || Number(Boolean(b.exempt)) - Number(Boolean(a.exempt));
+  const exemptItems = presentExempt?.map((label) => ({ len: label.length, pattern: escape(label), exempt: true })) ?? [];
+  return {
+    ...(ciItems.length ? { ciRegex: new RegExp([...ciItems, ...exemptItems].sort(byLen).map((item) => item.pattern).join("|"), "gi") } : {}),
+    ciMap,
+    ...(csItems.length ? { csRegex: new RegExp([...csItems, ...exemptItems].sort(byLen).map((item) => item.pattern).join("|"), "g") } : {}),
+    csMap,
+  };
 }
 
-function applySpellings(text: string, spellings: CompiledSpelling[], exempt?: Set<string>, skipOwner?: KnownName) {
+function applySpellings(text: string, matcher: CompiledMatcher, exempt?: Set<string>, skipOwner?: KnownName) {
   let result = text;
-  for (const name of spellings) {
-    if (skipOwner && name.owner === skipOwner) continue;
-    if (exempt?.size) {
-      result = result.replace(name.regex, (match) => (exempt.has(match) ? match : name.as));
-    } else {
-      result = result.replace(name.regex, () => name.as);
-    }
+  if (matcher.ciRegex) {
+    result = result.replace(matcher.ciRegex, (match) => {
+      if (exempt?.has(match)) return match;
+      const hit = matcher.ciMap.get(match.toLowerCase());
+      return !hit || (skipOwner && hit.owner === skipOwner) ? match : hit.as;
+    });
+  }
+  if (matcher.csRegex) {
+    result = result.replace(matcher.csRegex, (match) => {
+      if (exempt?.has(match)) return match;
+      const hit = matcher.csMap.get(match);
+      return !hit || (skipOwner && hit.owner === skipOwner) ? match : hit.as;
+    });
   }
   return result;
 }
@@ -191,7 +223,8 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
   const result = passOne(text);
   const sanitizedAfter = after.map((entry) => ({ ...entry, as: sanitizeLabel(entry) }));
   const exempt = new Set([...redactorLabels, ...labels, ...sanitizedAfter.map((entry) => entry.as)]);
-  const afterSpellings = compileSpellings(sanitizedAfter, passOne, exempt);
+  const presentExempt = [...exempt].filter((label) => result.includes(label)).sort((a, b) => b.length - a.length);
+  const afterSpellings = compileSpellings(sanitizedAfter, passOne, exempt, presentExempt);
   return applySpellings(result, afterSpellings, exempt);
 }
 

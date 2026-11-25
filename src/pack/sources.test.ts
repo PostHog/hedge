@@ -617,38 +617,45 @@ describe("fetchSource", () => {
     expect([offline.packs[0]?.manifest.summary, offline.stale]).toEqual(["Proto rules.", undefined]);
   });
 
-  test("does not share pin history across repository URLs that differ only by SSH username", async () => {
-    const repo = await packRepo("Account A.");
-    const commit = await spawnGit(repo, "rev-parse", "HEAD");
+  test("does not share pin history across effective SSH URLs that differ only by SSH username", async () => {
+    const repoA = await packRepo("Account A.");
+    const commitA = await spawnGit(repoA, "rev-parse", "HEAD");
+    const repoB = await packRepo("Account B.");
+    const commitB = await spawnGit(repoB, "rev-parse", "HEAD");
+    const bin = temp.make("fake-ssh-");
+    writeFileSync(
+      join(bin, "ssh"),
+      `#!/bin/sh
+dest=""
+for arg in "$@"; do
+  case "$arg" in
+    alice@*) dest=${JSON.stringify(repoA)} ;;
+    bob@*) dest=${JSON.stringify(repoB)} ;;
+  esac
+done
+exec git-upload-pack "$dest"
+`,
+      { mode: 0o755 },
+    );
     const cache = temp.make("cache-");
     const alice = "ssh://alice@example.invalid/repo.git";
     const bob = "ssh://bob@example.invalid/repo.git";
-    const env = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: `url.${repo}.insteadOf`, GIT_CONFIG_VALUE_0: alice };
-    Object.assign(process.env, env);
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${bin}:${prevPath ?? ""}`;
     try {
-      const first = await fetchSource({ name: "team", repo: alice, ref: commit }, cache);
+      const first = await fetchSource({ name: "team", repo: alice, ref: commitA }, cache);
       if ("error" in first) throw new Error(first.error);
       expect(first.packs[0]?.manifest.summary).toBe("Account A.");
-    } finally {
-      delete process.env.GIT_CONFIG_COUNT;
-      delete process.env.GIT_CONFIG_KEY_0;
-      delete process.env.GIT_CONFIG_VALUE_0;
-    }
-    const repoB = await packRepo("Account B.");
-    const commitB = await spawnGit(repoB, "rev-parse", "HEAD");
-    Object.assign(process.env, { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: `url.${repoB}.insteadOf`, GIT_CONFIG_VALUE_0: bob });
-    try {
       const second = await fetchSource({ name: "team", repo: bob, ref: commitB }, cache);
       if ("error" in second) throw new Error(second.error);
       expect(second.packs[0]?.manifest.summary).toBe("Account B.");
-      const cross = await fetchSource({ name: "team", repo: bob, ref: commit }, cache);
+      const cross = await fetchSource({ name: "team", repo: bob, ref: commitA }, cache);
       if ("error" in cross) throw new Error(cross.error);
       expect(cross.packs[0]?.manifest.summary).toBe("Account B.");
-      expect(cross.stale).toContain(`could not fetch ${commit}`);
+      expect(cross.stale).toContain(`could not fetch ${commitA}`);
     } finally {
-      delete process.env.GIT_CONFIG_COUNT;
-      delete process.env.GIT_CONFIG_KEY_0;
-      delete process.env.GIT_CONFIG_VALUE_0;
+      if (prevPath === undefined) delete process.env.PATH;
+      else process.env.PATH = prevPath;
     }
   });
 
@@ -802,6 +809,45 @@ describe("fetchSource", () => {
     const repaired = await fetchSource({ name: "team", repo: repairRepo, ref: "main" }, repairCache);
     if ("error" in repaired) throw new Error(repaired.error);
     expect(repaired.packs[0]?.manifest.summary).toBe("Repairable.");
+
+    const migPacks = join(parent, "mig-packs");
+    const migPacksGit = join(parent, "mig-packs.git");
+    const migShaA = await initPackRepo(migPacks, "Legacy target A.");
+    const migShaB = await initPackRepo(migPacksGit, "Target B.");
+    const migConfigured = "https://example.invalid/mig-team.git";
+    const migCache = temp.make("cache-mig-dotgit-");
+    const migDir = join(migCache, "team");
+    mkdirSync(migDir, { recursive: true });
+    await spawnGit(migDir, "init", "-q");
+    await spawnGit(migDir, "config", `url.${migPacks}.insteadOf`, migConfigured);
+    await spawnGit(migDir, "fetch", "-q", "--depth", "1", "--no-tags", migConfigured, migShaA);
+    await spawnGit(migDir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    writeFileSync(join(migDir, ".git", "hedge-source.json"), JSON.stringify({ repo: migConfigured, ref: migShaA, commit: migShaA }) + "\n");
+    await spawnGit(migDir, "config", "--unset", `url.${migPacks}.insteadOf`);
+    await spawnGit(migDir, "config", `url.${migPacksGit}.insteadOf`, migConfigured);
+    expect("error" in (await fetchSource({ name: "team", repo: migConfigured, ref: migShaB }, migCache))).toBe(false);
+    rmSync(migPacksGit, { recursive: true, force: true });
+    const migCross = await fetchSource({ name: "team", repo: migPacksGit, ref: migShaA }, migCache);
+    expect("error" in migCross).toBe(true);
+
+    const sha256Repo = join(parent, "sha256-repo");
+    mkdirSync(sha256Repo, { recursive: true });
+    await spawnGit(sha256Repo, "init", "-q", "--object-format=sha256", "-b", "main");
+    writePack(sha256Repo, "SHA-256 branch packs.");
+    await spawnGit(sha256Repo, "add", ".");
+    await spawnGit(sha256Repo, "commit", "-q", "-m", "v1");
+    const sha256Cache = temp.make("cache-sha256-");
+    const sha256Dir = join(sha256Cache, "team");
+    mkdirSync(sha256Dir, { recursive: true });
+    await spawnGit(sha256Dir, "init", "-q", "--object-format=sha256");
+    const sha256Online = await fetchSource({ name: "team", repo: sha256Repo, ref: "main" }, sha256Cache);
+    if ("error" in sha256Online) throw new Error(sha256Online.error);
+    expect(sha256Online.packs[0]?.manifest.summary).toBe("SHA-256 branch packs.");
+    rmSync(sha256Repo, { recursive: true, force: true });
+    const sha256Offline = await fetchSource({ name: "team", repo: sha256Repo, ref: "main" }, sha256Cache);
+    if ("error" in sha256Offline) throw new Error(sha256Offline.error);
+    expect(sha256Offline.packs[0]?.manifest.summary).toBe("SHA-256 branch packs.");
+    expect(sha256Offline.stale).toContain("could not fetch main");
   });
 });
 
