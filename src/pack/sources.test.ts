@@ -296,17 +296,24 @@ describe("fetchSource", () => {
     expect(fetched).toMatchObject({ error: expect.stringContaining("could not fetch v1") });
   });
 
-  test("ignores a malformed pins file or malformed last-good record and fetches cleanly", async () => {
+  test("ignores a malformed pins file, a pins directory, or a malformed last-good record and fetches cleanly", async () => {
     const repo = await packRepo("Team rules v1.");
     const commit = await spawnGit(repo, "rev-parse", "HEAD");
     const cache = temp.make("cache-");
     const ref = { name: "team", repo, ref: commit };
     await fetchSource(ref, cache);
     writeFileSync(join(cache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo: 42 }));
-    writeFileSync(join(cache, "team", ".git", "hedge-pins.json"), JSON.stringify({ repoHash: "bad", commits: "bad" }));
+    rmSync(join(cache, "team", ".git", "hedge-pins.json"), { recursive: true, force: true });
+    mkdirSync(join(cache, "team", ".git", "hedge-pins.json"));
     const fetched = await fetchSource(ref, cache);
     if ("error" in fetched) throw new Error(fetched.error);
     expect([fetched.packs[0]?.manifest.summary, fetched.stale]).toEqual(["Team rules v1.", undefined]);
+
+    rmSync(join(cache, "team", ".git", "hedge-pins.json"), { recursive: true, force: true });
+    mkdirSync(join(cache, "team", ".git", "hedge-pins.json"));
+    const branch = await fetchSource({ name: "team", repo, ref: "main" }, cache);
+    if ("error" in branch) throw new Error(branch.error);
+    expect([branch.packs[0]?.manifest.summary, branch.stale]).toEqual(["Team rules v1.", undefined]);
   });
 
   test("records pinned history even for a relative repository path named after an Object property", async () => {

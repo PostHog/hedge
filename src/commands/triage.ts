@@ -20,7 +20,7 @@ export type TriageContext = {
   hostname: string;
   /** Runs hedge doctor and returns what it printed. */
   doctor(): Promise<string[]>;
-  profileDir?: string;
+  doctorProfileDir?(): string | undefined;
   now?: Date;
 };
 
@@ -66,23 +66,23 @@ export async function triageCommand(args: string[], context: TriageContext): Pro
 /** Everything a maintainer needs to fix a setup problem, with secrets and names removed. */
 export async function triageReport(context: TriageContext, note?: string): Promise<TriageReport> {
   const machine = await loadMachine(context.home).catch(() => undefined);
-  const activeProfileDir = context.profileDir || machine?.profileDir;
-  const [profile, savedProfile] = await Promise.all([
-    activeProfileDir ? loadProfile(activeProfileDir).catch(() => undefined) : Promise.resolve(undefined),
-    machine?.profileDir && machine.profileDir !== activeProfileDir ? loadProfile(machine.profileDir).catch(() => undefined) : Promise.resolve(undefined),
-  ]);
+  const profile = machine?.profileDir ? await loadProfile(machine.profileDir).catch(() => undefined) : undefined;
   const failure = readFailure(context.home);
   const timings = readTimings(context.home);
-  const [versions, doctor, gitName, origin, savedOrigin] = await Promise.all([
+  const [versions, doctor, gitName, origin] = await Promise.all([
     versionLines(context, profile),
     context.doctor().catch((error: Error) => [`hedge doctor could not run: ${error.message}`]),
     firstLine(context, ["git", "config", "--global", "user.name"]),
-    activeProfileDir ? firstLine(context, ["git", "-C", activeProfileDir, "remote", "get-url", "origin"]) : Promise.resolve(undefined),
-    machine?.profileDir && machine.profileDir !== activeProfileDir ? firstLine(context, ["git", "-C", machine.profileDir, "remote", "get-url", "origin"]) : Promise.resolve(undefined),
+    machine?.profileDir ? firstLine(context, ["git", "-C", machine.profileDir, "remote", "get-url", "origin"]) : Promise.resolve(undefined),
   ]);
+  const doctorDir = context.doctorProfileDir?.();
+  const [doctorProfile, doctorOrigin] =
+    doctorDir && doctorDir !== machine?.profileDir
+      ? await Promise.all([loadProfile(doctorDir).catch(() => undefined), firstLine(context, ["git", "-C", doctorDir, "remote", "get-url", "origin"])])
+      : [undefined, undefined];
   const known = [
     ...knownNames(context.hostname, machine, profile, gitName, origin),
-    ...(savedProfile || savedOrigin ? knownNames(context.hostname, undefined, savedProfile, undefined, savedOrigin) : []),
+    ...(doctorProfile || doctorOrigin ? knownNames(context.hostname, undefined, doctorProfile, undefined, doctorOrigin) : []),
   ];
   const clean = (text: string) => redact(text, context.home, known);
   const described = note?.trim() ? clean(note.trim()) : "Not described.";

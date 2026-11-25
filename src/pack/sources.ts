@@ -145,7 +145,18 @@ function pinsPath(dir: string) {
 async function writeAtomic(path: string, content: string) {
   const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
   await writeFile(temp, content);
-  await rename(temp, path);
+  try {
+    await rename(temp, path);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EISDIR" || code === "ENOTEMPTY") {
+      await rm(path, { recursive: true, force: true });
+      await rename(temp, path);
+    } else {
+      await rm(temp, { force: true }).catch(() => {});
+      throw error;
+    }
+  }
 }
 
 async function readPins(dir: string): Promise<Pins | undefined> {
@@ -169,7 +180,7 @@ async function saveGood(dir: string, good: Good) {
   }
   if (commitSha.test(good.ref) && commitSha.test(good.commit)) known.add(good.commit.toLowerCase());
   if (known.size) await writeAtomic(pinsPath(dir), JSON.stringify({ repoHash: digest, commits: [...known] }) + "\n");
-  else await rm(pinsPath(dir), { force: true });
+  else await rm(pinsPath(dir), { recursive: true, force: true });
   await writeAtomic(goodPath(dir), JSON.stringify(good) + "\n");
 }
 

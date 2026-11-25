@@ -158,11 +158,12 @@ async function runSetup(args: string[], options: CliOptions) {
 }
 
 async function triage(args: string[], options: CliOptions) {
+  let inspectedProfile: string | undefined;
   const doctor = async () => {
     const lines: string[] = [];
     const collect = (line: string) => void lines.push(line);
     try {
-      await reconcile("doctor", [], { ...options, print: collect, fail: collect });
+      await reconcile("doctor", [], { ...options, print: collect, fail: collect }, (dir) => { inspectedProfile = dir; });
     } catch (error) {
       collect(`hedge: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -176,7 +177,7 @@ async function triage(args: string[], options: CliOptions) {
       terminal: options.terminal ?? { ...ttyTerminal(), print: options.print },
       capture: options.capture ?? spawnRunner,
       hostname: (options.hostname ?? hostname)(),
-      profileDir: options.env?.HEDGE_PROFILE_DIR || options.env?.FLEET_PROFILE_DIR,
+      doctorProfileDir: () => inspectedProfile,
       doctor,
     });
   } catch (error) {
@@ -186,7 +187,7 @@ async function triage(args: string[], options: CliOptions) {
   }
 }
 
-async function reconcile(command: "apply" | "doctor", args: string[], options: CliOptions) {
+async function reconcile(command: "apply" | "doctor", args: string[], options: CliOptions, onProfile?: (dir: string) => void) {
   const flags = parseFlags(args);
   const doctor = command === "doctor";
   if (flags.toDo && !doctor) throw new Error("unknown option --to-do");
@@ -198,6 +199,7 @@ async function reconcile(command: "apply" | "doctor", args: string[], options: C
     printFindings(held, options.print);
     throw error;
   });
+  if (plan.machine.profileDir) onProfile?.(plan.machine.profileDir);
   const stillHeld = preview ? [] : await holds();
   if (stillHeld.length) return printReport({ ok: false, actions: [], findings: stillHeld, humanLeft: [] }, command, options.print, false), 1;
   if (!preview) await remember();
