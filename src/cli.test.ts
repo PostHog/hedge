@@ -432,6 +432,24 @@ describe("hedge doctor and pack sources", () => {
     const sibling = await applied(() => ({ name: "sibling", repo: "/tmp/profile.git", ref: "main" }), "/tmp/profile");
     expect((await hedge(["doctor"], sibling)).output).toContain("Note: The pack source sibling is not pinned to a commit SHA.");
   });
+
+  test("notes a 64-character hex branch on a SHA-1 repository as unpinned", async () => {
+    const hex64Branch = "a".repeat(64);
+    const sourceRepo = temp.make("hex64-repo-");
+    await spawnGit(sourceRepo, "init", "-q", "-b", hex64Branch);
+    mkdirSync(join(sourceRepo, "packs/team"), { recursive: true });
+    writeFileSync(join(sourceRepo, "packs/team/pack.json"), JSON.stringify({ schema: 1, name: "team", summary: "Hex-64 branch packs." }));
+    await spawnGit(sourceRepo, "add", ".");
+    await spawnGit(sourceRepo, "commit", "-q", "-m", "v1");
+    const home = temp.make("home-");
+    const profile = profileDir();
+    const file = join(profile, "hedge.json");
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), sources: [{ name: "team", repo: sourceRepo, ref: hex64Branch }] }));
+    expect(await hedge(["apply", "--profile", profile], home)).toMatchObject({ code: 0 });
+    const doctor = await hedge(["doctor"], home);
+    expect(doctor.code).toBe(0);
+    expect(doctor.output).toContain("Note: The pack source team is not pinned to a commit SHA.");
+  });
 });
 
 describe("a profile source that would run code it does not ship", () => {

@@ -209,14 +209,52 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
   const maskedSpellings = compileSpellings(maskedEntries);
   const tokenPattern = `${escape(prefix)}(\\d+)${escape(suffix)}`;
   const tokenRegex = new RegExp(tokenPattern, "g");
-  const maskedRandomRegex = new RegExp(`(?:${tokenPattern}|[A-Za-z0-9+/_-])+={0,2}`, "g");
+  const tokenOrChunk = new RegExp(`[A-Za-z0-9+/_-]+|${tokenPattern}`, "g");
+
+  const replaceMaskedRandom = (value: string) => {
+    let out = "";
+    let pos = 0;
+    let runStart = -1;
+    let runEnd = -1;
+    const flush = () => {
+      if (runStart === -1) return;
+      let end = runEnd;
+      let eq = 0;
+      while (eq < 2 && value[end] === "=") {
+        end++;
+        eq++;
+      }
+      const slice = value.slice(runStart, end);
+      const expanded = slice.replace(tokenRegex, (_tok, idx) => originals[Number(idx)] ?? "");
+      out += value.slice(pos, runStart);
+      out += expanded.length >= tokenLetters && looksRandom(expanded) ? "<secret>" : slice;
+      pos = end;
+      runStart = -1;
+      runEnd = -1;
+    };
+    tokenOrChunk.lastIndex = 0;
+    for (let match = tokenOrChunk.exec(value); match !== null; match = tokenOrChunk.exec(value)) {
+      if (match[1] !== undefined && !/^[A-Za-z0-9+/_-]+$/.test(originals[Number(match[1])] ?? "")) {
+        flush();
+        continue;
+      }
+      const start = match.index;
+      const end = start + match[0].length;
+      if (runStart !== -1 && start === runEnd) {
+        runEnd = end;
+      } else {
+        flush();
+        runStart = start;
+        runEnd = end;
+      }
+    }
+    flush();
+    return pos === 0 ? value : out + value.slice(pos);
+  };
 
   const passOne = (value: string) => {
     let next = applyRules(stripHome(applySpellings(value, maskedSpellings)), preRandomRules);
-    next = next.replace(maskedRandomRegex, (match) => {
-      const expanded = match.replace(tokenRegex, (_tok, idx) => originals[Number(idx)] ?? "");
-      return expanded.length >= tokenLetters && looksRandom(expanded) ? "<secret>" : match;
-    });
+    next = replaceMaskedRandom(next);
     return next.replace(tokenRegex, (_tok, idx) => labels[Number(idx)] ?? "");
   };
 

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
-import { advanceSource, cachedSource, fetchSource, followsBranch, unpinnedSources } from "./sources.ts";
+import { advanceSource, cachedSource, fetchSource, followsBranch } from "./sources.ts";
 
 isolateGit();
 const temp = tempDirs();
@@ -729,11 +729,37 @@ exec git-upload-pack "$dest"
     if ("error" in offline) throw new Error(offline.error);
     expect(offline.packs[0]?.manifest.summary).toBe("Legacy mirror A.");
 
+    const offlineAgain = await fetchSource({ name: "team", repo: configured, ref: shaA }, cache);
+    if ("error" in offlineAgain) throw new Error(offlineAgain.error);
+    expect(offlineAgain.packs[0]?.manifest.summary).toBe("Legacy mirror A.");
+
     await spawnGit(dir, "config", "--unset", `url.${repoA}.insteadOf`);
     await spawnGit(dir, "config", `url.${repoB}.insteadOf`, configured);
     rmSync(repoB, { recursive: true, force: true });
     const swapped = await fetchSource({ name: "team", repo: configured, ref: shaA }, cache);
     expect("error" in swapped).toBe(true);
+    const swappedAgain = await fetchSource({ name: "team", repo: configured, ref: shaA }, cache);
+    expect("error" in swappedAgain).toBe(true);
+
+    const directRepo = await packRepo("Direct repo.");
+    const directSha = await spawnGit(directRepo, "rev-parse", "HEAD");
+    const emptyFhCache = temp.make("cache-empty-fh-");
+    const emptyFhDir = join(emptyFhCache, "team");
+    mkdirSync(emptyFhDir, { recursive: true });
+    await spawnGit(emptyFhDir, "init", "-q");
+    const mirrorRepo = await packRepo("Mirror only.");
+    const mirrorSha = await spawnGit(mirrorRepo, "rev-parse", "HEAD");
+    await spawnGit(emptyFhDir, "config", `url.${mirrorRepo}.insteadOf`, directRepo);
+    await spawnGit(emptyFhDir, "fetch", "-q", "--depth", "1", "--no-tags", directRepo, mirrorSha);
+    await spawnGit(emptyFhDir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    writeFileSync(join(emptyFhDir, ".git", "hedge-source.json"), JSON.stringify({ repo: directRepo, ref: mirrorSha, commit: mirrorSha }) + "\n");
+    writeFileSync(join(emptyFhDir, ".git", "FETCH_HEAD"), "");
+    await spawnGit(emptyFhDir, "config", "--unset", `url.${mirrorRepo}.insteadOf`);
+    expect("error" in (await fetchSource({ name: "team", repo: directRepo, ref: directSha }, emptyFhCache))).toBe(false);
+    rmSync(directRepo, { recursive: true, force: true });
+    const poisoned = await fetchSource({ name: "team", repo: directRepo, ref: mirrorSha }, emptyFhCache);
+    expect("error" in poisoned || poisoned.stale !== undefined).toBe(true);
+    if (!("error" in poisoned)) expect(poisoned.packs[0]?.manifest.summary).toBe("Direct repo.");
   });
 
   test("falls back to the last-good commit offline after an interrupted apply left detached HEAD at FETCH_HEAD", async () => {
@@ -867,7 +893,6 @@ exec git-upload-pack "$dest"
     if ("error" in hexOnline) throw new Error(hexOnline.error);
     expect(hexOnline.packs[0]?.manifest.summary).toBe("Hex-64 branch packs.");
     expect(await followsBranch({ name: "team", repo: sha1HexRepo, ref: hex64Branch }, hexCache)).toBe(true);
-    expect((await unpinnedSources([{ name: "team", repo: sha1HexRepo, ref: hex64Branch }], parent)).map((f) => f.id)).toEqual(["source:unpinned:team"]);
     rmSync(sha1HexRepo, { recursive: true, force: true });
     const hexOffline = await fetchSource({ name: "team", repo: sha1HexRepo, ref: hex64Branch }, hexCache);
     if ("error" in hexOffline) throw new Error(hexOffline.error);
@@ -933,6 +958,62 @@ exec git-upload-pack "$dest"
       if (savedPath === undefined) delete process.env.PATH;
       else process.env.PATH = savedPath;
     }
+
+    const dotgitSrc = join(parent, "swap-packs.git");
+    const plainDst = join(parent, "swap-packs");
+    const dotgitSha = await initPackRepo(dotgitSrc, "Legacy dotgit.");
+    const plainSha = await initPackRepo(plainDst, "Sibling plain.");
+    const swapConfigured = "https://example.invalid/dotgit-swap.git";
+    const swapCache = temp.make("cache-dotgit-swap-");
+    const swapDir = join(swapCache, "team");
+    mkdirSync(swapDir, { recursive: true });
+    await spawnGit(swapDir, "init", "-q");
+    await spawnGit(swapDir, "config", `url.${dotgitSrc}.insteadOf`, swapConfigured);
+    await spawnGit(swapDir, "fetch", "-q", "--depth", "1", "--no-tags", swapConfigured, dotgitSha);
+    await spawnGit(swapDir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    writeFileSync(join(swapDir, ".git", "hedge-source.json"), JSON.stringify({ repo: swapConfigured, ref: dotgitSha, commit: dotgitSha }) + "\n");
+    rmSync(dotgitSrc, { recursive: true, force: true });
+    await spawnGit(swapDir, "config", "--unset", `url.${dotgitSrc}.insteadOf`);
+    await spawnGit(swapDir, "config", `url.${plainDst}.insteadOf`, swapConfigured);
+    const swapHit = await fetchSource({ name: "team", repo: swapConfigured, ref: dotgitSha }, swapCache);
+    expect("error" in swapHit || swapHit.stale !== undefined).toBe(true);
+    expect("error" in (await fetchSource({ name: "team", repo: swapConfigured, ref: plainSha }, swapCache))).toBe(false);
+    rmSync(plainDst, { recursive: true, force: true });
+    const swapPoison = await fetchSource({ name: "team", repo: swapConfigured, ref: dotgitSha }, swapCache);
+    if ("error" in swapPoison) throw new Error(swapPoison.error);
+    expect(swapPoison.packs[0]?.manifest.summary).toBe("Sibling plain.");
+    expect(swapPoison.stale).toContain(`could not fetch ${dotgitSha}`);
+
+    const emptyLegacyRepo = await packRepo("Empty FETCH_HEAD legacy.");
+    const emptyLegacySha = await spawnGit(emptyLegacyRepo, "rev-parse", "HEAD");
+    const emptyLegacyCache = temp.make("cache-empty-legacy-");
+    const emptyLegacyDir = await legacyPinnedCache(emptyLegacyCache, "team", emptyLegacyRepo, emptyLegacySha);
+    writeFileSync(join(emptyLegacyDir, ".git", "FETCH_HEAD"), "");
+    rmSync(emptyLegacyRepo, { recursive: true, force: true });
+    const emptyLegacyOffline = await fetchSource({ name: "team", repo: emptyLegacyRepo, ref: emptyLegacySha }, emptyLegacyCache);
+    if ("error" in emptyLegacyOffline) throw new Error(emptyLegacyOffline.error);
+    expect(emptyLegacyOffline.packs[0]?.manifest.summary).toBe("Empty FETCH_HEAD legacy.");
+    expect(emptyLegacyOffline.stale).toContain(`could not fetch ${emptyLegacySha}`);
+
+    const fhRepo = await packRepo("Branch v1.");
+    writePack(fhRepo, "Branch v2.");
+    await spawnGit(fhRepo, "commit", "-q", "-am", "v2");
+    const fhPin = await spawnGit(fhRepo, "rev-parse", "HEAD");
+    await spawnGit(fhRepo, "reset", "-q", "--hard", "HEAD~1");
+    const fhCache = temp.make("cache-restore-fh-");
+    const fhInitial = await fetchSource({ name: "team", repo: fhRepo, ref: "main" }, fhCache);
+    if ("error" in fhInitial) throw new Error(fhInitial.error);
+    expect(await followsBranch({ name: "team", repo: fhRepo, ref: "main" }, fhCache)).toBe(true);
+    const fhRefs = join(fhCache, "team", ".git", "refs");
+    setDirModes(fhRefs, 0o555);
+    try {
+      const fhFailed = await fetchSource({ name: "team", repo: fhRepo, ref: fhPin }, fhCache);
+      if ("error" in fhFailed) throw new Error(fhFailed.error);
+      expect(fhFailed.stale).toContain(`could not record ${fhPin}`);
+    } finally {
+      setDirModes(fhRefs, 0o755);
+    }
+    expect(await followsBranch({ name: "team", repo: fhRepo, ref: "main" }, fhCache)).toBe(true);
   });
 });
 

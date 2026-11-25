@@ -472,17 +472,45 @@ describe("hedge triage", () => {
     expect(body).toContain("## hedge doctor");
   }, 2_000);
 
-  test("a million-tilde transcript line still produces a bounded report without blowing up redaction", async () => {
+  test("oversized tilde and token-like transcript lines still redact secrets on following lines cleanly", async () => {
     const home = temp.make("home-");
     failedMachine(home);
-    writeFileSync(join(home, ".local/state/hedge/logs/setup.log"), `${"~".repeat(1_000_000)}\nthe newest line on noras-mbp\n`);
+    const token = ["K9mP2xQ7", "vL4nR8wT", "1zB6yC3f", "H5jD0sA2"].join("");
+    writeFileSync(
+      join(home, ".local/state/hedge/logs/setup.log"),
+      `${"~".repeat(1_000_000)}\n${"AbCd1234".repeat(200_000)}\nsecret ${token} on noras-mbp\n`,
+    );
     const result = await triage(home, ["--send"], []);
     expect(result.code).toBe(0);
     const body = result.sent.find((call) => call.command[1] === "issue")!.input!;
     expect(body.length).toBeLessThanOrEqual(60_000);
-    expect(body).toContain("## Setup transcript (newest 1 lines)\n\n```text\nthe newest line on <this machine>\n```\n\nMade by `hedge triage`.");
+    expect(body).toContain("## Setup transcript (newest 2 lines)\n\n```text\n<secret>\nsecret <secret> on <this machine>\n```\n\nMade by `hedge triage`.");
+    expect(body).not.toContain(token);
     expect(body).not.toContain("noras-mbp");
-  }, 5_000);
+  });
+
+  test("keeps unpinned-source doctor advisories readable when a private source alias contains digits", async () => {
+    const home = temp.make("home-");
+    const inherited = temp.make("inherited-profile-");
+    await spawnGit(inherited, "init", "-q");
+    writeFileSync(
+      join(inherited, "hedge.json"),
+      JSON.stringify({ schema: 1, engine: { repo: "PostHog/hedge", ref: "main", channel: "track" }, sources: [{ name: "product-team-release-12345", repo: "acme/private-packs", ref: "main" }], packs: [], plan: "both", settings: {}, workflows: {} }),
+    );
+    const sent: Sent[] = [];
+    const io = scripted([]);
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      sent.push({ command, ...(options.input === undefined ? {} : { input: options.input }) });
+      if (command[0] === "git") return spawnRunner(command, options);
+      return capture([], undefined)(command, options);
+    };
+    const code = await main(["triage", "--send"], { home, engineRoot, platform: "darwin", env: { HEDGE_PROFILE_DIR: inherited }, print: io.terminal.print, terminal: io.terminal, capture: runRealGit, hostname: () => "noras-mbp.local", run: async () => 0 });
+    expect(code).toBe(0);
+    const body = sent.find((call) => call.command[1] === "issue")!.input!;
+    expect(body).toContain("Note: The pack source <private source> is not pinned to a commit SHA.");
+    expect(body).not.toContain("product-team-release-12345");
+    expect(body).not.toContain("Note: <secret>");
+  });
 });
 
 describe("hedge setup and triage", () => {
