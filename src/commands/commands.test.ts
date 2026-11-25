@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { main, type CliOptions } from "../cli.ts";
 import type { AvailableSource, PackManifest, ProfileFile } from "../pack/types.ts";
@@ -228,13 +229,20 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     expect((await hedge(home, ["packs"])).output).toContain(`  ~ team  Team rules.\n      Workflows: allowlist on\n${needsSetup}`);
   });
 
-  test("counts a human step that does not answer in time as needing setup", async () => {
+  test("counts a human step that does not answer in time as needing setup, and stops it with every process it started", async () => {
     const { home } = await machineWithProfile();
-    await withTeamPack(home, { workflows: [flow("allowlist")], human: [humanStep("allowlist", "true", "allowlist")] });
-    const silent = () => new Promise<number>(() => {});
-    const timedOut = { now: () => 0, sleep: async () => {} };
-
-    expect((await hedge(home, ["packs"], 0, { run: silent, clock: timedOut })).output).toContain("Workflows: allowlist needs setup");
+    const [ready, gone] = [join(home, "ready"), join(home, "gone")];
+    expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+    await withTeamPack(home, { workflows: [flow("allowlist")], human: [humanStep("allowlist", '{ sleep 30 & } 3>"$HOME/gone"; echo $! > "$HOME/ready"; wait', "allowlist")] });
+    const holderGone = readFile(gone, "utf8");
+    const started = readFile(ready, "utf8");
+    const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await started) };
+    try {
+      expect((await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output).toContain("Workflows: allowlist needs setup");
+      expect(await holderGone).toBe("");
+    } finally {
+      try { process.kill(Number((await started).trim())); } catch {}
+    }
   });
 });
 

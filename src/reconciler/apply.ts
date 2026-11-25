@@ -18,7 +18,7 @@ export type Adapter = {
   targets(plan: Plan): string[];
   apply(plan: Plan, context: AdapterContext): Promise<AdapterResult>;
 };
-export type Runner = (command: string[], env?: Record<string, string>) => Promise<number>;
+export type Runner = (command: string[], env?: Record<string, string>, signal?: AbortSignal) => Promise<number>;
 /** Fills this machine's credential for each served service: the hub issues its own, and a node pulls its own from the hub. Reports what failed. */
 export type Issuer = (entries: CatalogEntry[], node: string) => Promise<Finding[]>;
 
@@ -251,8 +251,9 @@ export async function check(plan: Plan, options: { home: string; adapters?: Adap
 
 export async function unmetHumanSteps(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void> }): Promise<Array<Owned<HumanStep>>> {
   const run = viaEngine(plan, options.run ?? spawnRunner(options.home, plan.machine.profileDir));
-  const passes = (step: Owned<HumanStep>) => Promise.race([run(step.probe).then((code) => code === 0), options.giveUp.then(() => false)]);
-  const passed = await Promise.all(plan.human.map(passes));
+  const deadline = new AbortController();
+  void options.giveUp.then(() => deadline.abort());
+  const passed = await Promise.all(plan.human.map(async (step) => (await run(step.probe, {}, deadline.signal)) === 0));
   return plan.human.filter((_, index) => !passed[index]);
 }
 
@@ -426,7 +427,7 @@ function hubFindings(plan: Plan): Finding[] {
 }
 
 function viaEngine(plan: Plan, run: Runner): Runner {
-  return (command, env) => run(engineCommand(command, plan.engineRoot), env);
+  return (command, env, signal) => run(engineCommand(command, plan.engineRoot), env, signal);
 }
 
 /** Names the step in HEDGE_UNDO, so a nested hedge runs the command of a pack that is off, but only for this step's undo, check and prerequisite. */
@@ -434,11 +435,25 @@ const undoRunner = (run: Runner, step: LedgerStep): Runner => (command) => run(c
 
 /** Runs commands with the plan's home directory as HOME, so a step installs into the home it applies to, and with the plan's profile, so a nested hedge reads the profile this run applies or checks. */
 function spawnRunner(home: string, profileDir: string | undefined): Runner {
-  return async (command, env = {}) => {
+  return async (command, env = {}, signal) => {
     try {
-      return await Bun.spawn(command, { stdout: "ignore", stderr: "ignore", env: withLegacyNames({ ...Bun.env, HOME: home, ...(profileDir ? { HEDGE_PROFILE_DIR: profileDir } : {}), ...env }) }).exited;
+      const child = Bun.spawn(command, { stdout: "ignore", stderr: "ignore", env: withLegacyNames({ ...Bun.env, HOME: home, ...(profileDir ? { HEDGE_PROFILE_DIR: profileDir } : {}), ...env }), ...(signal ? { detached: true } : {}) });
+      return await stoppedBy(signal, child);
     } catch {
       return 127;
     }
   };
+}
+
+async function stoppedBy(signal: AbortSignal | undefined, child: { pid: number; exited: Promise<number> }) {
+  const endGroup = () => {
+    try { process.kill(-child.pid, "SIGTERM"); } catch {}
+  };
+  signal?.addEventListener("abort", endGroup, { once: true });
+  if (signal?.aborted) endGroup();
+  try {
+    return await child.exited;
+  } finally {
+    signal?.removeEventListener("abort", endGroup);
+  }
 }
