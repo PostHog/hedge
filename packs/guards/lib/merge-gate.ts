@@ -276,7 +276,7 @@ function mcpIntent(tool: string, input: Record<string, unknown>): MergeIntent {
   const writesComment = /comment|review|respond/i.test(name) && (!t3 || name.startsWith("pull_request_"));
   const texts = t3 ? strings(input).flatMap((text) => [text, text.trim()]) : strings(input);
   if (!merges && !(writesComment && texts.some((text) => enqueueLine.test(text)))) return { targets: [] };
-  if (!merges && (/review/i.test(name) || input.reviewThreadId !== undefined)) return { targets: [], refusal: otherEndpointReason };
+  if (!merges && (/review/i.test(name) || input.reviewThreadId != null)) return { targets: [], refusal: otherEndpointReason };
   const named = t3 ? t3Pr(input) : mcpPr(input);
   return named ? { targets: [{ ...named, via: merges ? tool : `${tool} comment` }] } : { targets: [], refusal: unnamedReason(merges ? "merges a PR" : "posts `/trunk merge`") };
 }

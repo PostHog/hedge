@@ -205,6 +205,12 @@ describe("which calls enqueue or merge", () => {
     const pr = { repository: "example/product", number: 7 };
     expect(mcp("mcp__t3-code__pull_request_respond", { ...pr, body })).toEqual({ targets: [target("example/product", 7)] });
     expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "comment", body }).refusal).toBe(otherEndpointReason);
+    expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "comment", comments: [{ path: "a.ts", line: 1, body }] }).refusal).toBe(otherEndpointReason);
+    expect(mcp("mcp__t3-code__pull_request_respond", { ...pr, reviewThreadId: "thread-1", body }).refusal).toBe(otherEndpointReason);
+  });
+
+  test("a T3 reply with a null reviewThreadId, which T3 posts as a PR comment, is gated as one", () => {
+    expect(mcp("mcp__t3-code__pull_request_respond", { repository: "example/product", number: 7, reviewThreadId: null, body: "/trunk merge" })).toEqual({ targets: [target("example/product", 7)] });
   });
 
   test("a T3 call checks the PR T3 merges, not one that a GitHub-style key beside it names", () => {
