@@ -943,7 +943,7 @@ function signalDeadTargets(targets: ProcTargets, deadSessionId?: number, guard?:
     if (guard && !guard()) return;
     signalOneGroup(pgrp, "SIGKILL");
   }
-  for (const pid of targets.pids) {
+  for (const pid of targets.orphanPids) {
     if (pid === deadSessionId || pid === process.pid) continue;
     if (guard && !guard()) return;
     signalOnePid(pid, "SIGKILL");
@@ -1236,6 +1236,8 @@ if (import.meta.main) {
   let controlFd: number | undefined;
   let resultFd: number | undefined;
   let spareFile: string | undefined;
+  let spareTag: string | undefined;
+  let spareHome: string | undefined;
   let holder = false;
   let guardFd: number | undefined;
   let holderFd: number | undefined;
@@ -1254,6 +1256,8 @@ if (import.meta.main) {
         controlFd?: unknown;
         resultFd?: unknown;
         spareFile?: unknown;
+        spareTag?: unknown;
+        spareHome?: unknown;
         holder?: unknown;
         guardFd?: unknown;
         holderFd?: unknown;
@@ -1272,6 +1276,8 @@ if (import.meta.main) {
       if (typeof record.controlFd === "number" && Number.isInteger(record.controlFd) && record.controlFd >= 3) controlFd = record.controlFd;
       if (typeof record.resultFd === "number" && Number.isInteger(record.resultFd) && record.resultFd >= 3) resultFd = record.resultFd;
       if (typeof record.spareFile === "string" && record.spareFile) spareFile = record.spareFile;
+      if (typeof record.spareTag === "string" && record.spareTag) spareTag = record.spareTag;
+      if (typeof record.spareHome === "string" && record.spareHome) spareHome = record.spareHome;
       if (record.holder === true) holder = true;
       if (typeof record.guardFd === "number" && Number.isInteger(record.guardFd) && record.guardFd >= 3) guardFd = record.guardFd;
       if (typeof record.holderFd === "number" && Number.isInteger(record.holderFd) && record.holderFd >= 3) holderFd = record.holderFd;
@@ -1279,6 +1285,18 @@ if (import.meta.main) {
       if (typeof record.innerResultFd === "number" && Number.isInteger(record.innerResultFd) && record.innerResultFd >= 3) innerResultFd = record.innerResultFd;
     }
   } catch {}
+  if (!spareFile && spareTag) {
+    spareFile = spareFilePath(spareTag, spareHome);
+    try {
+      writeSync(1, `spare:${spareFile}\n`);
+    } catch {}
+    const envObj: Record<string, string | undefined> = targetEnv ?? Object.create(null);
+    if (!targetEnv) {
+      for (const [k, v] of Object.entries(process.env)) if (v !== undefined) envObj[k] = v;
+      targetEnv = envObj;
+    }
+    envObj[spareEnvVar] = spareFile;
+  }
   if (process.platform === "linux" && holder) {
     enableChildSubreaper();
     shieldGroupSignals();
@@ -1333,6 +1351,7 @@ if (import.meta.main) {
       closeFd(controlFd);
       closeFd(resultFd);
       closeFd(guardFd);
+      removeSpareFile(spareFile);
       process.exit(127);
     }
     closeFd(holderAlive?.readFd);
@@ -1428,6 +1447,7 @@ if (import.meta.main) {
     try {
       writeSync(1, "stopped\n");
     } catch {}
+    removeSpareFile(spareFile);
     process.exit(128);
   }
   if (controlFd !== undefined) {
