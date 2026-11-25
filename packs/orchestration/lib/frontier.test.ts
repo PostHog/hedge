@@ -155,13 +155,15 @@ test("hedge frontier over REST gives the same report when gh pretty-prints for a
   expect(result).toEqual({ stdout: `${expected("acme/maps")}\n`, stderr: restNotice, code: 0 });
 });
 
-test("hedge frontier over REST fails and names the issue when GitHub leaves out its sub-issue summary", async () => {
-  const home = await temporaryHome();
-  const bin = await fakeGitHub(home, { ...mapFixture("acme/maps"), graphqlError: rateLimited, restWithoutSummaries: true });
+test("hedge frontier over REST still finds a grandchild when GitHub leaves out a sub-issue summary, and still finds a blocker when it leaves out the dependency summary", async () => {
+  for (const field of ["sub_issues_summary", "issue_dependencies_summary"] as const) {
+    const home = await temporaryHome();
+    const bin = await fakeGitHub(home, { ...mapFixture("acme/maps"), graphqlError: rateLimited, restWithout: [field] });
 
-  const result = await runPackCommand("frontier", ["acme/maps#1"], { HOME: home, PATH: `${bin}:${Bun.env.PATH}`, HEDGE_SETTINGS: "{}" });
+    const result = await runPackCommand("frontier", ["acme/maps#1"], { HOME: home, PATH: `${bin}:${Bun.env.PATH}`, HEDGE_SETTINGS: "{}" });
 
-  expect(result).toEqual({ stdout: "", stderr: `${restNotice}hedge: GitHub's REST answer for acme/maps#2 has no sub_issues_summary\n`, code: 1 });
+    expect(result).toEqual({ stdout: `${expected("acme/maps")}\n`, stderr: restNotice, code: 0 });
+  }
 });
 
 test("hedge frontier over REST refuses a pull request number", async () => {

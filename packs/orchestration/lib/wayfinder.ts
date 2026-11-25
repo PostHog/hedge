@@ -165,21 +165,20 @@ function restRepository(issue: RestIssue): string {
   return issue.repository_url.split("/").slice(-2).join("/");
 }
 
-function restChildCount(issue: RestIssue): number {
-  if (!issue.sub_issues_summary) throw new Error(`GitHub's REST answer for ${restRepository(issue)}#${issue.number} has no sub_issues_summary`);
-  return issue.sub_issues_summary.total;
-}
+const childCountUntilRead = 1;
 
 async function restNode(issue: RestIssue, children?: RestIssue[]): Promise<IssueNode> {
   const path = `repos/${restRepository(issue)}/issues/${issue.number}`;
   const blockers = issue.issue_dependencies_summary?.total_blocked_by === 0 ? [] : await restList<RestIssue>(`${path}/dependencies/blocked_by`);
+  const total = issue.sub_issues_summary?.total;
+  const summaryCount = typeof total === "number" && Number.isInteger(total) && total >= 0 ? total : childCountUntilRead;
   const nodes: IssueNode[] = [];
   for (const child of children ?? []) nodes.push(await restNode(child));
   return {
     number: issue.number, title: issue.title, state: issue.state.toUpperCase(), repository: restRepository(issue),
     assignees: issue.assignees.map((user) => user.login), labels: issue.labels.map((label) => label.name),
     blockedBy: blockers.map((blocker) => ({ number: blocker.number, state: blocker.state.toUpperCase(), repository: restRepository(blocker) })).sort(byIssue),
-    childCount: children?.length ?? restChildCount(issue),
+    childCount: children?.length ?? summaryCount,
     children: nodes,
   };
 }

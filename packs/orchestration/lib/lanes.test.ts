@@ -1,5 +1,4 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { startT3Stub, ToolRefusal, type T3Fixture, type T3Stub } from "../../base/lib/t3/testing.ts";

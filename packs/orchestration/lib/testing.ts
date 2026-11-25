@@ -75,7 +75,7 @@ export function linkedTools(threads: LinkedThreadFixture[]): ToolHandler {
   };
 }
 
-export type GitHubFixture = { issues: IssueNode[]; discussions?: Record<string, Discussion>; graphqlError?: string; pullRequests?: string[]; restPageSize?: number; restWithoutSummaries?: boolean };
+export type GitHubFixture = { issues: IssueNode[]; discussions?: Record<string, Discussion>; graphqlError?: string; pullRequests?: string[]; restPageSize?: number; restWithout?: ("sub_issues_summary" | "issue_dependencies_summary")[] };
 export type CommandResult = { stdout: string; stderr: string; code: number };
 
 export function issueNode(repository: string, number: number, fields: Partial<IssueNode> = {}): IssueNode {
@@ -202,8 +202,9 @@ async function writeRestFixture(bin: string, fixture: GitHubFixture): Promise<vo
     }
   };
   const issue = (...args: Parameters<typeof restIssue>) => {
-    const { sub_issues_summary, issue_dependencies_summary, ...fields } = restIssue(...args);
-    return fixture.restWithoutSummaries ? fields : { ...fields, sub_issues_summary, issue_dependencies_summary };
+    const fields = restIssue(...args);
+    for (const field of fixture.restWithout ?? []) delete fields[field];
+    return fields;
   };
   const write = async (node: IssueNode) => {
     const path = `repos/${node.repository}/issues/${node.number}`;
