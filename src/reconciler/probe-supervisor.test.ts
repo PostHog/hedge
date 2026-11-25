@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { closeSync, existsSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../testing/git.ts";
-import { createPipe, setCloexec, tagEnvVar } from "./probe-supervisor.ts";
+import { createPipe, discoverTargets, setCloexec, tagEnvVar } from "./probe-supervisor.ts";
 import { watchEntries } from "./probe-watchdog.ts";
 
 const temp = tempDirs();
@@ -1143,6 +1143,14 @@ await slow.exited;`;
       if (probePid > 0) try { process.kill(probePid, "SIGKILL"); } catch {}
       await daemonClosed.catch(() => {});
     }
+  });
+
+  test("ignores a non-regular FIFO planted at a spareFile path without blocking discovery", async () => {
+    const dir = temp.make("sup-fifo-spare-");
+    const fifoSpare = join(dir, "planted.spare");
+    mkfifo(fifoSpare);
+    const targets = await discoverTargets(process.pid, crypto.randomUUID(), fifoSpare);
+    expect(targets).toBeDefined();
   });
 
   test("forwards a __proto__ environment variable to supervised probes", async () => {

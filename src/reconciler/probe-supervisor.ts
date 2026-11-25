@@ -1,5 +1,5 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
-import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, writeSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -16,17 +16,29 @@ export function spareFilePath(tag: string): string {
   return join(tmpdir(), `hedge-sup-${uid}`, `${tag}.spare`);
 }
 
+function isOwnedDirectory(dir: string): boolean {
+  try {
+    const info = lstatSync(dir);
+    if (!info.isDirectory() || info.isSymbolicLink()) return false;
+    if (typeof process.getuid === "function" && info.uid !== process.getuid()) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function recordSparedProcess(filePath: string, pids: number[], sids: number[]): void {
   if (!pids.length && !sids.length) return;
   try {
     const dir = dirname(filePath);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const info = lstatSync(dir);
-    if (!info.isDirectory() || info.isSymbolicLink()) return;
-    if (typeof process.getuid === "function" && info.uid !== process.getuid()) return;
-    const flags = constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0);
+    if (!isOwnedDirectory(dir)) return;
+    const flags = constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
     const fd = openSync(filePath, flags, 0o600);
     try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile()) return;
+      if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return;
       const lines: string[] = [];
       for (const pid of new Set(pids)) if (Number.isInteger(pid) && pid > 0) lines.push(`pid:${pid}`);
       for (const sid of new Set(sids)) if (Number.isInteger(sid) && sid > 0) lines.push(`sid:${sid}`);
@@ -42,11 +54,14 @@ export function recordSparedProcess(filePath: string, pids: number[], sids: numb
 function readSpared(filePath: string | undefined): { pids: Set<number>; sids: Set<number> } {
   const pids = new Set<number>();
   const sids = new Set<number>();
-  if (!filePath) return { pids, sids };
+  if (!filePath || !isOwnedDirectory(dirname(filePath))) return { pids, sids };
   let fd: number | undefined;
   try {
-    const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+    const flags = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
     fd = openSync(filePath, flags);
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) return { pids, sids };
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return { pids, sids };
     const raw = readFileSync(fd, "utf8");
     for (const line of raw.split("\n")) {
       if (line.startsWith("pid:")) {
@@ -378,13 +393,13 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string, deadLeade
       for (const row of rows) {
         if (matched.has(row.pid)) continue;
         const isSpared = spared.pids.has(row.pid) || (row.sid !== sessionId && row.sid !== self && spared.sids.has(row.sid));
+        if (isSpared) continue;
         if (row.envTag && envMatchesAnyTag(row.envTag, activeTags)) {
           matched.add(row.pid);
           grew = true;
         } else if (matched.has(row.ppid)) {
           const foreignCompleted = Boolean(
-            tag &&
-              (isSpared || (row.envTag && row.sid !== sessionId && row.sid !== self && !envMatchesAnyTag(row.envTag, activeTags))),
+            tag && row.envTag && row.sid !== sessionId && row.sid !== self && !envMatchesAnyTag(row.envTag, activeTags),
           );
           if (!foreignCompleted) {
             matched.add(row.pid);
@@ -595,15 +610,15 @@ function buildTargetsFromPs(
       }
       for (const row of rows) {
         if (matched.has(row.pid)) continue;
+        const sid = sessionIdDarwin(row.pid);
+        const isSpared = spared.pids.has(row.pid) || (sid !== undefined && sid > 0 && sid !== sessionId && sid !== self && spared.sids.has(sid));
+        if (isSpared) continue;
         if (row.envTag && envMatchesAnyTag(row.envTag, activeTags)) {
           matched.add(row.pid);
           grew = true;
         } else if (matched.has(row.ppid)) {
-          const sid = sessionIdDarwin(row.pid);
-          const isSpared = spared.pids.has(row.pid) || (sid !== undefined && sid > 0 && sid !== sessionId && sid !== self && spared.sids.has(sid));
           const foreignCompleted = Boolean(
-            tag &&
-              (isSpared || (row.envTag && sid !== undefined && sid > 0 && sid !== sessionId && sid !== self && !envMatchesAnyTag(row.envTag, activeTags))),
+            tag && row.envTag && sid !== undefined && sid > 0 && sid !== sessionId && sid !== self && !envMatchesAnyTag(row.envTag, activeTags),
           );
           if (!foreignCompleted) {
             matched.add(row.pid);
@@ -742,7 +757,10 @@ export function discoverTargetsSync(sessionId?: number, tag?: string, deadLeader
         }
       }
       for (const row of rows) {
-        if (!matched.has(row.pid) && row.envTag && envMatchesAnyTag(row.envTag, activeTags)) {
+        if (matched.has(row.pid)) continue;
+        const isSpared = spared.pids.has(row.pid) || (row.sid > 0 && row.sid !== effectiveSessionId && row.sid !== self && spared.sids.has(row.sid));
+        if (isSpared) continue;
+        if (row.envTag && envMatchesAnyTag(row.envTag, activeTags)) {
           matched.add(row.pid);
           grew = true;
         }

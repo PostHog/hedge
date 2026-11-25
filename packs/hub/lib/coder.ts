@@ -385,6 +385,9 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         } catch {}
       }
       closeControl();
+      if (childEnv[spareEnvVar] && !supervisorReaped) {
+        await Promise.race([live.exited, Bun.sleep(2_000)]);
+      }
       if (!supervisorReaped) live.unref();
       if (tagSweep) await tagSweep;
       if (status.error !== undefined) {

@@ -830,45 +830,45 @@ process.exit(0);`;
     expect(rejectResult.unchecked.map((item) => item.id)).toEqual(["reject-abort"]);
 
     const dir = temp.make("home-completed-probe-");
-    const [fastReady, slowReady, slowGone] = [join(dir, "fast-ready"), join(dir, "slow-ready"), join(dir, "slow-gone")];
-    expect(Bun.spawnSync(["mkfifo", fastReady, slowReady, slowGone]).exitCode).toBe(0);
-    const fastDone = Bun.file(fastReady).text();
-    const slowStarted = Bun.file(slowReady).text();
-    const slowClosed = Bun.file(slowGone).text();
+    const applyPath = join(import.meta.dir, "apply.ts");
     const marker = join(dir, "aborted-marker");
-    let fireReal!: () => void;
-    let slowPid = 0;
-    try {
-      const pending = humanStepsLeft(
-        plan({
-          human: [
-            {
-              id: "fast-done",
-              pack: "team",
-              say: "Fast.",
-              probe: ["sh", "-c", 'trap "echo hit > \"$2\"" TERM INT; echo ok > "$1"; exit 0', "fast", fastReady, marker],
-            },
-            {
-              id: "slow-hang",
-              pack: "team",
-              say: "Slow.",
-              probe: ["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "slow", slowGone, slowReady],
-            },
-          ],
-        }),
-        { home: dir, giveUp: new Promise<void>((resolve) => (fireReal = resolve)), graceMs: 0 },
-      );
-      expect((await fastDone).trim()).toBe("ok");
-      slowPid = Number((await slowStarted).trim());
-      expect(slowPid).toBeGreaterThan(0);
-      fireReal();
-      const realResult = await pending;
-      expect(realResult.failing).toEqual([]);
-      expect(realResult.unchecked.map((item) => item.id)).toEqual(["slow-hang"]);
-      expect(await slowClosed).toBe("");
-      expect(existsSync(marker)).toBe(false);
-    } finally {
-      if (slowPid > 0) try { process.kill(slowPid, "SIGKILL"); } catch {}
-    }
+    const script = `import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { humanStepsLeft } from ${JSON.stringify(applyPath)};
+const dir = ${JSON.stringify(dir)};
+const [afterReady, holdGone] = [join(dir, "after-ready"), join(dir, "hold-gone")];
+if (Bun.spawnSync(["mkfifo", afterReady, holdGone]).exitCode !== 0) process.exit(2);
+const afterStarted = Bun.file(afterReady).text();
+const holdsClosed = Bun.file(holdGone).text();
+const marker = ${JSON.stringify(marker)};
+let fireReal;
+const pending = humanStepsLeft({
+  machine: { schema: 1, role: "linux" },
+  os: process.platform === "darwin" ? "darwin" : "linux",
+  ai: "both",
+  packs: [],
+  workflows: [],
+  files: [],
+  config: [],
+  owners: {},
+  jobs: [],
+  human: [
+    { id: "fast-done", pack: "team", say: "Fast.", probe: ["sh", "-c", 'trap "echo hit > \\"$1\\"" TERM INT; exit 0', "fast", marker] },
+    ...Array.from({ length: 7 }, (_, i) => ({ id: "hold-" + i, pack: "team", say: "Hold.", probe: ["sh", "-c", 'exec 3>"$1"; exec sleep 30', "hold-" + i, holdGone] })),
+    { id: "after-fast", pack: "team", say: "After.", probe: ["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "after-fast", holdGone, afterReady] },
+  ],
+  steps: [], checks: [], commands: {}, handlers: {}, models: [], settings: {}, unanswered: [], ask: [], dropped: [],
+}, { home: dir, giveUp: new Promise((resolve) => (fireReal = resolve)), graceMs: 0 });
+const afterPid = Number((await afterStarted).trim());
+if (!(afterPid > 0)) process.exit(3);
+fireReal();
+const realResult = await pending;
+const closed = await holdsClosed;
+const expected = [...Array.from({ length: 7 }, (_, i) => "hold-" + i), "after-fast"];
+const ok = realResult.failing.length === 0 && JSON.stringify(realResult.unchecked.map((s) => s.id)) === JSON.stringify(expected) && closed === "" && !existsSync(marker);
+process.exit(ok ? 0 : 4);`;
+    const child = Bun.spawn([process.execPath, "-e", script], { stdin: "ignore", stdout: "ignore", stderr: "inherit" });
+    expect(await child.exited).toBe(0);
+    expect(existsSync(marker)).toBe(false);
   });
 });
