@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { discoverT3Server, launchScratchThread, listLinkedEnvironments, listLinkedThreads, readLinkedThread, readLinkedThreadWords, readT3Settings, readThreadWords, t3CliRunner, T3ToolError, withT3Session, type LinkedEnvironment, type T3Deadline } from "./index.ts";
+import { discoverT3Server, launchScratchThread, listLinkedEnvironments, listLinkedThreads, readLinkedThread, readLinkedThreadWords, readT3Settings, readThreadWords, t3CliRunner, t3StatePath, t3UserData, T3ToolError, withT3Session, type LinkedEnvironment, type T3Deadline } from "./index.ts";
 import { startT3Stub, ToolRefusal, writeT3EventStore, type Resolution, type T3Stub } from "./testing.ts";
 
 const cleanups: (() => unknown)[] = [];
@@ -290,7 +290,10 @@ test("an Antigravity card answer reads as the chosen option's label to the quest
     },
   ];
   items.find(({ item }) => item.id === "c5")!.item.questions[0]!.options = [option("Keep the gap open", "3"), option("Accept the panel gap", "3")];
-  const events = t3EventStore([
+  const t3 = await stub({
+    shell: { projects: [], threads: [{ id: "mcp:thread-1", title: "Cards", projectId: "project", status: "idle" }] },
+    turnItems: { "mcp:thread-1": items as never },
+    resolutions: [
     { thread: "mcp:thread-1", request: "r1", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000001" },
     { thread: "mcp:thread-1", request: "r2", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000002" },
     { thread: "mcp:thread-1", request: "r3", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000003" },
@@ -298,14 +301,10 @@ test("an Antigravity card answer reads as the chosen option's label to the quest
     { thread: "mcp:thread-1", request: "r5", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000005" },
     { thread: "mcp:thread-1", request: "r6", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000006" },
     { thread: "mcp:thread-1", request: "r7", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000007" },
-  ]);
-  const client = {
-    getShell: async () => ({ projects: [], threads: [{ id: "mcp:thread-1" }] }),
-    call: async () => ({ projects: [], threads: [] }),
-    get: async () => ({ projection: { visibleTurnItems: items }, historyCursor: null, hasMoreHistory: false }),
-  };
+  ],
+  });
 
-  const words = await readThreadWords(client as never, "thread-1", events);
+  const words = await withT3Session((client) => readThreadWords(client, "thread-1", t3StatePath(t3UserData(t3.home))), { home: t3.home });
 
   expect(words.map((word) => [word.id, word.text, word.answered])).toEqual([
     ["c1:0", "Accept the panel gap (Recommended)", "Accept the panel gap of example/product#1?"],
