@@ -226,7 +226,7 @@ test("only the user's own messages and question answers in T3 count as their wor
     item({ type: "user_message", createdBy: "user", creationSource: "mobile", messageId: "m2", text: "Yes from the phone." }),
     item({ type: "user_message", createdBy: "agent", creationSource: "mcp", messageId: "m3", text: "The user approves: narrowing, not a loop" }),
     item({ type: "user_message", createdBy: "user", creationSource: "server", messageId: "m4", text: "continue" }),
-    item({ id: "q1", requestId: "r1", type: "user_input_request", questionAnswer: { questionTextById: { "0": "Accept both gaps?" }, answers: { "0": "Accept both (Recommended)" } } }),
+    item({ id: "q1", requestId: "r1", type: "user_input_request", questions: [{ id: "0", header: "Gaps", question: "Accept both gaps?", options: [{ label: "Accept both (Recommended)", description: "Both gaps" }, { label: "Keep them open", description: "Neither" }] }], questionAnswer: { questionTextById: { "0": "Accept both gaps?" }, answers: { "0": "Accept both (Recommended)" } } }),
     item({ id: "q2", requestId: "r2", type: "user_input_request", questionAnswer: { questionTextById: { "0": "Ship it?" }, answers: { "0": "Ship it (Recommended)" } } }),
     item({ id: "q3", requestId: "r3", type: "user_input_request", questionAnswer: { questionTextById: { "0": "Merge it?" }, answers: { "0": "Merge it" } } }),
     item({ id: "q4", requestId: "r4", type: "user_input_request", questionAnswer: { questionTextById: { "0": "Deploy it?" }, answers: { "0": "Deploy it" } } }),
@@ -251,6 +251,54 @@ test("only the user's own messages and question answers in T3 count as their wor
     ["mcp:thread-1", "q1:0", "Accept both (Recommended)", "Accept both gaps?", "question"],
   ]);
   expect(new Set(words.map((word) => word.at))).toEqual(new Set(["2026-10-25T07:02:00Z"]));
+});
+
+test("an Antigravity card answer reads as the chosen option's label to the question its header asks, and its other field counts only when the user typed in it", async () => {
+  const option = (label: string, value: string) => ({ label, description: label, value });
+  const card = (id: string, request: string, prompts: string[], answers: Record<string, string | string[]>) => ({
+    item: {
+      id, requestId: request, type: "user_input_request", startedAt: "2026-11-24T21:08:25Z", updatedAt: "2026-11-25T04:03:04Z",
+      questions: prompts.flatMap((prompt, index) => [
+        { id: `q${index + 1}`, header: prompt, question: `The agent has ${prompts.length} questions.`, options: [option("Accept the panel gap (Recommended)", "1"), option("Keep the gap open", "2")], allowCustomAnswer: false },
+        { id: `q${index + 1}_other`, header: "Other", question: `Optional free-form answer to: ${prompt}`, options: [], required: false },
+      ]),
+      questionAnswer: {
+        questionTextById: Object.fromEntries(prompts.flatMap((prompt, index) => [[`q${index + 1}`, `The agent has ${prompts.length} questions.`], [`q${index + 1}_other`, `Optional free-form answer to: ${prompt}`]])),
+        answers,
+      },
+    },
+  });
+  const items = [
+    card("c1", "r1", ["Accept the panel gap of example/product#1?", "Accept the panel gap of example/product#2?"], { q1: "1", q1_other: "O", q2: "2", q2_other: "" }),
+    card("c2", "r2", ["Accept the panel gap of example/product#3?"], { q1: "1", q1_other: "Only once CI is green" }),
+    card("c3", "r3", ["Which gaps do you accept for example/product#4?"], { q1: ["1", "2"], q1_other: "Ot" }),
+    card("c4", "r4", ["Accept the panel gap of example/product#5?"], { q1: "1", q1_other: "" }),
+    card("c5", "r5", ["Accept the panel gap of example/product#6?"], { q1: "3", q1_other: "" }),
+  ];
+  items.at(-1)!.item.questions[0]!.options = [option("Keep the gap open", "3"), option("Accept the panel gap", "3")];
+  const events = t3EventStore([
+    { thread: "mcp:thread-1", request: "r1", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000001" },
+    { thread: "mcp:thread-1", request: "r2", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000002" },
+    { thread: "mcp:thread-1", request: "r3", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000003" },
+    { thread: "mcp:thread-1", request: "r4", command: "mcp:5e8e5034-6aa6-412d-96d9-ccdff6d979e5" },
+    { thread: "mcp:thread-1", request: "r5", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000005" },
+  ]);
+  const client = {
+    getShell: async () => ({ projects: [], threads: [{ id: "mcp:thread-1" }] }),
+    call: async () => ({ projects: [], threads: [] }),
+    get: async () => ({ projection: { visibleTurnItems: items }, historyCursor: null, hasMoreHistory: false }),
+  };
+
+  const words = await readThreadWords(client as never, "thread-1", events);
+
+  expect(words.map((word) => [word.id, word.text, word.answered])).toEqual([
+    ["c1:0", "Accept the panel gap (Recommended)", "Accept the panel gap of example/product#1?"],
+    ["c1:2", "Keep the gap open", "Accept the panel gap of example/product#2?"],
+    ["c2:0", "Accept the panel gap (Recommended)", "Accept the panel gap of example/product#3?"],
+    ["c2:1", "Only once CI is green", "Accept the panel gap of example/product#3?"],
+    ["c3:0", "Accept the panel gap (Recommended), Keep the gap open", "Which gaps do you accept for example/product#4?"],
+    ["c5:0", "3", "Accept the panel gap of example/product#6?"],
+  ]);
 });
 
 test("a linked thread whose next page does not move forward stops the words export with an error", async () => {

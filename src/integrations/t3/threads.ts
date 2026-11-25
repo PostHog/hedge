@@ -25,10 +25,11 @@ export type ShellProject = { id: string; title: string; workspaceRoot: string };
 export type ShellSnapshot = { projects: ShellProject[]; threads: ShellThread[] };
 
 type QuestionAnswer = { questionTextById: Record<string, string>; answers: Record<string, string | string[]> };
+type CardQuestion = { id: string; header?: string; question?: string; options?: { label: string; value?: string }[] };
 export type TurnItem = {
   item: {
     id?: string; type: string; createdBy?: string; creationSource?: string; messageId?: string; text?: string;
-    startedAt: string; completedAt?: string | null; updatedAt?: string | null; requestId?: string; questionAnswer?: QuestionAnswer;
+    startedAt: string; completedAt?: string | null; updatedAt?: string | null; requestId?: string; questions?: CardQuestion[]; questionAnswer?: QuestionAnswer;
   };
 };
 type BoundedThread = { projection: { visibleTurnItems: TurnItem[] }; historyCursor: string | null; hasMoreHistory: boolean };
@@ -122,11 +123,38 @@ export async function readThreadWords(client: T3HttpClient, value: string, state
     if (item.type === "assistant_message" && item.text) lastAssistant = item.text;
     if (typedByUser(item) && item.text) words.push({ thread: threadId, id: item.messageId ?? item.id ?? "", text: item.text, answered: lastAssistant.slice(0, answeredCap), at: item.updatedAt ?? item.startedAt, source: "typed" });
     const answer = item.type === "user_input_request" && answeredInClient().has(item.requestId ?? "") ? item.questionAnswer : undefined;
-    Object.entries(answer?.answers ?? {}).forEach(([question, text], index) => words.push({
-      thread: threadId, id: `${item.id}:${index}`, text: [text].flat().join(", "), answered: (answer!.questionTextById[question] ?? question).slice(0, answeredCap), at: item.updatedAt ?? item.startedAt, source: "question",
-    }));
+    Object.entries(answer?.answers ?? {}).forEach(([question, chosen], index) => {
+      const card = cardAnswer(item.questions ?? [], answer!.questionTextById, question, chosen);
+      if (card) words.push({ thread: threadId, id: `${item.id}:${index}`, text: card.text, answered: card.answered.slice(0, answeredCap), at: item.updatedAt ?? item.startedAt, source: "question" });
+    });
   }
   return words;
+}
+
+const otherSuffix = "_other";
+const questionCountPlaceholder = /^The agent has \d+ questions?\.$/u;
+
+function cardAnswer(questions: CardQuestion[], questionTextById: Record<string, string>, id: string, chosen: string | string[]) {
+  const byId = (wanted: string) => questions.find((question) => question.id === wanted);
+  const asked = byId(id);
+  const otherOf = id.endsWith(otherSuffix) && asked && !asked.options?.length ? byId(id.slice(0, -otherSuffix.length)) : undefined;
+  if (otherOf) return typedInOtherField(asked!, chosen) ? { text: [chosen].flat().join(", "), answered: promptOf(otherOf, questionTextById[otherOf.id]) } : undefined;
+  const labels = [chosen].flat().map((value) => onlyLabelOf(asked?.options ?? [], value));
+  return { text: labels.join(", "), answered: asked ? promptOf(asked, questionTextById[id]) : questionTextById[id] ?? id };
+}
+
+function onlyLabelOf(options: NonNullable<CardQuestion["options"]>, value: string) {
+  const matching = options.filter((option) => option.value === value);
+  return matching.length === 1 ? matching[0]!.label : value;
+}
+
+function promptOf(question: CardQuestion, text = question.question ?? question.id) {
+  return questionCountPlaceholder.test(text) && question.header ? question.header : text;
+}
+
+function typedInOtherField(field: CardQuestion, chosen: string | string[]) {
+  const typed = [chosen].flat().join(", ").trim().toLowerCase();
+  return typed !== "" && !(field.header ?? "").toLowerCase().startsWith(typed);
 }
 
 export async function readLinkedThreadWords(client: Pick<T3HttpClient, "callTool">, environmentId: string, threadId: string): Promise<ThreadWord[]> {
