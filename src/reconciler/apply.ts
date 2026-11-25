@@ -252,21 +252,55 @@ export async function check(plan: Plan, options: { home: string; adapters?: Adap
 
 export type HumanStepsLeft = { failing: Array<Owned<HumanStep>>; unchecked: Array<Owned<HumanStep>> };
 
-export async function humanStepsLeft(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void> }): Promise<HumanStepsLeft> {
+const probeConcurrency = 8;
+const supervisorSpawnFailed = -1;
+
+export async function humanStepsLeft(
+  plan: Plan,
+  options: { home: string; run?: Runner; giveUp: Promise<void>; supervisor?: string; onReported?: (step: Owned<HumanStep>, code: number) => void },
+): Promise<HumanStepsLeft> {
   const reported = new WeakMap<AbortSignal, number>();
-  const run = viaEngine(plan, options.run ?? spawnRunner(options.home, plan.machine.profileDir, (sig, code) => reported.set(sig, code)));
-  const outcome = (step: Owned<HumanStep>) => {
+  const stepBySignal = new WeakMap<AbortSignal, Owned<HumanStep>>();
+  const run = viaEngine(
+    plan,
+    options.run ??
+      spawnRunner(
+        options.home,
+        plan.machine.profileDir,
+        (sig, code) => {
+          reported.set(sig, code);
+          const step = stepBySignal.get(sig);
+          if (step) options.onReported?.(step, code);
+        },
+        options.supervisor,
+      ),
+  );
+  let timedOut = false;
+  void options.giveUp.then(() => {
+    timedOut = true;
+  });
+  const outcomes = new Array<"passes" | "fails" | "unchecked">(plan.human.length).fill("unchecked");
+  let next = 0;
+  const checkOne = async (index: number) => {
+    if (timedOut) return;
+    const step = plan.human[index]!;
     const deadline = new AbortController();
-    const result = run(step.probe, {}, deadline.signal).then((code) => (code === 0 ? ("passes" as const) : ("fails" as const)));
+    stepBySignal.set(deadline.signal, step);
+    const result = run(step.probe, {}, deadline.signal).then((code) =>
+      code === supervisorSpawnFailed ? ("unchecked" as const) : code === 0 ? ("passes" as const) : ("fails" as const),
+    );
     const late = options.giveUp.then(() => {
       const code = reported.get(deadline.signal);
-      if (code !== undefined) return code === 0 ? ("passes" as const) : ("fails" as const);
       deadline.abort();
+      if (code !== undefined) return code === 0 ? ("passes" as const) : ("fails" as const);
       return "unchecked" as const;
     });
-    return Promise.race([result, late]);
+    outcomes[index] = await Promise.race([result, late]);
   };
-  const outcomes = await Promise.all(plan.human.map(outcome));
+  const workers = Array.from({ length: Math.min(probeConcurrency, plan.human.length) }, async () => {
+    while (next < plan.human.length && !timedOut) await checkOne(next++);
+  });
+  await Promise.all(workers);
   return { failing: plan.human.filter((_, index) => outcomes[index] === "fails"), unchecked: plan.human.filter((_, index) => outcomes[index] === "unchecked") };
 }
 
@@ -447,7 +481,7 @@ function viaEngine(plan: Plan, run: Runner): Runner {
 const undoRunner = (run: Runner, step: LedgerStep): Runner => (command) => run(command, { [undoVariable]: ledgerKey(step) });
 
 /** Runs commands with the plan's home directory as HOME, so a step installs into the home it applies to, and with the plan's profile, so a nested hedge reads the profile this run applies or checks. */
-function spawnRunner(home: string, profileDir: string | undefined, onResult?: (signal: AbortSignal, code: number) => void): Runner {
+function spawnRunner(home: string, profileDir: string | undefined, onResult?: (signal: AbortSignal, code: number) => void, supervisor = probeSupervisor): Runner {
   return async (command, env = {}, signal) => {
     const childEnv = withLegacyNames({ ...Bun.env, HOME: home, ...(profileDir ? { HEDGE_PROFILE_DIR: profileDir } : {}), ...env });
     if (!signal) {
@@ -457,7 +491,7 @@ function spawnRunner(home: string, profileDir: string | undefined, onResult?: (s
         return 127;
       }
     }
-    return await runDetached(command, childEnv, signal, onResult);
+    return await runDetached(command, childEnv, signal, onResult, supervisor);
   };
 }
 
@@ -493,7 +527,7 @@ async function readSupervisorResult(stdout: ReadableStream<Uint8Array>, onFirstC
   return { code, cleanup };
 }
 
-async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal, onResult?: (signal: AbortSignal, code: number) => void) {
+async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal, onResult?: (signal: AbortSignal, code: number) => void, supervisor = probeSupervisor) {
   if (!command.length || (command[0]!.includes("/") && !existsSync(command[0]!))) return 127;
   let child: { pid: number; exited: Promise<number>; stdout: ReadableStream<Uint8Array>; unref(): void } | undefined;
   let stopSignal: NodeJS.Signals | undefined;
@@ -524,7 +558,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
     return 124;
   }
   try {
-    child = Bun.spawn(bunScript(probeSupervisor), {
+    child = Bun.spawn(bunScript(supervisor), {
       stdin: new TextEncoder().encode(JSON.stringify(command)),
       stdout: "pipe",
       stderr: "ignore",
@@ -540,7 +574,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
     const exited = await child.exited;
     return status.code ?? exited;
   } catch {
-    return 127;
+    return supervisorSpawnFailed;
   } finally {
     reaped = true;
     release();

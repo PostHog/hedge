@@ -5,7 +5,7 @@ import type { Plan } from "../pack/types.ts";
 import { tempDirs } from "../testing/git.ts";
 import { providerConfigAdapter, type CommandRunner } from "../adapters/provider-config/adapter.ts";
 import { keyHelper } from "../adapters/provider-config/proxy-route.ts";
-import { apply, check, filesAdapter, type Adapter } from "./apply.ts";
+import { apply, check, filesAdapter, humanStepsLeft, type Adapter } from "./apply.ts";
 import { changeLedger, readLedger } from "./ledger.ts";
 
 const temp = tempDirs();
@@ -638,5 +638,49 @@ describe("a leading hedge in a pack's commands", () => {
     const { calls, run } = recorder();
     await check(plan({ ...team, engineRoot: undefined, checks: [{ id: "gh", pack: "team", run: ["gh", "hedge"], say: "No gh." }] }), { home: temp.make("home-"), run });
     expect(calls).toEqual(["gh hedge", "hedge whoami", "hedge status", "hedge whoami"]);
+  });
+});
+
+describe("humanStepsLeft", () => {
+  test("resolves a reported failing probe at the deadline even while the supervisor is still stalled, and aborts the supervisor", async () => {
+    const home = temp.make("home-");
+    const gone = join(home, "sup-gone");
+    expect(Bun.spawnSync(["mkfifo", gone]).exitCode).toBe(0);
+    const stalledSupervisor = join(home, "stalled-supervisor.ts");
+    writeFileSync(
+      stalledSupervisor,
+      `import { openSync, writeSync } from "node:fs";
+await Bun.stdin.text();
+openSync(${JSON.stringify(gone)}, "w");
+process.on("SIGTERM", () => process.exit(143));
+writeSync(1, "7\\n");
+await new Promise(() => {});
+`,
+    );
+    const goneProc = Bun.spawn(["cat", gone], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    const supervisorClosed = new Response(goneProc.stdout).text();
+    let fireDeadline!: () => void;
+    const giveUp = new Promise<void>((resolve) => {
+      fireDeadline = resolve;
+    });
+    try {
+      const result = await humanStepsLeft(
+        plan({ human: [{ id: "sign-in", pack: "team", say: "Sign in.", probe: [Bun.which("true")!] }] }),
+        { home, giveUp, supervisor: stalledSupervisor, onReported: () => fireDeadline() },
+      );
+      expect(result.failing.map((step) => step.id)).toEqual(["sign-in"]);
+      expect(result.unchecked).toEqual([]);
+      expect(await supervisorClosed).toBe("");
+    } finally {
+      goneProc.kill("SIGKILL");
+    }
+  });
+
+  test("runs 35 passing probes cleanly under bounded concurrency", async () => {
+    const home = temp.make("home-");
+    const trueBin = Bun.which("true")!;
+    const human = Array.from({ length: 35 }, (_, idx) => ({ id: `step-${idx}`, pack: "team", say: `Step ${idx}.`, probe: [trueBin] }));
+    const result = await humanStepsLeft(plan({ human }), { home, giveUp: new Promise<void>(() => {}) });
+    expect(result).toEqual({ failing: [], unchecked: [] });
   });
 });

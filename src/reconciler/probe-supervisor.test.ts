@@ -35,7 +35,6 @@ async function fifoWrite(path: string, content: string): Promise<void> {
 
 function spawnControlledSupervisor(command: string[], options?: { scanGate?: string }) {
   const harness = `
-import { readFileSync } from "node:fs";
 import { hasOtherGroupMembers, supervise } from ${JSON.stringify(supervisorPath)};
 const scanGate = ${JSON.stringify(options?.scanGate ?? "")};
 const timers = [];
@@ -66,9 +65,12 @@ await supervise(${JSON.stringify(command)}, {
   killGroup: (signal) => {
     try { process.kill(-process.pid, signal); } catch {}
   },
-  hasOtherMembers: () => {
-    if (scanGate) readFileSync(scanGate, "utf8");
-    return hasOtherGroupMembers(process.pid);
+  hasOtherMembers: async () => {
+    if (scanGate) {
+      const gate = Bun.spawn(["cat", scanGate], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+      await gate.exited;
+    }
+    return await hasOtherGroupMembers(process.pid);
   },
   timer: (_ms, fire) => {
     const entry = { fire, cancelled: false };
@@ -386,7 +388,7 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
     }
   });
 
-  test("publishes the probe exit status while descendant scanning is still blocked, then exits cleanly once no descendants remain", async () => {
+  test("publishes the probe exit status while descendant scanning is still blocked, exits cleanly once none remain, and bounds stalled scans via the cleanup timer", async () => {
     const dir = temp.make("sup-scan-");
     const scanGate = join(dir, "scan-gate");
     mkfifo(scanGate);
@@ -397,6 +399,18 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
       expect(await sup.proc.exited).toBe(7);
     } finally {
       sup.cleanup();
+    }
+
+    const dir2 = temp.make("sup-stalled-scan-");
+    const stalledGate = join(dir2, "scan-gate");
+    mkfifo(stalledGate);
+    const stalled = spawnControlledSupervisor(["sh", "-c", "exit 7"], { scanGate: stalledGate });
+    try {
+      expect(await stalled.waitResult()).toBe(7);
+      await stalled.advance();
+      expect(await stalled.proc.exited).not.toBe(0);
+    } finally {
+      stalled.cleanup();
     }
   });
 });

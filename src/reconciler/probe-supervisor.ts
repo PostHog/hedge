@@ -9,7 +9,7 @@ export const interruptGraceMs = 300;
 export type SupervisorHost = {
   spawn: (command: string[]) => { exited: Promise<number> };
   killGroup: (signal: NodeJS.Signals) => void;
-  hasOtherMembers: () => boolean;
+  hasOtherMembers: () => Promise<boolean>;
   timer: Timer;
   onSignal: (signal: StopSignal, handler: () => void) => void;
   reportResult: (code: number) => void;
@@ -22,7 +22,7 @@ const realTimer: Timer = (ms, fire) => {
   return () => clearTimeout(handle);
 };
 
-export function hasOtherGroupMembers(pgid = process.pid): boolean {
+export async function hasOtherGroupMembers(pgid = process.pid): Promise<boolean> {
   if (process.platform === "linux") {
     try {
       for (const entry of readdirSync("/proc")) {
@@ -47,9 +47,16 @@ export function hasOtherGroupMembers(pgid = process.pid): boolean {
   }
   try {
     const ps = existsSync("/bin/ps") ? "/bin/ps" : "ps";
-    const proc = Bun.spawnSync([ps, "-axo", "pid=,pgid=,ppid=,stat="], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-    if (proc.exitCode !== 0) return false;
-    for (const line of proc.stdout.toString("utf8").split("\n")) {
+    const proc = Bun.spawn([ps, "-axo", "pid=,pgid=,ppid=,stat="], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+      timeout: graceMs,
+      killSignal: "SIGKILL",
+    });
+    const [code, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
+    if (code !== 0 || proc.signalCode) return true;
+    for (const line of stdout.split("\n")) {
       const parts = line.trim().split(/\s+/);
       if (parts.length < 4) continue;
       const pid = Number(parts[0]);
@@ -60,7 +67,7 @@ export function hasOtherGroupMembers(pgid = process.pid): boolean {
     }
     return false;
   } catch {
-    return false;
+    return true;
   }
 }
 
@@ -131,7 +138,13 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
       if (forwarded.has(sig)) return;
       if (!stop) stop = sig;
       if (!target) return exit(128);
-      if (leaderDone) return;
+      if (leaderDone) {
+        if (sig === "SIGTERM" || sig === "SIGHUP") {
+          armHard();
+          forwardGroup(sig);
+        }
+        return;
+      }
       arm(sig);
       forwardGroup(sig);
     });
@@ -154,12 +167,14 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
   if (finished) return settled;
   if (!stop) {
     host.reportResult(code);
-    if (!host.hasOtherMembers()) {
+    armHard();
+    const hasPeers = await host.hasOtherMembers();
+    if (finished) return settled;
+    if (!hasPeers) {
       exit(code);
       return settled;
     }
     host.reportCleanup();
-    armHard();
     forwardGroup("SIGTERM");
   }
   return settled;
