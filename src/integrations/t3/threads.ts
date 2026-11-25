@@ -146,16 +146,17 @@ function antigravityAnswer(questions: CardQuestion[], answer: QuestionAnswer, id
   const picked = id.slice(0, -otherSuffix.length);
   if (asked && isOtherField(asked) && byId(picked)) {
     const beside = typed(answer.answers[picked] ?? "") !== "";
-    return beside && !typedInOtherField(chosen) ? undefined : { text: [chosen].flat().join(", "), answered: cutAtWord(answer.questionTextById[id] ?? asked.question!, otherPrompt.length + answeredCap) };
+    return beside && !typedInOtherField(chosen) ? undefined : { text: [chosen].flat().join(", "), answered: cutOutsideNumber(answer.questionTextById[id] ?? asked.question!, otherPrompt.length + answeredCap) };
   }
   if (other && isOtherField(other) && typedInOtherField(answer.answers[other.id] ?? "")) return undefined;
   if (!asked) return cardAnswer(questions, answer, id, chosen);
   const labels = [chosen].flat().map((value) => onlyLabelOf(asked.options ?? [], value));
-  return { text: labels.join(", "), answered: cutAtWord(promptOf(asked, answer.questionTextById[id]), answeredCap) };
+  return { text: labels.join(", "), answered: cutOutsideNumber(promptOf(asked, answer.questionTextById[id]), answeredCap) };
 }
 
-function cutAtWord(text: string, cap: number) {
-  return text.length <= cap || /\s/u.test(text[cap]!) ? text.slice(0, cap) : text.slice(0, cap).replace(/\s*\S*$/u, "");
+function cutOutsideNumber(text: string, cap: number) {
+  const cut = text.slice(0, cap);
+  return /\d/u.test(text[cap] ?? "") ? cut.replace(/\d+$/u, "") : cut;
 }
 
 function isOtherField(question: CardQuestion) {
