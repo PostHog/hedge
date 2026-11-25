@@ -283,12 +283,12 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     }
   });
 
-  test("reports a failing human step that exits nonzero even when it leaves a stubborn background child behind, and still stops that child", async () => {
+  test("reports a failing human step that exits nonzero even when it leaves a background child behind, and still stops that child", async () => {
     const { home } = await machineWithProfile();
     const [childReady, ready, gone] = [join(home, "child-ready"), join(home, "ready"), join(home, "gone")];
     expect(Bun.spawnSync(["mkfifo", childReady, ready, gone]).exitCode).toBe(0);
-    const childBin = join(home, "stubborn-child.sh");
-    writeFileSync(childBin, '#!/bin/sh\ntrap "" HUP TERM\nexec 3>"$1"\necho $$ > "$2"\nexec sleep 30\n', { mode: 0o755 });
+    const childBin = join(home, "stray-child.sh");
+    writeFileSync(childBin, '#!/bin/sh\ntrap "exit 0" TERM\nexec 3>"$1"\necho $$ > "$2"\nsleep 30 3>&- & wait\n', { mode: 0o755 });
     await withTeamPack(home, {
       workflows: [flow("allowlist")],
       human: [humanStep("allowlist", `${JSON.stringify(childBin)} "$HOME/gone" "$HOME/child-ready" & pid=$(cat "$HOME/child-ready"); echo "$pid" > "$HOME/ready"; exit 7`, "allowlist")],

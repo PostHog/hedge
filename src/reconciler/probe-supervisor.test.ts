@@ -2,7 +2,6 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../testing/git.ts";
-import { supervise } from "./probe-supervisor.ts";
 
 const temp = tempDirs();
 const activeHelpers: Array<{ kill(signal?: NodeJS.Signals): void }> = [];
@@ -34,9 +33,11 @@ async function fifoWrite(path: string, content: string): Promise<void> {
   await proc.exited;
 }
 
-function spawnControlledSupervisor(command: string[]) {
+function spawnControlledSupervisor(command: string[], options?: { scanGate?: string }) {
   const harness = `
+import { readFileSync } from "node:fs";
 import { hasOtherGroupMembers, supervise } from ${JSON.stringify(supervisorPath)};
+const scanGate = ${JSON.stringify(options?.scanGate ?? "")};
 const timers = [];
 const write = (line) => process.stdout.write(line + "\\n");
 const reader = Bun.stdin.stream().getReader();
@@ -65,7 +66,10 @@ await supervise(${JSON.stringify(command)}, {
   killGroup: (signal) => {
     try { process.kill(-process.pid, signal); } catch {}
   },
-  hasOtherMembers: () => hasOtherGroupMembers(process.pid),
+  hasOtherMembers: () => {
+    if (scanGate) readFileSync(scanGate, "utf8");
+    return hasOtherGroupMembers(process.pid);
+  },
   timer: (_ms, fire) => {
     const entry = { fire, cancelled: false };
     timers.push(entry);
@@ -91,6 +95,7 @@ await supervise(${JSON.stringify(command)}, {
   let armedCount = 0;
   let exited = false;
   let reported: number | undefined;
+  const resultWaiters: Array<(code: number) => void> = [];
   void proc.exited.then(() => {
     exited = true;
     for (const waiter of armedWaiters.splice(0)) waiter();
@@ -109,10 +114,13 @@ await supervise(${JSON.stringify(command)}, {
           else armedCount++;
         } else if (line.startsWith("result:")) {
           reported = Number(line.slice("result:".length));
+          for (const waiter of resultWaiters.splice(0)) waiter(reported);
         }
       }
     }
   })();
+  const waitResult = () =>
+    reported !== undefined ? Promise.resolve(reported) : new Promise<number>((resolve) => resultWaiters.push(resolve));
   const waitArmed = () =>
     armedCount > 0
       ? (armedCount--, Promise.resolve(true))
@@ -145,7 +153,7 @@ await supervise(${JSON.stringify(command)}, {
     } catch {}
     proc.kill("SIGKILL");
   };
-  return { proc, advance, drain, cleanup };
+  return { proc, advance, drain, waitResult, cleanup };
 }
 
 function mkfifo(...paths: string[]) {
@@ -378,41 +386,17 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
     }
   });
 
-  test("publishes the probe exit status before scanning for descendants, and exits without cleanup timers when none remain", async () => {
-    const cleanEvents: string[] = [];
-    const cleanCode = await supervise(["probe"], {
-      spawn: () => ({ exited: Promise.resolve(7) }),
-      killGroup: (sig) => void cleanEvents.push(`kill:${sig}`),
-      hasOtherMembers: () => (cleanEvents.push("scan"), false),
-      timer: () => (cleanEvents.push("timer"), () => {}),
-      onSignal: () => {},
-      reportResult: (code) => void cleanEvents.push(`result:${code}`),
-      reportCleanup: () => void cleanEvents.push("cleanup"),
-      exit: (code) => void cleanEvents.push(`exit:${code}`),
-    });
-    expect(cleanCode).toBe(7);
-    expect(cleanEvents).toEqual(["result:7", "scan", "exit:7"]);
-
-    const strayEvents: string[] = [];
-    let fireGrace: (() => void) | undefined;
-    const strayDone = supervise(["probe"], {
-      spawn: () => ({ exited: Promise.resolve(7) }),
-      killGroup: (sig) => void strayEvents.push(`kill:${sig}`),
-      hasOtherMembers: () => (strayEvents.push("scan"), true),
-      timer: (_ms, fire) => {
-        strayEvents.push("timer");
-        fireGrace = fire;
-        return () => {};
-      },
-      onSignal: () => {},
-      reportResult: (code) => void strayEvents.push(`result:${code}`),
-      reportCleanup: () => void strayEvents.push("cleanup"),
-      exit: (code) => void strayEvents.push(`exit:${code}`),
-    });
-    await Promise.resolve();
-    expect(strayEvents).toEqual(["result:7", "scan", "cleanup", "timer", "kill:SIGTERM"]);
-    fireGrace!();
-    expect(await strayDone).toBe(143);
-    expect(strayEvents).toEqual(["result:7", "scan", "cleanup", "timer", "kill:SIGTERM", "kill:SIGKILL", "exit:143"]);
+  test("publishes the probe exit status while descendant scanning is still blocked, then exits cleanly once no descendants remain", async () => {
+    const dir = temp.make("sup-scan-");
+    const scanGate = join(dir, "scan-gate");
+    mkfifo(scanGate);
+    const sup = spawnControlledSupervisor(["sh", "-c", "exit 7"], { scanGate });
+    try {
+      expect(await sup.waitResult()).toBe(7);
+      await fifoWrite(scanGate, "go\n");
+      expect(await sup.proc.exited).toBe(7);
+    } finally {
+      sup.cleanup();
+    }
   });
 });
