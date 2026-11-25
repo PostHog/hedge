@@ -249,9 +249,11 @@ describe("hedge refresh", () => {
     expect(await box.hedge("refresh")).toBe(0);
     expect(box.read(guide)).toBe("Rules v3.\n");
 
-    writeFileSync(join(box.cache, "team/.git/hedge-source.json"), "{}");
-    box.pin("release");
-    expect(await box.hedge("refresh")).toBe(0);
-    expect(box.read(guide)).toBe("Rules v3.\n");
+    const bad = await machine("main");
+    const head = await spawnGit(bad.repo, "rev-parse", "main");
+    writeFileSync(join(bad.cache, "team/.git/hedge-source.json"), JSON.stringify({ repo: bad.repo, commit: head, ref: 42 }));
+    await v2(bad.repo);
+    expect(await bad.hedge("refresh")).toBe(0);
+    expect(bad.read(guide)).toBe("Rules v1.\n");
   });
 });

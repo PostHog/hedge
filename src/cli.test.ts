@@ -424,6 +424,11 @@ describe("hedge doctor and pack sources", () => {
       expect((await hedge(["doctor"], home)).output).toContain("Note: The pack source external is not pinned to a commit SHA.");
     });
   }
+
+  test("keeps non-GitHub repository paths case-sensitive when checking the profile's own repository", async () => {
+    const home = await applied(() => ({ name: "external", repo: "/tmp/team", ref: "main" }), "/tmp/Team");
+    expect((await hedge(["doctor"], home)).output).toContain("Note: The pack source external is not pinned to a commit SHA.");
+  });
 });
 
 describe("a profile source that would run code it does not ship", () => {

@@ -175,11 +175,13 @@ async function saveGood(dir: string, good: Good) {
 
 const commitSha = /^[0-9a-f]{40}$/i;
 
-const repoKey = (repo: string) =>
-  repoUrl(repo)
-    .replace(/^(?:[a-z][a-z0-9+.-]*:\/\/(?:[^/@\s]+@)?(?:(?:ssh|www)\.)?github\.com(?::\d+)?\/|(?:[^/@:\s]+@)?(?:(?:ssh|www)\.)?github\.com:)/i, "")
-    .replace(/\.git$/, "")
-    .toLowerCase();
+const githubRepoPattern = /^(?:[a-z][a-z0-9+.-]*:\/\/(?:[^/@\s]+@)?(?:(?:ssh|www)\.)?github\.com(?::\d+)?\/|(?:[^/@:\s]+@)?(?:(?:ssh|www)\.)?github\.com:)(.+)$/i;
+
+const repoKey = (repo: string) => {
+  const url = repoUrl(repo).replace(/\.git$/, "");
+  const github = url.match(githubRepoPattern)?.[1];
+  return github ? github.toLowerCase() : url;
+};
 
 export async function unpinnedSources(refs: SourceRef[], profileDir: string): Promise<Finding[]> {
   const unpinned = refs.filter((ref) => !commitSha.test(ref.ref));

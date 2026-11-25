@@ -169,7 +169,16 @@ async function triage(args: string[], options: CliOptions) {
     return lines;
   };
   try {
-    return await triageCommand(args, { home: options.home, engineRoot: options.engineRoot, platform: options.platform, terminal: options.terminal ?? { ...ttyTerminal(), print: options.print }, capture: options.capture ?? spawnRunner, hostname: (options.hostname ?? hostname)(), doctor });
+    return await triageCommand(args, {
+      home: options.home,
+      engineRoot: options.engineRoot,
+      platform: options.platform,
+      terminal: options.terminal ?? { ...ttyTerminal(), print: options.print },
+      capture: options.capture ?? spawnRunner,
+      hostname: (options.hostname ?? hostname)(),
+      profileDir: options.env?.HEDGE_PROFILE_DIR || options.env?.FLEET_PROFILE_DIR,
+      doctor,
+    });
   } catch (error) {
     if (!(error instanceof FlagError)) throw error;
     options.print(`hedge triage: ${error.message}`);
