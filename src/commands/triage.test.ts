@@ -912,8 +912,18 @@ describe("hedge triage", () => {
     expect(bpTitle).not.toContain("tok1234567890SECRET");
     expect(bpBody).not.toContain("tok1234567890SECRET");
 
-    const skKnown = [{ text: "private-owner/SK-abcdefghijklmnop1234", as: "<private source>" }];
+    const skKnown = [
+      { text: "private-owner/SK-abcdefghijklmnop1234", as: "<private source>" },
+      { text: "private-owner/EYJ12345678.12345678.12345678", as: "<private source>" },
+      { text: "private-owner/SK-aaaaaaaaaaaaaaaa/SK-bbbbbbbbbbbbbbbb", as: "<private source>" },
+    ];
     expect(redact("failed to clone https://github.com/private-owner/sk-abcdefghijklmnop1234.git", schemeHome, skKnown)).toBe(
+      "failed to clone https://github.com/<private source>.git",
+    );
+    expect(redact("failed to clone https://github.com/private-owner/eyJ12345678.12345678.12345678.git", schemeHome, skKnown)).toBe(
+      "failed to clone https://github.com/<private source>.git",
+    );
+    expect(redact("failed to clone https://github.com/private-owner/sk-aaaaaaaaaaaaaaaa/SK-bbbbbbbbbbbbbbbb.git", schemeHome, skKnown)).toBe(
       "failed to clone https://github.com/<private source>.git",
     );
   });

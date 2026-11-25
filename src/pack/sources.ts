@@ -103,9 +103,10 @@ async function resolvedRepoUrl(dir: string, repo: string) {
 }
 
 const gitHash = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+const stripTrailingColon = (ref: string) => (ref.endsWith(":") ? ref.slice(0, -1) : ref);
 const stripSourceRefspec = (ref: string) => {
   const noPlus = ref.startsWith("+") ? ref.slice(1) : ref;
-  return noPlus.endsWith(":") ? noPlus.slice(0, -1) : noPlus;
+  return stripTrailingColon(noPlus);
 };
 const isInvalidRef = (ref: string) => {
   if (!ref || ref.startsWith("-") || ref.startsWith("^") || /[\0\r\n]/.test(ref)) return true;
@@ -668,7 +669,12 @@ async function checkout(dir: string, repo: string, ref: string, savedFetchHead: 
   await mkdir(dir, { recursive: true });
   if (!existsSync(join(dir, ".git"))) await git(dir, "init", "-q");
   const effectiveRepo = await resolvedRepoUrl(dir, repo);
-  const fetched = await fetchExact(dir, repo, ref, true);
+  const hashLen = await repoHashLength(dir);
+  const existingPins = isCommitPin(stripSourceRefspec(ref), hashLen)
+    ? undefined
+    : await git(dir, "for-each-ref", "--count=1", `refs/hedge/pins/${repoDigest(effectiveRepo)}/`);
+  const shallow = !(existingPins?.ok && existingPins.stdout !== "");
+  const fetched = await fetchExact(dir, repo, ref, shallow);
   if (!fetched.ok || !fetched.oid) {
     await restoreFetchHead(dir, savedFetchHead);
     return { effectiveRepo, error: fetched.stderr || "could not fetch commit" };
@@ -719,7 +725,7 @@ export function sourceCache(home: string) {
   return join(home, ".local", "share", "hedge", "sources");
 }
 
-const branchName = (ref: unknown) => (typeof ref === "string" ? stripSourceRefspec(ref).replace(/^refs\/heads\//, "") : undefined);
+const branchName = (ref: unknown) => (typeof ref === "string" ? stripTrailingColon(ref).replace(/^refs\/heads\//, "") : undefined);
 
 async function fetchHeadIsBranch(dir: string, ref: string, expectedOid?: string): Promise<boolean | undefined> {
   const branch = branchName(ref);
@@ -795,7 +801,7 @@ export async function advanceSource(ref: SourceRef, cacheRoot: string, from: str
 
 async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimitMs: number): Promise<Advance> {
   const repo = repoUrl(ref.repo);
-  const branch = stripSourceRefspec(ref.ref).replace(/^refs\/heads\//, "");
+  const branch = stripTrailingColon(ref.ref).replace(/^refs\/heads\//, "");
   const head = `refs/heads/${branch}`;
   if (!branch || isInvalidRef(head)) return { state: "failed", say: `invalid ref ${JSON.stringify(ref.ref)} for ${ref.repo}` };
   const effectiveRepo = await resolvedRepoUrl(dir, repo);

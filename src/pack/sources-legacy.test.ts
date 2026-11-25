@@ -834,6 +834,23 @@ throw new Error("broken pack");
     mkdirSync(join(badCommitDir, ".git"), { recursive: true });
     writeFileSync(join(badCommitDir, ".git", "hedge-source.json"), JSON.stringify({ repo: colonRepo, ref: "main", commit: 42, branch: true }) + "\n");
     expect(await followsBranch({ name: "team", repo: colonRepo, ref: "main" }, badCommitCache)).toBe(false);
+
+    const midRepo = await packRepo("Branch c1.");
+    const c1 = await spawnGit(midRepo, "rev-parse", "HEAD");
+    const midCache = temp.make("cache-mid-reapply-");
+    expect("error" in (await fetchSource({ name: "team", repo: midRepo, ref: "main" }, midCache))).toBe(false);
+    writePack(midRepo, "Branch c2.");
+    await spawnGit(midRepo, "commit", "-q", "-am", "c2");
+    const c2 = await spawnGit(midRepo, "rev-parse", "HEAD");
+    writePack(midRepo, "Branch c3.");
+    await spawnGit(midRepo, "commit", "-q", "-am", "c3");
+    expect((await advanceSource({ name: "team", repo: midRepo, ref: "main" }, midCache, c1)).state).toBe("moved");
+    expect("error" in (await fetchSource({ name: "team", repo: midRepo, ref: "main" }, midCache))).toBe(false);
+    rmSync(midRepo, { recursive: true, force: true });
+    const midOffline = await fetchSource({ name: "team", repo: midRepo, ref: c2 }, midCache);
+    if ("error" in midOffline) throw new Error(midOffline.error);
+    expect(midOffline.packs[0]?.manifest.summary).toBe("Branch c2.");
+    expect(midOffline.stale).toBeUndefined();
   });
 });
 

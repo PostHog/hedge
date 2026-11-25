@@ -30,6 +30,10 @@ const standardRules: Rule[] = [
 
 const randomRule: Rule = [/[A-Za-z0-9+/_-]{32,}={0,2}/g, (text) => (looksRandom(text) ? "<secret>" : text)];
 const fixedSecretRules: Rule[] = [...secretRules.slice(0, 6), secretRules[7]!];
+const ciFixedSecretRules: Rule[] = fixedSecretRules.map(([pattern, replacement]) => [
+  new RegExp(pattern.source, pattern.flags.includes("i") ? pattern.flags : `${pattern.flags}i`),
+  replacement,
+]);
 const contextualSecretRules: Rule[] = secretRules.slice(8);
 const allRules: Rule[] = [...secretRules, ...standardRules, randomRule];
 const preRandomRules: Rule[] = [...contextualSecretRules, ...standardRules];
@@ -110,13 +114,14 @@ function foldCase(text: string): string {
   return out;
 }
 
-type CiEntry = { text: string; as: string; owner: KnownName; ambiguous?: boolean; regex?: RegExp };
+type CiEntry = { text: string; as: string; owner: KnownName; ambiguous?: boolean; regex?: RegExp; pattern?: string };
 
 type CompiledMatcher = {
   ciRegexes: RegExp[];
   ciMaxLen: number;
   ciMap: Map<string, CiEntry>;
   ciEntries: CiEntry[];
+  ciFlexEntries: CiEntry[];
   csRegexes: RegExp[];
   csMaxLen: number;
   csMap: Map<string, { as: string; owner: KnownName }>;
@@ -170,17 +175,46 @@ function batchTransform(inputs: string[], transform: (value: string) => string):
   return out;
 }
 
+function flexSecretPattern(text: string): { pattern: string; maxLen: number } | undefined {
+  const hits: Array<{ start: number; end: number; raw: string; masked: string }> = [];
+  for (const [regex, replacement] of ciFixedSecretRules) {
+    regex.lastIndex = 0;
+    for (let match = regex.exec(text); match !== null; match = regex.exec(text)) {
+      if (!match[0].length) {
+        regex.lastIndex++;
+        continue;
+      }
+      const single = new RegExp(regex.source, regex.flags.replace("g", ""));
+      const masked = match[0].replace(single, replacement as string);
+      if (masked !== match[0]) {
+        hits.push({ start: match.index, end: match.index + match[0].length, raw: match[0], masked });
+      }
+    }
+  }
+  if (!hits.length) return undefined;
+  hits.sort((a, b) => a.start - b.start || b.end - a.end);
+  let out = "";
+  let pos = 0;
+  let maxLen = 0;
+  for (const hit of hits) {
+    if (hit.start < pos) continue;
+    out += escape(text.slice(pos, hit.start));
+    maxLen += hit.start - pos;
+    out += `(?:${escape(hit.raw)}|${escape(hit.masked)})`;
+    maxLen += Math.max(hit.raw.length, hit.masked.length);
+    pos = hit.end;
+  }
+  out += escape(text.slice(pos));
+  maxLen += text.length - pos;
+  return { pattern: out, maxLen };
+}
+
 function compileSpellings(entries: KnownName[], transform?: (value: string) => string, exempt?: Set<string>, presentExempt?: string[]): CompiledMatcher {
   const validEntries = entries.filter((entry) => typeof entry.text === "string" && typeof entry.as === "string" && entry.text.length >= (entry.after ? 1 : 2));
   const entryBases = validEntries.map((entry) => {
     const minLength = entry.after ? 1 : 2;
     const safeAs = applyRules(entry.as, secretRules);
-    const rawVariants = [entry.text, applyRules(entry.text, secretRules), encodeUri(entry.text), entry.text.replace(/ /g, "+")];
-    const lowerFixed = applyRules(entry.text.toLowerCase(), fixedSecretRules);
-    if (lowerFixed !== entry.text.toLowerCase()) rawVariants.push(lowerFixed);
-    const upperFixed = applyRules(entry.text.toUpperCase(), fixedSecretRules);
-    if (upperFixed !== entry.text.toUpperCase()) rawVariants.push(upperFixed);
-    const baseVariants = [...new Set(rawVariants)];
+    const baseVariants = [entry.text, applyRules(entry.text, secretRules), encodeUri(entry.text), entry.text.replace(/ /g, "+")];
     return { entry, minLength, safeAs, baseVariants };
   });
   let transformed: Map<string, string> | undefined;
@@ -219,6 +253,8 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
   const csItems: Array<{ len: number; pattern: string; exempt?: boolean }> = [];
   const ciMap = new Map<string, CiEntry>();
   const ciEntries: CiEntry[] = [];
+  const ciFlexEntries: CiEntry[] = [];
+  const seenFlex = new Set<string>();
   const csMap = new Map<string, { as: string; owner: KnownName }>();
   for (const name of raw) {
     const left = name.after && /^[~<]/.test(name.text) ? "" : "(?<![\\w-])";
@@ -235,18 +271,25 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
         csItems.push({ len: name.text.length, pattern });
       }
     } else {
+      const flex = name.after ? flexSecretPattern(name.text) : undefined;
+      if (flex && !seenFlex.has(flex.pattern)) {
+        seenFlex.add(flex.pattern);
+        const flexEntry: CiEntry = { text: name.text, as: name.as, owner: name.owner, pattern: flex.pattern };
+        ciFlexEntries.push(flexEntry);
+        ciItems.push({ len: flex.maxLen, pattern: `${left}${flex.pattern}${right}` });
+      }
       const key = foldCase(name.text);
       const existing = ciMap.get(key);
       if (!existing) {
         const entry: CiEntry = { text: name.text, as: name.as, owner: name.owner };
         ciMap.set(key, entry);
         ciEntries.push(entry);
-        ciItems.push({ len: name.text.length, pattern });
+        if (!flex) ciItems.push({ len: name.text.length, pattern });
       } else if (!(existing.regex ??= new RegExp(`^${escape(existing.text)}$`, "i")).test(name.text)) {
         existing.ambiguous = true;
         const entry: CiEntry = { text: name.text, as: name.as, owner: name.owner };
         ciEntries.push(entry);
-        ciItems.push({ len: name.text.length, pattern });
+        if (!flex) ciItems.push({ len: name.text.length, pattern });
       }
     }
   }
@@ -259,6 +302,7 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
     ciMaxLen: ciSorted[0]?.len ?? 0,
     ciMap,
     ciEntries,
+    ciFlexEntries,
     csRegexes: csItems.length ? compileRegexChunks(csSorted, "g") : [],
     csMaxLen: csSorted[0]?.len ?? 0,
     csMap,
@@ -337,7 +381,8 @@ function applySpellings(text: string, matcher: CompiledMatcher, exempt?: Set<str
       const hit =
         fast && !fast.ambiguous
           ? fast
-          : matcher.ciEntries.find((entry) => (entry.regex ??= new RegExp(`^${escape(entry.text)}$`, "i")).test(match));
+          : matcher.ciFlexEntries.find((entry) => (entry.regex ??= new RegExp(`^${entry.pattern}$`, "i")).test(match))
+            ?? matcher.ciEntries.find((entry) => (entry.regex ??= new RegExp(`^${escape(entry.text)}$`, "i")).test(match));
       if (!hit || (skipOwner && hit.owner === skipOwner)) return match;
       return onMatch ? onMatch(match, hit.as) : hit.as;
     });
