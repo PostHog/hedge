@@ -279,7 +279,7 @@ const psBin = existsSync("/bin/ps") ? "/bin/ps" : existsSync("/usr/bin/ps") ? "/
 
 const tagPrefixBytes = new TextEncoder().encode(`${tagEnvVar}=`);
 
-export function procArgs2HasTag(buf: Uint8Array, tag: string): boolean {
+function procArgs2HasTag(buf: Uint8Array, tag: string): boolean {
   if (buf.byteLength < 4) return false;
   const argc = new DataView(buf.buffer, buf.byteOffset, buf.byteLength).getInt32(0, true);
   if (argc < 0) return false;
@@ -329,7 +329,7 @@ type DarwinLib = {
 };
 
 let darwinLib: DarwinLib | null | undefined;
-const darwinProcArgsBuf = new Uint8Array(65536);
+let darwinProcArgsBuf: Uint8Array | undefined;
 
 function getDarwinLib(): DarwinLib | null {
   if (process.platform !== "darwin") return null;
@@ -357,14 +357,32 @@ function getDarwinLib(): DarwinLib | null {
   return darwinLib;
 }
 
+function getDarwinProcArgsBuf(lib: DarwinLib): Uint8Array {
+  if (!darwinProcArgsBuf) {
+    let size = 1024 * 1024;
+    const mib = new Int32Array([1, 8]);
+    const argMax = new Int32Array(1);
+    const len = new BigUint64Array([4n]);
+    if (lib.sysctl(ptr(mib), 2, ptr(argMax), ptr(len), null, 0) === 0 && argMax[0]! > 0) {
+      size = Math.min(4 * 1024 * 1024, Math.max(65536, argMax[0]!));
+    }
+    darwinProcArgsBuf = new Uint8Array(size);
+  }
+  return darwinProcArgsBuf;
+}
+
 function hasEnvTagDarwin(pid: number, tag: string): boolean {
   const lib = getDarwinLib();
   if (!lib) return false;
+  const buf = getDarwinProcArgsBuf(lib);
   const mib = new Int32Array([1, 49, pid]);
   const sizeBuf = new BigUint64Array(1);
-  sizeBuf[0] = BigInt(darwinProcArgsBuf.byteLength);
-  if (lib.sysctl(ptr(mib), 3, ptr(darwinProcArgsBuf), ptr(sizeBuf), null, 0) === 0) {
-    return procArgs2HasTag(darwinProcArgsBuf.subarray(0, Number(sizeBuf[0])), tag);
+  sizeBuf[0] = BigInt(buf.byteLength);
+  if (lib.sysctl(ptr(mib), 3, ptr(buf), ptr(sizeBuf), null, 0) === 0) {
+    const written = Number(sizeBuf[0]);
+    if (written > 0 && written < buf.byteLength) {
+      return procArgs2HasTag(buf.subarray(0, written), tag);
+    }
   }
   sizeBuf[0] = 0n;
   if (lib.sysctl(ptr(mib), 3, null, ptr(sizeBuf), null, 0) !== 0) return false;
@@ -566,18 +584,47 @@ export function killSessionSync(sessionId: number | undefined, signal: NodeJS.Si
   signalTargets(discoverTargetsSync(sessionId, tag) ?? { pids: [], groups: [], orphanPids: [] }, signal, sessionId);
 }
 
-export function killSession(sessionId: number | undefined, signal: NodeJS.Signals, tag?: string): void | Promise<void> {
+export function killSession(
+  sessionId: number | undefined,
+  signal: NodeJS.Signals,
+  tag?: string,
+  remembered?: Map<number, number>,
+): void | Promise<void> {
   if (process.platform === "linux") {
     signalTargets(discoverTargetsLinux(sessionId, tag), signal, sessionId);
     return;
   }
-  if (signal !== "SIGKILL" && sessionId !== undefined) {
-    signalOneGroup(sessionId, signal);
-    return discoverTargets(sessionId, tag).then((targets) => {
-      if (targets) signalTargets(targets, signal);
-    });
-  }
-  return discoverTargets(sessionId, tag).then((targets) => signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, signal, sessionId));
+  return discoverTargets(sessionId, tag).then((found) => {
+    const targets: ProcTargets = found
+      ? { pids: [...found.pids], groups: [...found.groups], orphanPids: [...found.orphanPids] }
+      : { pids: [], groups: [], orphanPids: [] };
+    const lib = getDarwinLib();
+    if (remembered && lib) {
+      for (const pid of targets.pids) {
+        const pgid = lib.getpgid(pid);
+        if (pgid > 0 && pgid !== sessionId && pgid !== process.pid) remembered.set(pid, pgid);
+      }
+      const seenGroups = new Set(targets.groups);
+      const seenOrphans = new Set(targets.orphanPids);
+      for (const [pid, savedPgid] of remembered) {
+        const currentPgid = lib.getpgid(pid);
+        if (currentPgid !== savedPgid) {
+          remembered.delete(pid);
+          continue;
+        }
+        if (sessionId === undefined) {
+          if (!seenOrphans.has(pid)) {
+            seenOrphans.add(pid);
+            targets.orphanPids.push(pid);
+          }
+        } else if (!seenGroups.has(savedPgid)) {
+          seenGroups.add(savedPgid);
+          targets.groups.push(savedPgid);
+        }
+      }
+    }
+    signalTargets(targets, signal, sessionId);
+  });
 }
 
 export async function hasOtherGroupMember(tag?: string): Promise<boolean> {
@@ -819,9 +866,11 @@ if (import.meta.main) {
   }
   enableChildSubreaper();
   const runTag = ownTag(process.env[tagEnvVar]);
+  const rememberedDetached = new Map<number, number>();
   await supervise(command, {
     spawn: (argv) => Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio: ["ignore", "ignore", "ignore"] }),
-    killGroup: (signal, includeTagged) => killSession(process.pid, signal, includeTagged ? runTag : undefined),
+    killGroup: (signal, includeTagged) =>
+      killSession(process.pid, signal, includeTagged ? runTag : undefined, includeTagged ? rememberedDetached : undefined),
     hasGroupMembers: () => hasOtherGroupMember(),
     timer: realTimer,
     onSignal: (signal, handler) => {

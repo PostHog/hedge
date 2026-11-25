@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { closeSync, existsSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../testing/git.ts";
-import { createPipe, procArgs2HasTag, setCloexec, tagEnvVar } from "./probe-supervisor.ts";
+import { createPipe, setCloexec, tagEnvVar } from "./probe-supervisor.ts";
 import { watchEntries } from "./probe-watchdog.ts";
 
 const temp = tempDirs();
@@ -748,32 +748,73 @@ await Bun.sleep(30_000);`;
     expect(usr1Res).toEqual({ failing: [], unchecked: [] });
   });
 
-  test("parses macOS KERN_PROCARGS2 buffers strictly from envp without matching argv or other env values", () => {
-    const build = (execPath: string, argv: string[], envp: string[], pad = 3, argcOverride?: number) => {
-      const enc = new TextEncoder();
-      const parts: Uint8Array[] = [new Uint8Array(4)];
-      new DataView(parts[0]!.buffer).setInt32(0, argcOverride ?? argv.length, true);
-      parts.push(enc.encode(execPath), new Uint8Array(pad));
-      for (const arg of argv) parts.push(enc.encode(arg), new Uint8Array([0]));
-      for (const entry of envp) parts.push(enc.encode(entry), new Uint8Array([0]));
-      const total = parts.reduce((sum, part) => sum + part.byteLength, 0);
-      const out = new Uint8Array(total);
-      let offset = 0;
-      for (const part of parts) {
-        out.set(part, offset);
-        offset += part.byteLength;
-      }
-      return out;
-    };
-    const tag = "11111111-2222-3333-4444-555555555555";
-    expect(procArgs2HasTag(build("/usr/bin/grep", ["grep", `${tagEnvVar}=${tag}`], ["PATH=/usr/bin"]), tag)).toBe(false);
-    expect(procArgs2HasTag(build("/bin/sh", ["sh", "-c", "true"], [`OTHER=foo ${tagEnvVar}=${tag}`]), tag)).toBe(false);
-    expect(procArgs2HasTag(build("/bin/sh", ["sh", "", `${tagEnvVar}=${tag}`], ["PATH=/bin"]), tag)).toBe(false);
-    expect(procArgs2HasTag(build("/bin/sh", ["sh", "-c", "sleep 30"], ["PATH=/bin", `${tagEnvVar}=${tag}`]), tag)).toBe(true);
-    expect(procArgs2HasTag(build("/bin/sh", ["sh"], [`${tagEnvVar}=outer,${tag}`]), tag)).toBe(true);
-    expect(procArgs2HasTag(build("/bin/sh", [], [`${tagEnvVar}=${tag}`]), tag)).toBe(true);
-    expect(procArgs2HasTag(build("/bin/sh", ["sh"], [`${tagEnvVar}=${tag}`], 2, -1), tag)).toBe(false);
-    expect(procArgs2HasTag(new Uint8Array(2), tag)).toBe(false);
+  test("stops a detached tagged worker with oversized argv and a detached clean-env child on SIGTERM while sparing unrelated processes whose argv or other env mentions the tag", async () => {
+    const dir = temp.make("sup-real-detached-tag-");
+    const envBin = Bun.which("env") ?? "/usr/bin/env";
+    const shBin = Bun.which("sh") ?? "/bin/sh";
+    const [unrelatedReady, unrelatedGone, taggedReady, taggedGone, cleanReady, cleanGone] = [
+      join(dir, "unrelated-ready"),
+      join(dir, "unrelated-gone"),
+      join(dir, "tagged-ready"),
+      join(dir, "tagged-gone"),
+      join(dir, "clean-ready"),
+      join(dir, "clean-gone"),
+    ];
+    mkfifo(unrelatedReady, unrelatedGone, taggedReady, taggedGone, cleanReady, cleanGone);
+    const unrelatedStarted = fifoRead(unrelatedReady);
+    const unrelatedClosed = fifoRead(unrelatedGone);
+    const taggedStarted = fifoRead(taggedReady);
+    const taggedClosed = fifoRead(taggedGone);
+    const cleanStarted = fifoRead(cleanReady);
+    const cleanClosed = fifoRead(cleanGone);
+    const tag = crypto.randomUUID();
+    const unrelatedEnv: Record<string, string> = Object.create(null);
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && k !== tagEnvVar) unrelatedEnv[k] = v;
+    }
+    unrelatedEnv.OTHER = `prefix ${tagEnvVar}=${tag}`;
+    const unrelated = Bun.spawn(
+      [shBin, "-c", 'exec 3>"$1"; echo $$ > "$2"; sleep 30 3>&- & wait', "unrelated", unrelatedGone, unrelatedReady, `${tagEnvVar}=${tag}`],
+      { env: unrelatedEnv, detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+    );
+    const largeArg = "x".repeat(70_000);
+    const probeScript = `const tagged = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; sleep 30 3>&- & wait', "tagged", ${JSON.stringify(taggedGone)}, ${JSON.stringify(taggedReady)}, ${JSON.stringify(largeArg)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+tagged.unref();
+const clean = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "clean", ${JSON.stringify(cleanGone)}, ${JSON.stringify(cleanReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+clean.unref();
+process.on("SIGTERM", () => process.exit(0));
+await Bun.sleep(30_000);`;
+    const payload = JSON.stringify({ command: [process.execPath, "-e", probeScript], controlFd: 3, graceMs: 0 });
+    const sup = Bun.spawn([process.execPath, supervisorPath], {
+      stdio: [new TextEncoder().encode(payload), "pipe", "ignore", "pipe"],
+      env: { ...process.env, [tagEnvVar]: tag },
+      detached: true,
+    });
+    const aliveFd = sup.stdio[3] as number;
+    let unrelatedPid = 0;
+    let taggedPid = 0;
+    let cleanPid = 0;
+    try {
+      [unrelatedPid, taggedPid, cleanPid] = (await Promise.all([unrelatedStarted, taggedStarted, cleanStarted])).map((s) => Number(s.trim())) as [number, number, number];
+      expect(unrelatedPid).toBeGreaterThan(0);
+      expect(taggedPid).toBeGreaterThan(0);
+      expect(cleanPid).toBeGreaterThan(0);
+      writeSync(aliveFd, "SIGTERM\n");
+      expect(await taggedClosed).toBe("");
+      expect(await cleanClosed).toBe("");
+      expect(await sup.exited).not.toBe(0);
+      expect(() => process.kill(unrelatedPid, 0)).not.toThrow();
+    } finally {
+      if (unrelatedPid > 0) try { process.kill(unrelatedPid, "SIGKILL"); } catch {}
+      if (taggedPid > 0) try { process.kill(taggedPid, "SIGKILL"); } catch {}
+      if (cleanPid > 0) try { process.kill(cleanPid, "SIGKILL"); } catch {}
+      unrelated.kill("SIGKILL");
+      sup.kill("SIGKILL");
+      try {
+        closeSync(aliveFd);
+      } catch {}
+      await unrelatedClosed.catch(() => {});
+    }
   });
 
   test("preserves an intentionally detached daemon when the watchdog takes over after result publication before stdout is drained", async () => {
