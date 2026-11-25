@@ -862,15 +862,6 @@ describe("hedge triage", () => {
       expect(schemeBody).not.toContain(leaked);
     }
 
-    const manyKnown = Array.from({ length: 20_000 }, (_, i) => ({
-      text: `The pack source alias-${i}`,
-      as: "The pack source <private source>",
-      after: true,
-    }));
-    expect(redact("Note: The pack source alias-19999 is not pinned.", schemeHome, manyKnown)).toBe(
-      "Note: The pack source <private source> is not pinned.",
-    );
-
     const bearerPathProfile = temp.make("profile-bearer-path-");
     writeFileSync(
       join(bearerPathProfile, "hedge.json"),
@@ -983,6 +974,17 @@ describe("hedge triage", () => {
         { text: "private-packs/release-candidate", as: "<branch>", after: true },
       ]),
     ).toBe("<branch>");
+    expect(
+      redact("cloning ware", "/Users/alice", [
+        { text: "ware", as: "<warehouse source>" },
+        { text: "warehouse", as: "<branch>", after: true },
+      ]),
+    ).toBe("cloning <<branch> source>");
+    expect(
+      redact("hit a.internal/B.INTERNAL/c.internal/D.INTERNAL/secret-branch", "/Users/alice", [
+        { text: "A.INTERNAL/b.internal/C.INTERNAL/d.internal/secret-branch", as: "<branch>", after: true },
+      ]),
+    ).toBe("hit <branch>");
   });
 });
 

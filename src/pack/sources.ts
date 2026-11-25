@@ -71,7 +71,7 @@ async function restoreCheckout(dir: string, before: CheckoutState | undefined): 
       ok = (await git(dir, "switch", "-q", before.branch)).ok;
     }
   }
-  if (!ok) ok = (await git(dir, "checkout", "-q", "--detach", before.commit)).ok;
+  if (!ok) ok = (await git(dir, "checkout", "-q", "--detach", `${before.commit}^{commit}`)).ok;
   if (!ok) return false;
   const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
   if (!head.ok || head.stdout.toLowerCase() !== before.commit.toLowerCase()) return false;
@@ -394,7 +394,7 @@ async function fallBack(ref: SourceRef, dir: string, repo: string, effectiveRepo
   if (before?.branch && before.commit.toLowerCase() === good.commit.toLowerCase()) {
     if (!(await restoreCheckout(dir, before))) return { ref, error: reason };
   } else {
-    if (!(await git(dir, "checkout", "-q", "--detach", good.commit)).ok) return { ref, error: reason };
+    if (!(await git(dir, "checkout", "-q", "--detach", `${good.commit}^{commit}`)).ok) return { ref, error: reason };
     const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
     if (!head.ok || head.stdout.toLowerCase() !== good.commit.toLowerCase()) return { ref, error: reason };
     clearLoadedModules(dir);
@@ -606,7 +606,7 @@ async function checkedOutFromCache(dir: string, repo: string, effectiveRepo: str
     (goodCommit.commit === oid || (good.peeled === true && good.ref.toLowerCase() === oid));
   const target = verifiedGoodMatch ? goodCommit.commit : await pinTarget(dir, effectiveDigest, oid);
   if (!target) return undefined;
-  return (await git(dir, "checkout", "-q", "--detach", target)).ok ? target : undefined;
+  return (await git(dir, "checkout", "-q", "--detach", `${target}^{commit}`)).ok ? target : undefined;
 }
 
 type SavedFetchHead = { kind: "content"; bytes: Buffer; mode: number } | { kind: "missing" } | { kind: "unreadable" };
@@ -723,7 +723,7 @@ async function checkout(dir: string, repo: string, ref: string, savedFetchHead: 
   }
   const targetCommit = peeled.stdout.toLowerCase();
   await restoreKnownShallow(dir, beforeShallow, targetCommit);
-  const moved = await git(dir, "checkout", "-q", "--detach", targetCommit);
+  const moved = await git(dir, "checkout", "-q", "--detach", `${targetCommit}^{commit}`);
   if (!moved.ok) return { effectiveRepo, error: moved.stderr };
   const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
   return head.ok && head.stdout.toLowerCase() === targetCommit ? { effectiveRepo, commit: targetCommit, fetchedOid: fetched.oid } : { effectiveRepo, error: head.stderr || "could not resolve checked-out HEAD" };
@@ -804,14 +804,14 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
   if (branchName(good.ref) === branch) {
     if (good.branch === true) return true;
     if (good.branch === false) return false;
-    return (await fetchHeadIsBranch(dir, ref.ref, good.commit)) === true;
+    return (await fetchHeadIsBranch(dir, ref.ref)) === true;
   }
   const aliasMatch =
     (forced !== undefined && (branchName(good.ref) === forced || branchName(good.asked) === forced)) ||
     forcedBranchName(good.ref) === branch ||
     forcedBranchName(good.asked) === branch;
   if (!aliasMatch && branchName(good.asked) !== branch) return false;
-  return (await fetchHeadIsBranch(dir, ref.ref, good.commit)) === true;
+  return (await fetchHeadIsBranch(dir, ref.ref)) === true;
 }
 
 export async function loadedCommit(ref: SourceRef, cacheRoot: string) {
@@ -853,18 +853,17 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
   let head = `refs/heads/${branch}`;
   if (!branch || isInvalidRef(head)) return { state: "failed", say: `invalid ref ${JSON.stringify(ref.ref)} for ${ref.repo}` };
   const effectiveRepo = await resolvedRepoUrl(dir, repo);
-  const heads = forced && forced !== branch && !isInvalidRef(`refs/heads/${forced}`) ? [head, `refs/heads/${forced}`] : [head];
+  const forcedHead = forced && forced !== branch && !isInvalidRef(`refs/heads/${forced}`) ? `refs/heads/${forced}` : undefined;
+  const heads = forcedHead ? [forcedHead, head] : [head];
   const listed = await git(dir, "ls-remote", repo, ...heads);
   if (!listed.ok) return { state: "failed", say: `could not reach ${ref.repo}: ${listed.stderr}` };
   const rows = listed.stdout.split("\n").map((line) => line.split("\t"));
-  let commit = rows.find(([, name]) => name === head)?.[0];
-  if (!commit && forced && forced !== branch) {
-    const forcedHead = `refs/heads/${forced}`;
-    commit = rows.find(([, name]) => name === forcedHead)?.[0];
-    if (commit) {
-      branch = forced;
-      head = forcedHead;
-    }
+  let commit = forcedHead ? rows.find(([, name]) => name === forcedHead)?.[0] : undefined;
+  if (commit && forced && forcedHead) {
+    branch = forced;
+    head = forcedHead;
+  } else {
+    commit = rows.find(([, name]) => name === head)?.[0];
   }
   if (!commit) return { state: "failed", say: `${ref.repo} has no branch ${branch}` };
   if (commit === from) return { state: "same", commit };
@@ -892,7 +891,7 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     return rewritten(tip);
   }
   const before = await currentCheckout(dir);
-  const moved = await git(dir, "checkout", "-q", "--detach", tip);
+  const moved = await git(dir, "checkout", "-q", "--detach", `${tip}^{commit}`);
   if (!moved.ok) {
     await restoreFetchHead(dir, savedFetchHead);
     return { state: "failed", say: `could not check out ${tip.slice(0, 12)} of ${ref.name}: ${moved.stderr}` };
@@ -900,14 +899,14 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
   const loaded = await load(dir, loadLimitMs);
   if ("error" in loaded) {
     if (before) await restoreCheckout(dir, before);
-    else if ((await git(dir, "checkout", "-q", "--detach", from)).ok) clearLoadedModules(dir);
+    else if ((await git(dir, "checkout", "-q", "--detach", `${from}^{commit}`)).ok) clearLoadedModules(dir);
     await restoreFetchHead(dir, savedFetchHead);
     return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} does not load: ${loaded.error}` };
   }
   const postLoadHead = (await git(dir, "rev-parse", "--verify", "--quiet", "HEAD")).stdout;
   if (!postLoadHead || postLoadHead.toLowerCase() !== tip.toLowerCase()) {
     if (before) await restoreCheckout(dir, before);
-    else if ((await git(dir, "checkout", "-q", "--detach", from)).ok) clearLoadedModules(dir);
+    else if ((await git(dir, "checkout", "-q", "--detach", `${from}^{commit}`)).ok) clearLoadedModules(dir);
     await restoreFetchHead(dir, savedFetchHead);
     return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} changed checkout HEAD while loading` };
   }
@@ -915,7 +914,7 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
   const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest });
   if (saveError) {
     if (before) await restoreCheckout(dir, before);
-    else if ((await git(dir, "checkout", "-q", "--detach", from)).ok) clearLoadedModules(dir);
+    else if ((await git(dir, "checkout", "-q", "--detach", `${from}^{commit}`)).ok) clearLoadedModules(dir);
     await restoreFetchHead(dir, savedFetchHead);
     return { state: "failed", say: `could not record ${branch} of ${ref.repo} at ${tip.slice(0, 12)}: ${saveError}` };
   }

@@ -42,6 +42,16 @@ const ciStandardMaskRules: Rule[] = [
   [/(\/Users|\/home)\/(?:[^/\n"'`:]{1,64}?(?=\/)|[^/\s"'`:]+)/gi, "$1/<user>"],
 ];
 const ciFlexRules: Rule[] = [...ciFixedSecretRules, ...ciStandardMaskRules];
+const canonMaskRules: Rule[] = [
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/gi, "<private key>"],
+  [/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/gi, "<token>"],
+  [/\bsk-[A-Za-z0-9_-]*(?:<key>)+|\bsk-[A-Za-z0-9_-]{16,}/gi, "<key>"],
+  [/\b(?:xox[abposr]|xapp)-[A-Za-z0-9-]*(?:<token>)+|\b(?:xox[abposr]|xapp)-[A-Za-z0-9-]{10,}/gi, "<token>"],
+  [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/gi, "<key>"],
+  [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/gi, "<token>"],
+  [/((?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi, "$1<credentials>@"],
+  ...ciStandardMaskRules,
+];
 const contextualSecretRules: Rule[] = secretRules.slice(8);
 const allRules: Rule[] = [...secretRules, ...standardRules, randomRule];
 const preRandomRules: Rule[] = [...contextualSecretRules, ...standardRules];
@@ -113,6 +123,7 @@ function encodeUri(text: string) {
 }
 
 function foldCase(text: string): string {
+  if (!/[^\x00-\x7f]/.test(text)) return text.toUpperCase();
   let out = "";
   for (let index = 0; index < text.length; index++) {
     const ch = text[index]!;
@@ -120,6 +131,14 @@ function foldCase(text: string): string {
     out += upper.length === 1 && !(ch.charCodeAt(0) >= 128 && upper.charCodeAt(0) < 128) ? upper : ch;
   }
   return out;
+}
+
+function foldCharCode(text: string, index: number): number {
+  const code = text.charCodeAt(index);
+  if (code < 128) return code >= 97 && code <= 122 ? code - 32 : code;
+  const ch = text[index]!;
+  const upper = ch.toUpperCase();
+  return upper.length === 1 && upper.charCodeAt(0) >= 128 ? upper.charCodeAt(0) : code;
 }
 
 function isWordOrDash(code: number): boolean {
@@ -152,26 +171,23 @@ type AcRule = {
   exempt?: boolean;
   ambiguous?: boolean;
   regex?: RegExp;
+  verifyPattern?: string;
+  verifyRegex?: RegExp;
 };
 
 type AcAutomaton = {
   ci: boolean;
+  hasExempt: boolean;
   next: Array<Map<number, number>>;
   fail: Int32Array;
   dict: Int32Array;
   out: Array<AcRule[] | undefined>;
 };
 
-type FlexRule = {
-  regex: RegExp;
-  as: string;
-  owner: KnownName;
-};
-
 type CompiledMatcher = {
   ciAc?: AcAutomaton;
   csAc?: AcAutomaton;
-  flexRules: FlexRule[];
+  canonAc?: AcAutomaton;
 };
 
 type MatchSpan = {
@@ -182,11 +198,123 @@ type MatchSpan = {
   exempt?: boolean;
 };
 
+type CanonEdit = { cStart: number; cEnd: number; oStart: number; oEnd: number };
+
+function mapPosToOrig(edits: CanonEdit[], pos: number, side: "start" | "end"): number {
+  let lo = 0;
+  let hi = edits.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const e = edits[mid]!;
+    if (pos < e.cStart) {
+      hi = mid - 1;
+    } else if (pos > e.cEnd) {
+      lo = mid + 1;
+    } else {
+      if (pos === e.cStart) return side === "start" ? e.oStart : mid > 0 ? edits[mid - 1]!.oEnd + (pos - edits[mid - 1]!.cEnd) : pos;
+      if (pos === e.cEnd) return e.oEnd;
+      return -1;
+    }
+  }
+  if (hi < 0) return pos;
+  const prev = edits[hi]!;
+  return prev.oEnd + (pos - prev.cEnd);
+}
+
+function mapBoundToOrig(edits: CanonEdit[], pos: number, side: "start" | "end"): number {
+  let lo = 0;
+  let hi = edits.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const e = edits[mid]!;
+    if (pos < e.cStart) {
+      hi = mid - 1;
+    } else if (pos > e.cEnd) {
+      lo = mid + 1;
+    } else {
+      if (pos === e.cStart && side === "end") return mid > 0 ? edits[mid - 1]!.oEnd + (pos - edits[mid - 1]!.cEnd) : pos;
+      return side === "start" ? e.oStart : e.oEnd;
+    }
+  }
+  if (hi < 0) return pos;
+  const prev = edits[hi]!;
+  return prev.oEnd + (pos - prev.cEnd);
+}
+
+function canonicalizeWithMap(text: string): { text: string; edits: CanonEdit[] } {
+  let cur = text;
+  let edits: CanonEdit[] = [];
+  for (const [regex, replacement] of canonMaskRules) {
+    regex.lastIndex = 0;
+    const single = new RegExp(regex.source, regex.flags.replace("g", ""));
+    const layer: CanonEdit[] = [];
+    let out = "";
+    let pos = 0;
+    for (let match = regex.exec(cur); match !== null; match = regex.exec(cur)) {
+      if (!match[0].length) {
+        regex.lastIndex++;
+        continue;
+      }
+      const mStart = match.index;
+      const mEnd = mStart + match[0].length;
+      const repl = match[0].replace(single, replacement as string);
+      if (repl !== match[0]) {
+        out += cur.slice(pos, mStart);
+        const cStart = out.length;
+        out += repl;
+        layer.push({ cStart, cEnd: out.length, oStart: mStart, oEnd: mEnd });
+        pos = mEnd;
+      }
+    }
+    if (!layer.length) continue;
+    out += cur.slice(pos);
+    if (!edits.length) {
+      edits = layer;
+      cur = out;
+      continue;
+    }
+    const composed: CanonEdit[] = [];
+    let p = 0;
+    let delta = 0;
+    for (const q of layer) {
+      while (p < edits.length && edits[p]!.cEnd <= q.oStart) {
+        const prev = edits[p]!;
+        composed.push({ cStart: prev.cStart + delta, cEnd: prev.cEnd + delta, oStart: prev.oStart, oEnd: prev.oEnd });
+        p++;
+      }
+      let cStart = q.cStart;
+      let cEnd = q.cEnd;
+      let oStart = mapBoundToOrig(edits, q.oStart, "start");
+      let oEnd = mapBoundToOrig(edits, q.oEnd, "end");
+      while (p < edits.length && edits[p]!.cStart < q.oEnd) {
+        const prev = edits[p]!;
+        if (prev.cStart < q.oStart) cStart = prev.cStart + delta;
+        if (prev.cEnd > q.oEnd) cEnd = q.cEnd + (prev.cEnd - q.oEnd);
+        if (prev.oStart < oStart) oStart = prev.oStart;
+        if (prev.oEnd > oEnd) oEnd = prev.oEnd;
+        p++;
+      }
+      composed.push({ cStart, cEnd, oStart, oEnd });
+      delta = q.cEnd - q.oEnd;
+    }
+    while (p < edits.length) {
+      const prev = edits[p]!;
+      composed.push({ cStart: prev.cStart + delta, cEnd: prev.cEnd + delta, oStart: prev.oStart, oEnd: prev.oEnd });
+      p++;
+    }
+    edits = composed;
+    cur = out;
+  }
+  return { text: cur, edits };
+}
+
 function buildAc(rules: AcRule[], ci: boolean): AcAutomaton | undefined {
   if (!rules.length) return undefined;
   const next: Array<Map<number, number>> = [new Map()];
   const out: Array<AcRule[] | undefined> = [undefined];
+  let hasExempt = false;
   for (const rule of rules) {
+    if (rule.exempt) hasExempt = true;
     const key = ci ? foldCase(rule.text) : rule.text;
     let state = 0;
     for (let i = 0; i < key.length; i++) {
@@ -219,97 +347,81 @@ function buildAc(rules: AcRule[], ci: boolean): AcAutomaton | undefined {
       queue.push(v);
     }
   }
-  return { ci, next, fail, dict, out };
+  return { ci, hasExempt, next, fail, dict, out };
+}
+
+function pushStreamingSpan(spans: MatchSpan[], start: number, end: number, len: number, as: string, allowPartialMerge: boolean) {
+  while (spans.length > 0 && spans[spans.length - 1]!.start >= start) spans.pop();
+  if (allowPartialMerge && spans.length > 0 && spans[spans.length - 1]!.end > start) {
+    const last = spans[spans.length - 1]!;
+    if (len > last.len) {
+      last.len = len;
+      last.as = as;
+    }
+    if (end > last.end) last.end = end;
+    return;
+  }
+  spans.push({ start, end, len, as });
 }
 
 function findAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?: KnownName): MatchSpan[] {
   if (!ac || !text.length) return [];
-  const hay = ac.ci ? foldCase(text) : text;
-  let bestEnd: Int32Array | undefined;
-  let bestAs: Array<string | undefined> | undefined;
-  let exemptEnd: Int32Array | undefined;
-  let exemptAs: Array<string | undefined> | undefined;
+  const spans: MatchSpan[] = [];
+  const exemptSpans: MatchSpan[] = [];
   let state = 0;
-  for (let i = 0; i < hay.length; i++) {
-    const code = hay.charCodeAt(i);
+  for (let i = 0; i < text.length; i++) {
+    const code = ac.ci ? foldCharCode(text, i) : text.charCodeAt(i);
     while (state !== 0 && !ac.next[state]!.has(code)) state = ac.fail[state]!;
     state = ac.next[state]!.get(code) ?? 0;
     const end = i + 1;
+    let gotNonExempt = false;
     for (let u = ac.out[state] ? state : ac.dict[state]!; u !== 0; u = ac.dict[u]!) {
       for (const rule of ac.out[u]!) {
         if (skipOwner && rule.owner === skipOwner) continue;
-        const start = end - rule.len;
         if (rule.exempt) {
-          if (exemptEnd && exemptEnd[start]! >= end) continue;
-          if (!isLeftOk(text, start, rule.left) || !isRightOk(text, end, rule.right)) continue;
-          if (rule.ambiguous && !(rule.regex ??= new RegExp(`^${escape(rule.text)}$`, "i")).test(text.slice(start, end))) continue;
-          exemptEnd ??= new Int32Array(text.length);
-          exemptAs ??= new Array<string | undefined>(text.length);
-          exemptEnd[start] = end;
-          exemptAs[start] = rule.as;
+          const start = end - rule.len;
+          exemptSpans.push({ start, end, len: rule.len, as: rule.as, exempt: true });
           continue;
         }
-        if (bestEnd && bestEnd[start]! >= end) continue;
+        if (gotNonExempt) continue;
+        const start = end - rule.len;
         if (!isLeftOk(text, start, rule.left) || !isRightOk(text, end, rule.right)) continue;
         if (rule.ambiguous && !(rule.regex ??= new RegExp(`^${escape(rule.text)}$`, "i")).test(text.slice(start, end))) continue;
-        bestEnd ??= new Int32Array(text.length);
-        bestAs ??= new Array<string | undefined>(text.length);
-        bestEnd[start] = end;
-        bestAs[start] = rule.as;
+        gotNonExempt = true;
+        pushStreamingSpan(spans, start, end, rule.len, rule.as, !ac.hasExempt);
       }
+      if (gotNonExempt && !ac.hasExempt) break;
     }
   }
-  const spans: MatchSpan[] = [];
-  if (bestEnd && bestAs) {
-    let maxEnd = -1;
-    for (let start = 0; start < text.length; start++) {
-      const end = bestEnd[start]!;
-      if (end > maxEnd) {
-        maxEnd = end;
-        spans.push({ start, end, len: end - start, as: bestAs[start]! });
-      }
-    }
-  }
-  if (exemptEnd && exemptAs) {
-    for (let start = 0; start < text.length; start++) {
-      const end = exemptEnd[start]!;
-      if (end > 0) spans.push({ start, end, len: end - start, as: exemptAs[start]!, exempt: true });
-    }
-  }
-  return spans;
+  return exemptSpans.length ? [...spans, ...exemptSpans] : spans;
 }
 
-function findFlexSpans(flexRules: FlexRule[], text: string, skipOwner?: KnownName): MatchSpan[] {
-  if (!flexRules.length || !text.length) return [];
-  let bestEnd: Int32Array | undefined;
-  let bestAs: Array<string | undefined> | undefined;
-  for (const rule of flexRules) {
-    if (skipOwner && rule.owner === skipOwner) continue;
-    rule.regex.lastIndex = 0;
-    for (let match = rule.regex.exec(text); match !== null; match = rule.regex.exec(text)) {
-      if (!match[0].length) {
-        rule.regex.lastIndex++;
-        continue;
-      }
-      const start = match.index;
-      const end = start + match[0].length;
-      if (!bestEnd || end > bestEnd[start]!) {
-        bestEnd ??= new Int32Array(text.length);
-        bestAs ??= new Array<string | undefined>(text.length);
-        bestEnd[start] = end;
-        bestAs[start] = rule.as;
-      }
-      rule.regex.lastIndex = start + 1;
-    }
-  }
-  if (!bestEnd || !bestAs) return [];
+function findCanonAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?: KnownName): MatchSpan[] {
+  if (!ac || !text.length) return [];
+  const { text: canonText, edits } = canonicalizeWithMap(text);
   const spans: MatchSpan[] = [];
-  let maxEnd = -1;
-  for (let start = 0; start < text.length; start++) {
-    const end = bestEnd[start]!;
-    if (end > maxEnd) {
-      maxEnd = end;
-      spans.push({ start, end, len: end - start, as: bestAs[start]! });
+  let state = 0;
+  for (let i = 0; i < canonText.length; i++) {
+    const code = foldCharCode(canonText, i);
+    while (state !== 0 && !ac.next[state]!.has(code)) state = ac.fail[state]!;
+    state = ac.next[state]!.get(code) ?? 0;
+    const cEnd = i + 1;
+    let gotHit = false;
+    for (let u = ac.out[state] ? state : ac.dict[state]!; u !== 0; u = ac.dict[u]!) {
+      for (const rule of ac.out[u]!) {
+        if (gotHit) break;
+        if (skipOwner && rule.owner === skipOwner) continue;
+        const cStart = cEnd - rule.len;
+        const oStart = mapPosToOrig(edits, cStart, "start");
+        const oEnd = mapPosToOrig(edits, cEnd, "end");
+        if (oStart < 0 || oEnd <= oStart) continue;
+        if (!isLeftOk(text, oStart, rule.left) || !isRightOk(text, oEnd, rule.right)) continue;
+        const slice = text.slice(oStart, oEnd);
+        if (rule.verifyPattern && !(rule.verifyRegex ??= new RegExp(`^(?:${rule.verifyPattern})$`, "i")).test(slice)) continue;
+        gotHit = true;
+        pushStreamingSpan(spans, oStart, oEnd, oEnd - oStart, rule.as, true);
+      }
+      if (gotHit) break;
     }
   }
   return spans;
@@ -534,10 +646,10 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
 
   const ciRules: AcRule[] = [];
   const csRules: AcRule[] = [];
-  const flexRules: FlexRule[] = [];
+  const canonRules: AcRule[] = [];
   const ciSeen = new Map<string, AcRule>();
   const csSeen = new Set<string>();
-  const flexSeen = new Set<string>();
+  const canonSeen = new Set<string>();
 
   const addLiteralRule = (text: string, as: string, after: boolean, owner: KnownName) => {
     const minLength = after ? 1 : 2;
@@ -580,12 +692,19 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
         if (expanded.pattern) {
           const left: 0 | 1 = /^[~<]/.test(name.text) ? 0 : 1;
           const right: 0 | 1 | 2 = /[>]$/.test(name.text) ? 0 : name.text.startsWith("The pack source ") ? 2 : 1;
-          const leftPat = left === 0 ? "" : "(?<![\\w-])";
-          const rightPat = right === 0 ? "" : right === 2 ? "(?![\\w/:-]|\\.[A-Za-z0-9])" : "(?![\\w-])";
-          const fullPat = `${leftPat}${expanded.pattern}${rightPat}`;
-          if (!flexSeen.has(fullPat)) {
-            flexSeen.add(fullPat);
-            flexRules.push({ regex: new RegExp(fullPat, "gi"), as: name.as, owner: name.owner });
+          const canonKey = canonicalizeWithMap(name.text).text;
+          const dedupKey = `${left}:${right}:${foldCase(canonKey)}:${expanded.pattern}`;
+          if (canonKey.length >= 4 && !canonSeen.has(dedupKey)) {
+            canonSeen.add(dedupKey);
+            canonRules.push({
+              text: canonKey,
+              len: canonKey.length,
+              left,
+              right,
+              as: name.as,
+              owner: name.owner,
+              verifyPattern: expanded.pattern,
+            });
           }
         }
       }
@@ -600,7 +719,7 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
   return {
     ciAc: ciRules.length ? buildAc(ciRules, true) : undefined,
     csAc: csRules.length ? buildAc(csRules, false) : undefined,
-    flexRules,
+    canonAc: canonRules.length ? buildAc(canonRules, true) : undefined,
   };
 }
 
@@ -655,10 +774,10 @@ function applySpans(text: string, spans: MatchSpan[], exempt?: Set<string>, onMa
 }
 
 function applySpellings(text: string, matcher: CompiledMatcher, exempt?: Set<string>, skipOwner?: KnownName, onMatch?: (match: string, as: string) => string) {
-  if (!matcher.ciAc && !matcher.csAc && !matcher.flexRules.length) return text;
+  if (!matcher.ciAc && !matcher.csAc && !matcher.canonAc) return text;
   const spans = [
     ...findAcSpans(matcher.ciAc, text, skipOwner),
-    ...findFlexSpans(matcher.flexRules, text, skipOwner),
+    ...findCanonAcSpans(matcher.canonAc, text, skipOwner),
     ...findAcSpans(matcher.csAc, text, skipOwner),
   ];
   return applySpans(text, spans, exempt, onMatch);
@@ -872,7 +991,7 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
   const afterSpellings = compileSpellings(afterEntries, afterTransform, exempt, presentExempt);
   const afterSpans = [
     ...findAcSpans(afterSpellings.ciAc, expanded),
-    ...findFlexSpans(afterSpellings.flexRules, expanded),
+    ...findCanonAcSpans(afterSpellings.canonAc, expanded),
     ...findAcSpans(afterSpellings.csAc, expanded),
   ];
   const mergedOriginals: string[] = [];

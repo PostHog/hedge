@@ -317,5 +317,28 @@ describe("hedge refresh", () => {
     await v2(plusMain.repo);
     expect(await plusMain.hedge("refresh")).toBe(0);
     expect(plusMain.read(guide)).toBe("Rules v2.\n");
+
+    const bothPlus = await machine("+main");
+    await spawnGit(bothPlus.repo, "checkout", "-q", "-b", "+main");
+    await commit(bothPlus.repo, "plus", { "packs/team/rules.md": "Plus branch.\n", "packs/team/AGENTS.md": "Plus.\n", "packs/team/skills/review/SKILL.md": "# review\n" });
+    await spawnGit(bothPlus.repo, "checkout", "-q", "main");
+    expect(await bothPlus.hedge("apply", "--profile", bothPlus.profile)).toBe(0);
+    expect(bothPlus.read(guide)).toBe("Rules v1.\n");
+    await v2(bothPlus.repo);
+    expect(await bothPlus.hedge("refresh")).toBe(0);
+    expect(bothPlus.read(guide)).toBe("Rules v2.\n");
+
+    const legacyBroken = await machine("main");
+    expect(await legacyBroken.hedge("apply", "--profile", legacyBroken.profile)).toBe(0);
+    const cacheDir = join(legacyBroken.home, ".local/share/hedge/sources/team");
+    const goodCommit = await spawnGit(legacyBroken.repo, "rev-parse", "HEAD");
+    await commit(legacyBroken.repo, "broken", { "packs/team/pack.json": "{not json" });
+    const brokenCommit = await spawnGit(legacyBroken.repo, "rev-parse", "HEAD");
+    await spawnGit(cacheDir, "fetch", "-q", "--no-tags", legacyBroken.repo, "main");
+    writeFileSync(join(cacheDir, ".git/hedge-source.json"), JSON.stringify({ repo: legacyBroken.repo, ref: "main", commit: goodCommit }) + "\n");
+    expect(readFileSync(join(cacheDir, ".git/FETCH_HEAD"), "utf8")).toContain(brokenCommit);
+    await v2(legacyBroken.repo);
+    expect(await legacyBroken.hedge("refresh")).toBe(0);
+    expect(legacyBroken.read(guide)).toBe("Rules v2.\n");
   });
 });

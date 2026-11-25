@@ -873,6 +873,19 @@ throw new Error("broken pack");
     if ("error" in forceRes) throw new Error(forceRes.error);
     expect(forceRes.packs[0]?.manifest.summary).toBe("Rewritten 5.");
     expect(await spawnGit(join(forceCache, "team"), "rev-list", "--count", "HEAD")).toBe("1");
+
+    const shaBranchRepo = await packRepo("SHA branch c1.");
+    const shaC1 = await spawnGit(shaBranchRepo, "rev-parse", "HEAD");
+    const shaBranchCache = temp.make("cache-sha-branch-");
+    expect("error" in (await fetchSource({ name: "team", repo: shaBranchRepo, ref: "main" }, shaBranchCache))).toBe(false);
+    writePack(shaBranchRepo, "SHA branch c2.");
+    await spawnGit(shaBranchRepo, "commit", "-q", "-am", "c2");
+    const shaC2 = await spawnGit(shaBranchRepo, "rev-parse", "HEAD");
+    await spawnGit(join(shaBranchCache, "team"), "branch", shaC2, shaC1);
+    const shaBranchRes = await fetchSource({ name: "team", repo: shaBranchRepo, ref: "main" }, shaBranchCache);
+    if ("error" in shaBranchRes) throw new Error(shaBranchRes.error);
+    expect(shaBranchRes.packs[0]?.manifest.summary).toBe("SHA branch c2.");
+    expect(shaBranchRes.stale).toBeUndefined();
   });
 });
 
