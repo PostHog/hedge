@@ -123,6 +123,12 @@ async function fallBack(ref: SourceRef, dir: string, repo: string, good: Good | 
     await restoreCheckout(dir, before);
     return { ref, error: reason };
   }
+  if (before?.branch) {
+    await restoreCheckout(dir, before);
+    const loaded = await load(dir, loadLimitMs);
+    if ("error" in loaded) return { ref, error: reason };
+    return { ref, dir, packs: loaded.packs, stale: reason };
+  }
   if (!(await git(dir, "checkout", "-q", "--detach", good.commit)).ok) return { ref, error: reason };
   const loaded = await load(dir, loadLimitMs);
   if ("error" in loaded) return { ref, error: reason };
@@ -155,7 +161,8 @@ function goodPath(dir: string) {
 
 async function lastGood(dir: string): Promise<Good | undefined> {
   try {
-    return JSON.parse(await readFile(goodPath(dir), "utf8")) as Good;
+    const parsed = JSON.parse(await readFile(goodPath(dir), "utf8")) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Good) : undefined;
   } catch {
     return undefined;
   }

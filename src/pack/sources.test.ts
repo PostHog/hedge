@@ -458,6 +458,7 @@ describe("fetchSource", () => {
     const commitA1 = await spawnGit(repoA, "rev-parse", "HEAD");
     writePack(repoA, "Repo A v2.");
     await spawnGit(repoA, "commit", "-q", "-am", "v2");
+    const commitA2 = await spawnGit(repoA, "rev-parse", "HEAD");
     const repoB = await packRepo("Repo B v1.");
     const commitB = await spawnGit(repoB, "rev-parse", "HEAD");
 
@@ -475,7 +476,26 @@ describe("fetchSource", () => {
     expect(await spawnGit(cacheDir, "rev-parse", "HEAD")).toBe(localCommit);
     expect(await spawnGit(cacheDir, "symbolic-ref", "-q", "HEAD")).toBe("refs/heads/topic");
 
+    const refsDir = join(cacheDir, ".git", "refs");
+    setDirModes(refsDir, 0o555);
+    try {
+      const sameRepoBlocked = await fetchSource({ name: "team", repo: repoA, ref: commitA2 }, cache);
+      if ("error" in sameRepoBlocked) throw new Error(sameRepoBlocked.error);
+      expect(sameRepoBlocked.packs[0]?.manifest.summary).toBe("Local cache edit.");
+      expect(sameRepoBlocked.stale).toContain(`could not record ${commitA2}`);
+      expect(await spawnGit(cacheDir, "rev-parse", "HEAD")).toBe(localCommit);
+      expect(await spawnGit(cacheDir, "symbolic-ref", "-q", "HEAD")).toBe("refs/heads/topic");
+    } finally {
+      setDirModes(refsDir, 0o755);
+    }
+
     const metaPath = join(cacheDir, ".git", "hedge-source.json");
+    writeFileSync(metaPath, "null\n");
+    const repaired = await fetchSource({ name: "team", repo: repoA, ref: commitA1 }, cache);
+    if ("error" in repaired) throw new Error(repaired.error);
+    expect([repaired.packs[0]?.manifest.summary, repaired.stale]).toEqual(["Repo A v1.", undefined]);
+    await spawnGit(cacheDir, "switch", "-q", "topic");
+
     rmSync(metaPath, { force: true });
     mkdirSync(metaPath, { recursive: true });
     writeFileSync(join(metaPath, "keep"), "x");

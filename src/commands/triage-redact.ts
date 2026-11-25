@@ -131,13 +131,14 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
   const stripHome = (value: string) => (home.length > 1 ? value.split(home.replace(/\/$/, "")).join("~") : value);
   const primary = known.filter((entry) => !entry.after);
   const allRules = [...secretRules, ...rules];
+  const sanitizeLabel = (entry: KnownName) => applyRules(stripHome(replaceKnown(entry.as, primary.filter((other) => other !== entry))), allRules);
   const passOne = (value: string) => {
     let fence = "~~";
     while (value.includes(fence) || primary.some((entry) => entry.text.includes(fence) || entry.as.includes(fence))) fence += "~";
     const labels: string[] = [];
     const masked = primary.map((entry) => {
       const token = `${fence}${labels.length}${fence}`;
-      labels.push(applyRules(entry.as, secretRules));
+      labels.push(sanitizeLabel(entry));
       return { ...entry, as: token };
     });
     let next = applyRules(stripHome(replaceKnown(value, masked)), allRules);
@@ -145,7 +146,7 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     return next;
   };
   const result = passOne(text);
-  const exempt = new Set([...redactorLabels, ...known.map((entry) => applyRules(entry.as, secretRules))]);
+  const exempt = new Set([...redactorLabels, ...known.map(sanitizeLabel)]);
   return replaceKnown(result, known.filter((entry) => entry.after), passOne, exempt);
 }
 
