@@ -82,7 +82,8 @@ async function readText(stream: ReadableStream<Uint8Array> | number | undefined,
       out += decoder.decode(value, { stream: true });
     }
     out += decoder.decode();
-  } catch {
+  } catch (error) {
+    if (!stop.aborted) throw error;
   } finally {
     stop.removeEventListener("abort", onStop);
   }
@@ -97,7 +98,6 @@ export function captureWith(timer: Timer): Capture {
     let child: ReturnType<typeof Bun.spawn> | undefined;
     const tag = crypto.randomUUID();
     let controlFd: number | undefined;
-    let targetPgid: number | undefined;
     let stopped = false;
     let supervisorReaped = false;
     let targetExited = false;
@@ -113,7 +113,7 @@ export function captureWith(timer: Timer): Capture {
     const killGroups = () => {
       if (!child) return;
       if (!supervisorReaped) {
-        killSessionSync(child.pid, "SIGKILL", targetPgid, tag);
+        killSessionSync(child.pid, "SIGKILL", tag);
         return;
       }
       void killSession(undefined, "SIGKILL", tag);
@@ -158,6 +158,7 @@ export function captureWith(timer: Timer): Capture {
     for (const name of stopSignals) process.on(name, interrupted);
     let expired = false;
     let cancel = () => {};
+    let hardKill: ReturnType<typeof setTimeout> | undefined;
     let resolveStatus!: (status: { code?: number; error?: string; errCode?: string }) => void;
     const statusPromise = new Promise<{ code?: number; error?: string; errCode?: string }>((resolve) => (resolveStatus = resolve));
     let settled = false;
@@ -179,10 +180,8 @@ export function captureWith(timer: Timer): Capture {
         detached: true,
         ipc(message) {
           if (!message || typeof message !== "object") return;
-          const record = message as { code?: unknown; error?: unknown; pgid?: unknown };
-          if (typeof record.pgid === "number") {
-            targetPgid = record.pgid;
-          } else if (typeof record.error === "string") {
+          const record = message as { code?: unknown; error?: unknown };
+          if (typeof record.error === "string") {
             targetExited = true;
             settle({ error: record.error, ...(typeof record.code === "string" ? { errCode: record.code } : {}) });
           } else if (typeof record.code === "number") {
@@ -205,7 +204,6 @@ export function captureWith(timer: Timer): Capture {
       } else {
         live.send({ argv: command, env: targetEnv, lockCount: locks.length, controlFd: 3 + locks.length });
       }
-      let hardKill: ReturnType<typeof setTimeout> | undefined;
       let forceExpired = false;
       cancel = timer(timeoutMs, () => {
         expired = true;
@@ -221,11 +219,20 @@ export function captureWith(timer: Timer): Capture {
           stopStream.abort();
         });
       });
-      const [stdout, stderr, status] = await Promise.all([
-        readText(live.stdout, stopStream.signal),
-        readText(live.stderr, stopStream.signal),
-        statusPromise,
-      ]);
+      let stdout: string;
+      let stderr: string;
+      let status: { code?: number; error?: string; errCode?: string };
+      try {
+        [stdout, stderr, status] = await Promise.all([
+          readText(live.stdout, stopStream.signal),
+          readText(live.stderr, stopStream.signal),
+          statusPromise,
+        ]);
+      } catch (error) {
+        stopStream.abort();
+        stopChild();
+        throw error;
+      }
       if (expired) {
         if (!supervisorReaped) {
           await Promise.race([live.exited, Bun.sleep(forceExpired ? 50 : 150)]);
@@ -234,10 +241,8 @@ export function captureWith(timer: Timer): Capture {
             await Promise.race([live.exited, Bun.sleep(50)]);
           }
         }
-        if (hardKill) clearTimeout(hardKill);
         return timeoutResult(timeoutMs, stdout);
       }
-      if (hardKill) clearTimeout(hardKill);
       if (!supervisorReaped) {
         try {
           live.send("done");
@@ -251,6 +256,7 @@ export function captureWith(timer: Timer): Capture {
       }
       return { code: status.code ?? 1, stdout, stderr };
     } finally {
+      if (hardKill) clearTimeout(hardKill);
       cancel();
       closeControl();
       release();

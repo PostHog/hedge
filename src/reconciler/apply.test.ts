@@ -696,52 +696,59 @@ describe("humanStepsLeft", () => {
     expect(result).toEqual({ failing: [], unchecked: [] });
   });
 
-  test("drains an already-completed probe failure when the deadline fires before result delivery, and marks a timed-out real probe unchecked while stopping it", async () => {
+  test("preserves an already-completed real probe failure when the deadline fires during cleanup while marking a timed-out real probe unchecked and stopping it", async () => {
     const home = temp.make("home-busy-deadline-");
+    const [childReady, childGone, sawCleanup, slowReady, slowGone] = [
+      join(home, "child-ready"),
+      join(home, "child-gone"),
+      join(home, "saw-cleanup"),
+      join(home, "slow-ready"),
+      join(home, "slow-gone"),
+    ];
+    expect(Bun.spawnSync(["mkfifo", childReady, childGone, sawCleanup, slowReady, slowGone]).exitCode).toBe(0);
+    const childStarted = Bun.file(childReady).text();
+    const childClosed = Bun.file(childGone).text();
+    const cleanupStarted = Bun.file(sawCleanup).text();
+    const slowStarted = Bun.file(slowReady).text();
+    const slowClosed = Bun.file(slowGone).text();
+    const childCmd = 'pid=; trap \'echo cleanup > "$3"\' TERM; exec 3>"$1"; echo $$ > "$2"; while true; do sleep 30 3>&- & pid=$!; wait "$pid"; done';
+    const failScript = `const c = Bun.spawn(["sh", "-c", ${JSON.stringify(childCmd)}, "child", ${JSON.stringify(childGone)}, ${JSON.stringify(childReady)}, ${JSON.stringify(sawCleanup)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+c.unref();
+process.exit(1);`;
     let fireDeadline!: () => void;
-    let fireDrainCap!: () => void;
-    let deliverResult!: (code: number) => void;
-    const giveUp = new Promise<void>((resolve) => (fireDeadline = resolve));
-    const drain = new Promise<void>((resolve) => (fireDrainCap = resolve));
-    const run = () => new Promise<number>((resolve) => (deliverResult = resolve));
-    const step = { id: "quick-fail", pack: "team", say: "Quick fail.", probe: ["false"] };
-    const pending = humanStepsLeft(plan({ human: [step] }), { home, run, giveUp, drain });
-    await Promise.resolve();
-    fireDeadline();
-    await Promise.resolve();
-    deliverResult(1);
-    const res = await pending;
-    expect(res.failing.map((item) => item.id)).toEqual(["quick-fail"]);
-    expect(res.unchecked).toEqual([]);
-    fireDrainCap();
-
-    const [ready, gone] = [join(home, "real-ready"), join(home, "real-gone")];
-    expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
-    const started = Bun.file(ready).text();
-    const closed = Bun.file(gone).text();
-    let fireReal!: () => void;
-    const realStep = {
+    const quickFailStep = {
+      id: "quick-fail",
+      pack: "team",
+      say: "Quick fail.",
+      probe: [process.execPath, "-e", failScript],
+    };
+    const slowStep = {
       id: "slow-real",
       pack: "team",
       say: "Slow.",
-      probe: ["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "probe", gone, ready],
+      probe: ["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "probe", slowGone, slowReady],
     };
-    let pid = 0;
+    let childPid = 0;
+    let slowPid = 0;
     try {
-      const pendingReal = humanStepsLeft(plan({ human: [realStep] }), {
+      const pending = humanStepsLeft(plan({ human: [quickFailStep, slowStep] }), {
         home,
-        giveUp: new Promise<void>((resolve) => (fireReal = resolve)),
-        graceMs: 0,
+        giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)),
+        graceMs: 100,
       });
-      pid = Number((await started).trim());
-      expect(pid).toBeGreaterThan(0);
-      fireReal();
-      const resReal = await pendingReal;
-      expect(resReal.failing).toEqual([]);
-      expect(resReal.unchecked.map((item) => item.id)).toEqual(["slow-real"]);
-      expect(await closed).toBe("");
+      [childPid, slowPid] = (await Promise.all([childStarted, slowStarted])).map((s) => Number(s.trim())) as [number, number];
+      expect(childPid).toBeGreaterThan(0);
+      expect(slowPid).toBeGreaterThan(0);
+      expect((await cleanupStarted).trim()).toBe("cleanup");
+      fireDeadline();
+      const res = await pending;
+      expect(res.failing.map((item) => item.id)).toEqual(["quick-fail"]);
+      expect(res.unchecked.map((item) => item.id)).toEqual(["slow-real"]);
+      expect(await slowClosed).toBe("");
+      expect(await childClosed).toBe("");
     } finally {
-      if (pid > 0) try { process.kill(pid, "SIGKILL"); } catch {}
+      if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
+      if (slowPid > 0) try { process.kill(slowPid, "SIGKILL"); } catch {}
     }
   });
 

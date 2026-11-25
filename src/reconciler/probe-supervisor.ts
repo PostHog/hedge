@@ -1,3 +1,4 @@
+import { dlopen, FFIType } from "bun:ffi";
 import { closeSync, existsSync, readdirSync, readFileSync, writeSync } from "node:fs";
 
 export type StopSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT";
@@ -117,6 +118,119 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string): ProcTarg
 const psLookupLimitMs = 200;
 const psBin = existsSync("/bin/ps") ? "/bin/ps" : existsSync("/usr/bin/ps") ? "/usr/bin/ps" : "ps";
 
+let darwinGetsid: ((pid: number) => number) | null | undefined;
+
+function sessionIdDarwin(pid: number): number | undefined {
+  if (process.platform !== "darwin") return undefined;
+  if (darwinGetsid === undefined) {
+    try {
+      const lib = dlopen("libSystem.B.dylib", { getsid: { args: [FFIType.i32], returns: FFIType.i32 } });
+      darwinGetsid = (targetPid: number) => lib.symbols.getsid(targetPid);
+    } catch {
+      darwinGetsid = null;
+    }
+  }
+  if (!darwinGetsid) return undefined;
+  const sid = darwinGetsid(pid);
+  return sid > 0 ? sid : undefined;
+}
+
+function buildTargetsFromPs(
+  self: number,
+  sessionId: number | undefined,
+  tag: string | undefined,
+  treeText: string | undefined,
+  envText: string | undefined,
+  excludePids: Set<number>,
+): ProcTargets {
+  const rows: Array<{ pid: number; ppid: number; pgid: number }> = [];
+  const matched = new Set<number>();
+  if (sessionId !== undefined) matched.add(sessionId);
+  if (treeText) {
+    for (const line of treeText.split("\n")) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 3) continue;
+      const pid = Number(parts[0]);
+      const ppid = Number(parts[1]);
+      const pgid = Number(parts[2]);
+      if (!Number.isFinite(pid) || !Number.isFinite(ppid) || !Number.isFinite(pgid)) continue;
+      if (excludePids.has(pid)) continue;
+      rows.push({ pid, ppid, pgid });
+      if (sessionId !== undefined && (pgid === sessionId || sessionIdDarwin(pid) === sessionId)) matched.add(pid);
+    }
+  }
+  if (tag && envText) {
+    const prefix = `${tagEnvVar}=`;
+    for (const line of envText.split("\n")) {
+      let from = 0;
+      let matchedLine = false;
+      for (;;) {
+        const idx = line.indexOf(prefix, from);
+        if (idx === -1) break;
+        const before = idx > 0 ? line[idx - 1] : " ";
+        if (/\s/.test(before!)) {
+          let end = idx + prefix.length;
+          while (end < line.length && !/\s/.test(line[end]!)) end++;
+          if (envMatchesTag(line.slice(idx + prefix.length, end), tag)) {
+            matchedLine = true;
+            break;
+          }
+        }
+        from = idx + prefix.length;
+      }
+      if (!matchedLine) continue;
+      const pidMatch = line.trimStart().match(/^(\d+)\s/);
+      if (!pidMatch) continue;
+      const pid = Number(pidMatch[1]);
+      if (Number.isFinite(pid) && pid !== self && !excludePids.has(pid)) matched.add(pid);
+    }
+  }
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const row of rows) {
+      if (!matched.has(row.pid) && matched.has(row.ppid)) {
+        matched.add(row.pid);
+        grew = true;
+      }
+    }
+  }
+  const pids = [...matched].filter((pid) => pid !== self && pid !== sessionId);
+  const groups = new Set<number>();
+  const pgidByPid = new Map<number, number>();
+  for (const row of rows) pgidByPid.set(row.pid, row.pgid);
+  const orphanPids: number[] = [];
+  for (const pid of pids) {
+    const pgid = pgidByPid.get(pid);
+    if (sessionId === undefined) {
+      orphanPids.push(pid);
+    } else if (pgid !== undefined && pgid > 0 && pgid !== sessionId && pgid !== self) {
+      groups.add(pgid);
+    } else if (pgid !== sessionId) {
+      orphanPids.push(pid);
+    }
+  }
+  return { pids, groups: [...groups], orphanPids };
+}
+
+function runBoundedPsSync(args: string[]): string | undefined {
+  try {
+    const res = Bun.spawnSync([psBin, ...args], { stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: psLookupLimitMs, killSignal: "SIGKILL" });
+    if (res.exitCode !== 0) return undefined;
+    return res.stdout.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function discoverTargetsSync(sessionId?: number, tag?: string): ProcTargets | undefined {
+  if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag);
+  const treeText = runBoundedPsSync(["-Ao", "pid=,ppid=,pgid="]);
+  const envText = tag ? runBoundedPsSync(["ewwax"]) : undefined;
+  if (treeText === undefined && envText === undefined) return undefined;
+  return buildTargetsFromPs(process.pid, sessionId, tag, treeText, envText, new Set());
+}
+
 async function runBoundedPs(args: string[]): Promise<{ pid: number; text: string } | undefined> {
   let ps: ReturnType<typeof Bun.spawn> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -164,80 +278,15 @@ async function runBoundedPs(args: string[]): Promise<{ pid: number; text: string
 
 export async function discoverTargets(sessionId?: number, tag?: string): Promise<ProcTargets | undefined> {
   if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag);
-  const self = process.pid;
   const [treeRes, envRes] = await Promise.all([
     runBoundedPs(["-Ao", "pid=,ppid=,pgid="]),
     tag ? runBoundedPs(["ewwax"]) : Promise.resolve(undefined),
   ]);
   if (!treeRes && !envRes) return undefined;
-  const rows: Array<{ pid: number; ppid: number; pgid: number }> = [];
-  const matched = new Set<number>();
-  if (sessionId !== undefined) matched.add(sessionId);
-  if (treeRes) {
-    for (const line of treeRes.text.split("\n")) {
-      const parts = line.trim().split(/\s+/);
-      if (parts.length < 3) continue;
-      const pid = Number(parts[0]);
-      const ppid = Number(parts[1]);
-      const pgid = Number(parts[2]);
-      if (!Number.isFinite(pid) || !Number.isFinite(ppid) || !Number.isFinite(pgid)) continue;
-      if (pid === treeRes.pid || pid === envRes?.pid) continue;
-      rows.push({ pid, ppid, pgid });
-      if (sessionId !== undefined && pgid === sessionId) matched.add(pid);
-    }
-  }
-  if (tag && envRes) {
-    const prefix = `${tagEnvVar}=`;
-    for (const line of envRes.text.split("\n")) {
-      let from = 0;
-      let matchedLine = false;
-      for (;;) {
-        const idx = line.indexOf(prefix, from);
-        if (idx === -1) break;
-        const before = idx > 0 ? line[idx - 1] : " ";
-        if (/\s/.test(before!)) {
-          let end = idx + prefix.length;
-          while (end < line.length && !/\s/.test(line[end]!)) end++;
-          if (envMatchesTag(line.slice(idx + prefix.length, end), tag)) {
-            matchedLine = true;
-            break;
-          }
-        }
-        from = idx + prefix.length;
-      }
-      if (!matchedLine) continue;
-      const pidMatch = line.trimStart().match(/^(\d+)\s/);
-      if (!pidMatch) continue;
-      const pid = Number(pidMatch[1]);
-      if (Number.isFinite(pid) && pid !== self && pid !== envRes.pid && pid !== treeRes?.pid) matched.add(pid);
-    }
-  }
-  let grew = true;
-  while (grew) {
-    grew = false;
-    for (const row of rows) {
-      if (!matched.has(row.pid) && matched.has(row.ppid)) {
-        matched.add(row.pid);
-        grew = true;
-      }
-    }
-  }
-  const pids = [...matched].filter((pid) => pid !== self && pid !== sessionId);
-  const groups = new Set<number>();
-  const pgidByPid = new Map<number, number>();
-  for (const row of rows) pgidByPid.set(row.pid, row.pgid);
-  const orphanPids: number[] = [];
-  for (const pid of pids) {
-    const pgid = pgidByPid.get(pid);
-    if (sessionId === undefined) {
-      orphanPids.push(pid);
-    } else if (pgid !== undefined && pgid > 0 && pgid !== sessionId && pgid !== self) {
-      groups.add(pgid);
-    } else if (pgid !== sessionId) {
-      orphanPids.push(pid);
-    }
-  }
-  return { pids, groups: [...groups], orphanPids };
+  const exclude = new Set<number>();
+  if (treeRes) exclude.add(treeRes.pid);
+  if (envRes) exclude.add(envRes.pid);
+  return buildTargetsFromPs(process.pid, sessionId, tag, treeRes?.text, envRes?.text, exclude);
 }
 
 function signalOneGroup(pgrp: number, signal: NodeJS.Signals): void {
@@ -274,31 +323,22 @@ export function signalTargets(targets: ProcTargets, signal: NodeJS.Signals, sess
   if (sessionId !== undefined) signalOneGroup(sessionId, signal);
 }
 
-export function killSessionSync(sessionId: number | undefined, signal: NodeJS.Signals, activeTargetPgid?: number, tag?: string): void {
-  if (process.platform === "linux") {
-    signalTargets(discoverTargetsLinux(sessionId, tag), signal, sessionId);
-    return;
-  }
-  const groups = activeTargetPgid !== undefined && activeTargetPgid !== sessionId ? [activeTargetPgid] : [];
-  signalTargets({ pids: [], groups, orphanPids: [] }, signal, sessionId);
+export function killSessionSync(sessionId: number | undefined, signal: NodeJS.Signals, tag?: string): void {
+  signalTargets(discoverTargetsSync(sessionId, tag) ?? { pids: [], groups: [], orphanPids: [] }, signal, sessionId);
 }
 
-export function killSession(sessionId: number | undefined, signal: NodeJS.Signals, tag?: string, extraPgid?: number): void | Promise<void> {
-  const withExtra = (targets: ProcTargets): ProcTargets => {
-    if (extraPgid === undefined || extraPgid === sessionId || extraPgid === process.pid || targets.groups.includes(extraPgid)) return targets;
-    return { ...targets, groups: [...targets.groups, extraPgid] };
-  };
+export function killSession(sessionId: number | undefined, signal: NodeJS.Signals, tag?: string): void | Promise<void> {
   if (process.platform === "linux") {
-    signalTargets(withExtra(discoverTargetsLinux(sessionId, tag)), signal, sessionId);
+    signalTargets(discoverTargetsLinux(sessionId, tag), signal, sessionId);
     return;
   }
   if (signal !== "SIGKILL" && sessionId !== undefined) {
     signalOneGroup(sessionId, signal);
     return discoverTargets(sessionId, tag).then((targets) => {
-      if (targets) signalTargets(withExtra(targets), signal);
+      if (targets) signalTargets(targets, signal);
     });
   }
-  return discoverTargets(sessionId, tag).then((targets) => signalTargets(withExtra(targets ?? { pids: [], groups: [], orphanPids: [] }), signal, sessionId));
+  return discoverTargets(sessionId, tag).then((targets) => signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, signal, sessionId));
 }
 
 export async function hasOtherGroupMember(tag?: string): Promise<boolean> {
@@ -394,8 +434,8 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
           arm(sig);
           forwardGroup(sig);
           host.reportCleanup();
-        } else if (sig === "SIGTERM" || sig === "SIGHUP") {
-          armHard();
+        } else {
+          if (sig === "SIGTERM" || sig === "SIGHUP") armHard();
           forwardGroup(sig);
         }
         return;

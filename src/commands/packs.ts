@@ -102,7 +102,7 @@ async function listPacks(context: ChangeContext) {
       : "on";
     if (on.has(manifest.name) && workflows.length) context.print(`      Workflows: ${workflows.map((workflow) => `${workflow.id} ${state(workflow)}`).join(", ")}`);
     if (failing.length) context.print("      Needs setup on this machine. Run hedge doctor for the steps.");
-    if (unchecked.length) context.print("      Hedge could not check this pack's setup in time. Run hedge doctor.");
+    if (unchecked.length) context.print("      Hedge could not check this pack's setup right now. Run hedge doctor.");
     if (on.has(manifest.name)) for (const workflow of manifest.workflows ?? []) if (workflow.risk) context.print(`      Terms note for ${workflow.id}: ${workflow.risk}`);
   }
   for (const pack of missing) context.print(`  ! ${pack.name}  is in your profile, but ${pack.reason ?? "its source is not here"}`);

@@ -5,7 +5,6 @@ type StartMessage = { argv: string[]; env?: Record<string, string>; lockCount: n
 
 const runTag = ownTag(process.env[tagEnvVar]);
 let target: ReturnType<typeof Bun.spawn> | undefined;
-let targetPgid: number | undefined;
 let targetReaped = false;
 let targetCode: number | undefined;
 let killing = false;
@@ -13,17 +12,20 @@ let killing = false;
 const killAll = () => {
   if (killing) return;
   killing = true;
-  if (target && !targetReaped) {
-    try {
-      target.kill("SIGKILL");
-    } catch {}
-  }
-  const done = killSession(process.pid, "SIGKILL", runTag, targetPgid);
+  const finish = () => {
+    if (target && !targetReaped) {
+      try {
+        target.kill("SIGKILL");
+      } catch {}
+    }
+    process.exit(137);
+  };
+  const done = killSession(process.pid, "SIGKILL", runTag);
   if (done && typeof (done as Promise<void>).then === "function") {
-    void (done as Promise<void>).finally(() => process.exit(137));
+    void (done as Promise<void>).finally(finish);
     return;
   }
-  process.exit(137);
+  finish();
 };
 
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
@@ -86,7 +88,6 @@ process.on("message", async (message: unknown) => {
   const stdio: [number, number, number, ...number[]] = [0, 1, 2, ...lockFds];
   try {
     target = Bun.spawn(argv, { ...(env ? { env } : {}), stdio });
-    targetPgid = target.pid;
   } catch (error) {
     for (const fd of [...lockFds, 1, 2]) {
       try {
@@ -103,15 +104,7 @@ process.on("message", async (message: unknown) => {
     }
     return;
   }
-  for (const fd of lockFds) {
-    try {
-      closeSync(fd);
-    } catch {}
-  }
-  try {
-    process.send?.({ pgid: target.pid });
-  } catch {}
-  for (const fd of [1, 2]) {
+  for (const fd of [...lockFds, 1, 2]) {
     try {
       closeSync(fd);
     } catch {}

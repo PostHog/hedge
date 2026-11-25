@@ -256,7 +256,7 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     if (pid > 0) try { process.kill(pid, "SIGKILL"); } catch {}
   };
 
-  const notChecked = "  ? team  Team rules.\n      Workflows: allowlist not checked\n      Hedge could not check this pack's setup in time. Run hedge doctor.";
+  const notChecked = "  ? team  Team rules.\n      Workflows: allowlist not checked\n      Hedge could not check this pack's setup right now. Run hedge doctor.";
 
   test("says a human step that does not answer in time is not checked, even when it exits well once asked to stop, and stops every process it started", async () => {
     const { home } = await machineWithProfile();
@@ -458,7 +458,7 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await Promise.all([started, allowTerm, allowClosed])) };
     try {
       const output = (await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output;
-      expect(output).toContain("  ~ team  Team rules.\n      Workflows: allowlist needs setup, sync not checked\n      Needs setup on this machine. Run hedge doctor for the steps.\n      Hedge could not check this pack's setup in time. Run hedge doctor.");
+      expect(output).toContain("  ~ team  Team rules.\n      Workflows: allowlist needs setup, sync not checked\n      Needs setup on this machine. Run hedge doctor for the steps.\n      Hedge could not check this pack's setup right now. Run hedge doctor.");
       expect(await holderGone).toBe("");
     } finally {
       await endHolder(started);

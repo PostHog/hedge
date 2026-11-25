@@ -256,7 +256,7 @@ export type HumanStepsLeft = { failing: Array<Owned<HumanStep>>; unchecked: Arra
 const probeConcurrency = 8;
 const supervisorSpawnFailed = -1;
 
-export async function humanStepsLeft(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void>; graceMs?: number; drain?: Promise<void> }): Promise<HumanStepsLeft> {
+export async function humanStepsLeft(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void>; graceMs?: number }): Promise<HumanStepsLeft> {
   const reported = new WeakMap<AbortSignal, number>();
   const live = new Set<LiveProbe>();
   const run = viaEngine(plan, options.run ?? spawnRunner(options.home, plan.machine.profileDir, (sig, code) => reported.set(sig, code), options.graceMs, live));
@@ -277,8 +277,7 @@ export async function humanStepsLeft(plan: Plan, options: { home: string; run?: 
       const code = reported.get(deadline.signal);
       deadline.abort();
       if (code !== undefined) return code === 0 ? ("passes" as const) : ("fails" as const);
-      if (options.run && !options.drain) return "unchecked" as const;
-      if (options.drain) return await Promise.race([result, options.drain.then(() => "unchecked" as const)]);
+      if (options.run) return "unchecked" as const;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const cap = new Promise<"unchecked">((resolve) => {
         timer = setTimeout(() => resolve("unchecked"), 50);
@@ -540,7 +539,7 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
   } finally {
     if (!handedOff) {
       for (const entry of batch) {
-        killSessionSync(entry.pid, "SIGKILL", entry.targetExited ? undefined : entry.targetPid, entry.targetExited ? undefined : entry.tag);
+        killSessionSync(entry.pid, "SIGKILL", entry.targetExited ? undefined : entry.tag);
         try {
           process.kill(entry.pid, "SIGKILL");
         } catch {}
