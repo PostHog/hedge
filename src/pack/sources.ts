@@ -123,13 +123,15 @@ async function fallBack(ref: SourceRef, dir: string, repo: string, good: Good | 
     await restoreCheckout(dir, before);
     return { ref, error: reason };
   }
+  if (before?.branch && before.commit !== good.commit) {
+    await restoreCheckout(dir, before);
+    return { ref, error: reason };
+  }
   if (before?.branch) {
     await restoreCheckout(dir, before);
-    const loaded = await load(dir, loadLimitMs);
-    if ("error" in loaded) return { ref, error: reason };
-    return { ref, dir, packs: loaded.packs, stale: reason };
+  } else if (!(await git(dir, "checkout", "-q", "--detach", good.commit)).ok) {
+    return { ref, error: reason };
   }
-  if (!(await git(dir, "checkout", "-q", "--detach", good.commit)).ok) return { ref, error: reason };
   const loaded = await load(dir, loadLimitMs);
   if ("error" in loaded) return { ref, error: reason };
   const nextGood = { repo: good.repo, ref: good.ref, commit: good.commit, ...(good.ref === ref.ref ? {} : { asked: ref.ref }) };
@@ -185,6 +187,7 @@ async function writeAtomic(path: string, content: string) {
 }
 
 async function hasPinRef(dir: string, repo: string, commit: string) {
+  if (!existsSync(join(dir, ".git"))) return false;
   const read = await git(dir, "rev-parse", "--verify", "--quiet", `${pinRef(repo, commit)}^{commit}`);
   return read.ok && read.stdout.toLowerCase() === commit.toLowerCase();
 }
@@ -195,11 +198,6 @@ async function recordPinRef(dir: string, repo: string, commit: string): Promise<
   return updated.ok ? undefined : updated.stderr || "could not record pinned commit";
 }
 
-const pinnedCommit = (record: Good | undefined) =>
-  record && typeof record.repo === "string" && typeof record.ref === "string" && typeof record.commit === "string" && commitSha.test(record.ref) && record.ref.toLowerCase() === record.commit.toLowerCase()
-    ? { repo: record.repo, commit: record.commit.toLowerCase() }
-    : undefined;
-
 async function saveGood(dir: string, good: Good): Promise<string | undefined> {
   const before = await lastGood(dir);
   const unchanged =
@@ -208,20 +206,23 @@ async function saveGood(dir: string, good: Good): Promise<string | undefined> {
     before.ref === good.ref &&
     before.commit === good.commit &&
     before.asked === good.asked;
-  const previousPin = pinnedCommit(before);
-  if (previousPin) {
-    const exists = await git(dir, "cat-file", "-e", `${previousPin.commit}^{commit}`);
+  const previousCommit = verifiedGoodCommit(before);
+  if (previousCommit) {
+    const exists = await git(dir, "cat-file", "-e", `${previousCommit.commit}^{commit}`);
     if (exists.ok) {
-      const migrated = await recordPinRef(dir, previousPin.repo, previousPin.commit);
+      const migrated = await recordPinRef(dir, previousCommit.repo, previousCommit.commit);
       if (migrated && !unchanged) return migrated;
     }
   }
-  const currentPin = pinnedCommit(good);
-  if (currentPin) {
-    const recorded = await recordPinRef(dir, currentPin.repo, currentPin.commit);
+  const currentCommit = verifiedGoodCommit(good);
+  if (currentCommit) {
+    const recorded = await recordPinRef(dir, currentCommit.repo, currentCommit.commit);
     if (recorded && !unchanged) return recorded;
   }
-  if (unchanged) return undefined;
+  if (unchanged) {
+    await chmod(goodPath(dir), 0o600).catch(() => {});
+    return undefined;
+  }
   try {
     await writeAtomic(goodPath(dir), JSON.stringify(good) + "\n");
   } catch (error) {
@@ -261,6 +262,7 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string): Pr
 }
 
 async function checkedOutFromCache(dir: string, repo: string, ref: SourceRef, good: Good | undefined) {
+  if (!existsSync(join(dir, ".git"))) return false;
   const commit = ref.ref.toLowerCase();
   if (!commitSha.test(commit)) return false;
   const goodCommit = verifiedGoodCommit(good);
@@ -349,16 +351,19 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
   if (!fetched.ok) return { state: "failed", say: `could not fetch ${branch} from ${ref.repo}: ${fetched.stderr}` };
   const tip = (await git(dir, "rev-parse", "FETCH_HEAD")).stdout;
   if (!(await git(dir, "merge-base", "--is-ancestor", from, tip)).ok) return rewritten(tip);
+  const before = await currentCheckout(dir);
   const moved = await git(dir, "checkout", "-q", "--detach", tip);
   if (!moved.ok) return { state: "failed", say: `could not check out ${tip.slice(0, 12)} of ${ref.name}: ${moved.stderr}` };
   const loaded = await load(dir, loadLimitMs);
   if ("error" in loaded) {
-    await git(dir, "checkout", "-q", "--detach", from);
+    if (before) await restoreCheckout(dir, before);
+    else await git(dir, "checkout", "-q", "--detach", from);
     return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} does not load: ${loaded.error}` };
   }
   const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip });
   if (saveError) {
-    await git(dir, "checkout", "-q", "--detach", from);
+    if (before) await restoreCheckout(dir, before);
+    else await git(dir, "checkout", "-q", "--detach", from);
     return { state: "failed", say: `could not record ${branch} of ${ref.repo} at ${tip.slice(0, 12)}: ${saveError}` };
   }
   return { state: "moved", commit: tip, source: { ref, dir, packs: loaded.packs } };

@@ -380,14 +380,18 @@ describe("fetchSource", () => {
     expect(afterBranch.stale).toContain(`could not fetch ${commitA1}`);
   });
 
-  test("loads a pinned commit offline right after loading that exact commit through a branch", async () => {
+  test("loads a pinned commit offline after loading it through a moving branch even after the branch advances", async () => {
     const repo = await packRepo("Branch rules v1.");
-    const commit = await spawnGit(repo, "rev-parse", "HEAD");
+    const commit1 = await spawnGit(repo, "rev-parse", "HEAD");
     const cache = temp.make("cache-");
-    const online = await fetchSource({ name: "team", repo, ref: "main" }, cache);
-    if ("error" in online) throw new Error(online.error);
+    const online1 = await fetchSource({ name: "team", repo, ref: "main" }, cache);
+    if ("error" in online1) throw new Error(online1.error);
+    writePack(repo, "Branch rules v2.");
+    await spawnGit(repo, "commit", "-q", "-am", "v2");
+    const online2 = await fetchSource({ name: "team", repo, ref: "main" }, cache);
+    if ("error" in online2) throw new Error(online2.error);
     rmSync(repo, { recursive: true, force: true });
-    const pinned = await fetchSource({ name: "team", repo, ref: commit }, cache);
+    const pinned = await fetchSource({ name: "team", repo, ref: commit1 }, cache);
     if ("error" in pinned) throw new Error(pinned.error);
     expect([pinned.packs[0]?.manifest.summary, pinned.stale]).toEqual(["Branch rules v1.", undefined]);
   });
@@ -480,9 +484,7 @@ describe("fetchSource", () => {
     setDirModes(refsDir, 0o555);
     try {
       const sameRepoBlocked = await fetchSource({ name: "team", repo: repoA, ref: commitA2 }, cache);
-      if ("error" in sameRepoBlocked) throw new Error(sameRepoBlocked.error);
-      expect(sameRepoBlocked.packs[0]?.manifest.summary).toBe("Local cache edit.");
-      expect(sameRepoBlocked.stale).toContain(`could not record ${commitA2}`);
+      expect(sameRepoBlocked).toMatchObject({ error: expect.stringContaining(`could not record ${commitA2}`) });
       expect(await spawnGit(cacheDir, "rev-parse", "HEAD")).toBe(localCommit);
       expect(await spawnGit(cacheDir, "symbolic-ref", "-q", "HEAD")).toBe("refs/heads/topic");
     } finally {
@@ -510,6 +512,7 @@ describe("fetchSource", () => {
 
     const refreshCache = temp.make("refresh-meta-");
     const refreshDir = await legacyPinnedCache(refreshCache, "team", repoA, commitA1, { asked: "main" });
+    await spawnGit(refreshDir, "checkout", "-q", "-b", "local-work");
     const refreshMeta = join(refreshDir, ".git", "hedge-source.json");
     rmSync(refreshMeta, { force: true });
     mkdirSync(refreshMeta, { recursive: true });
@@ -518,9 +521,20 @@ describe("fetchSource", () => {
       const refreshFailed = await advanceSource({ name: "team", repo: repoA, ref: "main" }, refreshCache, commitA1);
       expect(refreshFailed).toMatchObject({ state: "failed", say: expect.stringContaining("could not record main") });
       expect(await spawnGit(refreshDir, "rev-parse", "HEAD")).toBe(commitA1);
+      expect(await spawnGit(refreshDir, "symbolic-ref", "-q", "HEAD")).toBe("refs/heads/local-work");
     } finally {
       rmSync(refreshMeta, { recursive: true, force: true });
     }
+
+    const enclosing = await packRepo("Outer worktree.");
+    const outerBranch = await spawnGit(enclosing, "symbolic-ref", "-q", "HEAD");
+    const outerHead = await spawnGit(enclosing, "rev-parse", "HEAD");
+    const fakeCache = join(enclosing, "nested-cache");
+    mkdirSync(join(fakeCache, "team"), { recursive: true });
+    const pinCheck = await fetchSource({ name: "team", repo: enclosing, ref: outerHead }, fakeCache);
+    if ("error" in pinCheck) throw new Error(pinCheck.error);
+    expect(await spawnGit(enclosing, "symbolic-ref", "-q", "HEAD")).toBe(outerBranch);
+    expect(await spawnGit(enclosing, "rev-parse", "HEAD")).toBe(outerHead);
   });
 
   test("records pinned history even for a relative repository path named after an Object property", async () => {

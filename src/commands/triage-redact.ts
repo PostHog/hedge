@@ -18,7 +18,7 @@ const secretRules: Rule[] = [
   [new RegExp(String.raw`\b(${secretKey})(["']?\s*[:=]\s*)(?:(")(?:[^"\\]|\\.){0,4096}"|(')[^']{0,4096}'|[^\s"']+)`, "gi"), (_match, key, separator, double, single) => `${key}${separator}${double ?? single ?? ""}<redacted>${double ?? single ?? ""}`],
 ];
 
-const rules: Rule[] = [
+const standardRules: Rule[] = [
   [/(?<![\w.+%-])[\w.+%-]+(?:@|%40)[A-Za-z0-9-]+(?:(?:\.|%2E)[A-Za-z0-9-]+)*(?:\.|%2E)[A-Za-z]{2,}\b/gi, (email, offset, text) => (email.startsWith("git@") && String(text)[Number(offset) + email.length] === ":" ? email : "<email>")],
   [/(?<![\w.-])[\w.-]+\/(?:hedge|fleet)-(profile|memory)(?:-[\w-]+)?\b/g, "<$1 repo>"],
   [/(private repos? )[\w.-]+\/[\w.-]+(?: and [\w.-]+\/[\w.-]+)?/g, "$1<private repo>"],
@@ -26,8 +26,11 @@ const rules: Rule[] = [
   [/(?<![A-Za-z0-9-]|[A-Za-z0-9-]\.)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:internal|local|lan|corp|home\.arpa|coder|ts\.net|tailscale\.net)\b/g, "<host>"],
   [/(\/Users|\/home)\/(?:[^/\n"'`:]{1,64}?(?=\/)|[^/\s"'`:]+)/g, "$1/<user>"],
   [/\b([A-Za-z]:(?:\\\\|\\|\/)Users(?:\\\\|\\|\/))(?:[^\\/\n"'`:]{1,64}?(?=[\\/])|[^\\/\s"'`:]+)/gi, "$1<user>"],
-  [/[A-Za-z0-9+/_-]{32,}={0,2}/g, (text) => (looksRandom(text) ? "<secret>" : text)],
 ];
+
+const randomRule: Rule = [/[A-Za-z0-9+/_-]{32,}={0,2}/g, (text) => (looksRandom(text) ? "<secret>" : text)];
+const allRules: Rule[] = [...secretRules, ...standardRules, randomRule];
+const preRandomRules: Rule[] = [...secretRules, ...standardRules];
 
 const tokenLetters = 32;
 const windowLetters = 128;
@@ -95,10 +98,11 @@ function encodeUri(text: string) {
   }
 }
 
-function replaceKnown(text: string, entries: KnownName[], transform?: (value: string) => string, exempt?: Set<string>) {
-  let result = text;
-  const spellings = entries
-    .filter((entry) => entry.text.length >= (entry.after ? 1 : 2))
+type CompiledSpelling = { text: string; as: string; regex: RegExp; owner: KnownName };
+
+function compileSpellings(entries: KnownName[], transform?: (value: string) => string, exempt?: Set<string>): CompiledSpelling[] {
+  const raw = entries
+    .filter((entry) => typeof entry.text === "string" && typeof entry.as === "string" && entry.text.length >= (entry.after ? 1 : 2))
     .flatMap((entry) => {
       const minLength = entry.after ? 1 : 2;
       const safeAs = applyRules(entry.as, secretRules);
@@ -110,18 +114,33 @@ function replaceKnown(text: string, entries: KnownName[], transform?: (value: st
           variants.push(prefixed.startsWith("/") ? prefixed.slice(1) : prefixed);
         }
       }
-      return [...new Set(variants.filter((variant) => variant.length >= minLength && !exempt?.has(variant)))].map((variant) => ({ text: variant, as: safeAs }));
-    });
+      return [...new Set(variants.filter((variant) => variant.length >= minLength && !exempt?.has(variant)))].map((variant) => ({
+        text: variant,
+        as: safeAs,
+        after: Boolean(entry.after),
+        owner: entry,
+      }));
+    })
+    .sort((a, b) => b.text.length - a.text.length);
   const exemptAlt = exempt?.size ? [...exempt].sort((a, b) => b.length - a.length).map(escape).join("|") : "";
-  for (const name of spellings.sort((a, b) => b.text.length - a.text.length)) {
+  return raw.map((name) => {
     const flags = name.text.length < 4 ? "g" : "gi";
-    const left = /^[\w-]/.test(name.text) ? "(?<![\\w-])" : "";
-    const right = /[\w-]$/.test(name.text) ? "(?![\\w-])" : "";
+    const left = name.after && /^[~<]/.test(name.text) ? "" : /^[\w-]/.test(name.text) ? "(?<![\\w-])" : "(?<![\\w-])";
+    const right = name.after && /[>]$/.test(name.text) ? "" : "(?![\\w-])";
     const pattern = `${left}${escape(name.text)}${right}`;
-    if (exemptAlt) {
-      result = result.replace(new RegExp(`${pattern}|${exemptAlt}`, flags), (match) => (exempt!.has(match) ? match : name.as));
+    const regex = new RegExp(exemptAlt ? `${pattern}|${exemptAlt}` : pattern, flags);
+    return { text: name.text, as: name.as, regex, owner: name.owner };
+  });
+}
+
+function applySpellings(text: string, spellings: CompiledSpelling[], exempt?: Set<string>, skipOwner?: KnownName) {
+  let result = text;
+  for (const name of spellings) {
+    if (skipOwner && name.owner === skipOwner) continue;
+    if (exempt?.size) {
+      result = result.replace(name.regex, (match) => (exempt.has(match) ? match : name.as));
     } else {
-      result = result.replace(new RegExp(pattern, flags), name.as);
+      result = result.replace(name.regex, () => name.as);
     }
   }
   return result;
@@ -129,25 +148,43 @@ function replaceKnown(text: string, entries: KnownName[], transform?: (value: st
 
 export function redact(text: string, home: string, known: KnownName[] = []): string {
   const stripHome = (value: string) => (home.length > 1 ? value.split(home.replace(/\/$/, "")).join("~") : value);
-  const primary = known.filter((entry) => !entry.after);
-  const allRules = [...secretRules, ...rules];
-  const sanitizeLabel = (entry: KnownName) => applyRules(stripHome(replaceKnown(entry.as, primary.filter((other) => other !== entry))), allRules);
+  const valid = known.filter((entry) => typeof entry.text === "string" && typeof entry.as === "string");
+  const primary = valid.filter((entry) => !entry.after);
+  const after = valid.filter((entry) => entry.after);
+
+  let fence = "~~";
+  const used = [text, ...valid.flatMap((entry) => [entry.text, entry.as])];
+  while (used.some((part) => part.includes(fence))) fence += "~";
+
+  const rawPrimarySpellings = compileSpellings(primary);
+  const sanitizeLabel = (entry: KnownName) => applyRules(stripHome(applySpellings(entry.as, rawPrimarySpellings, undefined, entry)), allRules);
+
+  const labels: string[] = [];
+  const originals: string[] = [];
+  const maskedEntries = primary.map((entry) => {
+    const index = labels.length;
+    labels.push(sanitizeLabel(entry));
+    originals.push(entry.text);
+    return { ...entry, as: `${fence}${index}${fence}` };
+  });
+  const maskedSpellings = compileSpellings(maskedEntries);
+  const tokenPattern = `${escape(fence)}(\\d+)${escape(fence)}`;
+  const tokenRegex = new RegExp(tokenPattern, "g");
+  const maskedRandomRegex = new RegExp(`(?:${tokenPattern}|[A-Za-z0-9+/_-])+={0,2}`, "g");
+
   const passOne = (value: string) => {
-    let fence = "~~";
-    while (value.includes(fence) || primary.some((entry) => entry.text.includes(fence) || entry.as.includes(fence))) fence += "~";
-    const labels: string[] = [];
-    const masked = primary.map((entry) => {
-      const token = `${fence}${labels.length}${fence}`;
-      labels.push(sanitizeLabel(entry));
-      return { ...entry, as: token };
+    let next = applyRules(stripHome(applySpellings(value, maskedSpellings)), preRandomRules);
+    next = next.replace(maskedRandomRegex, (match) => {
+      const expanded = match.replace(tokenRegex, (_tok, idx) => originals[Number(idx)] ?? "");
+      return expanded.length >= tokenLetters && looksRandom(expanded) ? "<secret>" : match;
     });
-    let next = applyRules(stripHome(replaceKnown(value, masked)), allRules);
-    for (let index = 0; index < labels.length; index++) next = next.split(`${fence}${index}${fence}`).join(labels[index]!);
-    return next;
+    return next.replace(tokenRegex, (_tok, idx) => labels[Number(idx)] ?? "");
   };
+
   const result = passOne(text);
-  const exempt = new Set([...redactorLabels, ...known.map(sanitizeLabel)]);
-  return replaceKnown(result, known.filter((entry) => entry.after), passOne, exempt);
+  const exempt = new Set([...redactorLabels, ...labels, ...after.map(sanitizeLabel)]);
+  const afterSpellings = compileSpellings(after, passOne, exempt);
+  return applySpellings(result, afterSpellings, exempt);
 }
 
 function escape(text: string) {

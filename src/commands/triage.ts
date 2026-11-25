@@ -185,7 +185,7 @@ function knownNames(hostname: string, machine: MachineFile | undefined, profile:
         if (shortRef !== source.ref) names.push({ text: shortRef, as: "<branch>", after: true });
       }
     }
-    if (publicRepos.has(source.repo)) continue;
+    if (typeof source.repo !== "string" || publicRepos.has(source.repo)) continue;
     names.push({ text: source.repo, as: anonymousSources ? "<private source>" : `<${source.name} source>` });
   }
   if (gitName) names.push({ text: gitName, as: "<name>" });
