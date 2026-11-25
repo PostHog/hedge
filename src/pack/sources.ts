@@ -147,7 +147,7 @@ const repoKey = (repo: string) => repoUrl(repo).replace(/^.*github\.com[:/]/i, "
 export async function unpinnedSources(refs: SourceRef[], profileDir: string): Promise<Finding[]> {
   const unpinned = refs.filter((ref) => !commitSha.test(ref.ref));
   if (!unpinned.length) return [];
-  const origin = (await git(profileDir, "config", "--get", "remote.origin.url")).stdout;
+  const origin = await git(profileDir, "config", "--get", "remote.origin.url").then((read) => read.stdout, () => "");
   const ownRepo = (ref: SourceRef) => origin !== "" && repoKey(ref.repo) === repoKey(origin);
   return unpinned
     .filter((ref) => !ownRepo(ref))
@@ -155,9 +155,10 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string): Pr
 }
 
 async function checkedOutFromCache(dir: string, repo: string, ref: SourceRef, good: Good | undefined) {
-  const fetchedHere = good?.repo === repo && (good.commit === ref.ref || good.pinned?.includes(ref.ref));
-  if (!commitSha.test(ref.ref) || !fetchedHere) return false;
-  return (await git(dir, "checkout", "-q", "--detach", ref.ref)).ok;
+  const commit = ref.ref.toLowerCase();
+  const fetchedHere = good?.repo === repo && (good.commit === commit || good.pinned?.includes(commit));
+  if (!commitSha.test(commit) || !fetchedHere) return false;
+  return (await git(dir, "checkout", "-q", "--detach", commit)).ok;
 }
 
 async function checkout(dir: string, url: string, ref: string): Promise<string | undefined> {

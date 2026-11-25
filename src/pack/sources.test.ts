@@ -226,6 +226,17 @@ describe("fetchSource", () => {
     expect(await fetchSource(ref, cache)).toEqual({ ref, dir: checkout, packs: [] });
   });
 
+  test("loads a commit pinned in capitals from the cache without reaching the source", async () => {
+    const repo = await packRepo("Team rules v1.");
+    const ref = { name: "team", repo, ref: (await spawnGit(repo, "rev-parse", "HEAD")).toUpperCase() };
+    const cache = temp.make("cache-");
+    await fetchSource(ref, cache);
+    rmSync(repo, { recursive: true, force: true });
+    const fetched = await fetchSource(ref, cache);
+    if ("error" in fetched) throw new Error(fetched.error);
+    expect([fetched.packs[0]?.manifest.summary, fetched.stale]).toEqual(["Team rules v1.", undefined]);
+  });
+
   test("moves to another pinned commit already in the cache without reaching the source", async () => {
     const repo = await packRepo("Team rules v1.");
     const first = await spawnGit(repo, "rev-parse", "HEAD");

@@ -389,6 +389,16 @@ describe("hedge doctor and pack sources", () => {
     expect(await hedge(["doctor"], home)).toEqual({ code: 0, output: "Everything matches your profile." });
   });
 
+  test("still prints its report without git when a source it notes was never fetched", async () => {
+    const home = temp.make("home-");
+    const profile = profileDir();
+    expect(await hedge(["apply", "--profile", profile], home)).toMatchObject({ code: 0 });
+    const file = join(profile, "hedge.json");
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), sources: [{ name: "team", repo: "someone/team", ref: "main" }] }));
+    process.env.PATH = temp.make("no-git-");
+    expect((await hedge(["doctor"], home)).output).toContain("Note: The pack source team follows main.");
+  });
+
   test("passes without git on a profile with no sources", async () => {
     const home = temp.make("home-");
     expect(await hedge(["apply", "--profile", profileDir()], home)).toMatchObject({ code: 0 });
