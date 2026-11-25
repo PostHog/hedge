@@ -186,8 +186,6 @@ describe("which calls enqueue or merge", () => {
     expect(mcp("mcp__t3-code__pull_request_merge", { ...merge, stack: true, environmentId: "box-2" })).toEqual({ targets: [target("example/product", 7)] });
     expect(mcp("mcp__t3-code__pull_request_merge", { ...merge, repository: "own/tooling" })).toEqual({ targets: [], exempt: [target("own/tooling", 7)] });
     expect(mcp("mcp__t3-code__pull_request_respond", { repository: "example/product", number: 7, body: "Ready.\n/trunk merge" })).toEqual({ targets: [target("example/product", 7)] });
-    expect(mcp("mcp__t3-code__comment_on_issue", { url: "https://github.com/example/product/pull/7", body: "/trunk merge" })).toEqual({ targets: [target("example/product", 7)] });
-    expect(mcp("mcp__t3-code__comment_on_issue", { url: "https://github.com/example/product/issues/7", body: "/trunk merge" })).toEqual({ targets: [target("example/product", 7)] });
   });
 
   test("a T3 merge or /trunk merge comment that leaves T3 to pick the PR is refused, since the gate cannot check it", () => {
@@ -201,15 +199,11 @@ describe("which calls enqueue or merge", () => {
       { owner: "example", repo: "product", pullNumber: 7, expectedHeadSha: head },
     ]) expect(mcp("mcp__t3-code__pull_request_merge", input).refusal).toContain("merges a PR without naming the PR");
     expect(mcp("mcp__t3-code__pull_request_respond", { body: "/trunk merge" }).refusal).toContain("posts `/trunk merge` without naming the PR");
-    expect(mcp("mcp__t3-code__comment_on_issue", { key: "example/product#7", body: "/trunk merge" }).refusal).toContain("without naming the PR");
-    expect(mcp("mcp__t3-code__comment_on_issue", { key: "ENG-7", url: "https://github.com/example/product/pull/7", body: "/trunk merge" }).refusal).toContain("without naming the PR");
-    expect(mcp("mcp__t3-code__comment_on_issue", { url: "https://linear.app/example/issue/ENG-7", body: "/trunk merge" }).refusal).toContain("without naming the PR");
   });
 
   test.each([["\r/trunk merge"], ["\v/trunk merge"], ["\uFEFF/trunk merge"], ["\u00A0\u2028/trunk merge"]])("a T3 body that T3 trims to /trunk merge counts as one: %j", (body) => {
     const pr = { repository: "example/product", number: 7 };
     expect(mcp("mcp__t3-code__pull_request_respond", { ...pr, body })).toEqual({ targets: [target("example/product", 7)] });
-    expect(mcp("mcp__t3-code__comment_on_issue", { url: "https://github.com/example/product/pull/7", body })).toEqual({ targets: [target("example/product", 7)] });
     expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "comment", body }).refusal).toBe(otherEndpointReason);
   });
 
@@ -219,7 +213,7 @@ describe("which calls enqueue or merge", () => {
     expect(mcp("mcp__t3-code__pull_request_respond", { ...decoys, repository: "example/product", number: 7, body: "/trunk merge" })).toEqual({ targets: [target("example/product", 7)] });
   });
 
-  test("a T3 review or review-thread reply that posts /trunk merge is refused, and T3 reads, edits and other comments enqueue nothing", () => {
+  test("a T3 review or review-thread reply that posts /trunk merge is refused, and T3 reads, edits, issue comments and other comments enqueue nothing", () => {
     const pr = { repository: "example/product", number: 7 };
     expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "comment", body: "/trunk merge" }).refusal).toBe(otherEndpointReason);
     expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "approve", expectedHeadSha: head, comments: [{ path: "a.ts", line: 1, body: "/trunk merge" }] }).refusal).toBe(otherEndpointReason);
@@ -232,6 +226,9 @@ describe("which calls enqueue or merge", () => {
     expect(mcp("mcp__t3-code__pull_request_list", { repository: "example/product" })).toEqual({ targets: [] });
     expect(mcp("mcp__t3-code__pull_request_create", { title: "Merge queue", body: "/trunk merge once green" })).toEqual({ targets: [] });
     expect(mcp("mcp__t3-code__t3_thread_send", { threadId: "t", message: "/trunk merge" })).toEqual({ targets: [] });
+    for (const target of [{ url: "https://github.com/example/product/pull/7" }, { url: "https://github.com/example/product/issues/7" }, { key: "ENG-7" }]) {
+      expect(mcp("mcp__t3-code__comment_on_issue", { ...target, body: "/trunk merge" })).toEqual({ targets: [] });
+    }
     expect(mcp("mcp__other__pull_request_merge", { ...pr, expectedHeadSha: head })).toEqual({ targets: [] });
   });
 

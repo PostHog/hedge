@@ -263,11 +263,7 @@ function mcpPr(input: Record<string, unknown>): { repository: string; pr: number
 
 const t3Tool = /^mcp__t3[-_]code__/;
 
-function t3Pr(name: string, input: Record<string, unknown>): { repository: string; pr: number } | undefined {
-  if (name === "comment_on_issue") {
-    const url = input.key === undefined && typeof input.url === "string" ? input.url.match(prUrl) : null;
-    return url ? { repository: url[1]!, pr: Number(url[2]) } : undefined;
-  }
+function t3Pr(input: Record<string, unknown>): { repository: string; pr: number } | undefined {
   const { repository, number } = input;
   return typeof repository === "string" && repoSlug.test(repository) && Number.isSafeInteger(number) && Number(number) > 0 ? { repository, pr: Number(number) } : undefined;
 }
@@ -276,11 +272,12 @@ function mcpIntent(tool: string, input: Record<string, unknown>): MergeIntent {
   const name = tool.replace(/^mcp__.*?__/, "");
   if (reads.test(name)) return { targets: [] };
   const merges = /merge/i.test(name) && !/disable|update_pull_request_branch/i.test(name);
-  const writesComment = /comment|review|respond/i.test(name);
-  const texts = t3Tool.test(tool) ? strings(input).flatMap((text) => [text, text.trim()]) : strings(input);
+  const t3 = t3Tool.test(tool);
+  const writesComment = /comment|review|respond/i.test(name) && (!t3 || name.startsWith("pull_request_"));
+  const texts = t3 ? strings(input).flatMap((text) => [text, text.trim()]) : strings(input);
   if (!merges && !(writesComment && texts.some((text) => enqueueLine.test(text)))) return { targets: [] };
   if (!merges && (/review/i.test(name) || input.reviewThreadId !== undefined)) return { targets: [], refusal: otherEndpointReason };
-  const named = t3Tool.test(tool) ? t3Pr(name, input) : mcpPr(input);
+  const named = t3 ? t3Pr(input) : mcpPr(input);
   return named ? { targets: [{ ...named, via: merges ? tool : `${tool} comment` }] } : { targets: [], refusal: unnamedReason(merges ? "merges a PR" : "posts `/trunk merge`") };
 }
 
