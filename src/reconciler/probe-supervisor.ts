@@ -41,15 +41,44 @@ export function sessionGroupsLinux(sessionId: number): number[] {
   return [...groups];
 }
 
-export async function sessionGroups(sessionId: number): Promise<number[]> {
-  if (process.platform === "linux") return sessionGroupsLinux(sessionId);
-  const groups = new Set<number>([sessionId]);
+const psLookupLimitMs = 200;
+
+async function readPsRows(): Promise<Array<{ pid: number; pgid: number; sess: string }> | undefined> {
+  let ps: ReturnType<typeof Bun.spawn> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const ps = Bun.spawn(["ps", "-Ao", "pid=,pgid=,sess="], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-    const [text, code] = await Promise.all([new Response(ps.stdout).text(), ps.exited]);
-    if (code !== 0) return [...groups];
+    ps = Bun.spawn(["ps", "-Ao", "pid=,pgid=,sess="], { stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: psLookupLimitMs, killSignal: "SIGKILL" });
+    const stream = ps.stdout as ReadableStream<Uint8Array>;
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    let timedOut = false;
+    const readAll = (async () => {
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          text += decoder.decode(value, { stream: true });
+        }
+        text += decoder.decode();
+      } catch {}
+    })();
+    const finished = await Promise.race([
+      Promise.all([readAll, ps.exited]).then(([, code]) => code === 0),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          try {
+            ps?.kill("SIGKILL");
+          } catch {}
+          void reader.cancel().catch(() => {});
+          resolve(false);
+        }, psLookupLimitMs + 50);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (timedOut || !finished) return undefined;
     const rows: Array<{ pid: number; pgid: number; sess: string }> = [];
-    let targetSess: string | undefined;
     for (const line of text.split("\n")) {
       const parts = line.trim().split(/\s+/);
       if (parts.length < 3) continue;
@@ -57,38 +86,50 @@ export async function sessionGroups(sessionId: number): Promise<number[]> {
       const pgid = Number(parts[1]);
       const sess = parts[2]!;
       if (!Number.isFinite(pid) || !Number.isFinite(pgid)) continue;
+      if (pid === ps.pid) continue;
       rows.push({ pid, pgid, sess });
-      if (pid === sessionId) targetSess = sess;
     }
-    if (targetSess && targetSess !== "0") {
-      for (const row of rows) {
-        if (row.sess === targetSess && row.pgid > 0) groups.add(row.pgid);
-      }
+    return rows;
+  } catch {
+    if (timer) clearTimeout(timer);
+    try {
+      ps?.kill("SIGKILL");
+    } catch {}
+    return undefined;
+  }
+}
+
+export async function sessionGroups(sessionId: number): Promise<number[]> {
+  if (process.platform === "linux") return sessionGroupsLinux(sessionId);
+  const groups = new Set<number>([sessionId]);
+  const rows = await readPsRows();
+  if (!rows) return [...groups];
+  const targetSess = rows.find((row) => row.pid === sessionId)?.sess;
+  if (targetSess && targetSess !== "0") {
+    for (const row of rows) {
+      if (row.sess === targetSess && row.pgid > 0) groups.add(row.pgid);
     }
-  } catch {}
+  }
   return [...groups];
+}
+
+function signalOneGroup(pgrp: number, signal: NodeJS.Signals): void {
+  if (signal !== "SIGKILL" && signal !== "SIGCONT") {
+    try {
+      process.kill(-pgrp, "SIGCONT");
+    } catch {}
+  }
+  try {
+    process.kill(-pgrp, signal);
+  } catch {}
 }
 
 function signalGroups(sessionId: number, groups: number[], signal: NodeJS.Signals): void {
   for (const pgrp of groups) {
     if (pgrp === sessionId) continue;
-    if (signal !== "SIGKILL" && signal !== "SIGCONT") {
-      try {
-        process.kill(-pgrp, "SIGCONT");
-      } catch {}
-    }
-    try {
-      process.kill(-pgrp, signal);
-    } catch {}
+    signalOneGroup(pgrp, signal);
   }
-  if (signal !== "SIGKILL" && signal !== "SIGCONT") {
-    try {
-      process.kill(-sessionId, "SIGCONT");
-    } catch {}
-  }
-  try {
-    process.kill(-sessionId, signal);
-  } catch {}
+  signalOneGroup(sessionId, signal);
 }
 
 export function killSessionSync(sessionId: number, signal: NodeJS.Signals, activeTargetPgid?: number): void {
@@ -103,6 +144,14 @@ export function killSession(sessionId: number, signal: NodeJS.Signals): void | P
   if (process.platform === "linux") {
     signalGroups(sessionId, sessionGroupsLinux(sessionId), signal);
     return;
+  }
+  if (signal !== "SIGKILL") {
+    signalOneGroup(sessionId, signal);
+    return sessionGroups(sessionId).then((groups) => {
+      for (const pgrp of groups) {
+        if (pgrp !== sessionId) signalOneGroup(pgrp, signal);
+      }
+    });
   }
   return sessionGroups(sessionId).then((groups) => signalGroups(sessionId, groups, signal));
 }
@@ -131,30 +180,14 @@ export async function hasOtherGroupMember(): Promise<boolean> {
       return true;
     }
   }
-  try {
-    const ps = Bun.spawn(["ps", "-Ao", "pid=,pgid=,sess="], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-    const [text, code] = await Promise.all([new Response(ps.stdout).text(), ps.exited]);
-    if (code !== 0) return true;
-    const rows: Array<{ pid: number; pgid: number; sess: string }> = [];
-    let selfSess: string | undefined;
-    for (const line of text.split("\n")) {
-      const parts = line.trim().split(/\s+/);
-      if (parts.length < 3) continue;
-      const pid = Number(parts[0]);
-      const pgid = Number(parts[1]);
-      const sess = parts[2]!;
-      if (!Number.isFinite(pid) || !Number.isFinite(pgid)) continue;
-      rows.push({ pid, pgid, sess });
-      if (pid === self) selfSess = sess;
-    }
-    for (const row of rows) {
-      if (row.pid === self || row.pid === ps.pid) continue;
-      if (row.pgid === self || (selfSess && selfSess !== "0" && row.sess === selfSess)) return true;
-    }
-    return false;
-  } catch {
-    return true;
+  const rows = await readPsRows();
+  if (!rows) return true;
+  const selfSess = rows.find((row) => row.pid === self)?.sess;
+  for (const row of rows) {
+    if (row.pid === self) continue;
+    if (row.pgid === self || (selfSess && selfSess !== "0" && row.sess === selfSess)) return true;
   }
+  return false;
 }
 
 const realTimer: Timer = (ms, fire) => {

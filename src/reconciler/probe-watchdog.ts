@@ -38,6 +38,7 @@ if (import.meta.main) {
   while (pending.size > 0) {
     const elapsed = performance.now() - started;
     let nextWake = Number.POSITIVE_INFINITY;
+    const due: WatchEntry[] = [];
     for (const entry of [...pending]) {
       if (!alive(entry.fd)) {
         close(entry.fd);
@@ -46,28 +47,36 @@ if (import.meta.main) {
       }
       const left = entry.delayMs - elapsed;
       if (left <= 0) {
-        if (alive(entry.fd)) {
-          const groups = await sessionGroups(entry.pid);
-          if (alive(entry.fd)) {
-            for (const pgrp of groups) {
-              if (pgrp === entry.pid) continue;
-              try {
-                process.kill(-pgrp, "SIGKILL");
-              } catch {}
-            }
-            try {
-              process.kill(-entry.pid, "SIGKILL");
-            } catch {}
-            try {
-              process.kill(entry.pid, "SIGKILL");
-            } catch {}
-          }
-        }
-        close(entry.fd);
+        due.push(entry);
         pending.delete(entry);
       } else if (left < nextWake) {
         nextWake = left;
       }
+    }
+    if (due.length > 0) {
+      await Promise.all(
+        due.map(async (entry) => {
+          if (alive(entry.fd)) {
+            const groups = await sessionGroups(entry.pid);
+            if (alive(entry.fd)) {
+              for (const pgrp of groups) {
+                if (pgrp === entry.pid) continue;
+                try {
+                  process.kill(-pgrp, "SIGKILL");
+                } catch {}
+              }
+              try {
+                process.kill(-entry.pid, "SIGKILL");
+              } catch {}
+              try {
+                process.kill(entry.pid, "SIGKILL");
+              } catch {}
+            }
+          }
+          close(entry.fd);
+        }),
+      );
+      continue;
     }
     if (pending.size > 0) await Bun.sleep(Math.min(25, Math.max(1, Math.ceil(nextWake))));
   }

@@ -6,7 +6,6 @@ type StartMessage = { argv: string[]; lockCount: number; controlFd?: number };
 let target: ReturnType<typeof Bun.spawn> | undefined;
 let targetReaped = false;
 let targetCode: number | undefined;
-let holdFd: number | undefined;
 let killing = false;
 
 const killAll = () => {
@@ -60,11 +59,6 @@ const watchControl = (fd: number) => {
       }
     } catch {}
     if (!sawKill && !killing) {
-      if (holdFd !== undefined) {
-        try {
-          closeSync(holdFd);
-        } catch {}
-      }
       process.exit(targetCode ?? 0);
     }
   })();
@@ -86,9 +80,8 @@ process.on("message", async (message: unknown) => {
   if (!message || typeof message !== "object" || !Array.isArray((message as StartMessage).argv)) return;
   const { argv, lockCount, controlFd } = message as StartMessage;
   if (typeof controlFd === "number" && Number.isInteger(controlFd) && controlFd >= 3) watchControl(controlFd);
-  const locked = lockCount > 0;
   const lockFds = Array.from({ length: lockCount }, (_, index) => index + 3);
-  const stdio: [number, number, number, ...(number | "pipe")[]] = locked ? [0, 1, 2, ...lockFds, "pipe"] : [0, 1, 2];
+  const stdio: [number, number, number, ...number[]] = [0, 1, 2, ...lockFds];
   try {
     target = Bun.spawn(argv, { stdio });
   } catch (error) {
@@ -97,9 +90,6 @@ process.on("message", async (message: unknown) => {
       process.send?.({ error: err?.message ?? String(error), ...(err?.code ? { code: err.code } : {}) });
     } catch {}
     process.exit(127);
-  }
-  if (locked && typeof target.stdio[lockCount + 3] === "number") {
-    holdFd = target.stdio[lockCount + 3] as number;
   }
   for (const fd of lockFds) {
     try {

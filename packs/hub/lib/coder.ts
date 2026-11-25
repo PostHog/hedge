@@ -45,9 +45,12 @@ export const orphanGraceSeconds = 10;
 
 function holdingLocks(argv: string[], locks: number[], timeoutMs: number): string[] {
   if (!locks.length) return argv;
-  const holdFd = locks.length + 3;
   const closed = locks.map((_, index) => `${index + 3}>&-`).join(" ");
-  const shell = holdFd >= 10 ? (Bun.which("bash") ?? "/bin/sh") : "/bin/sh";
+  const needsMultiDigit = locks.length + 2 >= 10;
+  const shell = needsMultiDigit ? (Bun.which("bash") ?? Bun.which("zsh") ?? Bun.which("ksh")) : "/bin/sh";
+  if (!shell) {
+    throw new Error(`cannot close ${locks.length} box lock descriptors without bash, zsh, or ksh`);
+  }
   return [
     "timeout",
     "-s",
@@ -55,7 +58,7 @@ function holdingLocks(argv: string[], locks: number[], timeoutMs: number): strin
     String(Math.ceil(timeoutMs / 1000) + orphanGraceSeconds),
     shell,
     "-c",
-    `(while read -r _ <&${holdFd}; do :; done) </dev/null >/dev/null 2>&1 ${closed} & exec "$@" ${closed} ${holdFd}<&-`,
+    `exec "$@" ${closed}`,
     "hedge-box-lock",
     ...argv,
   ];
@@ -217,18 +220,24 @@ export function captureWith(timer: Timer): Capture {
         readText(live.stderr, stopStream.signal),
         statusPromise,
       ]);
+      if (expired) {
+        if (!supervisorReaped) {
+          await Promise.race([live.exited, Bun.sleep(forceExpired ? 50 : 150)]);
+          if (!supervisorReaped) {
+            killStalled();
+            await Promise.race([live.exited, Bun.sleep(50)]);
+          }
+        }
+        if (hardKill) clearTimeout(hardKill);
+        return timeoutResult(timeoutMs, stdout);
+      }
       if (hardKill) clearTimeout(hardKill);
-      if (!supervisorReaped && !expired) {
+      if (!supervisorReaped) {
         try {
           live.send("done");
         } catch {}
       }
-      if (forceExpired) {
-        await Promise.race([live.exited, Bun.sleep(50)]);
-      } else {
-        await live.exited;
-      }
-      if (expired) return timeoutResult(timeoutMs, stdout);
+      await live.exited;
       if (status.error !== undefined) {
         const err = new Error(status.error) as NodeJS.ErrnoException;
         if (status.errCode) err.code = status.errCode;
