@@ -109,7 +109,8 @@ const stripSourceRefspec = (ref: string) => {
   return stripTrailingColon(noPlus);
 };
 const isInvalidRef = (ref: string) => {
-  if (!ref || ref.startsWith("-") || ref.startsWith("^") || /[\0\r\n]/.test(ref)) return true;
+  if (ref === "") return false;
+  if (ref.startsWith("-") || ref.startsWith("^") || /[\0\r\n]/.test(ref)) return true;
   const colon = ref.indexOf(":");
   if (colon !== -1 && colon !== ref.length - 1) return true;
   const src = stripSourceRefspec(ref);
@@ -271,7 +272,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
   if (!checkedOutCommit) {
     savedFetchHead = await snapshotFetchHead(dir);
     fetchedNew = true;
-    const fetched = await checkout(dir, repo, ref.ref, savedFetchHead);
+    const fetched = await checkout(dir, repo, ref.ref, savedFetchHead, good);
     effectiveRepo = fetched.effectiveRepo;
     fetchError = fetched.error;
     checkedOutCommit = fetched.commit;
@@ -650,7 +651,7 @@ async function fetchExact(dir: string, repo: string, ref: string, shallow: boole
   if (!fetched.ok && !unsupportedPorcelain) {
     return { ok: false, stderr: fetched.stderr };
   }
-  const src = stripSourceRefspec(ref);
+  const src = stripSourceRefspec(ref) || "HEAD";
   const tmpRef = `refs/hedge/tmp/${crypto.randomUUID()}`;
   try {
     const fallbackArgs = shallow ? ["fetch", "-q", "--depth", "1", "--no-tags", repo, `+${src}:${tmpRef}`] : ["fetch", "-q", "--no-tags", repo, `+${src}:${tmpRef}`];
@@ -663,18 +664,19 @@ async function fetchExact(dir: string, repo: string, ref: string, shallow: boole
   }
 }
 
-async function checkout(dir: string, repo: string, ref: string, savedFetchHead: SavedFetchHead): Promise<{ effectiveRepo: string; commit?: string; fetchedOid?: string; error?: string }> {
+async function checkout(dir: string, repo: string, ref: string, savedFetchHead: SavedFetchHead, good?: Good): Promise<{ effectiveRepo: string; commit?: string; fetchedOid?: string; error?: string }> {
   const effectiveBefore = await resolvedRepoUrl(dir, repo);
   if (isInvalidRef(ref)) return { effectiveRepo: effectiveBefore, error: `invalid ref ${JSON.stringify(ref)}` };
   await mkdir(dir, { recursive: true });
   if (!existsSync(join(dir, ".git"))) await git(dir, "init", "-q");
   const effectiveRepo = await resolvedRepoUrl(dir, repo);
-  const hashLen = await repoHashLength(dir);
-  const existingPins = isCommitPin(stripSourceRefspec(ref), hashLen)
-    ? undefined
-    : await git(dir, "for-each-ref", "--count=1", `refs/hedge/pins/${repoDigest(effectiveRepo)}/`);
-  const shallow = !(existingPins?.ok && existingPins.stdout !== "");
-  const fetched = await fetchExact(dir, repo, ref, shallow);
+  const sameTrackedBranch =
+    good?.branch === true &&
+    good.repo === repo &&
+    goodResolvedDigest(good) === repoDigest(effectiveRepo) &&
+    Boolean(branchName(good.ref)) &&
+    branchName(good.ref) === branchName(ref);
+  const fetched = await fetchExact(dir, repo, ref, !sameTrackedBranch);
   if (!fetched.ok || !fetched.oid) {
     await restoreFetchHead(dir, savedFetchHead);
     return { effectiveRepo, error: fetched.stderr || "could not fetch commit" };

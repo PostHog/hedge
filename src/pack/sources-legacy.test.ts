@@ -851,6 +851,12 @@ throw new Error("broken pack");
     if ("error" in midOffline) throw new Error(midOffline.error);
     expect(midOffline.packs[0]?.manifest.summary).toBe("Branch c2.");
     expect(midOffline.stale).toBeUndefined();
+
+    const emptyRefRepo = await packRepo("Default HEAD packs.");
+    const emptyRefCache = temp.make("cache-empty-ref-");
+    const emptyRefRes = await fetchSource({ name: "team", repo: emptyRefRepo, ref: "" }, emptyRefCache);
+    if ("error" in emptyRefRes) throw new Error(emptyRefRes.error);
+    expect(emptyRefRes.packs[0]?.manifest.summary).toBe("Default HEAD packs.");
   });
 });
 

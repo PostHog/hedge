@@ -916,6 +916,9 @@ describe("hedge triage", () => {
       { text: "private-owner/SK-abcdefghijklmnop1234", as: "<private source>" },
       { text: "private-owner/EYJ12345678.12345678.12345678", as: "<private source>" },
       { text: "private-owner/SK-aaaaaaaaaaaaaaaa/SK-bbbbbbbbbbbbbbbb", as: "<private source>" },
+      { text: "private-owner/SK-prefix-SK-abcdefghijklmnop1234", as: "<private source>" },
+      { text: "abc", as: "<name>" },
+      { text: "https://github.com/ABC/private-repo", as: "<private source>" },
     ];
     expect(redact("failed to clone https://github.com/private-owner/sk-abcdefghijklmnop1234.git", schemeHome, skKnown)).toBe(
       "failed to clone https://github.com/<private source>.git",
@@ -925,6 +928,12 @@ describe("hedge triage", () => {
     );
     expect(redact("failed to clone https://github.com/private-owner/sk-aaaaaaaaaaaaaaaa/SK-bbbbbbbbbbbbbbbb.git", schemeHome, skKnown)).toBe(
       "failed to clone https://github.com/<private source>.git",
+    );
+    expect(redact("failed to clone https://github.com/private-owner/SK-prefix-sk-abcdefghijklmnop1234.git", schemeHome, skKnown)).toBe(
+      "failed to clone https://github.com/<private source>.git",
+    );
+    expect(redact("clone https://github.com/abc/private-repo and abc", schemeHome, skKnown)).toBe(
+      "clone <private source> and <name>",
     );
   });
 });
