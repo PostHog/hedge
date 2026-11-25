@@ -60,19 +60,38 @@ export function captureWith(timer: Timer): Capture {
     const output = inherit ? "inherit" : "pipe";
     const locks = heldLocks();
     const input = stdin === undefined ? "ignore" : new TextEncoder().encode(stdin);
-    const child = Bun.spawn(holdingLocks(argv, locks, timeoutMs), { env: env as Record<string, string> | undefined, stdio: [input, output, output, ...locks], detached: true });
-    let expired = false;
-    const cancel = timer(timeoutMs, () => {
-      expired = true;
+    let child: ReturnType<typeof Bun.spawn> | undefined;
+    let stopped = false;
+    const stopGroup = () => {
+      stopped = true;
+      if (!child) return;
       kill(-child.pid);
       kill(child.pid);
-    });
+    };
+    const interrupted = (name: NodeJS.Signals) => {
+      stopGroup();
+      release();
+      if (!process.listenerCount(name)) process.kill(process.pid, name);
+    };
+    const release = () => {
+      process.off("SIGINT", interrupted).off("SIGTERM", interrupted);
+    };
+    process.on("SIGINT", interrupted).on("SIGTERM", interrupted);
+    let expired = false;
+    let cancel = () => {};
     try {
+      child = Bun.spawn(holdingLocks(argv, locks, timeoutMs), { env: env as Record<string, string> | undefined, stdio: [input, output, output, ...locks], detached: true });
+      if (stopped) stopGroup();
+      cancel = timer(timeoutMs, () => {
+        expired = true;
+        stopGroup();
+      });
       const text = (stream: ReadableStream<Uint8Array> | number | undefined) => (stream instanceof ReadableStream ? new Response(stream).text() : "");
       const [stdout, stderr, code] = await Promise.all([text(child.stdout), text(child.stderr), child.exited]);
       return expired ? timeoutResult(timeoutMs, stdout) : { code, stdout, stderr };
     } finally {
       cancel();
+      release();
     }
   };
 }

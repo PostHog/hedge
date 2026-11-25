@@ -321,3 +321,20 @@ test("a call that hands its output through to the caller still has a time limit 
   clock.fire();
   expect(await result).toEqual({ code: 124, stdout: "", stderr: "timed out after 30 ms" });
 });
+
+test("terminates its detached child process group when the parent receives SIGTERM", async () => {
+  const dir = temp.make("hedge-term-");
+  const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+  expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+  const runner = Bun.spawn([process.execPath, "-e", `import { capture } from ${JSON.stringify(join(import.meta.dir, "coder.ts"))}; await capture(["sh", "-c", "{ sleep 30 & } 3>${gone}; echo $! > ${ready}; wait"], { timeoutMs: 30_000 });`], { stdout: "ignore", stderr: "ignore" });
+  const holderGone = Bun.file(gone).text();
+  const childPid = Number((await Bun.file(ready).text()).trim());
+  try {
+    runner.kill("SIGTERM");
+    expect(await holderGone).toBe("");
+    expect(await runner.exited).not.toBe(0);
+  } finally {
+    runner.kill("SIGKILL");
+    try { process.kill(childPid, "SIGKILL"); } catch {}
+  }
+});
