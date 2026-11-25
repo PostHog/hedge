@@ -272,13 +272,37 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     }
   });
 
+  test("resolves probe executables via PATH rather than shell builtins, matching hedge doctor", async () => {
+    const { home } = await machineWithProfile();
+    const bin = join(home, "bin");
+    mkdirSync(bin, { recursive: true });
+    const fakeSet = join(bin, "set");
+    writeFileSync(fakeSet, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    await withTeamPack(home, {
+      workflows: [flow("external"), flow("builtin")],
+      human: [
+        { id: "external", say: "Check external set.", probe: ["set", "--hedge-external-flag"], workflow: "external" },
+        { id: "builtin", say: "Check builtin export.", probe: ["export", "HEDGE_BUILTIN=1"], workflow: "builtin" },
+      ],
+    });
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${bin}:${prevPath ?? ""}`;
+    try {
+      const output = (await hedge(home, ["packs"])).output;
+      expect(output).toContain(`  ~ team  Team rules.\n      Workflows: external on, builtin needs setup\n${needsSetup}`);
+    } finally {
+      if (prevPath === undefined) delete process.env.PATH;
+      else process.env.PATH = prevPath;
+    }
+  });
+
   test("forwards SIGINT to human steps so SIGINT cleanup traps run without being preempted by SIGTERM", async () => {
     const { home } = await machineWithProfile();
     const [ready, fgGone, cleaned] = [join(home, "ready"), join(home, "fg-gone"), join(home, "cleaned")];
     expect(Bun.spawnSync(["mkfifo", ready, fgGone, cleaned]).exitCode).toBe(0);
     await withTeamPack(home, {
       workflows: [flow("allowlist")],
-      human: [humanStep("allowlist", 'trap "" TERM; sleep 30 & pid=$!; trap \'kill $pid 2>/dev/null; echo cleaned > "$HOME/cleaned"; exit 130\' INT; exec 3>"$HOME/fg-gone"; echo $$ > "$HOME/ready"; wait', "allowlist")],
+      human: [humanStep("allowlist", 'trap "" TERM; sleep 30 & pid=$!; trap \'kill $pid 2>/dev/null; echo cleaned > "$HOME/cleaned"; exit 130\' INT; exec 3>"$HOME/fg-gone"; ps -o pgid= -p $$ | tr -d " " > "$HOME/ready"; wait', "allowlist")],
     });
     const [fgClosed, sawClean, started] = [readFile(fgGone, "utf8"), readFile(cleaned, "utf8"), readFile(ready, "utf8")];
     const listing = Bun.spawn([process.execPath, join(engineRoot, "src/cli.ts"), "packs"], { env: { ...Bun.env, HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });

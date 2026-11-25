@@ -49,13 +49,25 @@ const realTimer: Timer = (ms, fire) => {
 
 export const orphanGraceSeconds = 10;
 
-function holdingLocks(argv: string[], locks: number[], timeoutMs: number, firstLockFd = 3): string[] {
+function holdingLocks(argv: string[], locks: number[], timeoutMs: number, firstLockFd = 3, foreground = false): string[] {
   if (!locks.length) return argv;
   const closed = locks.map((_, index) => `${index + firstLockFd}>&-`).join(" ");
-  return ["timeout", "-s", "KILL", String(Math.ceil(timeoutMs / 1000) + orphanGraceSeconds), "/bin/sh", "-c", `exec "$@" ${closed}`, "hedge-box-lock", ...argv];
+  return ["timeout", ...(foreground ? ["--foreground"] : []), "-s", "KILL", String(Math.ceil(timeoutMs / 1000) + orphanGraceSeconds), "/bin/sh", "-c", `exec "$@" ${closed}`, "hedge-box-lock", ...argv];
 }
 
-const captureSupervisor = 'exec 9<&3 3<&-; "$@" 9<&-; code=$?; exec 1>&- 2>&-; read _ <&9; exit "$code"';
+function resolveExecutable(argv: string[], env?: Env): string[] {
+  if (!argv[0] || argv[0].includes("/")) return argv;
+  const found = Bun.which(argv[0], { PATH: env?.PATH ?? process.env.PATH });
+  return found ? [found, ...argv.slice(1)] : ["env", "--", ...argv];
+}
+
+function supervisedCommand(argv: string[], locks: number[], timeoutMs: number): string[] {
+  const closeLocks = locks.map((_, index) => `${index + 4}>&-`).join(" ");
+  const inner = holdingLocks(argv, locks, timeoutMs, 4, true);
+  const closeAfter = closeLocks ? ` ${closeLocks}` : "";
+  const script = `exec 9<&3 3<&-; "$@" 9<&-; code=$?; exec 1>&- 2>&-${closeAfter}; read _ <&9; exit "$code"`;
+  return ["/bin/sh", "-c", script, "hedge-capture", ...inner];
+}
 
 async function readStream(stream: ReadableStream<Uint8Array> | number | undefined, abort: AbortSignal) {
   if (!(stream instanceof ReadableStream)) return "";
@@ -91,7 +103,8 @@ export function captureWith(timer: Timer): Capture {
     const locks = heldLocks();
     const input = stdin === undefined ? "ignore" : new TextEncoder().encode(stdin);
     const supervised = !inherit;
-    const command = holdingLocks(supervised ? ["/bin/sh", "-c", captureSupervisor, "hedge-capture", ...argv] : argv, locks, timeoutMs, supervised ? 4 : 3);
+    const resolved = resolveExecutable(argv, env);
+    const command = supervised ? supervisedCommand(resolved, locks, timeoutMs) : holdingLocks(resolved, locks, timeoutMs, 3);
     const stdio = supervised ? ([input, "pipe", "pipe", "pipe", ...locks] as const) : ([input, "inherit", "inherit", ...locks] as const);
     let child: ReturnType<typeof Bun.spawn> | undefined;
     let ctrl: number | undefined;

@@ -322,6 +322,13 @@ test("a call that hands its output through to the caller still has a time limit 
   expect(await result).toEqual({ code: 124, stdout: "", stderr: "timed out after 30 ms" });
 });
 
+test("captures stdout cleanly under a box lock without waiting for the timeout", async () => {
+  const result = await withBoxLock(temp.make("hedge-lock-"), "box-ok", { waitMs: 0 }, () =>
+    captureWith(handTimer().timer)(["sh", "-c", 'printf "locked-ok"'], { timeoutMs: 5_000 }),
+  );
+  expect(result).toEqual({ code: 0, stdout: "locked-ok", stderr: "" });
+});
+
 test("strips a leading UTF-8 BOM from captured output so JSON callers parse it", async () => {
   const result = await captureWith(handTimer().timer)(["sh", "-c", 'printf "\\357\\273\\277{\\"ok\\":true}"'], { timeoutMs: 5_000 });
   expect(result.code).toBe(0);
