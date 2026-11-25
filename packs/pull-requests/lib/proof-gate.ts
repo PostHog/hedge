@@ -11,7 +11,7 @@ import { askGap, authorOf, ciRunningCode, conditionName, isStandingCondition, ju
 import { displayEntry } from "./proof-display.ts";
 import { receiptMarker } from "./proof-receipt.ts";
 import { baseRefs, cleanBaseMerge, devPullOf, diffOf, mergeBase, pullRequestDetails, remotesOf, topLevel } from "./proof-checkout.ts";
-import { quietCommitIn } from "./proof-delta.ts";
+import { gitCommitReader, quietCommitIn, testOnlyRange } from "./proof-delta.ts";
 import { isCommitSha, measureGrowth, type Growth } from "./proof-end-table.ts";
 import { autonomyOf, decidesAll } from "./proof-autonomy.ts";
 import { readSanity } from "./proof-sanity.ts";
@@ -73,7 +73,7 @@ export async function finalGate(head: ProofIdentity, context: JudgingContext, { 
   const shown = pull === undefined ? undefined : receiptMarker((pull as PullRequest).body);
   const stale = shown && shown.head !== head.commit ? [`receipt: the PR body shows the receipt of ${shown.head.slice(0, 7)}, not HEAD ${head.commit.slice(0, 7)}. Refresh it with hedge proof receipt`] : [];
   const growth = await grownBy(home, head, run, pull);
-  const reason = judged.code === 0 ? "pass" : (judged.reason ?? `exit ${judged.code}`).replace(/\s*[\r\n]+\s*/g, " ");
+  const reason = judged.code === 0 ? "pass" : judged.reason?.replace(/\s*[\r\n]+\s*/g, " ").trim() || `exit ${judged.code} without a named check`;
   const gate = {
     code: judged.code,
     reason,
@@ -196,11 +196,12 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
   return { code: 1, lines, covered: "", judge: verdict(lines), reason };
 }
 
-async function judgeDiff(head: ProofIdentity, known: Omit<JudgeInput, "cwd" | "from" | "diff">, row: ModelRow, context: JudgingContext) {
+async function judgeDiff(head: ProofIdentity, known: Omit<JudgeInput, "cwd" | "from" | "diff" | "testOnly">, row: ModelRow, context: JudgingContext) {
   const { home, cwd, env, run, now, lock } = context;
   const from = mergeBase(head, run);
   const directory = judgeDirectory(home, head);
-  return judge({ ...known, cwd: topLevel(run) ?? cwd, from, diff: diffOf(from, known.commit, run) }, {
+  const testOnly = testOnlyRange(gitCommitReader(run, () => baseRefs(head, run)), from, known.commit);
+  return judge({ ...known, cwd: topLevel(run) ?? cwd, from, diff: diffOf(from, known.commit, run), testOnly }, {
     ask: (request) => askModel("judge", row, request, env, reviewLimit(env)), model: modelLabel("judge", row, env), arbiter: arbiterOf(context),
     directory, commit: known.commit, now: now?.() ?? new Date(), failLimit: numberSetting("pull-requests.reviewCeiling", env), decidesAll: decidesAll(env),
     serialize: async (step) => { await mkdir(directory, { recursive: true, mode: 0o700 }); return withRoundLock(directory, await lock(), step); },

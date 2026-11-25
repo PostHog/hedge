@@ -25,7 +25,7 @@ export type CommitReader = {
   isAncestor(ancestor: string, commit: string): boolean;
 };
 
-const importName = (path: string) => /_test\.go$/.test(path) || path.endsWith(".snap") ? undefined : path.split("/").at(-1)!.replace(/\.[cm]?[jt]sx?$|\.py$/, "");
+const importName = (path: string) => /_test\.go$/.test(path) ? undefined : path.endsWith(".snap") ? path.split("/").at(-1)! : path.split("/").at(-1)!.replace(/\.[cm]?[jt]sx?$|\.py$/, "");
 
 function importedByCode(reader: CommitReader, commit: string, path: string) {
   const seen = new Set([path]);
@@ -65,6 +65,11 @@ export function quietStep(reader: CommitReader, commit: string): QuietStep | und
   if (!changes.every(quietChange)) return undefined;
   if (changes.some((change) => importedByCode(reader, commit, change.path))) return undefined;
   return { parent, kinds: ["test"] };
+}
+
+export function testOnlyRange(reader: CommitReader, from: string, to: string) {
+  const changes = reader.changes(from, to);
+  return Boolean(changes?.length) && changes!.every(quietChange) && !changes!.some((change) => importedByCode(reader, to, change.path));
 }
 
 const kindReasons: Record<DeltaKind, string> = { test: "test-only delta", revert: "revert of a PR commit" };

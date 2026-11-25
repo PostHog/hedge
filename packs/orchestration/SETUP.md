@@ -165,3 +165,45 @@ The stop passes when any of these holds:
 - any read fails, or the check takes longer than 10 seconds. At the deadline
   it stops the git and `ps` commands it started, and the hook process exits
   once it has answered, even when a helper of those commands still runs.
+
+## Loop pause
+
+The `loop-pause` workflow is on by default. It installs
+`hooks/loop-pause.ts` for PreToolUse in Claude and Codex. The setting
+`orchestration.loopLedger` names the loops' ledger directory, which holds
+`limits.md`, `lanes.md` and `signals.md`. With a context library, it defaults
+to its `quality-loop` directory. Without the setting, or when that directory
+does not exist, such as on a machine whose loops keep their ledger in
+`orchestration.ledgerRepo` elsewhere, the hook does nothing. Any other error
+reading the directory denies. Set it to that
+ledger's checkout to turn the hook on there.
+
+A thread whose first prompt opens, after any bracketed note on who sent it
+(as T3's scheduled tasks add), with a line that starts with "Run" or "Start"
+and names a coordinator and the `quality-loop` or `signal-loop` skill, or with
+the skill's slash command, is a loop coordinator, whether a schedule or a
+person started it. A prompt that asks about a coordinator run, or quotes one
+further down, is not. A prompt that opens with "Run" and names both, such as
+"Run the quality-loop coordinator audit", counts: while the loops are paused,
+start such an audit with "Audit" instead. When such a thread calls
+`delegate_task` while `limits.md` says `Paused: yes`, or while the file cannot
+be read, has no `Paused:` line, says anything but a plain `yes` or `no` (a
+note may follow after a comma, a semicolon, a spaced dash, or in closed
+brackets, and any markup around the word must match), or has `Paused:` lines that disagree, the call is denied: the coordinator settles the lanes that ended, keeps
+its watches and post-deploy checks, records a no-op run, and starts no lane.
+Settling, `watch_pull_request`, `schedule_task`, `t3_thread_send`, and every
+other thread pass.
+
+Two commands give the loop skills the same facts:
+
+- `hedge loop check-pause [--ledger <dir>]` exits 0 while the loops run, 1
+  while they are paused, and 3 when `limits.md` cannot be read or does not
+  clearly say yes or no.
+- `hedge loop next-id --kind lane|signal [--ledger <dir>]` prints the next
+  lane or signal id, one past the highest row in `lanes.md` or `signals.md`,
+  follow-up rows such as `L012b` included.
+  It reserves each id with an exclusive file create under
+  `~/.local/state/hedge/loop-ids/`, keyed by the ledger directory's real
+  path, so two coordinators on one machine that share a checkout never get
+  the same id. Two checkouts are like two machines: write the row and push the
+  ledger right after.

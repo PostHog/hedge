@@ -146,7 +146,7 @@ function jsonFile<T>(path: string): T | undefined {
   try { return JSON.parse(readFileSync(path, "utf8")) as T; } catch { return undefined; }
 }
 
-function expandHome(path: string, home: string): string {
+export function expandHome(path: string, home: string): string {
   return path === "~" || path.startsWith("~/") ? join(home, path.slice(1)) : path;
 }
 
