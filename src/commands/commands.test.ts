@@ -309,13 +309,13 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
 
   test("propagates pack-level human prerequisite timeouts to dependent workflows and prints both hints when another probe fails", async () => {
     const { home } = await machineWithProfile();
-    const [failDone, ready, gone] = [join(home, "fail-done"), join(home, "ready"), join(home, "gone")];
-    expect(Bun.spawnSync(["mkfifo", failDone, ready, gone]).exitCode).toBe(0);
+    const [ready, gone] = [join(home, "ready"), join(home, "gone")];
+    expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
     await withTeamPack(home, {
       workflows: [flow("allowlist"), flow("sync")],
       human: [
-        humanStep("allowlist", 'exec 3>"$HOME/fail-done"; exit 1', "allowlist"),
-        humanStep("sign-in", `cat "$HOME/fail-done"; ${blockedProbe("-")}`),
+        { id: "allowlist", say: "Set up allowlist.", probe: ["/nonexistent-hedge-probe"], workflow: "allowlist" },
+        humanStep("sign-in", blockedProbe("-")),
       ],
       steps: [{ id: "sync-step", workflow: "sync", after: "sign-in", run: ["true"] }],
     });
@@ -328,6 +328,42 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     } finally {
       await endHolder(started);
     }
+  });
+
+  test("propagates a failing prerequisite to a workflow whose only item is a served service on the hub, and not on a node", async () => {
+    const { home } = await machineWithProfile();
+    const source = join(home, ".local/share/hedge/sources/team");
+    await cachedCheckout(source, { name: "team", repo: "team/packs", ref: "main" });
+    mkdirSync(join(source, "packs/team"), { recursive: true });
+    writeFileSync(
+      join(source, "packs/team/pack.ts"),
+      `export default {
+  sdk: 1,
+  name: "team",
+  summary: "Team rules.",
+  register(hedge) {
+    const serviceOnly = hedge.workflow({ id: "service-only", name: "Service only", sentence: "Serves on the hub.", default: true });
+    const signIn = hedge.check({ id: "sign-in", say: "Sign in.", test: async () => false, repair: { ask: "Sign in." } });
+    hedge.service({ on: "hub", id: "svc", when: serviceOnly, after: signIn, serve: { port: 4599, health: "/health", credential: async () => "x" } });
+  },
+};
+`,
+    );
+    const dir = join(home, "profile");
+    const file = JSON.parse(readFileSync(join(dir, "hedge.json"), "utf8")) as ProfileFile;
+    writeFileSync(join(dir, "hedge.json"), JSON.stringify({ ...file, sources: [...file.sources, { name: "team", repo: "team/packs", ref: "main" }], packs: [...file.packs, "team"] }, null, 2) + "\n");
+    await spawnGit(dir, "commit", "-q", "-am", "Team pack.ts");
+    await spawnGit(dir, "push", "-q");
+
+    const onHub = await hedge(home, ["packs"]);
+    expect(onHub.code).toBe(0);
+    expect(onHub.output).toContain(`  ~ team  Team rules.\n      Workflows: service-only needs setup\n${needsSetup}`);
+
+    writeFileSync(join(dir, "hedge.json"), JSON.stringify({ ...JSON.parse(readFileSync(join(dir, "hedge.json"), "utf8")), hub: "hub-1", devboxes: ["node-2"] }, null, 2) + "\n");
+    writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "devbox", name: "node-2", profileDir: dir }));
+    const onNode = await hedge(home, ["packs"]);
+    expect(onNode.code).toBe(0);
+    expect(onNode.output).toContain(`  ~ team  Team rules.\n      Workflows: service-only on\n${needsSetup}`);
   });
 });
 

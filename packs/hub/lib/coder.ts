@@ -62,9 +62,10 @@ export function captureWith(timer: Timer): Capture {
     const input = stdin === undefined ? "ignore" : new TextEncoder().encode(stdin);
     let child: ReturnType<typeof Bun.spawn> | undefined;
     let stopped = false;
+    let reaped = false;
     const stopGroup = () => {
       stopped = true;
-      if (!child) return;
+      if (!child || reaped) return;
       kill(-child.pid);
       kill(child.pid);
     };
@@ -82,6 +83,7 @@ export function captureWith(timer: Timer): Capture {
     let cancel = () => {};
     try {
       child = Bun.spawn(holdingLocks(argv, locks, timeoutMs), { env: env as Record<string, string> | undefined, stdio: [input, output, output, ...locks], detached: true });
+      void child.exited.finally(() => { reaped = true; });
       if (stopped) stopGroup();
       cancel = timer(timeoutMs, () => {
         expired = true;
