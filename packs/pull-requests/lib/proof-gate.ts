@@ -14,6 +14,7 @@ import { baseRefs, cleanBaseMerge, devPullOf, diffOf, mergeBase, pullRequestDeta
 import { gitCommitReader, quietCommitIn, testOnlyRange } from "./proof-delta.ts";
 import { isCommitSha, measureGrowth, type Growth } from "./proof-end-table.ts";
 import { autonomyOf, decidesAll } from "./proof-autonomy.ts";
+import { mergeCardLine, readTimeline } from "./proof-merge-card.ts";
 import { readSanity } from "./proof-sanity.ts";
 import { inputsDigest, readBloat } from "./proof-bloat.ts";
 import { judge, readCriticalPaths, type JudgeInput } from "./proof-judge.ts";
@@ -22,7 +23,7 @@ import { askModel, modelLabel, otherFamily, readRiskRubric, readRubric, reviewer
 
 export type GateContext = { home: string; cwd: string; env: Env; run: Run; now?: () => Date; ssh?: Ssh };
 export type JudgingContext = GateContext & { lock: () => Promise<RoundLock> };
-export type FinalGate = { code: number; reason: string; lines: string[]; verdict: string; summary: ProofSummary };
+export type FinalGate = { code: number; reason: string; lines: string[]; verdict: string; summary: ProofSummary; cardOf?: () => string; seenGaps?: string[] };
 
 type Checked = Awaited<ReturnType<typeof proofGate>>;
 type Judged = { code: number; lines: string[]; covered: string; judge: JudgeSummary; reason?: string };
@@ -81,8 +82,12 @@ export async function finalGate(head: ProofIdentity, context: JudgingContext, { 
     verdict: verdictOf(judged.code, reason, `${checked.summary}; judge: ${judged.covered}`),
     summary: { ...checked.proofSummary, code: judged.code, judge: judged.judge, growth },
   };
-  if (pull) await writeJson(savedPath(home, head, head.commit), { key: keyOf(pull, landed, await fingerprintOf(home, head, files, checked.decisions)), gate, conditions: checked.conditions } satisfies SavedGate);
-  return gate;
+  if (!pull) return gate;
+  const read = pull as PullRequest;
+  await writeJson(savedPath(home, head, head.commit), { key: keyOf(read, landed, await fingerprintOf(home, head, files, checked.decisions)), gate, conditions: checked.conditions } satisfies SavedGate);
+  if (gate.code !== 0) return gate;
+  const seenGaps = Array.isArray(checked.decisions) ? checked.decisions.filter((decision) => decision.mark === "🤖" && decision.class === "proof-gap" && covers(decision, head)).map((decision) => decision.id) : [];
+  return { ...gate, seenGaps, cardOf: () => mergeCardLine({ ref: head, summary: gate.summary, body: read.body, timeline: readTimeline(head, read, run) }, now?.() ?? new Date()) };
 }
 
 const verdictOf = (code: number, reason: string, covered: string) =>

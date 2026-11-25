@@ -115,7 +115,7 @@ export const prodShapeResult = "measured on production; details in the receipt";
 export type ReceiptReview = ReviewDisplay & { lenses?: Plan["lenses"] };
 export type ReceiptInput = {
   summary: ProofSummary; gated: boolean; landed: boolean; display: Display; notChecked: string[]; reviews: ReceiptReview[];
-  screenshots: { commit: string; names: string[] }[];
+  screenshots: { commit: string; names: string[] }[]; card?: string;
 };
 
 export function kindSource(kind: KindProof, head: string) {
@@ -169,6 +169,7 @@ export function renderSection(input: ReceiptInput) {
     warnings.push(`warning: screenshot ${shot.name} at ${short(shot.commit)} has no published URL. Run hedge proof publish --commit ${shot.commit} --asset-repo <owner/fork> <the screenshot>`);
   }
   const section = [
+    ...input.card ? [input.card, ""] : [],
     "| Proof | What ran | Result | Commit |", "| --- | --- | --- | --- |", ...rows, reviewRow(input.reviews), judgeRow(input.summary), "",
     ...input.gated
       ? endTable([{ ref: input.summary, summary: input.summary, reason: (kind, reason) => guardedReason(kind, reason) }])
