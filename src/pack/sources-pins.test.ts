@@ -1080,6 +1080,7 @@ esac
     await spawnGit(dir, "fetch", "-q", "--depth", "1", "--no-tags", repo, c3);
     await spawnGit(dir, "checkout", "-q", "--detach", `${c3}^{commit}`);
     writeFileSync(join(dir, ".git", "hedge-source.json"), JSON.stringify({ repo, ref: c3, commit: c3 }) + "\n");
+    await spawnGit(dir, "gc", "-q", "--prune=now");
 
     rmSync(repo, { recursive: true, force: true });
     const offlineC2 = await fetchSource({ name: "team", repo, ref: c2 }, cache);
@@ -1087,7 +1088,7 @@ esac
     expect([offlineC2.packs[0]?.manifest.summary, offlineC2.stale]).toEqual(["Commit 2.", undefined]);
   });
 
-  test("invalidates cached pin provenance when a local mirror symlink is repointed to another repository", async () => {
+  test("matches Git path resolution for symlink parent traversal, dangling parent symlinks, and implicit .git directories", async () => {
     const repoA = await packRepo("Mirror A.");
     const shaA = await spawnGit(repoA, "rev-parse", "HEAD");
     const repoB = await packRepo("Mirror B.");
@@ -1116,6 +1117,72 @@ esac
     symlinkSync(repoB, mirror);
     const secondFile = await fetchSource({ name: "team", repo: fileUrl, ref: shaA }, fileCache);
     expect("error" in secondFile).toBe(true);
+
+    const dotDotRoot = temp.make("dotdot-symlink-");
+    const directRepo = join(dotDotRoot, "repo");
+    const targetParent = join(dotDotRoot, "target-parent");
+    const linkedSiblingRepo = join(targetParent, "repo");
+    const linkedLeaf = join(targetParent, "leaf");
+    mkdirSync(linkedLeaf, { recursive: true });
+    for (const [dir, summary] of [
+      [directRepo, "Direct sibling repo."],
+      [linkedSiblingRepo, "Linked parent sibling repo."],
+    ] as const) {
+      mkdirSync(dir, { recursive: true });
+      await spawnGit(dir, "init", "-q", "-b", "main");
+      writePack(dir, summary);
+      await spawnGit(dir, "add", ".");
+      await spawnGit(dir, "commit", "-q", "-m", "v1");
+    }
+    const directSha = await spawnGit(directRepo, "rev-parse", "HEAD");
+    const link = join(dotDotRoot, "link");
+    symlinkSync(linkedLeaf, link);
+    const dotDotCache = temp.make("cache-dotdot-symlink-");
+    const loadedDirect = await fetchSource({ name: "team", repo: directRepo, ref: directSha }, dotDotCache);
+    if ("error" in loadedDirect) throw new Error(loadedDirect.error);
+    expect([loadedDirect.packs[0]?.manifest.summary, loadedDirect.stale]).toEqual(["Direct sibling repo.", undefined]);
+    const traversed = await fetchSource({ name: "team", repo: `${link}/../repo`, ref: directSha }, dotDotCache);
+    expect("error" in traversed).toBe(true);
+
+    const parentLinkRoot = temp.make("dangling-parent-link-");
+    const realTarget = join(parentLinkRoot, "target");
+    const nestedRepo = join(realTarget, "repo");
+    mkdirSync(nestedRepo, { recursive: true });
+    await spawnGit(nestedRepo, "init", "-q", "-b", "main");
+    writePack(nestedRepo, "Parent link repo.");
+    await spawnGit(nestedRepo, "add", ".");
+    await spawnGit(nestedRepo, "commit", "-q", "-m", "v1");
+    const nestedSha = await spawnGit(nestedRepo, "rev-parse", "HEAD");
+    const parentLink = join(parentLinkRoot, "link");
+    symlinkSync(realTarget, parentLink);
+    const parentLinkCache = temp.make("cache-dangling-parent-");
+    const viaParentLink = await fetchSource({ name: "team", repo: join(parentLink, "repo"), ref: nestedSha }, parentLinkCache);
+    if ("error" in viaParentLink) throw new Error(viaParentLink.error);
+    rmSync(realTarget, { recursive: true, force: true });
+    const offlineViaDanglingParent = await fetchSource({ name: "team", repo: join(parentLink, "repo"), ref: nestedSha }, parentLinkCache);
+    if ("error" in offlineViaDanglingParent) throw new Error(offlineViaDanglingParent.error);
+    expect([offlineViaDanglingParent.packs[0]?.manifest.summary, offlineViaDanglingParent.stale]).toEqual(["Parent link repo.", undefined]);
+
+    const implicitRoot = temp.make("implicit-git-dir-");
+    const bareDir = join(implicitRoot, "packs.git");
+    const plainDir = join(implicitRoot, "packs");
+    mkdirSync(bareDir, { recursive: true });
+    await spawnGit(bareDir, "init", "-q", "-b", "main");
+    writePack(bareDir, "Implicit dotgit repo.");
+    await spawnGit(bareDir, "add", ".");
+    await spawnGit(bareDir, "commit", "-q", "-m", "v1");
+    const bareSha = await spawnGit(bareDir, "rev-parse", "HEAD");
+    const implicitCache = temp.make("cache-implicit-git-");
+    const loadedImplicit = await fetchSource({ name: "team", repo: plainDir, ref: bareSha }, implicitCache);
+    if ("error" in loadedImplicit) throw new Error(loadedImplicit.error);
+    expect([loadedImplicit.packs[0]?.manifest.summary, loadedImplicit.stale]).toEqual(["Implicit dotgit repo.", undefined]);
+    mkdirSync(plainDir, { recursive: true });
+    await spawnGit(plainDir, "init", "-q", "-b", "main");
+    writePack(plainDir, "New plain repo.");
+    await spawnGit(plainDir, "add", ".");
+    await spawnGit(plainDir, "commit", "-q", "-m", "v1");
+    const afterPlainCreated = await fetchSource({ name: "team", repo: plainDir, ref: bareSha }, implicitCache);
+    expect("error" in afterPlainCreated).toBe(true);
   });
 
 });

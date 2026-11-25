@@ -60,46 +60,86 @@ const allRules: Rule[] = [...secretRules, ...standardRules, randomRule];
 const preRandomRules: Rule[] = [...contextualSecretRules, ...standardRules];
 
 const bearerSchemeWord = /^(?:Bearer|Basic|token)$/i;
-const bearerSchemeFollow = /^\s+[A-Za-z0-9._~+/=-]{12,}/;
+const bearerSchemeFollow = /^\s+([A-Za-z0-9._~+/=-]+)/;
+const bearerScanRegex = /\b(?:Bearer|Basic|token)\s+([A-Za-z0-9._~+/=-]+)/gi;
 
-const deferredContextualSecretRules: Rule[] = [
-  [
-    secretRules[8]![0],
-    (match: string, ...rest: Array<string | number | undefined>) => {
-      const prefix = String(rest[0] ?? "");
-      const offset = rest.at(-2) as number;
-      const whole = rest.at(-1) as string;
-      const val = match.slice(prefix.length);
-      if (bearerSchemeWord.test(val) && bearerSchemeFollow.test(whole.slice(offset + match.length))) return match;
-      return `${prefix}<redacted>`;
-    },
-  ],
-  [
-    secretRules[9]![0],
-    (match: string, ...rest: Array<string | number | undefined>) => {
-      const key = String(rest[0] ?? "");
-      const separator = String(rest[1] ?? "");
-      const double = rest[2] as string | undefined;
-      const single = rest[3] as string | undefined;
-      if (!double && !single) {
+function expandedTokenLength(raw: string, tokenRegex?: RegExp, matchedOriginals?: string[]): number {
+  if (!tokenRegex || !matchedOriginals || !matchedOriginals.length) return raw.length;
+  return raw.replace(tokenRegex, (_tok, idx) => matchedOriginals[Number(idx)] ?? "").length;
+}
+
+function findBearerSpans(text: string, tokenRegex?: RegExp, matchedOriginals?: string[]): Array<[number, number]> {
+  if (!/(?:bearer|basic|token)\s/i.test(text)) return [];
+  const spans: Array<[number, number]> = [];
+  bearerScanRegex.lastIndex = 0;
+  for (let match = bearerScanRegex.exec(text); match !== null; match = bearerScanRegex.exec(text)) {
+    const body = match[1]!;
+    if (expandedTokenLength(body, tokenRegex, matchedOriginals) >= 12) {
+      spans.push([match.index, match.index + match[0].length]);
+    }
+  }
+  return spans;
+}
+
+function makeDeferredContextualSecretRules(tokenRegex?: RegExp, matchedOriginals?: string[]): Rule[] {
+  const isDeferredBearer = (val: string, restText: string) => {
+    if (!bearerSchemeWord.test(val)) return false;
+    const follow = restText.match(bearerSchemeFollow);
+    return follow !== null && expandedTokenLength(follow[1]!, tokenRegex, matchedOriginals) >= 12;
+  };
+  return [
+    [
+      secretRules[8]![0],
+      (match: string, ...rest: Array<string | number | undefined>) => {
+        const prefix = String(rest[0] ?? "");
         const offset = rest.at(-2) as number;
         const whole = rest.at(-1) as string;
-        const val = match.slice(key.length + separator.length);
-        if (bearerSchemeWord.test(val) && bearerSchemeFollow.test(whole.slice(offset + match.length))) return match;
-      }
-      return `${key}${separator}${double ?? single ?? ""}<redacted>${double ?? single ?? ""}`;
-    },
-  ],
-];
+        const val = match.slice(prefix.length);
+        if (isDeferredBearer(val, whole.slice(offset + match.length))) return match;
+        return `${prefix}<redacted>`;
+      },
+    ],
+    [
+      secretRules[9]![0],
+      (match: string, ...rest: Array<string | number | undefined>) => {
+        const key = String(rest[0] ?? "");
+        const separator = String(rest[1] ?? "");
+        const double = rest[2] as string | undefined;
+        const single = rest[3] as string | undefined;
+        if (!double && !single) {
+          const offset = rest.at(-2) as number;
+          const whole = rest.at(-1) as string;
+          const val = match.slice(key.length + separator.length);
+          if (isDeferredBearer(val, whole.slice(offset + match.length))) return match;
+        }
+        return `${key}${separator}${double ?? single ?? ""}<redacted>${double ?? single ?? ""}`;
+      },
+    ],
+  ];
+}
 
-function applyEmailSafeRule(text: string, [pattern, replacement]: Rule): string {
-  if (!text.includes("@") && !/%40/i.test(text)) {
+function applyDeferredSafeRule(
+  text: string,
+  [pattern, replacement]: Rule,
+  protectEmails: boolean,
+  tokenRegex?: RegExp,
+  matchedOriginals?: string[],
+): string {
+  const checkEmails = protectEmails && (text.includes("@") || /%40/i.test(text));
+  const bearerSpans = findBearerSpans(text, tokenRegex, matchedOriginals);
+  if (!checkEmails && !bearerSpans.length) {
     return text.replace(pattern, replacement as string);
   }
   let runEnd = -1;
   let runEmails: Array<[number, number]> = [];
   let emailIdx = 0;
+  let bearerIdx = 0;
+  const overlapsBearer = (start: number, end: number) => {
+    while (bearerIdx < bearerSpans.length && bearerSpans[bearerIdx]![1] <= start) bearerIdx++;
+    return bearerIdx < bearerSpans.length && bearerSpans[bearerIdx]![0] < end;
+  };
   const overlapsEmail = (start: number, end: number) => {
+    if (!checkEmails) return false;
     if (start >= runEnd) {
       let lo = start;
       while (lo > Math.max(0, runEnd) && /[A-Za-z0-9_.+%@-]/.test(text[lo - 1]!)) lo--;
@@ -125,17 +165,24 @@ function applyEmailSafeRule(text: string, [pattern, replacement]: Rule): string 
   };
   return text.replace(pattern, (match: string, ...rest: Array<string | number | undefined>) => {
     const offset = rest.at(-2) as number;
-    if (overlapsEmail(offset, offset + match.length)) return match;
+    const end = offset + match.length;
+    if (overlapsBearer(offset, end) || overlapsEmail(offset, end)) return match;
     if (typeof replacement === "function") return replacement(match, ...rest);
     return replacement.replace(/\$(\d+)/g, (_, n) => String(rest[Number(n) - 1] ?? ""));
   });
 }
 
-function applyPreAfterRules(text: string, includeFixedSecrets = false): string {
+function applyPreAfterRules(
+  text: string,
+  includeFixedSecrets = false,
+  tokenRegex?: RegExp,
+  matchedOriginals?: string[],
+): string {
   let result = includeFixedSecrets ? applyRules(text, [...secretRules.slice(0, 6), secretRules[7]!]) : text;
-  result = applyRules(result, deferredContextualSecretRules);
-  for (const rule of standardRules.slice(1, 5)) result = applyEmailSafeRule(result, rule);
-  return applyRules(result, standardRules.slice(5));
+  result = applyRules(result, makeDeferredContextualSecretRules(tokenRegex, matchedOriginals));
+  for (const rule of standardRules.slice(1, 5)) result = applyDeferredSafeRule(result, rule, true, tokenRegex, matchedOriginals);
+  for (const rule of standardRules.slice(5)) result = applyDeferredSafeRule(result, rule, false, tokenRegex, matchedOriginals);
+  return result;
 }
 
 const tokenLetters = 32;
@@ -1473,7 +1520,7 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     const postRandom = replaceMaskedRandom(preRandom, matchedOriginals);
     return postRandom.replace(tokenRegex, (_tok, idx) => matchedLabels[Number(idx)] ?? "");
   }
-  const preAfter = applyPreAfterRules(homeStripped, false);
+  const preAfter = applyPreAfterRules(homeStripped, false, tokenRegex, matchedOriginals);
 
   let expanded = "";
   let expPos = 0;

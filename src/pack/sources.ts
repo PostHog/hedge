@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadPacks } from "./manifest.ts";
 import { tryLock, waitLock } from "../lock.ts";
@@ -90,31 +90,40 @@ function decodeRepoBytes(bytes: Uint8Array): string {
   }
 }
 
-function resolveSymlinkPath(target: string, depth = 0): string {
-  const abs = resolve(target);
-  try {
-    return realpathSync(abs);
-  } catch {}
-  if (depth < 40) {
-    try {
-      const info = lstatSync(abs);
-      if (info.isSymbolicLink()) {
-        const linked = readlinkSync(abs);
-        return resolveSymlinkPath(isAbsolute(linked) ? linked : resolve(dirname(abs), linked), depth + 1);
-      }
-    } catch {}
+function resolvePosixPath(base: string, rawPath: string): string {
+  const queue = rawPath.split("/");
+  const stack: string[] = [];
+  if (!rawPath.startsWith("/")) {
+    for (const part of base.split("/")) if (part && part !== ".") stack.push(part);
   }
-  const missing: string[] = [];
-  let current = abs;
-  for (;;) {
-    const parent = dirname(current);
-    if (parent === current) return abs;
-    missing.unshift(basename(current));
-    current = parent;
-    try {
-      return join(realpathSync(current), ...missing);
-    } catch {}
+  let hops = 0;
+  let index = 0;
+  while (index < queue.length) {
+    const seg = queue[index++]!;
+    if (!seg || seg === ".") continue;
+    if (seg === "..") {
+      stack.pop();
+      continue;
+    }
+    const candidate = `/${[...stack, seg].join("/")}`;
+    if (hops < 40) {
+      try {
+        const info = lstatSync(candidate);
+        if (info.isSymbolicLink()) {
+          hops++;
+          const linked = readlinkSync(candidate);
+          const rest = queue.slice(index);
+          if (linked.startsWith("/")) stack.length = 0;
+          queue.length = 0;
+          queue.push(...linked.split("/"), ...rest);
+          index = 0;
+          continue;
+        }
+      } catch {}
+    }
+    stack.push(seg);
   }
+  return `/${stack.join("/")}`;
 }
 
 function isLocalPath(url: string): boolean {
@@ -124,32 +133,52 @@ function isLocalPath(url: string): boolean {
   return !/^[^/\\]+:/.test(url);
 }
 
-function canonicalLocalTarget(localPath: string): string {
-  const abs = resolve(localPath);
-  let target = abs;
-  try {
-    lstatSync(abs);
-  } catch {
-    if (!abs.endsWith(".git")) {
-      try {
-        if (lstatSync(`${abs}.git`).isSymbolicLink()) target = `${abs}.git`;
-      } catch {}
+function canonicalLocalTarget(baseDir: string, localPath: string): string {
+  if (process.platform === "win32") {
+    const abs = resolve(baseDir, localPath);
+    try {
+      return realpathSync(abs);
+    } catch {
+      return abs;
     }
   }
-  return resolveSymlinkPath(target);
+  const canonicalBase = isAbsolute(localPath) ? "/" : resolvePosixPath("/", resolve(baseDir));
+  const resolved = resolvePosixPath(canonicalBase, localPath);
+  let exists = false;
+  try {
+    lstatSync(resolved);
+    exists = true;
+  } catch {}
+  if (!exists && !resolved.endsWith(".git")) {
+    try {
+      lstatSync(`${resolved}.git`);
+      return resolvePosixPath("/", `${resolved}.git`);
+    } catch {}
+  }
+  return resolved;
 }
 
 function canonicalLocalRepo(dir: string, effective: string): string {
   if (effective.startsWith("\0raw:")) return effective;
   if (/^file:\/\//i.test(effective)) {
     try {
-      return pathToFileURL(canonicalLocalTarget(fileURLToPath(effective))).href;
+      if (process.platform !== "win32") {
+        const raw = effective.replace(/^file:\/\/(?:localhost)?/i, "");
+        if (raw.startsWith("/")) {
+          let decoded = raw;
+          try {
+            decoded = decodeURIComponent(raw);
+          } catch {}
+          return pathToFileURL(canonicalLocalTarget("/", decoded)).href;
+        }
+      }
+      return pathToFileURL(canonicalLocalTarget("/", fileURLToPath(effective))).href;
     } catch {
       return effective;
     }
   }
   if (!isLocalPath(effective)) return effective;
-  return canonicalLocalTarget(isAbsolute(effective) ? effective : resolve(dir, effective));
+  return canonicalLocalTarget(dir, effective);
 }
 
 async function rawResolvedRepoUrl(dir: string, repo: string) {
@@ -554,7 +583,8 @@ const goodResolvedDigest = (record: { resolved?: string; resolvedDigest?: string
 
 const pinRef = (repoHash: string, commit: string) => `refs/hedge/pins/${repoHash}/${commit.toLowerCase()}`;
 const historyRef = (repoHash: string, commit: string, from: string) => `refs/hedge/history/${repoHash}/${commit.toLowerCase()}/${from.toLowerCase()}`;
-const historySetRef = (repoHash: string, commit: string, from: string) => `refs/hedge/history-set/${repoHash}/${commit.toLowerCase()}/${from.toLowerCase()}`;
+const historyAnchorRef = (repoHash: string, commit: string, from: string) => `refs/hedge/history-anchor/${repoHash}/${commit.toLowerCase()}/${from.toLowerCase()}`;
+const inlineHistoryPinLimit = 256;
 
 async function writeAtomic(path: string, content: string | Uint8Array, mode = 0o600) {
   const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
@@ -605,6 +635,60 @@ async function outsideAnyStop(dir: string, oid: string, stops: Set<string>, pinP
   return false;
 }
 
+async function gitWithStdin(dir: string, stdin: string, args: string[], extraEnv?: Record<string, string>) {
+  const proc = Bun.spawn(["git", "-C", dir, ...args], {
+    stdin: new TextEncoder().encode(stdin),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: extraEnv ? { ...gitEnv(), ...extraEnv } : gitEnv(),
+    timeout: fetchTimeoutMs,
+  });
+  const [code, rawBytes, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).arrayBuffer(), new Response(proc.stderr).text()]);
+  const bytes = new Uint8Array(rawBytes);
+  const rawStdout = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes);
+  const message = proc.signalCode ? `git timed out after ${fetchTimeoutMs / 1000} seconds` : (stderr.trim().split("\n").at(-1) ?? "");
+  return { ok: code === 0, code, stdout: rawStdout.trim(), rawStdout, rawBytes: bytes, stderr: message };
+}
+
+async function anchorsContainCommit(dir: string, anchorOids: string[], needle: string): Promise<boolean> {
+  if (!anchorOids.length) return false;
+  const seen = new Set<string>();
+  let frontier = anchorOids;
+  while (frontier.length) {
+    const batch = frontier.filter((oid) => !seen.has(oid));
+    if (!batch.length) return false;
+    for (const oid of batch) seen.add(oid);
+    const read = await gitWithStdin(dir, `${batch.join("\n")}\n`, ["cat-file", "--batch"]);
+    if (!read.ok) return false;
+    const raw = read.rawBytes;
+    const decoder = new TextDecoder("latin1");
+    const next: string[] = [];
+    let pos = 0;
+    while (pos < raw.length) {
+      let nl = pos;
+      while (nl < raw.length && raw[nl] !== 0x0a) nl++;
+      const header = decoder.decode(raw.subarray(pos, nl));
+      pos = nl + 1;
+      const parts = header.split(" ");
+      if (parts.length < 3) continue;
+      const type = parts[1];
+      const size = Number(parts[2]);
+      if (!Number.isInteger(size) || size < 0 || pos + size > raw.length) break;
+      const body = decoder.decode(raw.subarray(pos, pos + size));
+      pos += size + 1;
+      if (type !== "commit") continue;
+      const parentLine = `parent ${needle}\n`;
+      if (body.includes(parentLine)) return true;
+      if (body.endsWith("\nhedge-history-chain\n")) {
+        const firstParent = body.match(/^parent ([0-9a-f]{40}|[0-9a-f]{64})$/m)?.[1]?.toLowerCase();
+        if (firstParent && !seen.has(firstParent)) next.push(firstParent);
+      }
+    }
+    frontier = next;
+  }
+  return false;
+}
+
 async function pinTarget(dir: string, repoHash: string, oid: string): Promise<string | undefined> {
   const exact = await exactPinTarget(dir, repoHash, oid);
   if (exact) return exact;
@@ -623,27 +707,37 @@ async function pinTarget(dir: string, repoHash: string, oid: string): Promise<st
     }
     if (await outsideAnyStop(dir, normalized, stops, `refs/hedge/pins/${repoHash}/`)) return normalized;
   }
-  const sets = await git(dir, "for-each-ref", "--format=%(objectname)", `refs/hedge/history-set/${repoHash}/`);
-  if (sets.ok && sets.stdout) {
-    for (const blobOid of sets.stdout.split("\n").map((line) => line.trim()).filter((line) => gitHash.test(line))) {
-      const blob = await git(dir, "cat-file", "blob", blobOid);
-      if (blob.ok && `\n${blob.rawStdout}`.includes(`\n${normalized}\n`)) return normalized;
-    }
+  const anchors = await git(dir, "for-each-ref", "--format=%(objectname)", `refs/hedge/history-anchor/${repoHash}/`);
+  if (anchors.ok && anchors.stdout) {
+    const anchorOids = [...new Set(anchors.stdout.split("\n").map((line) => line.trim().toLowerCase()).filter((line) => gitHash.test(line)))];
+    if (await anchorsContainCommit(dir, anchorOids, normalized)) return normalized;
   }
   return undefined;
 }
 
-async function writeGitBlob(dir: string, content: string): Promise<string | undefined> {
-  const proc = Bun.spawn(["git", "-C", dir, "hash-object", "-w", "--stdin"], {
-    stdin: new TextEncoder().encode(content),
-    stdout: "pipe",
-    stderr: "pipe",
-    env: gitEnv(),
-    timeout: fetchTimeoutMs,
-  });
-  const [code, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
-  const oid = stdout.trim().toLowerCase();
-  return code === 0 && gitHash.test(oid) ? oid : undefined;
+async function buildHistoryAnchor(dir: string, commits: string[]): Promise<string | undefined> {
+  const tree = await gitWithStdin(dir, "", ["mktree"]);
+  if (!tree.ok || !gitHash.test(tree.stdout)) return undefined;
+  const emptyTree = tree.stdout.toLowerCase();
+  const anchorEnv = {
+    GIT_AUTHOR_NAME: "hedge",
+    GIT_AUTHOR_EMAIL: "hedge@localhost",
+    GIT_AUTHOR_DATE: "0 +0000",
+    GIT_COMMITTER_NAME: "hedge",
+    GIT_COMMITTER_EMAIL: "hedge@localhost",
+    GIT_COMMITTER_DATE: "0 +0000",
+  };
+  let prev: string | undefined;
+  for (let i = 0; i < commits.length; i += inlineHistoryPinLimit) {
+    const chunk = commits.slice(i, i + inlineHistoryPinLimit);
+    const args = ["commit-tree", emptyTree];
+    if (prev) args.push("-p", prev);
+    for (const oid of chunk) args.push("-p", oid);
+    const created = await gitWithStdin(dir, prev ? "hedge-history-chain\n" : "hedge-history\n", args, anchorEnv);
+    if (!created.ok || !gitHash.test(created.stdout)) return undefined;
+    prev = created.stdout.toLowerCase();
+  }
+  return prev;
 }
 
 async function recordPinRef(dir: string, repoHash: string, oid: string, created?: string[]): Promise<string | undefined> {
@@ -664,26 +758,46 @@ async function recordHistoryRef(dir: string, repoHash: string, commit: string, f
     if (!updated.ok) return updated.stderr || "could not record verified commit history";
     created?.push(ref);
   }
-  const setRef = historySetRef(repoHash, commit, from);
-  const existingSet = await git(dir, "rev-parse", "--verify", "--quiet", setRef);
-  if (!existingSet.ok || !gitHash.test(existingSet.stdout)) {
-    const listed = await git(dir, "rev-list", normalized, `^${from.toLowerCase()}`);
-    if (!listed.ok) return listed.stderr || "could not list verified commit history";
-    const body = listed.stdout
-      .split("\n")
-      .map((line) => line.trim().toLowerCase())
-      .filter((line) => gitHash.test(line))
-      .join("\n");
-    const blob = await writeGitBlob(dir, body ? `${body}\n` : "");
-    if (!blob) return "could not record verified commit history";
-    const updatedSet = await git(dir, "update-ref", setRef, blob);
-    if (!updatedSet.ok) return updatedSet.stderr || "could not record verified commit history";
-    created?.push(setRef);
+  const listed = await git(dir, "rev-list", normalized, `^${from.toLowerCase()}`);
+  if (!listed.ok) return listed.stderr || "could not list verified commit history";
+  const commits = listed.stdout
+    .split("\n")
+    .map((line) => line.trim().toLowerCase())
+    .filter((line) => gitHash.test(line));
+  if (!commits.length) return undefined;
+  if (commits.length <= inlineHistoryPinLimit) {
+    const existingPinsRes = await git(dir, "for-each-ref", "--format=%(refname)", `refs/hedge/pins/${repoHash}/`);
+    const existingPins = new Set(
+      existingPinsRes.ok ? existingPinsRes.stdout.split("\n").map((line) => line.trim()).filter(Boolean) : [],
+    );
+    const toCreate: Array<{ ref: string; oid: string }> = [];
+    for (const oid of commits) {
+      const targetRef = pinRef(repoHash, oid);
+      if (!existingPins.has(targetRef)) toCreate.push({ ref: targetRef, oid });
+    }
+    if (!toCreate.length) return undefined;
+    const cmds = toCreate.map((item) => `update ${item.ref} ${item.oid}\n`).join("");
+    const batch = await gitWithStdin(dir, cmds, ["update-ref", "--stdin"]);
+    if (!batch.ok) return batch.stderr || "could not record verified commit history";
+    if (created) for (const item of toCreate) created.push(item.ref);
+    return undefined;
   }
+  const anchorRef = historyAnchorRef(repoHash, commit, from);
+  const existingAnchor = await git(dir, "rev-parse", "--verify", "--quiet", anchorRef);
+  if (existingAnchor.ok && gitHash.test(existingAnchor.stdout)) return undefined;
+  const anchorOid = await buildHistoryAnchor(dir, commits);
+  if (!anchorOid) return "could not record verified commit history";
+  const savedAnchor = await git(dir, "update-ref", anchorRef, anchorOid);
+  if (!savedAnchor.ok) return savedAnchor.stderr || "could not record verified commit history";
+  created?.push(anchorRef);
   return undefined;
 }
 
 async function rollbackRefs(dir: string, refs: string[]): Promise<void> {
+  if (!refs.length) return;
+  const cmds = refs.map((ref) => `delete ${ref}\n`).join("");
+  const batch = await gitWithStdin(dir, cmds, ["update-ref", "--stdin"]).catch(() => ({ ok: false }));
+  if (batch.ok) return;
   for (const ref of refs) {
     await git(dir, "update-ref", "-d", ref).catch(() => {});
   }

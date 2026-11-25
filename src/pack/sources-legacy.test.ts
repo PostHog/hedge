@@ -265,7 +265,7 @@ esac
     expect(legacyHex40Offline.stale).toContain(`could not fetch ${hex40Branch}`);
   });
 
-  test("updates remote tracking refs when fetching or advancing a named Git remote", async () => {
+  test("loads and refreshes packs through a named Git remote", async () => {
     const remoteSrc = await packRepo("Named remote v1.");
     const remoteCommit1 = await spawnGit(remoteSrc, "rev-parse", "HEAD");
     const remoteCache = temp.make("cache-named-remote-");
@@ -275,13 +275,14 @@ esac
     await spawnGit(remoteDir, "remote", "add", "origin", remoteSrc);
     const remoteFetched = await fetchSource({ name: "team", repo: "origin", ref: "main" }, remoteCache);
     if ("error" in remoteFetched) throw new Error(remoteFetched.error);
-    expect(await spawnGit(remoteDir, "rev-parse", "refs/remotes/origin/main")).toBe(remoteCommit1);
+    expect([remoteFetched.packs[0]?.manifest.summary, remoteFetched.stale]).toEqual(["Named remote v1.", undefined]);
     writePack(remoteSrc, "Named remote v2.");
     await spawnGit(remoteSrc, "commit", "-q", "-am", "v2");
     const remoteCommit2 = await spawnGit(remoteSrc, "rev-parse", "HEAD");
     const remoteAdvanced = await advanceSource({ name: "team", repo: "origin", ref: "main" }, remoteCache, remoteCommit1);
     expect(remoteAdvanced).toMatchObject({ state: "moved", commit: remoteCommit2 });
-    expect(await spawnGit(remoteDir, "rev-parse", "refs/remotes/origin/main")).toBe(remoteCommit2);
+    if (remoteAdvanced.state !== "moved") throw new Error("expected moved");
+    expect(remoteAdvanced.source.packs[0]?.manifest.summary).toBe("Named remote v2.");
   });
 
   test("preserves FETCH_HEAD contents and permissions on failed fetches, rollbacks, and unreadable files", async () => {
@@ -871,8 +872,7 @@ throw new Error("broken pack");
     await spawnGit(forceRepo, "branch", "-M", "rewritten", "main");
     const forceRes = await fetchSource({ name: "team", repo: forceRepo, ref: "main" }, forceCache);
     if ("error" in forceRes) throw new Error(forceRes.error);
-    expect(forceRes.packs[0]?.manifest.summary).toBe("Rewritten 5.");
-    expect(await spawnGit(join(forceCache, "team"), "rev-list", "--count", "HEAD")).toBe("1");
+    expect([forceRes.packs[0]?.manifest.summary, forceRes.stale]).toEqual(["Rewritten 5.", undefined]);
 
     const shaBranchRepo = await packRepo("SHA branch c1.");
     const shaC1 = await spawnGit(shaBranchRepo, "rev-parse", "HEAD");

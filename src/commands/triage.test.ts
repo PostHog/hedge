@@ -359,6 +359,13 @@ describe("hedge triage", () => {
     expect(authAndAssign).not.toContain("anothersecret12345");
     expect(authAndAssign).toContain("Authorization: token <token>");
 
+    const splitBearer = redact(
+      "Bearer 10.20.30.40.secretSuffix99 and Bearer box.internal.tailSecret88 and Bearer prefix/Users/alice/tailSecret77",
+      home,
+      [{ text: "release-branch", as: "<branch>", after: true }],
+    );
+    expect(splitBearer).toBe("Bearer <token> and Bearer <token> and Bearer <token>");
+
     const repeatedHostRef = "A.INTERNAL/".repeat(300);
     const repeatedLog = "a.internal/".repeat(1_000);
     const repeatedOut = redact(repeatedLog, home, [{ text: repeatedHostRef, as: "<branch>", after: true }]);
