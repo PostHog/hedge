@@ -25,7 +25,7 @@ export type ShellProject = { id: string; title: string; workspaceRoot: string };
 export type ShellSnapshot = { projects: ShellProject[]; threads: ShellThread[] };
 
 type QuestionAnswer = { questionTextById: Record<string, string>; answers: Record<string, string | string[]> };
-type CardQuestion = { id: string; header?: string; question?: string; options?: { label: string; value?: string }[] };
+type CardQuestion = { id: string; header?: string; question?: string; multiSelect?: boolean; options?: { label: string; value?: string }[] };
 export type TurnItem = {
   item: {
     id?: string; type: string; createdBy?: string; creationSource?: string; messageId?: string; text?: string;
@@ -147,7 +147,7 @@ function antigravityAnswer(questions: CardQuestion[], answer: QuestionAnswer, id
   if (!asked) return { text: [chosen].flat().join(", "), answered: answer.questionTextById[id] ?? id };
   const raw = { text: [chosen].flat().join(", "), answered: shown(asked) };
   const pick = byId(id.slice(0, -otherSuffix.length));
-  if (pairs(pick, asked)) return typed(answer.answers[pick.id] ?? "") !== "" && !typedInOtherField(chosen) ? undefined : raw;
+  if (id.endsWith(otherSuffix) && pairs(pick, asked)) return typed(answer.answers[pick.id] ?? "") !== "" && !typedInOtherField(chosen) ? undefined : raw;
   const other = byId(`${id}${otherSuffix}`);
   if (!other) return label(asked, chosen, raw.answered);
   if (!pairs(asked, other)) return raw;
@@ -155,8 +155,7 @@ function antigravityAnswer(questions: CardQuestion[], answer: QuestionAnswer, id
 }
 
 function label(asked: CardQuestion, chosen: string | string[], answered: string) {
-  const values = [chosen].flat();
-  return { text: values.length === 1 ? onlyLabelOf(asked.options ?? [], values[0]!) : values.join(", "), answered };
+  return { text: typeof chosen === "string" && !asked.multiSelect ? onlyLabelOf(asked.options ?? [], chosen) : [chosen].flat().join(", "), answered };
 }
 
 function onlyLabelOf(options: NonNullable<CardQuestion["options"]>, value: string) {
