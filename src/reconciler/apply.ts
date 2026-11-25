@@ -10,7 +10,7 @@ import { hublessReason, listedPack } from "./resolve.ts";
 import { wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
 import { withLegacyNames } from "../legacy.ts";
 import { bunScript } from "../runner/bun.ts";
-import { appendTag, graceMs, interruptGraceMs, killSession, killSessionSync, supervisorEnv, tagEnvVar } from "./probe-supervisor.ts";
+import { appendTag, createPipe, graceMs, interruptGraceMs, killSession, killSessionSync, probeResultReported, setCloexec, supervisorEnv, tagEnvVar } from "./probe-supervisor.ts";
 
 export type AdapterContext = { home: string; dryRun: boolean; adopt: string[]; adoptFrom?: string[] };
 export type AdapterResult = { actions: Action[]; findings: Finding[]; blocked?: boolean; failed?: boolean };
@@ -498,39 +498,58 @@ const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
 let activeSupervisors = 0;
 const supervisorWaiters: Array<() => void> = [];
 
-type LiveProbe = { pid: number; tag: string; targetPid?: number; targetExited?: boolean; aliveFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
+type LiveProbe = { pid: number; tag: string; targetPid?: number; targetExited?: boolean; aliveFd?: number; resultFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
 type ActiveRunner = { stop: (name: NodeJS.Signals) => void };
 const activeRunners = new Set<ActiveRunner>();
 const allLiveProbes = new Set<LiveProbe>();
 let interruptHandlersAttached = false;
 
 function handOffWatchdog(probes: Iterable<LiveProbe>) {
-  const batch: Array<{ pid: number; tag: string; targetPid?: number; targetExited?: boolean; fd: number; delayMs: number }> = [];
+  const batch: Array<{ pid: number; tag: string; targetPid?: number; targetExited?: boolean; fd: number; resultFd?: number; delayMs: number }> = [];
   for (const probe of probes) {
     if (probe.aliveFd === undefined) continue;
+    let targetExited = Boolean(probe.targetExited);
+    const resultFd = probe.resultFd;
+    probe.resultFd = undefined;
+    if (!targetExited && resultFd !== undefined && probeResultReported(resultFd) === "reported") {
+      targetExited = true;
+    }
     batch.push({
       pid: probe.pid,
       tag: probe.tag,
       ...(probe.targetPid !== undefined ? { targetPid: probe.targetPid } : {}),
-      ...(probe.targetExited ? { targetExited: true } : {}),
+      ...(targetExited ? { targetExited: true } : {}),
       fd: probe.aliveFd,
+      ...(resultFd !== undefined ? { resultFd } : {}),
       delayMs: probe.delayMs,
     });
     probe.aliveFd = undefined;
   }
   if (!batch.length) return;
+  const extraFds: number[] = [];
   const payload = JSON.stringify(
-    batch.map((entry, index) => ({
-      pid: entry.pid,
-      ...(entry.targetExited ? {} : { tag: entry.tag }),
-      fd: index + 3,
-      delayMs: entry.delayMs,
-    })),
+    batch.map((entry) => {
+      const fd = extraFds.length + 3;
+      extraFds.push(entry.fd);
+      let resultFd: number | undefined;
+      if (!entry.targetExited && entry.resultFd !== undefined) {
+        resultFd = extraFds.length + 3;
+        extraFds.push(entry.resultFd);
+      }
+      return {
+        pid: entry.pid,
+        ...(entry.targetExited ? {} : { tag: entry.tag }),
+        fd,
+        ...(resultFd !== undefined ? { resultFd } : {}),
+        delayMs: entry.delayMs,
+      };
+    }),
   );
+  for (const fd of extraFds) setCloexec(fd, false);
   let handedOff = false;
   try {
     const watchdog = Bun.spawn(bunScript(probeWatchdog, payload), {
-      stdio: ["ignore", "ignore", "ignore", ...batch.map((entry) => entry.fd)],
+      stdio: ["ignore", "ignore", "ignore", ...extraFds],
       detached: true,
     });
     watchdog.unref();
@@ -549,6 +568,11 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
       try {
         closeSync(entry.fd);
       } catch {}
+      if (entry.resultFd !== undefined) {
+        try {
+          closeSync(entry.resultFd);
+        } catch {}
+      }
     }
   }
 }
@@ -696,21 +720,45 @@ async function runDetached(command: string[], env: Record<string, string | undef
     return supervisorSpawnFailed;
   }
   let handedToExit = false;
+  const resultPipe = createPipe();
+  if (resultPipe) setCloexec(resultPipe.readFd, true);
+  let resultWriteClosed = false;
+  const closeResultWrite = () => {
+    if (!resultPipe || resultWriteClosed) return;
+    resultWriteClosed = true;
+    try {
+      closeSync(resultPipe.writeFd);
+    } catch {}
+  };
   try {
     const tag = crypto.randomUUID();
     const fullTag = appendTag(env[tagEnvVar], tag);
-    const targetEnv: Record<string, string> = {};
+    const targetEnv: Record<string, string> = Object.create(null);
     for (const [k, v] of Object.entries(env)) if (v !== undefined) targetEnv[k] = v;
     targetEnv[tagEnvVar] = fullTag;
-    const payload = { command, env: targetEnv, controlFd: 3, ...(cleanupGraceMs === undefined ? {} : { graceMs: cleanupGraceMs }) };
+    const payload = {
+      command,
+      env: targetEnv,
+      controlFd: 3,
+      ...(resultPipe ? { resultFd: 4 } : {}),
+      ...(cleanupGraceMs === undefined ? {} : { graceMs: cleanupGraceMs }),
+    };
     const encoded = JSON.stringify(payload);
     child = Bun.spawn(bunScript(probeSupervisor), {
-      stdio: [new TextEncoder().encode(encoded), "pipe", "ignore", "pipe"],
+      stdio: [new TextEncoder().encode(encoded), "pipe", "ignore", "pipe", ...(resultPipe ? [resultPipe.writeFd] : [])],
       env: supervisorEnv(fullTag),
       detached: true,
     });
+    closeResultWrite();
     const aliveFd = typeof child.stdio[3] === "number" ? child.stdio[3] : undefined;
-    probe = { pid: child.pid, tag, aliveFd, delayMs: (cleanupGraceMs ?? graceMs) + 100, stop: endGroup };
+    probe = {
+      pid: child.pid,
+      tag,
+      aliveFd,
+      ...(resultPipe ? { resultFd: resultPipe.readFd } : {}),
+      delayMs: (cleanupGraceMs ?? graceMs) + 100,
+      stop: endGroup,
+    };
     allLiveProbes.add(probe);
     live?.add(probe);
     syncInterruptHandlers();
@@ -731,7 +779,8 @@ async function runDetached(command: string[], env: Record<string, string | undef
       async (supCode) => {
         reaped = true;
         await statusPromise.catch(() => {});
-        if (!reportedResult && supCode !== 128 && supCode !== 143) {
+        const sawResult = reportedResult || (owned.resultFd !== undefined && probeResultReported(owned.resultFd) === "reported");
+        if (!sawResult && supCode !== 128 && supCode !== 143) {
           void killSession(undefined, "SIGKILL", owned.tag);
         }
       },
@@ -744,6 +793,12 @@ async function runDetached(command: string[], env: Record<string, string | undef
           closeSync(owned.aliveFd);
         } catch {}
         owned.aliveFd = undefined;
+      }
+      if (owned.resultFd !== undefined) {
+        try {
+          closeSync(owned.resultFd);
+        } catch {}
+        owned.resultFd = undefined;
       }
       allLiveProbes.delete(owned);
       live?.delete(owned);
@@ -763,7 +818,15 @@ async function runDetached(command: string[], env: Record<string, string | undef
     await child.exited;
     return status.code ?? supervisorSpawnFailed;
   } catch {
-    if (!handedToExit) releaseSlot();
+    closeResultWrite();
+    if (!handedToExit) {
+      if (resultPipe) {
+        try {
+          closeSync(resultPipe.readFd);
+        } catch {}
+      }
+      releaseSlot();
+    }
     return supervisorSpawnFailed;
   } finally {
     release();

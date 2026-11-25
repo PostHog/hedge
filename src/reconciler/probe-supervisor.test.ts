@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { closeSync, existsSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../testing/git.ts";
-import { tagEnvVar } from "./probe-supervisor.ts";
+import { createPipe, procArgs2HasTag, setCloexec, tagEnvVar } from "./probe-supervisor.ts";
 import { watchEntries } from "./probe-watchdog.ts";
 
 const temp = tempDirs();
@@ -746,5 +746,115 @@ await Bun.sleep(30_000);`;
       { home: dir, giveUp: new Promise<void>(() => {}) },
     );
     expect(usr1Res).toEqual({ failing: [], unchecked: [] });
+  });
+
+  test("parses macOS KERN_PROCARGS2 buffers strictly from envp without matching argv or other env values", () => {
+    const build = (execPath: string, argv: string[], envp: string[], pad = 3, argcOverride?: number) => {
+      const enc = new TextEncoder();
+      const parts: Uint8Array[] = [new Uint8Array(4)];
+      new DataView(parts[0]!.buffer).setInt32(0, argcOverride ?? argv.length, true);
+      parts.push(enc.encode(execPath), new Uint8Array(pad));
+      for (const arg of argv) parts.push(enc.encode(arg), new Uint8Array([0]));
+      for (const entry of envp) parts.push(enc.encode(entry), new Uint8Array([0]));
+      const total = parts.reduce((sum, part) => sum + part.byteLength, 0);
+      const out = new Uint8Array(total);
+      let offset = 0;
+      for (const part of parts) {
+        out.set(part, offset);
+        offset += part.byteLength;
+      }
+      return out;
+    };
+    const tag = "11111111-2222-3333-4444-555555555555";
+    expect(procArgs2HasTag(build("/usr/bin/grep", ["grep", `${tagEnvVar}=${tag}`], ["PATH=/usr/bin"]), tag)).toBe(false);
+    expect(procArgs2HasTag(build("/bin/sh", ["sh", "-c", "true"], [`OTHER=foo ${tagEnvVar}=${tag}`]), tag)).toBe(false);
+    expect(procArgs2HasTag(build("/bin/sh", ["sh", "", `${tagEnvVar}=${tag}`], ["PATH=/bin"]), tag)).toBe(false);
+    expect(procArgs2HasTag(build("/bin/sh", ["sh", "-c", "sleep 30"], ["PATH=/bin", `${tagEnvVar}=${tag}`]), tag)).toBe(true);
+    expect(procArgs2HasTag(build("/bin/sh", ["sh"], [`${tagEnvVar}=outer,${tag}`]), tag)).toBe(true);
+    expect(procArgs2HasTag(build("/bin/sh", [], [`${tagEnvVar}=${tag}`]), tag)).toBe(true);
+    expect(procArgs2HasTag(build("/bin/sh", ["sh"], [`${tagEnvVar}=${tag}`], 2, -1), tag)).toBe(false);
+    expect(procArgs2HasTag(new Uint8Array(2), tag)).toBe(false);
+  });
+
+  test("preserves an intentionally detached daemon when the watchdog takes over after result publication before stdout is drained", async () => {
+    const dir = temp.make("sup-watchdog-resultfd-");
+    const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+    mkfifo(ready, gone);
+    const started = fifoRead(ready);
+    const closed = fifoRead(gone);
+    const tag = crypto.randomUUID();
+    const resultPipe = createPipe();
+    expect(resultPipe).toBeDefined();
+    setCloexec(resultPipe!.readFd, true);
+    const daemonScript = `const c = Bun.spawn(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" }); c.unref(); process.exit(0);`;
+    const payload = JSON.stringify({ command: [process.execPath, "-e", daemonScript], controlFd: 3, resultFd: 4 });
+    const sup = Bun.spawn([process.execPath, supervisorPath], {
+      stdio: [new TextEncoder().encode(payload), "pipe", "ignore", "pipe", resultPipe!.writeFd],
+      env: { ...process.env, [tagEnvVar]: tag },
+      detached: true,
+    });
+    closeSync(resultPipe!.writeFd);
+    const aliveFd = sup.stdio[3] as number;
+    let daemonPid = 0;
+    try {
+      daemonPid = Number((await started).trim());
+      expect(daemonPid).toBeGreaterThan(0);
+      expect(await sup.exited).toBe(0);
+      await watchEntries([{ pid: sup.pid, fd: aliveFd, resultFd: resultPipe!.readFd, delayMs: 250, tag }], {
+        now: () => 0,
+        sleep: async () => {},
+      });
+      expect(() => process.kill(daemonPid, 0)).not.toThrow();
+    } finally {
+      if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
+      sup.kill("SIGKILL");
+      try {
+        closeSync(aliveFd);
+      } catch {}
+      try {
+        closeSync(resultPipe!.readFd);
+      } catch {}
+      await closed.catch(() => {});
+    }
+  });
+
+  test("forwards a __proto__ environment variable to supervised probes", async () => {
+    const dir = temp.make("sup-proto-env-");
+    const applyPath = join(import.meta.dir, "apply.ts");
+    const script = `import { humanStepsLeft } from ${JSON.stringify(applyPath)};
+const res = await humanStepsLeft({
+  machine: { schema: 1, role: "linux" },
+  os: process.platform,
+  ai: "both",
+  packs: [],
+  workflows: [],
+  files: [],
+  config: [],
+  owners: {},
+  jobs: [],
+  human: [
+    {
+      id: "proto",
+      pack: "team",
+      say: "Proto.",
+      probe: [process.execPath, "-e", 'process.exit(Object.getOwnPropertyDescriptor(process.env, "__proto__")?.value === "keep-proto" ? 0 : 1)'],
+    },
+  ],
+  steps: [],
+  checks: [],
+  commands: {},
+  handlers: {},
+  models: [],
+  settings: {},
+  unanswered: [],
+  ask: [],
+  dropped: [],
+}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}) });
+process.exit(res.failing.length === 0 && res.unchecked.length === 0 ? 0 : 1);`;
+    const env: Record<string, string> = Object.create(null);
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
+    env["__proto__"] = "keep-proto";
+    const child = Bun.spawn([process.execPath, "-e", script], { env, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    expect(await child.exited).toBe(0);
   });
 });

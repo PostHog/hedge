@@ -2,7 +2,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, re
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { boxPrefix } from "../../../src/hub/names.ts";
-import { appendTag, killSession, killSessionSync, supervisorEnv, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { appendTag, killSession, killSessionSync, setCloexec, supervisorEnv, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 import { bunScript } from "../../../src/runner/bun.ts";
 import { heldLocks } from "./box-lock.ts";
 
@@ -66,6 +66,7 @@ function holdingLocks(argv: string[], locks: number[], timeoutMs: number, pathEn
 }
 
 const captureSupervisor = join(import.meta.dir, "capture-supervisor.ts");
+const probeWatchdog = join(import.meta.dir, "../../../src/reconciler/probe-watchdog.ts");
 
 async function readText(stream: ReadableStream<Uint8Array> | number | undefined, stop: AbortSignal): Promise<string> {
   if (!(stream instanceof ReadableStream)) return "";
@@ -148,8 +149,42 @@ export function captureWith(timer: Timer): Capture {
         } catch {}
       }
     };
+    const supervisorGraceMs = process.platform === "linux" ? 150 : 350;
     const interrupted = (name: NodeJS.Signals) => {
       stopChild();
+      if (child && !supervisorReaped && controlFd !== undefined) {
+        const fd = controlFd;
+        controlFd = undefined;
+        setCloexec(fd, false);
+        let handedOff = false;
+        try {
+          const payload = JSON.stringify([{ pid: child.pid, tag, fd: 3, delayMs: supervisorGraceMs }]);
+          const watchdog = Bun.spawn(bunScript(probeWatchdog, payload), {
+            stdio: ["ignore", "ignore", "ignore", fd],
+            detached: true,
+          });
+          watchdog.unref();
+          handedOff = true;
+        } catch {
+        } finally {
+          if (!handedOff) {
+            killSessionSync(child.pid, "SIGKILL", tag);
+            try {
+              child.kill("SIGKILL");
+            } catch {}
+          }
+          try {
+            closeSync(fd);
+          } catch {}
+        }
+      } else if (child) {
+        killSessionSync(supervisorReaped ? undefined : child.pid, "SIGKILL", tag);
+        if (!supervisorReaped) {
+          try {
+            child.kill("SIGKILL");
+          } catch {}
+        }
+      }
       release();
       if (!process.listenerCount(name)) {
         if (name === "SIGQUIT") process.exit(131);
@@ -176,9 +211,11 @@ export function captureWith(timer: Timer): Capture {
       const command = holdingLocks(argv, locks, timeoutMs, env?.PATH ?? process.env.PATH ?? "");
       const childEnv = env ?? process.env;
       const fullTag = appendTag(childEnv[tagEnvVar], tag);
-      const targetEnv: Record<string, string> = {};
-      for (const [k, v] of Object.entries(childEnv)) if (v !== undefined) targetEnv[k] = v;
-      targetEnv[tagEnvVar] = fullTag;
+      const envEntries: Array<[string, string]> = [];
+      for (const [k, v] of Object.entries(childEnv)) {
+        if (v !== undefined && k !== tagEnvVar) envEntries.push([k, v]);
+      }
+      envEntries.push([tagEnvVar, fullTag]);
       child = Bun.spawn(bunScript(captureSupervisor), {
         env: supervisorEnv(fullTag),
         stdio: [input, output, output, ...locks, "pipe"],
@@ -205,7 +242,6 @@ export function captureWith(timer: Timer): Capture {
         settle({ code });
       });
       let forceExpired = false;
-      const supervisorGraceMs = process.platform === "linux" ? 150 : 350;
       cancel = timer(timeoutMs, () => {
         expired = true;
         stopChild();
@@ -223,7 +259,7 @@ export function captureWith(timer: Timer): Capture {
       if (stopped || expired) {
         stopChild();
       } else {
-        live.send({ argv: command, env: targetEnv, lockCount: locks.length, controlFd: 3 + locks.length });
+        live.send({ argv: command, envEntries, lockCount: locks.length, controlFd: 3 + locks.length });
       }
       let stdout: string;
       let stderr: string;

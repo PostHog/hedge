@@ -1,7 +1,7 @@
 import { closeSync } from "node:fs";
-import { drainControlFd, enableChildSubreaper, killSession, ownTag, shieldGroupSignals, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { drainControlFd, enableChildSubreaper, killSession, ownTag, setCloexec, shieldGroupSignals, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
-type StartMessage = { argv: string[]; env?: Record<string, string>; lockCount: number; controlFd?: number };
+type StartMessage = { argv: string[]; env?: Record<string, string>; envEntries?: Array<[string, string]>; lockCount: number; controlFd?: number };
 
 enableChildSubreaper();
 shieldGroupSignals();
@@ -85,9 +85,10 @@ process.on("message", async (message: unknown) => {
     return;
   }
   if (!message || typeof message !== "object" || !Array.isArray((message as StartMessage).argv)) return;
-  const { argv, env, lockCount, controlFd } = message as StartMessage;
+  const { argv, env, envEntries, lockCount, controlFd } = message as StartMessage;
   const lockFds = Array.from({ length: lockCount }, (_, index) => index + 3);
   if (typeof controlFd === "number" && Number.isInteger(controlFd) && controlFd >= 3) {
+    setCloexec(controlFd, true);
     const drained = drainControlFd(controlFd);
     if (drained.closed || drained.lines.includes("kill")) {
       for (const fd of [...lockFds, 1, 2]) {
@@ -99,9 +100,19 @@ process.on("message", async (message: unknown) => {
     }
     watchControl(controlFd, drained.rest);
   }
+  let targetEnv: Record<string, string> | undefined;
+  if (Array.isArray(envEntries)) {
+    targetEnv = Object.create(null) as Record<string, string>;
+    for (const [k, v] of envEntries) targetEnv[k] = v;
+  } else if (env && typeof env === "object") {
+    targetEnv = Object.create(null) as Record<string, string>;
+    for (const [k, v] of Object.entries(env)) {
+      if (typeof v === "string") targetEnv[k] = v;
+    }
+  }
   const stdio: [number, number, number, ...number[]] = [0, 1, 2, ...lockFds];
   try {
-    target = Bun.spawn(argv, { ...(env ? { env } : {}), stdio });
+    target = Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio });
   } catch (error) {
     for (const fd of [...lockFds, 1, 2]) {
       try {

@@ -18,7 +18,7 @@ export function ownTag(value: string | undefined): string | undefined {
 }
 
 export function supervisorEnv(fullTag: string): Record<string, string> {
-  const clean: Record<string, string> = {};
+  const clean: Record<string, string> = Object.create(null);
   for (const [key, value] of Object.entries(process.env)) {
     if (key === "BUN_OPTIONS" || value === undefined) continue;
     clean[key] = value;
@@ -78,29 +78,71 @@ export function enableChildSubreaper(): void {
   } catch {}
 }
 
-let pollSym: ((fds: ReturnType<typeof ptr>, nfds: number, timeout: number) => number) | null | undefined;
+type PosixLib = {
+  poll: (fds: ReturnType<typeof ptr>, nfds: number, timeout: number) => number;
+  pipe: (fds: ReturnType<typeof ptr>) => number;
+  fcntl: (fd: number, cmd: number, arg: number) => number;
+};
 
-function pollFd(fd: number): number | undefined {
-  if (process.platform !== "linux" && process.platform !== "darwin") return undefined;
-  if (pollSym === undefined) {
+let posixLib: PosixLib | null | undefined;
+
+function getPosixLib(): PosixLib | null {
+  if (process.platform !== "linux" && process.platform !== "darwin") return null;
+  if (posixLib === undefined) {
     try {
       const libName = process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6";
       const nfdsType = process.platform === "darwin" ? FFIType.u32 : FFIType.u64;
-      const lib = dlopen(libName, { poll: { args: [FFIType.pointer, nfdsType, FFIType.i32], returns: FFIType.i32 } });
-      pollSym = (fds, nfds, timeout) => lib.symbols.poll(fds, nfds, timeout);
+      const lib = dlopen(libName, {
+        poll: { args: [FFIType.pointer, nfdsType, FFIType.i32], returns: FFIType.i32 },
+        pipe: { args: [FFIType.pointer], returns: FFIType.i32 },
+        fcntl: { args: [FFIType.i32, FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+      });
+      posixLib = {
+        poll: (fds, nfds, timeout) => lib.symbols.poll(fds, nfds, timeout),
+        pipe: (fds) => lib.symbols.pipe(fds),
+        fcntl: (fd, cmd, arg) => lib.symbols.fcntl(fd, cmd, arg),
+      };
     } catch {
-      pollSym = null;
+      posixLib = null;
     }
   }
-  if (!pollSym) return undefined;
+  return posixLib;
+}
+
+export function createPipe(): { readFd: number; writeFd: number } | undefined {
+  const lib = getPosixLib();
+  if (!lib) return undefined;
+  const fds = new Int32Array(2);
+  if (lib.pipe(ptr(fds)) !== 0) return undefined;
+  return { readFd: fds[0]!, writeFd: fds[1]! };
+}
+
+export function setCloexec(fd: number, enabled: boolean): void {
+  const lib = getPosixLib();
+  if (!lib) return;
+  try {
+    lib.fcntl(fd, 2, enabled ? 1 : 0);
+  } catch {}
+}
+
+function pollFd(fd: number): number | undefined {
+  const lib = getPosixLib();
+  if (!lib) return undefined;
   const raw = new Uint8Array(8);
   const view = new DataView(raw.buffer);
   view.setInt32(0, fd, true);
   view.setInt16(4, 0x0001, true);
   view.setInt16(6, 0, true);
-  const ready = pollSym(ptr(raw), 1, 0);
+  const ready = lib.poll(ptr(raw), 1, 0);
   if (ready < 0) return undefined;
   return ready === 0 ? 0 : view.getInt16(6, true);
+}
+
+export function probeResultReported(fd: number): "reported" | "closed" | "pending" {
+  const drained = drainControlFd(fd);
+  if (drained.lines.includes("1") || drained.rest.includes("1")) return "reported";
+  if (drained.closed) return "closed";
+  return "pending";
 }
 
 const groupShieldSignals: NodeJS.Signals[] = [
@@ -235,13 +277,59 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string): ProcTarg
 const psLookupLimitMs = 200;
 const psBin = existsSync("/bin/ps") ? "/bin/ps" : existsSync("/usr/bin/ps") ? "/usr/bin/ps" : "ps";
 
+const tagPrefixBytes = new TextEncoder().encode(`${tagEnvVar}=`);
+
+export function procArgs2HasTag(buf: Uint8Array, tag: string): boolean {
+  if (buf.byteLength < 4) return false;
+  const argc = new DataView(buf.buffer, buf.byteOffset, buf.byteLength).getInt32(0, true);
+  if (argc < 0) return false;
+  let pos = 4;
+  while (pos < buf.byteLength && buf[pos] !== 0) pos++;
+  while (pos < buf.byteLength && buf[pos] === 0) pos++;
+  for (let i = 0; i < argc; i++) {
+    if (pos >= buf.byteLength) return false;
+    while (pos < buf.byteLength && buf[pos] !== 0) pos++;
+    pos++;
+  }
+  const decoder = new TextDecoder();
+  while (pos < buf.byteLength) {
+    if (buf[pos] === 0) {
+      pos++;
+      continue;
+    }
+    const start = pos;
+    while (pos < buf.byteLength && buf[pos] !== 0) pos++;
+    if (pos - start > tagPrefixBytes.byteLength) {
+      let match = true;
+      for (let j = 0; j < tagPrefixBytes.byteLength; j++) {
+        if (buf[start + j] !== tagPrefixBytes[j]) {
+          match = false;
+          break;
+        }
+      }
+      if (match && envMatchesTag(decoder.decode(buf.subarray(start + tagPrefixBytes.byteLength, pos)), tag)) return true;
+    }
+    pos++;
+  }
+  return false;
+}
+
 type DarwinLib = {
   getsid: (pid: number) => number;
   getpgid: (pid: number) => number;
   proc_listallpids: (buf: ReturnType<typeof ptr> | null, size: number) => number;
+  sysctl: (
+    name: ReturnType<typeof ptr>,
+    namelen: number,
+    oldp: ReturnType<typeof ptr> | null,
+    oldlenp: ReturnType<typeof ptr>,
+    newp: ReturnType<typeof ptr> | null,
+    newlen: number,
+  ) => number;
 };
 
 let darwinLib: DarwinLib | null | undefined;
+const darwinProcArgsBuf = new Uint8Array(65536);
 
 function getDarwinLib(): DarwinLib | null {
   if (process.platform !== "darwin") return null;
@@ -251,17 +339,41 @@ function getDarwinLib(): DarwinLib | null {
         getsid: { args: [FFIType.i32], returns: FFIType.i32 },
         getpgid: { args: [FFIType.i32], returns: FFIType.i32 },
         proc_listallpids: { args: [FFIType.pointer, FFIType.i32], returns: FFIType.i32 },
+        sysctl: {
+          args: [FFIType.pointer, FFIType.u32, FFIType.pointer, FFIType.pointer, FFIType.pointer, FFIType.u64],
+          returns: FFIType.i32,
+        },
       });
       darwinLib = {
         getsid: (pid) => lib.symbols.getsid(pid),
         getpgid: (pid) => lib.symbols.getpgid(pid),
         proc_listallpids: (buf, size) => lib.symbols.proc_listallpids(buf, size),
+        sysctl: (name, namelen, oldp, oldlenp, newp, newlen) => lib.symbols.sysctl(name, namelen, oldp, oldlenp, newp, newlen),
       };
     } catch {
       darwinLib = null;
     }
   }
   return darwinLib;
+}
+
+function hasEnvTagDarwin(pid: number, tag: string): boolean {
+  const lib = getDarwinLib();
+  if (!lib) return false;
+  const mib = new Int32Array([1, 49, pid]);
+  const sizeBuf = new BigUint64Array(1);
+  sizeBuf[0] = BigInt(darwinProcArgsBuf.byteLength);
+  if (lib.sysctl(ptr(mib), 3, ptr(darwinProcArgsBuf), ptr(sizeBuf), null, 0) === 0) {
+    return procArgs2HasTag(darwinProcArgsBuf.subarray(0, Number(sizeBuf[0])), tag);
+  }
+  sizeBuf[0] = 0n;
+  if (lib.sysctl(ptr(mib), 3, null, ptr(sizeBuf), null, 0) !== 0) return false;
+  const needed = Number(sizeBuf[0]);
+  if (needed <= 0 || needed > 4 * 1024 * 1024) return false;
+  const big = new Uint8Array(needed);
+  sizeBuf[0] = BigInt(needed);
+  if (lib.sysctl(ptr(mib), 3, ptr(big), ptr(sizeBuf), null, 0) !== 0) return false;
+  return procArgs2HasTag(big.subarray(0, Number(sizeBuf[0])), tag);
 }
 
 function sessionIdDarwin(pid: number): number | undefined {
@@ -276,7 +388,6 @@ function buildTargetsFromPs(
   sessionId: number | undefined,
   tag: string | undefined,
   treeText: string | undefined,
-  envText: string | undefined,
   excludePids: Set<number>,
 ): ProcTargets {
   const includeDetached = Boolean(tag);
@@ -293,33 +404,11 @@ function buildTargetsFromPs(
       if (!Number.isFinite(pid) || !Number.isFinite(ppid) || !Number.isFinite(pgid)) continue;
       if (excludePids.has(pid)) continue;
       rows.push({ pid, ppid, pgid });
-      if (sessionId !== undefined && (pgid === sessionId || sessionIdDarwin(pid) === sessionId)) matched.add(pid);
-    }
-  }
-  if (tag && envText) {
-    const prefix = `${tagEnvVar}=`;
-    for (const line of envText.split("\n")) {
-      let from = 0;
-      let matchedLine = false;
-      for (;;) {
-        const idx = line.indexOf(prefix, from);
-        if (idx === -1) break;
-        const before = idx > 0 ? line[idx - 1] : " ";
-        if (/\s/.test(before!)) {
-          let end = idx + prefix.length;
-          while (end < line.length && !/\s/.test(line[end]!)) end++;
-          if (envMatchesTag(line.slice(idx + prefix.length, end), tag)) {
-            matchedLine = true;
-            break;
-          }
-        }
-        from = idx + prefix.length;
+      if (sessionId !== undefined && (pgid === sessionId || sessionIdDarwin(pid) === sessionId)) {
+        matched.add(pid);
+      } else if (tag && pid !== self && hasEnvTagDarwin(pid, tag)) {
+        matched.add(pid);
       }
-      if (!matchedLine) continue;
-      const pidMatch = line.trimStart().match(/^(\d+)\s/);
-      if (!pidMatch) continue;
-      const pid = Number(pidMatch[1]);
-      if (Number.isFinite(pid) && pid !== self && !excludePids.has(pid)) matched.add(pid);
     }
   }
   if (includeDetached || sessionId === undefined) {
@@ -354,7 +443,7 @@ function buildTargetsFromPs(
 
 function discoverTargetsSync(sessionId?: number, tag?: string): ProcTargets | undefined {
   if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag);
-  if (sessionId === undefined) return undefined;
+  if (sessionId === undefined && !tag) return undefined;
   const lib = getDarwinLib();
   if (!lib) return undefined;
   const count = lib.proc_listallpids(null, 0);
@@ -373,9 +462,12 @@ function discoverTargetsSync(sessionId?: number, tag?: string): ProcTargets | un
     if (pid <= 0 || pid === self || pid === sessionId) continue;
     const sid = lib.getsid(pid);
     const pgid = lib.getpgid(pid);
-    if (sid !== sessionId && pgid !== sessionId) continue;
+    const inSession = sessionId !== undefined && (sid === sessionId || pgid === sessionId);
+    if (!inSession && !(tag && hasEnvTagDarwin(pid, tag))) continue;
     pids.push(pid);
-    if (pgid > 0 && pgid !== sessionId && pgid !== self) {
+    if (sessionId === undefined) {
+      orphanPids.push(pid);
+    } else if (pgid > 0 && pgid !== sessionId && pgid !== self) {
       groups.add(pgid);
     } else if (pgid !== sessionId) {
       orphanPids.push(pid);
@@ -431,15 +523,9 @@ async function runBoundedPs(args: string[]): Promise<{ pid: number; text: string
 
 export async function discoverTargets(sessionId?: number, tag?: string): Promise<ProcTargets | undefined> {
   if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag);
-  const [treeRes, envRes] = await Promise.all([
-    runBoundedPs(["-Ao", "pid=,ppid=,pgid="]),
-    tag ? runBoundedPs(["ewwax"]) : Promise.resolve(undefined),
-  ]);
-  if (!treeRes && !envRes) return undefined;
-  const exclude = new Set<number>();
-  if (treeRes) exclude.add(treeRes.pid);
-  if (envRes) exclude.add(envRes.pid);
-  return buildTargetsFromPs(process.pid, sessionId, tag, treeRes?.text, envRes?.text, exclude);
+  const treeRes = await runBoundedPs(["-Ao", "pid=,ppid=,pgid="]);
+  if (!treeRes) return discoverTargetsSync(sessionId, tag);
+  return buildTargetsFromPs(process.pid, sessionId, tag, treeRes.text, new Set([treeRes.pid]));
 }
 
 function signalOneGroup(pgrp: number, signal: NodeJS.Signals): void {
@@ -653,16 +739,17 @@ if (import.meta.main) {
   let targetEnv: Record<string, string | undefined> | undefined;
   let cleanupGraceMs = graceMs;
   let controlFd: number | undefined;
+  let resultFd: number | undefined;
   try {
     const raw = Bun.argv[2] ?? (await Bun.stdin.text());
     const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed) && parsed.every((arg) => typeof arg === "string")) {
       command = parsed;
     } else if (parsed && typeof parsed === "object" && Array.isArray((parsed as { command?: unknown }).command)) {
-      const record = parsed as { command: unknown[]; env?: unknown; graceMs?: unknown; controlFd?: unknown };
+      const record = parsed as { command: unknown[]; env?: unknown; graceMs?: unknown; controlFd?: unknown; resultFd?: unknown };
       if (record.command.every((arg) => typeof arg === "string")) command = record.command as string[];
       if (record.env && typeof record.env === "object" && !Array.isArray(record.env)) {
-        const cleanEnv: Record<string, string> = {};
+        const cleanEnv: Record<string, string> = Object.create(null);
         for (const [k, v] of Object.entries(record.env as Record<string, unknown>)) {
           if (typeof v === "string") cleanEnv[k] = v;
         }
@@ -670,8 +757,22 @@ if (import.meta.main) {
       }
       if (typeof record.graceMs === "number" && record.graceMs >= 0) cleanupGraceMs = record.graceMs;
       if (typeof record.controlFd === "number" && Number.isInteger(record.controlFd) && record.controlFd >= 3) controlFd = record.controlFd;
+      if (typeof record.resultFd === "number" && Number.isInteger(record.resultFd) && record.resultFd >= 3) resultFd = record.resultFd;
     }
   } catch {}
+  if (controlFd !== undefined) setCloexec(controlFd, true);
+  if (resultFd !== undefined) setCloexec(resultFd, true);
+  const markResultFd = () => {
+    if (resultFd === undefined) return;
+    const fd = resultFd;
+    resultFd = undefined;
+    try {
+      writeSync(fd, "1\n");
+    } catch {}
+    try {
+      closeSync(fd);
+    } catch {}
+  };
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
     process.on(sig, () => {
       if (controlFd !== undefined) return;
@@ -743,6 +844,7 @@ if (import.meta.main) {
       } catch {}
     },
     reportResult: (code) => {
+      markResultFd();
       try {
         writeSync(1, `${code}\n`);
       } catch {}

@@ -252,8 +252,9 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
   }
 
   const endHolder = async (started: Promise<string>) => {
-    const pid = Number((await started).trim());
+    const pid = Number((await Promise.race([started, Promise.resolve("")])).trim());
     if (pid > 0) try { process.kill(pid, "SIGKILL"); } catch {}
+    return pid > 0;
   };
 
   const notChecked = "  ? team  Team rules.\n      Workflows: allowlist not checked\n      Hedge could not check this pack's setup right now. Run hedge doctor.";
@@ -281,8 +282,7 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     try {
       expect((await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output).toContain(notChecked);
     } finally {
-      await endHolder(started);
-      await holderGone;
+      if (await endHolder(started)) await holderGone;
     }
   });
 
@@ -373,7 +373,7 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
         expect(await listing.exited).not.toBe(0);
       } finally {
         listing.kill("SIGKILL");
-        const pgid = Number((await started).trim());
+        const pgid = Number((await Promise.race([started, Promise.resolve("")])).trim());
         if (pgid > 0) try { process.kill(-pgid, "SIGKILL"); } catch {}
       }
     });
@@ -400,9 +400,14 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     const { home: pgidHome } = await machineWithProfile();
     const [pgidReady, pgidGone] = [join(pgidHome, "ready"), join(pgidHome, "gone")];
     expect(Bun.spawnSync(["mkfifo", pgidReady, pgidGone]).exitCode).toBe(0);
+    const pgidScript = `import { dlopen, FFIType } from "bun:ffi";
+const lib = dlopen(process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6", { setpgid: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
+if (lib.symbols.setpgid(0, 0) !== 0) process.exit(2);
+const c = Bun.spawn(["sh", "-c", 'exec 3>"$HOME/gone"; sleep 30 & echo $! > "$HOME/ready"; wait'], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+process.exit(await c.exited);`;
     await withTeamPack(pgidHome, {
       workflows: [flow("allowlist")],
-      human: [{ id: "allowlist", say: "Allowlist.", workflow: "allowlist", probe: ["timeout", "10", "sh", "-c", 'exec 3>"$HOME/gone"; sleep 30 & echo $! > "$HOME/ready"; wait'] }],
+      human: [{ id: "allowlist", say: "Allowlist.", workflow: "allowlist", probe: [process.execPath, "-e", pgidScript] }],
     });
     const [pgidStarted, pgidClosed] = [fifoRead(pgidReady), fifoRead(pgidGone)];
     const timesOutOncePgidStarted = { now: () => 0, sleep: async () => void (await pgidStarted) };
@@ -416,9 +421,11 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     const { home: sidHome } = await machineWithProfile();
     const [sidReady, sidGone] = [join(sidHome, "ready"), join(sidHome, "gone")];
     expect(Bun.spawnSync(["mkfifo", sidReady, sidGone]).exitCode).toBe(0);
+    const sidScript = `const c = Bun.spawn(["sh", "-c", 'exec 3>"$HOME/gone"; echo $$ > "$HOME/ready"; exec sleep 30'], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+process.exit(await c.exited);`;
     await withTeamPack(sidHome, {
       workflows: [flow("allowlist")],
-      human: [{ id: "allowlist", say: "Allowlist.", workflow: "allowlist", probe: ["setsid", "sh", "-c", 'exec 3>"$HOME/gone"; echo $$ > "$HOME/ready"; exec sleep 30'] }],
+      human: [{ id: "allowlist", say: "Allowlist.", workflow: "allowlist", probe: [process.execPath, "-e", sidScript] }],
     });
     const [sidStarted, sidClosed] = [fifoRead(sidReady), fifoRead(sidGone)];
     const timesOutOnceSidStarted = { now: () => 0, sleep: async () => void (await sidStarted) };

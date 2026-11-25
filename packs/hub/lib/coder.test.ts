@@ -546,16 +546,12 @@ test("kills a background child left in an unlocked command's own process group a
   const holderGone = Bun.file(gone).text();
   const leaderClosed = Bun.file(leaderGone).text();
   const clock = handTimer();
-  const result = captureWith(clock.timer)(
-    [
-      "timeout",
-      "10",
-      "sh",
-      "-c",
-      `exec 4>${JSON.stringify(leaderGone)}; { sleep 30 4>&- & } 3>${JSON.stringify(gone)}; echo $! > ${JSON.stringify(ready)}`,
-    ],
-    { timeoutMs: 30 },
-  );
+  const pgidScript = `import { dlopen, FFIType } from "bun:ffi";
+const lib = dlopen(process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6", { setpgid: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
+if (lib.symbols.setpgid(0, 0) !== 0) process.exit(2);
+const c = Bun.spawn(["sh", "-c", ${JSON.stringify(`exec 4>${JSON.stringify(leaderGone)}; { sleep 30 4>&- & } 3>${JSON.stringify(gone)}; echo $! > ${JSON.stringify(ready)}`)}], { stdio: ["inherit", "inherit", "inherit"] });
+process.exit(await c.exited);`;
+  const result = captureWith(clock.timer)([process.execPath, "-e", pgidScript], { timeoutMs: 30 });
   const childPid = Number((await started).trim());
   expect(await leaderClosed).toBe("");
   try {
@@ -620,4 +616,41 @@ test("rejects eight nested box locks cleanly before spawning a supervisor when n
   const nest = <T>(index: number, fn: () => Promise<T>): Promise<T> =>
     index > 8 ? fn() : withBoxLock(lockHome, `box-${index}`, { waitMs: 0 }, () => nest(index + 1, fn));
   await expect(nest(1, () => capture(["printf", "%s", "ok"], { env: { PATH: emptyBin }, timeoutMs: 10_000 }))).rejects.toThrow("cannot close 8 box lock descriptors");
+});
+
+test("preserves a __proto__ environment variable through supervised capture", async () => {
+  const env: Record<string, string | undefined> = Object.create(null);
+  env.PATH = process.env.PATH;
+  env["__proto__"] = "keep-proto";
+  const result = await capture(
+    [process.execPath, "-e", 'process.stdout.write(Object.getOwnPropertyDescriptor(process.env, "__proto__")?.value ?? "")'],
+    { env, timeoutMs: 10_000 },
+  );
+  expect(result).toEqual({ code: 0, stdout: "keep-proto", stderr: "" });
+});
+
+test("kills a repeatedly self-stopping detached capture group when the caller receives SIGTERM", async () => {
+  const dir = temp.make("hedge-capture-term-stop-");
+  const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+  expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+  const started = Bun.file(ready).text();
+  const holderGone = Bun.file(gone).text();
+  const coderPath = join(import.meta.dir, "coder.ts");
+  const callerScript = `import { capture } from ${JSON.stringify(coderPath)};
+await capture(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; while true; do kill -STOP 0; done', "probe", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { timeoutMs: 30_000 });`;
+  const caller = Bun.spawn([process.execPath, "-e", callerScript], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  let targetPid = 0;
+  try {
+    targetPid = Number((await started).trim());
+    expect(targetPid).toBeGreaterThan(0);
+    caller.kill("SIGTERM");
+    expect(await caller.exited).not.toBe(0);
+    expect(await holderGone).toBe("");
+  } finally {
+    caller.kill("SIGKILL");
+    if (targetPid > 0) {
+      try { process.kill(targetPid, "SIGCONT"); } catch {}
+      try { process.kill(targetPid, "SIGKILL"); } catch {}
+    }
+  }
 });
