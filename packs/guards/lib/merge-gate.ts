@@ -261,15 +261,26 @@ function mcpPr(input: Record<string, unknown>): { repository: string; pr: number
   return repository && repoSlug.test(repository) && number !== undefined ? { repository, pr: Number(number) } : undefined;
 }
 
+const t3Tool = /^mcp__t3[-_]code__/;
+
+function t3Pr(name: string, input: Record<string, unknown>): { repository: string; pr: number } | undefined {
+  if (name === "comment_on_issue") {
+    const url = input.key === undefined && typeof input.url === "string" ? input.url.match(prUrl) : null;
+    return url ? { repository: url[1]!, pr: Number(url[2]) } : undefined;
+  }
+  const { repository, number } = input;
+  return typeof repository === "string" && repoSlug.test(repository) && Number.isSafeInteger(number) && Number(number) > 0 ? { repository, pr: Number(number) } : undefined;
+}
+
 function mcpIntent(tool: string, input: Record<string, unknown>): MergeIntent {
   const name = tool.replace(/^mcp__.*?__/, "");
   if (reads.test(name)) return { targets: [] };
   const merges = /merge/i.test(name) && !/disable|update_pull_request_branch/i.test(name);
-  const writesComment = /comment|review/i.test(name);
+  const writesComment = /comment|review|respond/i.test(name);
   if (!merges && !(writesComment && strings(input).some((text) => enqueueLine.test(text)))) return { targets: [] };
-  if (!merges && /review/i.test(name)) return { targets: [], refusal: otherEndpointReason };
-  const named = mcpPr(input);
-  return named ? { targets: [{ ...named, via: tool }] } : { targets: [], refusal: unnamedReason(merges ? "merges a PR" : "posts `/trunk merge`") };
+  if (!merges && (/review/i.test(name) || input.reviewThreadId !== undefined)) return { targets: [], refusal: otherEndpointReason };
+  const named = t3Tool.test(tool) ? t3Pr(name, input) : mcpPr(input);
+  return named ? { targets: [{ ...named, via: merges ? tool : `${tool} comment` }] } : { targets: [], refusal: unnamedReason(merges ? "merges a PR" : "posts `/trunk merge`") };
 }
 
 export type ToolCall = { tool_name?: string; tool_input?: Record<string, unknown>; cwd?: string };
@@ -300,7 +311,7 @@ export function mergeIntent(call: ToolCall, command: string, exempt: string[], i
       const one = commandIntent(found, command, cwdIn(found.scope), io);
       intent = { targets: [...intent.targets, ...one.targets], refusal: intent.refusal ?? one.refusal };
     }
-  } else if (/github/i.test(tool)) intent = mcpIntent(tool, call.tool_input ?? {});
+  } else if (/github/i.test(tool) || t3Tool.test(tool)) intent = mcpIntent(tool, call.tool_input ?? {});
   const skipping = intent.targets.filter((target) => isExempt(target.repository, exempt));
   return { ...intent, targets: intent.targets.filter((target) => !skipping.includes(target)), ...skipping.length ? { exempt: skipping } : {} };
 }

@@ -178,6 +178,56 @@ describe("which calls enqueue or merge", () => {
     expect(mcp("mcp__plugin_github_github__merge_pull_request", { repository_full_name: "example/product", pr_number: 7 })).toEqual({ targets: [target("example/product", 7)] });
   });
 
+  test("T3 Code's PR tools: a merge, an auto-merge, a stack merge and a PR comment that posts /trunk merge target the PR, on either server name", () => {
+    const merge = { repository: "example/product", number: 7, expectedHeadSha: head };
+    expect(mcp("mcp__t3-code__pull_request_merge", merge)).toEqual({ targets: [target("example/product", 7)] });
+    expect(mcp("mcp__t3_code__pull_request_merge", merge)).toEqual({ targets: [target("example/product", 7)] });
+    expect(mcp("mcp__t3-code__pull_request_merge", { ...merge, auto: true, method: "squash" })).toEqual({ targets: [target("example/product", 7)] });
+    expect(mcp("mcp__t3-code__pull_request_merge", { ...merge, stack: true, environmentId: "box-2" })).toEqual({ targets: [target("example/product", 7)] });
+    expect(mcp("mcp__t3-code__pull_request_merge", { ...merge, repository: "own/tooling" })).toEqual({ targets: [], exempt: [target("own/tooling", 7)] });
+    expect(mcp("mcp__t3-code__pull_request_respond", { repository: "example/product", number: 7, body: "Ready.\n/trunk merge" })).toEqual({ targets: [target("example/product", 7)] });
+    expect(mcp("mcp__t3-code__comment_on_issue", { url: "https://github.com/example/product/pull/7", body: "/trunk merge" })).toEqual({ targets: [target("example/product", 7)] });
+    expect(mcp("mcp__t3-code__comment_on_issue", { url: "https://github.com/example/product/issues/7", body: "/trunk merge" })).toEqual({ targets: [target("example/product", 7)] });
+  });
+
+  test("a T3 merge or /trunk merge comment that leaves T3 to pick the PR is refused, since the gate cannot check it", () => {
+    for (const input of [
+      { expectedHeadSha: head },
+      { number: 7, expectedHeadSha: head },
+      { repository: "example/product", expectedHeadSha: head },
+      { repository: "https://github.com/example/product", number: 7, expectedHeadSha: head },
+      { repository: "example/product", number: "7", expectedHeadSha: head },
+      { repository: "example/product", number: 0, expectedHeadSha: head },
+      { owner: "example", repo: "product", pullNumber: 7, expectedHeadSha: head },
+    ]) expect(mcp("mcp__t3-code__pull_request_merge", input).refusal).toContain("merges a PR without naming the PR");
+    expect(mcp("mcp__t3-code__pull_request_respond", { body: "/trunk merge" }).refusal).toContain("posts `/trunk merge` without naming the PR");
+    expect(mcp("mcp__t3-code__comment_on_issue", { key: "example/product#7", body: "/trunk merge" }).refusal).toContain("without naming the PR");
+    expect(mcp("mcp__t3-code__comment_on_issue", { key: "ENG-7", url: "https://github.com/example/product/pull/7", body: "/trunk merge" }).refusal).toContain("without naming the PR");
+    expect(mcp("mcp__t3-code__comment_on_issue", { url: "https://linear.app/example/issue/ENG-7", body: "/trunk merge" }).refusal).toContain("without naming the PR");
+  });
+
+  test("a T3 call checks the PR T3 merges, not one that a GitHub-style key beside it names", () => {
+    const decoys = { pull_number: 9, pullNumber: 9, owner: "own", repo: "tooling", repository_full_name: "own/tooling" };
+    expect(mcp("mcp__t3-code__pull_request_merge", { ...decoys, repository: "example/product", number: 7, expectedHeadSha: head })).toEqual({ targets: [target("example/product", 7)] });
+    expect(mcp("mcp__t3-code__pull_request_respond", { ...decoys, repository: "example/product", number: 7, body: "/trunk merge" })).toEqual({ targets: [target("example/product", 7)] });
+  });
+
+  test("a T3 review or review-thread reply that posts /trunk merge is refused, and T3 reads, edits and other comments enqueue nothing", () => {
+    const pr = { repository: "example/product", number: 7 };
+    expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "comment", body: "/trunk merge" }).refusal).toBe(otherEndpointReason);
+    expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "approve", expectedHeadSha: head, comments: [{ path: "a.ts", line: 1, body: "/trunk merge" }] }).refusal).toBe(otherEndpointReason);
+    expect(mcp("mcp__t3-code__pull_request_respond", { ...pr, reviewThreadId: "thread-1", body: "/trunk merge" }).refusal).toBe(otherEndpointReason);
+    expect(mcp("mcp__t3-code__pull_request_respond", { ...pr, body: "Thanks, fixed." })).toEqual({ targets: [] });
+    expect(mcp("mcp__t3-code__pull_request_respond", { ...pr, reviewThreadId: "thread-1", resolved: true })).toEqual({ targets: [] });
+    expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "approve", expectedHeadSha: head })).toEqual({ targets: [] });
+    expect(mcp("mcp__t3-code__pull_request_update", { ...pr, body: "Steps:\n/trunk merge once green", ready: true })).toEqual({ targets: [] });
+    expect(mcp("mcp__t3-code__pull_request_read", { ...pr })).toEqual({ targets: [] });
+    expect(mcp("mcp__t3-code__pull_request_list", { repository: "example/product" })).toEqual({ targets: [] });
+    expect(mcp("mcp__t3-code__pull_request_create", { title: "Merge queue", body: "/trunk merge once green" })).toEqual({ targets: [] });
+    expect(mcp("mcp__t3-code__t3_thread_send", { threadId: "t", message: "/trunk merge" })).toEqual({ targets: [] });
+    expect(mcp("mcp__other__pull_request_merge", { ...pr, expectedHeadSha: head })).toEqual({ targets: [] });
+  });
+
   test("GitHub MCP reads and PR body edits that name /trunk merge enqueue nothing", () => {
     expect(mcp("mcp__github__search_issues", { query: "/trunk merge", owner: "example", repo: "product" })).toEqual({ targets: [] });
     expect(mcp("mcp__github__update_pull_request", { owner: "example", repo: "product", pullNumber: 7, body: "Steps:\n/trunk merge once green" })).toEqual({ targets: [] });
@@ -446,7 +496,8 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     chmodSync(join(bin, "gh"), 0o755);
     const where = { home, env: { HEDGE_SETTINGS: undefined, PATH: `${bin}:${process.env.PATH}` }, intent: { ...realIntentIO, ghRepo: undefined, aliases: () => aliases } };
     const hook = async (command: string, cwd = "/") => (await mergeGate({ tool_name: "Bash", tool_input: { command }, cwd }, where))?.hookSpecificOutput.permissionDecisionReason;
-    return Object.assign(hook, { home });
+    const tool = async (tool_name: string, tool_input: Record<string, unknown>) => (await mergeGate({ tool_name, tool_input, cwd: "/" }, where))?.hookSpecificOutput.permissionDecisionReason;
+    return Object.assign(hook, { home, bin, tool });
   };
   const pass = (repository: string, pr: number, commit: string): LedgerEvent => ({ type: "gate", repository, pr, commit, passed: true, machine: "box-2", at: "2026-11-16T08:00:00Z" });
   const openHead = (branch: string) => `repos/example/product/pulls?state=open&per_page=2&head=example:${branch}`;
@@ -458,6 +509,56 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     expect(await enqueue(4)).toBeUndefined();
     expect(await enqueue(9)).toContain("has not passed at the head of example/product#9");
     expect(await enqueue(5)).toContain("cannot read example/product#5");
+  });
+
+  test("T3's merge tool gets the refusal gh pr merge gets, and passes where it passes", async () => {
+    const github = { "repos/example/product/pulls/9": pull(head) };
+    const t3Merge = { repository: "example/product", number: 9, expectedHeadSha: head, method: "squash" };
+    const unpassed = machine(github);
+    const refusal = await unpassed("gh pr merge 9 --repo example/product --squash");
+    expect(refusal).toContain("has not passed at the head of example/product#9");
+    expect(await unpassed.tool("mcp__t3-code__pull_request_merge", t3Merge)).toBe(refusal!);
+    expect(await unpassed.tool("mcp__t3-code__pull_request_merge", { ...t3Merge, auto: true })).toBe(refusal!);
+    expect(await unpassed.tool("mcp__t3-code__pull_request_respond", { repository: "example/product", number: 9, body: "/trunk merge" })).toBe(refusal!);
+    const passed = machine(github, [pass("example/product", 9, head)]);
+    expect(await passed("gh pr merge 9 --repo example/product --squash")).toBeUndefined();
+    expect(await passed.tool("mcp__t3-code__pull_request_merge", t3Merge)).toBeUndefined();
+    expect(await passed.tool("mcp__t3-code__pull_request_merge", { ...t3Merge, number: 5 })).toContain("cannot read example/product#5");
+  });
+
+  test("T3's merge tool is held on a gap an agent accepted, as gh pr merge is, until the person's merge card names it", async () => {
+    const github = { "repos/example/product/pulls/9": pull(head) };
+    const gap: LedgerEvent = { type: "decide", decision: { id: "d-agent", at: "2026-11-16T08:00:00Z", class: "proof-gap", mark: "🤖", question: "Accept the live-run gap? example/product#9: no sandbox", answer: "Accept the gap", rejected: "Keep the gap open", reason: "x", scope: { prs: ["example/product#9"], kinds: ["live-run"] }, effect: "accept", where: { thread: "t", machine: "hub" } } };
+    const card: LedgerEvent = { type: "decide", decision: { id: "w-merge", at: "2026-11-16T09:00:00Z", class: "merge", mark: "👤", question: `Merge example/product#9 at ${head}? An agent accepted d-agent for live-run.`, answer: '2026-11-16 "Merge"', scope: { prs: ["example/product#9"], condition: `${head}: merge card` }, where: { thread: "t", message: "m-w", machine: "hub" } } };
+    const t3Merge = { repository: "example/product", number: 9, expectedHeadSha: head };
+    const held = machine(github, [pass("example/product", 9, head), gap]);
+    const refusal = await held("gh pr merge 9 --repo example/product");
+    expect(refusal).toContain("an agent accepted proof gaps of example/product#9");
+    expect(await held.tool("mcp__t3-code__pull_request_merge", t3Merge)).toBe(refusal!);
+    expect(await machine(github, [pass("example/product", 9, head), gap, card]).tool("mcp__t3-code__pull_request_merge", t3Merge)).toBeUndefined();
+  });
+
+  test("T3's stack merge needs a gate pass at every open layer below the PR", async () => {
+    const github = { "repos/example/product/pulls/7": pull(head, "layer-1"), "repos/example/product/pulls/6": pull(lower), [openHead("layer-1")]: [{ number: 6 }] };
+    const t3Merge = { repository: "example/product", number: 7, expectedHeadSha: head, stack: true };
+    expect(await machine(github, [pass("example/product", 7, head)]).tool("mcp__t3-code__pull_request_merge", t3Merge)).toContain("example/product#6 (a lower layer of example/product#7)");
+    expect(await machine(github, [pass("example/product", 7, head), pass("example/product", 6, lower)]).tool("mcp__t3-code__pull_request_merge", t3Merge)).toBeUndefined();
+  });
+
+  test("the installed hook script gates T3's merge tool", async () => {
+    const hook = machine({ "repos/example/product/pulls/9": pull(head) });
+    const answer = async (tool_input: Record<string, unknown>) => {
+      const { HEDGE_SETTINGS: _settings, GH_REPO: _repo, ...env } = process.env;
+      const child = Bun.spawn([process.execPath, join(import.meta.dir, "hooks/merge-gate.ts"), "claude"], {
+        env: { ...env, HOME: hook.home, PATH: `${hook.bin}:${process.env.PATH}` }, cwd: "/", timeout: 4_000,
+        stdin: new Blob([JSON.stringify({ tool_name: "mcp__t3-code__pull_request_merge", tool_input, cwd: "/" })]), stdout: "pipe",
+      });
+      const output = await new Response(child.stdout).text();
+      expect(await child.exited).toBe(0);
+      return JSON.parse(output).hookSpecificOutput.permissionDecisionReason;
+    };
+    expect(await answer({ repository: "example/product", number: 9, expectedHeadSha: head })).toContain("has not passed at the head of example/product#9");
+    expect(await answer({ expectedHeadSha: head })).toContain("merges a PR without naming the PR");
   });
 
   test("a stack layer's parent is its open PR, not a newer closed one, and two open parents are refused", async () => {
