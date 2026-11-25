@@ -443,7 +443,7 @@ or the judge failed or was unavailable; 3 means only unaccepted gaps remain; 75 
 holds the gate. No gap waives the head check. The last line is the verdict: on a pass it names what it covered, and
 on any other exit it names the check that held the gate, also when the gate itself fails with an error. On a pass, the line before the verdict, or after a ledger
 line, starts "merge card:": the merge-risk grade and door, the review rounds and final reads and how many ran past the
-review budget, each gap with who accepted it and why, each item under Known issues, and the minutes from opened to
+review budget, each gap with who accepted it and why, after "held:" each 🤖 decision as the merge-gate hook names it, each item under Known issues, and the minutes from opened to
 ready and from ready to now; --json carries it as mergeCard. A pass records the gaps that 🤖 decisions accepted, here
 and in the ledger, and the merge-gate hook then holds that head until the user chooses "Merge" on a merge card that
 names the PR, its full head sha, and each held decision as the hook names it, such as d-1a2b3c4d for live-run/prod-shape, recorded with

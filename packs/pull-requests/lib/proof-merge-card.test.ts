@@ -29,7 +29,7 @@ test("a passing gate prints the merge card line: grade and door, reads, each gap
   const { pr, id } = await agentAcceptedGap();
   const gate = await pr.hedge("gate");
   expect(gate.code).toBe(0);
-  expect(gate.output.split("\n")).toContain(`merge card: example/product#42: medium, two-way door · 1 round · gaps: prod-shape (🤖 agent ${id}): ${reason} · 2 known issues: major: feature.txt:1 The greeting repeats on reload.; major: feature.txt:2 The farewell is missing. · 120 min opened to ready, 60 min ready to card`);
+  expect(gate.output.split("\n")).toContain(`merge card: example/product#42: medium, two-way door · 1 round · gaps: prod-shape (🤖 agent ${id}): ${reason} · held: ${id} for prod-shape · 2 known issues: major: feature.txt:1 The greeting repeats on reload.; major: feature.txt:2 The farewell is missing. · 120 min opened to ready, 60 min ready to card`);
   expect(gate.output.split("\n").at(-1)).toStartWith("gate: pass");
 });
 
@@ -121,12 +121,15 @@ test("a merge word lifts an agent's gap decision only when its card named every 
   expect((await pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${head}: merge card`)).code).toBe(0);
   await pr.hedge("require", "--kinds", "prod-shape");
   await pr.hedge("gap", "--kind", "prod-shape", "--reason", "No production read access");
-  expect((await pr.hedge("gate")).output).toContain(`prod-shape: gap from ${head.slice(0, 7)}, accepted by 🤖 decision ${id}`);
+  const gate = await pr.hedge("gate");
+  expect(gate.output).toContain(`prod-shape: gap from ${head.slice(0, 7)}, accepted by 🤖 decision ${id}`);
+  const held = / · held: ([^·]+) · /.exec(gate.output)?.[1];
+  expect(held).toBe(`${id} for live-run/prod-shape`);
   expect(await merge()).toContain(`(🤖 ${id} for live-run/prod-shape) itself`);
   pr.choose("Merge", `Merge example/product#42 at ${head}? An agent accepted ${id} for live-run, and d-0000 for prod-shape.`);
   expect((await pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${head}: merge card`)).code).toBe(0);
   expect(await merge()).toContain(`(🤖 ${id} for live-run/prod-shape) itself`);
-  pr.choose("Merge", `Merge example/product#42 at ${head}? An agent accepted ${id} for live-run/prod-shape.`);
+  pr.choose("Merge", `Merge example/product#42 at ${head}? An agent accepted ${held}.`);
   expect((await pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${head}: merge card`)).code).toBe(0);
   expect(await merge()).toBeUndefined();
 });

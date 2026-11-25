@@ -1,10 +1,18 @@
-import { refText, riskCalloutOf, type PrRef } from "./decision-ledger.ts";
+import { refText, riskCalloutOf, type DecisionState, type PrRef } from "./decision-ledger.ts";
 import type { PullRequest, Run } from "./pr-ci.ts";
 import { acceptor, roundsCell } from "./proof-end-table.ts";
 import { knownIssues, summaryGaps, type ProofSummary } from "./proof.ts";
 
 export type Timeline = { opened?: string; ready?: string; draft?: true };
-type CardInput = { ref: PrRef; summary: ProofSummary; body: string; timeline: Timeline };
+type CardInput = { ref: PrRef; summary: ProofSummary; body: string; timeline: Timeline; held?: string[] };
+
+export function heldNames(summary: ProofSummary, decisions: DecisionState[]) {
+  const ids = [...new Set(summaryGaps(summary).flatMap(({ gap }) => gap.accepted?.mark === "🤖" && gap.accepted.id ? [gap.accepted.id] : []))];
+  return ids.map((id) => {
+    const kinds = decisions.find((decision) => decision.id === id)?.scope.kinds ?? [];
+    return kinds.length ? `${id} for ${kinds.join("/")}` : id;
+  });
+}
 
 export function readTimeline(ref: PrRef, pull: PullRequest, run: Run): Timeline {
   if (!pull.createdAt) return {};
@@ -38,11 +46,11 @@ const reads = (summary: ProofSummary) => {
 
 const listedIssues = (body: string) => knownIssues(body).map((line) => line.replace(/^[-*]\s+/, ""));
 
-export function mergeCardLine({ ref, summary, body, timeline }: CardInput, now: Date) {
+export function mergeCardLine({ ref, summary, body, timeline, held = [] }: CardInput, now: Date) {
   const gaps = summaryGaps(summary).map(({ kind, gap }) => `${kind} (${acceptor(gap)})${gap.reason ? `: ${gap.reason.replace(/\s+/g, " ")}` : ""}`);
   const issues = listedIssues(body);
   return `merge card: ${refText(ref)}: ${[
-    gradeText(body), reads(summary), `gaps: ${gaps.join("; ") || "none"}`,
+    gradeText(body), reads(summary), `gaps: ${gaps.join("; ") || "none"}`, ...held.length ? [`held: ${held.join(", ")}`] : [],
     issues.length ? `${issues.length} known issue${issues.length === 1 ? "" : "s"}: ${issues.join("; ")}` : "no known issues",
     timesText(timeline, now),
   ].join(" · ")}`;
