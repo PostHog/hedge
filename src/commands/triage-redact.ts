@@ -256,7 +256,7 @@ function replaceLongestFirst(text: string, regexes: RegExp[], maxLen: number, re
       if (bestMatch.length < maxLen) {
         let probe = bestStart + 1;
         while (probe < bestEnd) {
-          const next = execAt(slice, probe);
+          const next = execAt(slice, probe, cached);
           if (!next || next.index >= bestEnd) break;
           if (next.text.length > bestMatch.length) {
             bestStart = next.index;
@@ -308,7 +308,7 @@ function applySpellings(text: string, matcher: CompiledMatcher, exempt?: Set<str
 }
 
 const deferToAfter = new RegExp(
-  String.raw`[:?&#="']|-----BEGIN|PRIVATE KEY|\beyJ[A-Za-z0-9_-]{8,}|(?:^|[^\w])(?:${secretKey}|[A-Za-z_]*(?:token|key|secret|password|auth|code|sig)[A-Za-z_]*|bearer|basic|users|home|private repos?)\s*$`,
+  String.raw`[:?&#="']|-----BEGIN|PRIVATE KEY|\beyJ[A-Za-z0-9_-]{8,}|\b(?:bearer|basic|token)\b|(?:^|[^\w])(?:${secretKey}|[A-Za-z_]*(?:token|key|secret|password|auth|code|sig)[A-Za-z_]*|users|home|private repos?)\s*$`,
   "i",
 );
 

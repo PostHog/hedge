@@ -600,7 +600,7 @@ async function fetchExact(dir: string, repo: string, ref: string, shallow: boole
     const oid = parsePorcelainFetchHead(fetched.stdout);
     if (oid) return { ok: true, oid, stderr: "" };
   }
-  if (!fetched.ok && !/unknown option.*porcelain/i.test(fetched.stderr)) {
+  if (!fetched.ok && !/unknown option.*porcelain/i.test(fetched.fullStderr)) {
     return { ok: false, stderr: fetched.stderr };
   }
   const src = ref.startsWith("+") ? ref.slice(1) : ref;
@@ -651,7 +651,7 @@ async function git(dir: string, ...args: string[]) {
   const bytes = new Uint8Array(rawBytes);
   const rawStdout = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes);
   const message = process.signalCode ? `git timed out after ${fetchTimeoutMs / 1000} seconds` : (stderr.trim().split("\n").at(-1) ?? "");
-  return { ok: code === 0, stdout: rawStdout.trim(), rawStdout, rawBytes: bytes, stderr: message };
+  return { ok: code === 0, stdout: rawStdout.trim(), rawStdout, rawBytes: bytes, stderr: message, fullStderr: stderr };
 }
 
 export function sourceCache(home: string) {

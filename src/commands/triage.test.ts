@@ -869,6 +869,48 @@ describe("hedge triage", () => {
     expect(redact("Note: The pack source alias-19999 is not pinned.", schemeHome, manyKnown)).toBe(
       "Note: The pack source <private source> is not pinned.",
     );
+
+    const bearerPathProfile = temp.make("profile-bearer-path-");
+    writeFileSync(
+      join(bearerPathProfile, "hedge.json"),
+      JSON.stringify({
+        schema: 1,
+        engine: { repo: "PostHog/hedge", ref: "main", channel: "track" },
+        sources: [{ name: "bp", repo: "Bearer tok1234", ref: "main" }],
+        packs: [],
+        plan: "both",
+        settings: {},
+        workflows: {},
+      }),
+    );
+    const bpSent: Sent[] = [];
+    const bpIo = scripted([]);
+    const bpCode = await main(
+      ["triage", "--send", "--note", "Authorization: Bearer tok1234567890SECRET"],
+      {
+        home: temp.make("home-bp-"),
+        engineRoot,
+        platform: "darwin",
+        env: { HEDGE_PROFILE_DIR: bearerPathProfile },
+        print: bpIo.terminal.print,
+        terminal: bpIo.terminal,
+        capture: async (command, options = {}) => {
+          bpSent.push({ command, ...(options.input === undefined ? {} : { input: options.input }) });
+          if (command[0] === "git") return spawnRunner(command, options);
+          return capture([], undefined)(command, options);
+        },
+        hostname: () => "noras-mbp.local",
+        run: async () => 0,
+      },
+    );
+    expect(bpCode).toBe(0);
+    const bpIssue = bpSent.find((call) => call.command[1] === "issue")!;
+    const bpTitle = bpIssue.command[bpIssue.command.indexOf("--title") + 1]!;
+    const bpBody = bpIssue.input!;
+    expect(bpTitle).toContain("Authorization: Bearer <token>");
+    expect(bpBody).toContain("Authorization: Bearer <token>");
+    expect(bpTitle).not.toContain("tok1234567890SECRET");
+    expect(bpBody).not.toContain("tok1234567890SECRET");
   });
 });
 

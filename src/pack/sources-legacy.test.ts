@@ -704,5 +704,42 @@ export default { sdk: 1, name: "team", summary: "Mutating.", register() {} };
     expect(tampered.stale).toContain("changed checkout HEAD while loading");
     expect(await spawnGit(join(mutateCache, "team"), "rev-parse", "HEAD")).toBe(cleanSha);
   });
+
+  test("falls back cleanly when git fetch does not support --porcelain", async () => {
+    const repo = await packRepo("Older git packs.");
+    const sha = await spawnGit(repo, "rev-parse", "HEAD");
+    const realGit = Bun.which("git")!;
+    const binDir = temp.make("old-git-bin-");
+    const shim = join(binDir, "git");
+    writeFileSync(
+      shim,
+      `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--porcelain" ]; then
+    printf "error: unknown option \\\`porcelain'\\nusage: git fetch [<options>] [<repository> [<refspec>...]]\\n" >&2
+    exit 129
+  fi
+done
+exec "${realGit}" "$@"
+`,
+      { mode: 0o755 },
+    );
+    const cache = temp.make("cache-old-git-");
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${savedPath ?? ""}`;
+    try {
+      const branchRes = await fetchSource({ name: "team", repo, ref: "main" }, cache);
+      if ("error" in branchRes) throw new Error(branchRes.error);
+      expect(branchRes.packs[0]?.manifest.summary).toBe("Older git packs.");
+      expect(await followsBranch({ name: "team", repo, ref: "main" }, cache)).toBe(true);
+      const pinRes = await fetchSource({ name: "team", repo, ref: sha }, cache);
+      if ("error" in pinRes) throw new Error(pinRes.error);
+      expect(pinRes.packs[0]?.manifest.summary).toBe("Older git packs.");
+    } finally {
+      process.env.PATH = savedPath;
+    }
+    const leftover = await spawnGit(join(cache, "team"), "for-each-ref", "refs/hedge/tmp");
+    expect(leftover).toBe("");
+  });
 });
 
