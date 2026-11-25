@@ -528,10 +528,18 @@ describe("the wake guard", () => {
     expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)), cwd: "/" }), home("Robin"))).stdout).toBe("");
   });
 
-  test("the hook process exits as soon as it has answered, without waiting out the deadline", async () => {
-    const env: Record<string, string | undefined> = { ...process.env, HOME: temp.make("home-") };
-    delete env.T3CODE_THREAD_ID;
-    const child = Bun.spawn([process.execPath, join(import.meta.dir, "ask-guard.ts"), "claude"], { env, stdin: new Blob([JSON.stringify({ cwd: "/", last_assistant_message: "Done." })]), stdout: "pipe", stderr: "pipe" });
+  test("the installed runner exits as soon as ask-guard answers, without waiting out the deadline", async () => {
+    const hookHome = home("Robin");
+    const stopDir = join(hookHome, ".config/hedge/hooks/Stop");
+    mkdirSync(stopDir, { recursive: true });
+    symlinkSync(join(import.meta.dir, "ask-guard.ts"), join(stopDir, "ask-guard.ts"));
+    symlinkSync(join(import.meta.dir, "../../base/hooks/run.ts"), join(hookHome, ".config/hedge/hooks/run.ts"));
+    const child = Bun.spawn([process.execPath, join(hookHome, ".config/hedge/hooks/run.ts"), "claude", "Stop"], {
+      env: { ...process.env, HOME: hookHome, T3CODE_THREAD_ID: conductor },
+      stdin: new Blob([JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)), cwd: "/" })]),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
     const exited = await Promise.race([child.exited.then(() => "exited"), Bun.sleep(4_000).then(() => "still running")]);
     child.kill();
     expect(exited).toBe("exited");

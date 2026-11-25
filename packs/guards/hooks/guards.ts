@@ -55,8 +55,6 @@ function check(call: ToolCall, { person, owners, mainPushRepos, allowRules, unre
     ?? gitRisk(command, cwd, person, mainPushRepos);
 }
 
-/** The answer for a tool call that a shell guard stops, naming the person the settings give. Such a call is refused, and so
- * is a call the guards cannot check. An installed signed allowlist under the system root wins over guards.owners. */
 export function guard(call: ToolCall, home: string, root = "/"): Answer | undefined {
   const settings = guardSettings(home);
   try {

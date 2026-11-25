@@ -113,10 +113,12 @@ The stop passes when any of these holds:
 
 ## Loop pause
 
-The `loop-pause` workflow is on by default. The setting
+The `loop-pause` workflow is on by default. It installs `hooks/loop-pause.ts`
+for PreToolUse in Claude and Codex so a quality-loop or signal-loop coordinator
+cannot launch a subthread while paused. The setting
 `orchestration.loopLedger` names the loops' ledger directory, which holds
 `limits.md`, `lanes.md` and `signals.md`. With a context library, it defaults
-to its `quality-loop` directory. Two commands read it, and `--ledger <dir>`
+to its `quality-loop` directory. Two commands also read it, and `--ledger <dir>`
 names another one:
 
 - `hedge loop check-pause [--ledger <dir>]` exits 0 while the loops run, 1

@@ -131,7 +131,7 @@
       "settings": [
         "orchestration.loopLedger"
       ],
-      "sentence": "While the loop ledger's limits.md says Paused: yes, or cannot be read, hedge loop next-id hands a quality-loop or signal-loop coordinator no lane id, so it starts no lane; it still settles lanes, keeps its watches, and records signals."
+      "sentence": "While the loop ledger's limits.md says Paused: yes, or cannot be read, a quality-loop or signal-loop coordinator gets no lane id from hedge loop next-id and cannot start a lane; it still settles lanes, keeps its watches, and records signals."
     }
   ],
   "files": [
@@ -144,6 +144,11 @@
       "path": "hooks/ask-guard.ts",
       "target": ".config/hedge/hooks/PreToolUse/ask-guard.ts",
       "workflow": "question-guard"
+    },
+    {
+      "path": "hooks/loop-pause.ts",
+      "target": ".config/hedge/hooks/PreToolUse/loop-pause.ts",
+      "workflow": "loop-pause"
     }
   ],
   "subcommands": {

@@ -142,3 +142,19 @@ test("refuses to turn a flat checkout into a subtree link, or the other way roun
   const toFlat = await sync(root, remote, "box");
   expect([toFlat.code, toFlat.out]).toEqual([1, expect.stringContaining("Remove the link")]);
 });
+
+test("with a subtree, pushes nothing that grows memory/MEMORY.md past 180 lines, and pushes once folded", async () => {
+  const { root, remote } = setup();
+  commitAll(join(root, "seed-main"), "subtree seed", { "memory/MEMORY.md": "# Memory\n" });
+  const env = { HEDGE_MEMORY_SUBTREE: "memory" };
+  const laptop = await sync(root, remote, "laptop", env);
+  expect(laptop.code).toBe(0);
+  const index = (lines: number) => `# Memory\n${Array.from({ length: lines - 1 }, (_, line) => `- note ${line}`).join("\n")}\n`;
+  writeFileSync(join(laptop.checkout, "MEMORY.md"), index(181));
+  const refused = await sync(root, remote, "laptop", env);
+  expect([refused.code, refused.out]).toEqual([1, expect.stringContaining("MEMORY.md would have 181 lines")]);
+  expect(git(root, "--git-dir", remote, "show", "main:memory/MEMORY.md")).not.toContain("- note 179");
+  writeFileSync(join(laptop.checkout, "MEMORY.md"), index(180));
+  expect((await sync(root, remote, "laptop", env)).code).toBe(0);
+  expect(git(root, "--git-dir", remote, "show", "main:memory/MEMORY.md")).toContain("- note 178");
+});

@@ -612,12 +612,12 @@ describe("hook runner", () => {
     expect(result.stdout).not.toContain(githubToken);
   });
 
-  test("runs a hook in its own Bun process when it lies outside the root or exports no hook", async () => {
+  test("runs a hook in its own Bun process when it lies outside the root or is a standalone script", async () => {
     const root = temp.make("root-");
     const dir = join(root, "PreToolUse");
     mkdirSync(dir);
     const printsItsInput = `const input = await Bun.stdin.text();\nconsole.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: \`\${process.argv[2]} \${input} \${process.pid}\` } }));\n`;
-    writeFileSync(join(dir, "a-plain.ts"), `if (import.meta.main) {\n${printsItsInput}}\n`);
+    writeFileSync(join(dir, "a-standalone.ts"), printsItsInput);
     const outside = join(temp.make("source-"), "b-outside.ts");
     writeFileSync(outside, printsItsInput);
     symlinkSync(outside, join(dir, "b-outside.ts"));

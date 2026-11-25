@@ -1,4 +1,4 @@
-import { readdirSync, realpathSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Hook, HookResult } from "../lib/hook.ts";
@@ -12,16 +12,6 @@ type Decision = { decision?: string; reason?: string; hookSpecificOutput?: Speci
 
 const strictness = ["allow", "ask", "deny"];
 
-/**
- * Runs every hook in name order and picks one answer. A JSON block wins, then an exit-2 block, then a
- * JSON answer with hook-specific output, then the first other output. Every hook's hook-specific output
- * is merged into one: the strictest permission decision wins (deny, then ask, then allow), the contexts
- * are joined, and any other field keeps its first value, so another hook can never undo the secret guard.
- * A deny drops any rewritten input, a block turns a tool call's answer into a deny, and prompt suppression
- * stays on once any hook asks for it. A permission request's deny wins over its allow. Codex cannot ask the
- * person, so an ask becomes a deny there. The joined context is redacted, so no hook can echo a secret back.
- * A failing hook only reports, and so does a hook that throws.
- */
 export async function dispatch(dir: string, provider: string, input: string, run: RunHook = runInProcessWithin(engineRoot)): Promise<HookResult> {
   const results: Array<HookResult & { name: string; json?: Decision }> = [];
   for (const name of listHooks(dir)) {
@@ -103,10 +93,14 @@ const isInside = (root: string, path: string) => {
 
 const failure = (error: unknown): HookResult => ({ code: 1, stdout: "", stderr: `${error instanceof Error ? error.message : String(error)}\n` });
 
+const exportsGuardedHook = (source: string) =>
+  /(?:^|\n)\s*export\s+(?:(?:const|let|var|async\s+function|function)\s+hook\b|\{[^}]*\bhook\b)/.test(source)
+  && /\bif\s*\(\s*import\.meta\.main\s*\)/.test(source);
+
 export const runInProcessWithin = (root: string): RunHook => async (path, provider, input) => {
   try {
     const real = realpathSync(path);
-    if (!isInside(root, real)) return await runWithBun(path, provider, input);
+    if (!isInside(root, real) || !exportsGuardedHook(readFileSync(real, "utf8"))) return await runWithBun(path, provider, input);
     const { hook } = (await import(real)) as { hook?: Hook };
     if (typeof hook !== "function") return await runWithBun(path, provider, input);
     return await hook(provider, () => Promise.resolve(input), process.env.HOME ?? homedir());

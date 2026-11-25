@@ -137,7 +137,9 @@ describe("the Base pack", () => {
   test.each(["claude", "codex"] as const)("starts %s's PreToolUse hooks only for shell, agent, question, and MCP tools", (provider) => {
     const entry = plan("both").config.find((item) => item.provider === provider && item.key === "hooks.PreToolUse");
     const groups = entry?.value as Array<{ matcher?: string }>;
-    const starts = (tool: string) => groups.some((group) => group.matcher !== undefined && new RegExp(group.matcher).test(tool));
+    expect(groups.length).toBeGreaterThan(0);
+    expect(groups.every((group) => typeof group.matcher === "string" && group.matcher.length > 0)).toBe(true);
+    const starts = (tool: string) => groups.some((group) => group.matcher === undefined || new RegExp(group.matcher).test(tool));
     expect(checkedTools[provider].filter(starts)).toEqual(checkedTools[provider]);
     expect(unchecked.filter(starts)).toEqual([]);
   });
