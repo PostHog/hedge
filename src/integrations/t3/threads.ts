@@ -143,11 +143,19 @@ function antigravityAnswer(questions: CardQuestion[], answer: QuestionAnswer, id
   const byId = (wanted: string) => questions.find((question) => question.id === wanted);
   const asked = byId(id);
   const other = byId(`${id}${otherSuffix}`);
-  if (asked && isOtherField(asked) && byId(id.slice(0, -otherSuffix.length))) return typedInOtherField(chosen) ? { text: [chosen].flat().join(", "), answered: (answer.questionTextById[id] ?? id).slice(0, otherPrompt.length + answeredCap) } : undefined;
+  const picked = id.slice(0, -otherSuffix.length);
+  if (asked && isOtherField(asked) && byId(picked)) {
+    const beside = typed(answer.answers[picked] ?? "") !== "";
+    return beside && !typedInOtherField(chosen) ? undefined : { text: [chosen].flat().join(", "), answered: cutAtWord(answer.questionTextById[id] ?? asked.question!, otherPrompt.length + answeredCap) };
+  }
   if (other && isOtherField(other) && typedInOtherField(answer.answers[other.id] ?? "")) return undefined;
   if (!asked) return cardAnswer(questions, answer, id, chosen);
   const labels = [chosen].flat().map((value) => onlyLabelOf(asked.options ?? [], value));
-  return { text: labels.join(", "), answered: promptOf(asked, answer.questionTextById[id]).slice(0, answeredCap) };
+  return { text: labels.join(", "), answered: cutAtWord(promptOf(asked, answer.questionTextById[id]), answeredCap) };
+}
+
+function cutAtWord(text: string, cap: number) {
+  return text.length <= cap || /\s/u.test(text[cap]!) ? text.slice(0, cap) : text.slice(0, cap).replace(/\s*\S*$/u, "");
 }
 
 function isOtherField(question: CardQuestion) {
@@ -165,8 +173,12 @@ function promptOf(question: CardQuestion, text = question.question ?? question.i
 
 const acknowledgment = /^(?:o|ok|okay)?$/iu;
 
+function typed(chosen: string | string[]) {
+  return [chosen].flat().join(", ").trim();
+}
+
 function typedInOtherField(chosen: string | string[]) {
-  return !acknowledgment.test([chosen].flat().join(", ").trim());
+  return !acknowledgment.test(typed(chosen));
 }
 
 export async function readLinkedThreadWords(client: Pick<T3HttpClient, "callTool">, environmentId: string, threadId: string): Promise<ThreadWord[]> {

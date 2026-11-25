@@ -253,9 +253,12 @@ test("only the user's own messages and question answers in T3 count as their wor
   expect(new Set(words.map((word) => word.at))).toEqual(new Set(["2026-10-25T07:02:00Z"]));
 });
 
-test("an Antigravity card answer reads as the chosen option's label to the question its header asks, a note beyond “Ok” typed in its other field replaces the pick and reads as on main, and other cards read as on main", async () => {
+test("an Antigravity card answer reads as the chosen option's label to the question its header asks, a note beyond “Ok” typed in its other field replaces the pick and reads as on main, a cut prompt never ends inside a word, and other cards read as on main", async () => {
   const option = (label: string, value: string) => ({ label, description: label, value });
   const longPrompt = `${"Why: the arbiter wants another read. ".repeat(26).padEnd(981, ".")}example/product#9?`;
+  const words197 = "word ".repeat(197);
+  const cutPrompt = `${words197}example/product#420?`;
+  const wordAtCap = `x${"word ".repeat(200)}`;
   const card = (id: string, request: string, prompts: string[], answers: Record<string, string | string[]>) => {
     const placeholder = prompts.length === 1 ? "The agent has a question." : `The agent has ${prompts.length} questions.`;
     return {
@@ -280,6 +283,11 @@ test("an Antigravity card answer reads as the chosen option's label to the quest
     card("c5", "r5", ["Accept the panel gap of example/product#6?"], { q1: "3", q1_other: "" }),
     card("c6", "r6", ["Accept the panel gap of example/product#7?"], { q1_other: "Accept once CI is green" }),
     card("c8", "r8", [longPrompt], { q1: "1", q1_other: "Only after CI is green" }),
+    card("c10", "r10", [cutPrompt], { q1: "1", q1_other: "" }),
+    card("c11", "r11", [cutPrompt], { q1: "1", q1_other: "Not yet" }),
+    card("c14", "r14", [`${wordAtCap}example/product#16?`], { q1: "2", q1_other: "" }),
+    card("c12", "r12", ["Accept the panel gap of example/product#14?"], { q1_other: "Okay" }),
+    card("c13", "r13", ["Accept the panel gap of example/product#15?"], { q1: "1", q1_other: "Only on Monday" }),
     card("c9", "r9", ["Accept the panel gap of example/product#10?", "Accept the panel gap of example/product#11?"], { q1: "1", q1_other: "Ok", q2: "2", q2_other: "okay" }),
     {
       item: {
@@ -292,6 +300,7 @@ test("an Antigravity card answer reads as the chosen option's label to the quest
       },
     },
   ];
+  delete (items.find(({ item }) => item.id === "c13")!.item.questionAnswer.questionTextById as Record<string, string>).q1_other;
   items.find(({ item }) => item.id === "c5")!.item.questions[0]!.options = [option("Keep the gap open", "3"), option("Accept the panel gap", "3")];
   const t3 = await stub({
     shell: { projects: [], threads: [{ id: "mcp:thread-1", title: "Cards", projectId: "project", status: "idle" }] },
@@ -306,6 +315,11 @@ test("an Antigravity card answer reads as the chosen option's label to the quest
     { thread: "mcp:thread-1", request: "r7", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000007" },
     { thread: "mcp:thread-1", request: "r8", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000008" },
     { thread: "mcp:thread-1", request: "r9", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000009" },
+    { thread: "mcp:thread-1", request: "r10", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000010" },
+    { thread: "mcp:thread-1", request: "r11", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000011" },
+    { thread: "mcp:thread-1", request: "r12", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000012" },
+    { thread: "mcp:thread-1", request: "r13", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000013" },
+    { thread: "mcp:thread-1", request: "r14", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000014" },
   ],
   });
 
@@ -319,6 +333,11 @@ test("an Antigravity card answer reads as the chosen option's label to the quest
     ["c5:0", "3", "Accept the panel gap of example/product#6?"],
     ["c6:0", "Accept once CI is green", "Optional free-form answer to: Accept the panel gap of example/product#7?"],
     ["c8:1", "Only after CI is green", `Optional free-form answer to: ${longPrompt}`],
+    ["c10:0", "Accept the panel gap (Recommended)", words197.trimEnd()],
+    ["c11:1", "Not yet", `Optional free-form answer to: ${words197.trimEnd()}`],
+    ["c14:0", "Keep the gap open", wordAtCap.trimEnd()],
+    ["c12:0", "Okay", "Optional free-form answer to: Accept the panel gap of example/product#14?"],
+    ["c13:1", "Only on Monday", "Optional free-form answer to: Accept the panel gap of example/product#15?"],
     ["c9:0", "Accept the panel gap (Recommended)", "Accept the panel gap of example/product#10?"],
     ["c9:2", "Keep the gap open", "Accept the panel gap of example/product#11?"],
     ["c7:0", "2", "Which deployment?"],
