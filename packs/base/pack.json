@@ -317,15 +317,8 @@
         "base.usageHost",
         "base.usageProjectKey"
       ],
-      "sentence": "Hedge counts how often you and your agents run its commands and recall memory, and sends the counts to your own analytics project every five minutes.",
+      "sentence": "Hedge counts how often you and your agents run its commands, and sends the counts to your own analytics project every five minutes.",
       "risk": "Command names, counts, and the machine name leave the machine for the analytics project you name. Arguments, prompts, file contents, and secrets never do."
-    },
-    {
-      "id": "format-on-edit",
-      "name": "Format on edit",
-      "default": false,
-      "sentence": "After Claude or Codex edits a file, the repository's own lint-staged formatters and fixers rewrite it, and the agent sees what they could not fix.",
-      "risk": "It runs after every edit in every repository, before you review the change, not only at commit. It runs only known formatters (Prettier, Biome, ESLint, Ruff, gofmt, shfmt and a few more) that the repository's lint-staged config names, with only their own rewrite and check flags, from the repository's installed node_modules/.bin or your PATH. It never runs package runners such as bunx or npx, interpreters, shells, scripts, Git, or a file the repository commits, also through a symlink, and no installed formatter runs when the repository commits anything under node_modules. Formatters and the tools they start see only PATH entries outside the repository. Formatters whose config can be code, such as ESLint and Prettier, run only once the repository's packages are installed, and no formatter runs from your PATH in a repository that pins tool versions for a version manager. An installed formatter still loads the repository's own config, and some configs, such as eslint.config.js, are code."
     }
   ],
   "config": [
@@ -349,6 +342,7 @@
       "key": "hooks.PreToolUse",
       "value": [
         {
+          "matcher": "^(Bash|Agent|Task|AskUserQuestion|mcp__.*)$",
           "hooks": [
             {
               "type": "command",
@@ -428,6 +422,7 @@
       "key": "hooks.PreToolUse",
       "value": [
         {
+          "matcher": "^(Bash|exec_command|shell|shell_command|local_shell|request_user_input|mcp__.*)$",
           "hooks": [
             {
               "type": "command",
@@ -675,15 +670,6 @@
         "claude",
         "both"
       ]
-    },
-    {
-      "path": "hooks/cast-the-reviewer.ts",
-      "target": ".config/hedge/hooks/UserPromptSubmit/cast-the-reviewer.ts"
-    },
-    {
-      "path": "hooks/format-on-edit.ts",
-      "target": ".config/hedge/hooks/PostToolUse/format-on-edit.ts",
-      "workflow": "format-on-edit"
     },
     {
       "path": "hedge-heavy.slice",

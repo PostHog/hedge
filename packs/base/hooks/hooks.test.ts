@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../../../src/testing/git.ts";
-import { dispatch, type HookResult } from "./run.ts";
+import { dispatch, type HookResult, runInProcessWithin } from "./run.ts";
 import { guard, type HookEvent } from "./secret-guard.ts";
 
 const temp = tempDirs();
@@ -587,5 +587,43 @@ describe("hook runner", () => {
   test("fails without a decision when a hook fails", async () => {
     const run = scripted({ "a.ts": { code: 1, stdout: "", stderr: "" } });
     expect(await dispatch(dirWith("a.ts"), "codex", "{}", run)).toEqual({ code: 1, stdout: "", stderr: "hedge hook a.ts: exit 1\n" });
+  });
+
+  const hookModule = (body: string) => `export const hook = async (provider, readInput, home) => {\n${body}\n};\nif (import.meta.main) console.log("ran as its own process");\n`;
+
+  test("loads a hook under the root in its own process, with the provider, input, and home it would get on its own", async () => {
+    const root = temp.make("root-");
+    const dir = join(root, "PreToolUse");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "a-context.ts"), hookModule("  const context = JSON.stringify([provider, await readInput(), home, process.pid]);\n  return { code: 0, stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: \"PreToolUse\", additionalContext: context } }), stderr: \"\" };"));
+    const { stdout } = await dispatch(dir, "codex", '{"tool_name":"Bash"}', runInProcessWithin(root));
+    expect(JSON.parse(JSON.parse(stdout).hookSpecificOutput.additionalContext)).toEqual(["codex", '{"tool_name":"Bash"}', process.env.HOME, process.pid]);
+  });
+
+  test("reports a hook under the root that throws like one that fails, and keeps the secret guard's redaction", async () => {
+    const root = temp.make("root-");
+    const dir = join(root, "PostToolUse");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "a-throws.ts"), hookModule("  throw new Error(\"boom\");"));
+    symlinkSync(join(import.meta.dir, "secret-guard.ts"), join(dir, "secret-guard.ts"));
+    const result = await dispatch(dir, "claude", JSON.stringify(toolEvent({ stdout: `token ${githubToken}` })), runInProcessWithin(root));
+    expect(result.stderr).toBe("hedge hook a-throws.ts: boom\n");
+    expect(result.stdout).toContain("[redacted GitHub token]");
+    expect(result.stdout).not.toContain(githubToken);
+  });
+
+  test("runs a hook in its own Bun process when it lies outside the root or exports no hook", async () => {
+    const root = temp.make("root-");
+    const dir = join(root, "PreToolUse");
+    mkdirSync(dir);
+    const printsItsInput = `const input = await Bun.stdin.text();\nconsole.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: \`\${process.argv[2]} \${input} \${process.pid}\` } }));\n`;
+    writeFileSync(join(dir, "a-plain.ts"), `if (import.meta.main) {\n${printsItsInput}}\n`);
+    const outside = join(temp.make("source-"), "b-outside.ts");
+    writeFileSync(outside, printsItsInput);
+    symlinkSync(outside, join(dir, "b-outside.ts"));
+    const { stdout } = await dispatch(dir, "claude", "{}", runInProcessWithin(root));
+    const contexts = JSON.parse(stdout).hookSpecificOutput.additionalContext.split("\n\n");
+    expect(contexts.map((context: string) => context.split(" ").slice(0, 2))).toEqual([["claude", "{}"], ["claude", "{}"]]);
+    expect(contexts.map((context: string) => Number(context.split(" ")[2]))).not.toContain(process.pid);
   });
 });

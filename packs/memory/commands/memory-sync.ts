@@ -2,8 +2,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { runCommand } from "../../base/lib/command.ts";
 import { stringSetting } from "../../base/lib/settings.ts";
-import { forgetIdleClaims, forgetOldShown } from "../lib/notes.ts";
-import { refreshTriggers } from "../lib/triggers.ts";
+import { forgetOldShown } from "../lib/notes.ts";
 
 export function memoryUrl(repo: string) {
   return repo.includes("://") || repo.includes("@") ? repo : `https://github.com/${repo}.git`;
@@ -17,11 +16,9 @@ export async function syncMemory(env: Record<string, string | undefined> = Bun.e
   const code = await child.exited;
   const home = env.HOME ?? homedir();
   try {
-    refreshTriggers(home);
-    forgetIdleClaims(home);
     forgetOldShown(home);
   } catch (error) {
-    console.error(`Memory: cannot refresh the trigger table: ${error instanceof Error ? error.message : error}`);
+    console.error(`Memory: cannot forget old shown-memory logs: ${error instanceof Error ? error.message : error}`);
   }
   return code;
 }

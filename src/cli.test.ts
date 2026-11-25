@@ -297,7 +297,7 @@ describe("hedge apply", () => {
   test("--dry-run previews without writing machine state", async () => {
     const home = temp.make("home-");
     const result = await hedge(["apply", "--dry-run", "--profile", profileDir()], home);
-    expect(result.output).toContain("Preview: 15 changes to apply. Nothing was written.");
+    expect(result.output).toContain("Preview: 14 changes to apply. Nothing was written.");
     expect(readdirSync(home)).toEqual([]);
   });
 

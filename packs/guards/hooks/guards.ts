@@ -3,16 +3,14 @@ import { join } from "node:path";
 import { type Hook, printing, runHook } from "../../base/lib/hook.ts";
 import { installedOwners } from "../lib/allowlist.ts";
 import { downloadRisk } from "../lib/download.ts";
-import { exitMaskRewrite, exitMaskRisk } from "../lib/exit-mask.ts";
 import { allowRuleList, ghRisk, ownerList } from "../lib/gh.ts";
 import { gitRisk, repoList } from "../lib/git.ts";
 import { killRisk } from "../lib/kill.ts";
 import { shellTools } from "../lib/shell-words.ts";
-import { backgroundWaitRisk, isBackgroundWait, isSleepPoll, isTaskStatus, repeatedStatusReason, repeatsTaskStatus, sleepPollReason } from "../lib/wait.ts";
 
-export type ToolCall = { tool_name?: string; tool_input?: Record<string, unknown>; cwd?: string; tool_use_id?: string; transcript_path?: string };
+export type ToolCall = { tool_name?: string; tool_input?: Record<string, unknown>; cwd?: string };
 export type Answer = {
-  hookSpecificOutput: { hookEventName: "PreToolUse"; permissionDecision?: "deny"; permissionDecisionReason?: string; updatedInput?: Record<string, unknown>; additionalContext?: string };
+  hookSpecificOutput: { hookEventName: "PreToolUse"; permissionDecision: "deny"; permissionDecisionReason: string };
 };
 
 const fallbackPerson = "the person who runs this machine";
@@ -49,56 +47,37 @@ const uncheckedReason = (error: unknown, person: string) => `Hedge blocked this 
   + `Split it into simpler commands, or stop and ask ${person}.`;
 
 function check(call: ToolCall, { person, owners, mainPushRepos, allowRules, unreadable }: Settings): string | undefined {
-  if (isTaskStatus(call.tool_name)) return repeatsTaskStatus(call) ? repeatedStatusReason(person) : undefined;
-  if (isBackgroundWait(call.tool_name)) return backgroundWaitRisk(call);
   if (!shellTools.has(call.tool_name ?? "")) return undefined;
   if (unreadable) return unreadableReason(unreadable, person);
   const command = shellCommand(call.tool_input);
   const cwd = call.cwd ?? "/";
   return downloadRisk(command, cwd, person) ?? ghRisk(command, owners, person, process.env.GH_REPO, allowRules) ?? killRisk(command, person)
-    ?? gitRisk(command, cwd, person, mainPushRepos) ?? exitMaskRisk(command, person) ?? (isSleepPoll(command) ? sleepPollReason(person) : undefined);
+    ?? gitRisk(command, cwd, person, mainPushRepos);
 }
 
-const rewriteNote = (command: string) => `Hedge ran this command as \`${command}\`: it added \`|| exit\` after each push, commit, merge, `
-  + "gate or watch whose exit status the call hid, so the call stops when one of those fails. Write it this way next time.";
-
-const restrictsPersonalHooks = () => !/^(?:|0|false|no|off)$/i.test((process.env.CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG ?? "").trim());
-
-function rewritten(call: ToolCall, settings: Settings, provider: string): Answer | undefined {
-  const input = call.tool_input;
-  if (provider !== "claude" || call.tool_name !== "Bash" || typeof input?.command !== "string" || restrictsPersonalHooks()) return undefined;
-  const command = exitMaskRewrite(input.command);
-  if (command === undefined) return undefined;
-  const updatedInput = { ...input, command };
-  if (check({ ...call, tool_input: updatedInput }, settings)) return undefined;
-  return { hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput, additionalContext: rewriteNote(command) } };
-}
-
-/** The answer for a tool call that a shell guard stops, naming the person the settings give. On Claude, a call whose only
- * fault is a hidden exit status runs rewritten into a form that shows it; Claude still asks for its permission as usual.
- * Any other such call is refused, and so is a call the guards cannot check. An installed signed allowlist under the
- * system root wins over guards.owners. */
-export function guard(call: ToolCall, home: string, root = "/", provider = ""): Answer | undefined {
+/** The answer for a tool call that a shell guard stops, naming the person the settings give. Such a call is refused, and so
+ * is a call the guards cannot check. An installed signed allowlist under the system root wins over guards.owners. */
+export function guard(call: ToolCall, home: string, root = "/"): Answer | undefined {
   const settings = guardSettings(home);
   try {
     const checked = { ...settings, owners: installedOwners(root) ?? settings.owners };
     const risk = check(call, checked);
-    return risk ? (rewritten(call, checked, provider) ?? deny(risk)) : undefined;
+    return risk ? deny(risk) : undefined;
   } catch (error) {
     return deny(uncheckedReason(error, settings.person));
   }
 }
 
-function answer(input: string, home: string, provider: string): Answer | undefined {
+function answer(input: string, home: string): Answer | undefined {
   let call: ToolCall;
   try {
     call = JSON.parse(input);
   } catch {
     return deny(uncheckedReason(new Error("the hook input is not JSON"), guardSettings(home).person));
   }
-  return guard(call, home, "/", provider);
+  return guard(call, home);
 }
 
-export const hook: Hook = async (provider, readInput, home) => printing(answer(await readInput(), home, provider));
+export const hook: Hook = async (_provider, readInput, home) => printing(answer(await readInput(), home));
 
 if (import.meta.main) await runHook(hook);

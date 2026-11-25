@@ -1,5 +1,4 @@
-import { createHash } from "node:crypto";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { type Hook, printing, quiet } from "../../base/lib/hook.ts";
 
@@ -56,29 +55,6 @@ export function forgetOldShown(home: string, now = Date.now()) {
   const dir = join(stateDir(home), "shown");
   if (!existsSync(dir)) return;
   for (const file of readdirSync(dir)) if (now - statSync(join(dir, file)).mtimeMs > shownKeepDays * 24 * 3600 * 1000) rmSync(join(dir, file), { force: true });
-}
-
-const claimedDir = (home: string) => join(stateDir(home), "claimed");
-const claimIdleDays = 7;
-
-export function claimNote(home: string, session: string, agent: string | undefined, note: string) {
-  const dir = join(claimedDir(home), session.replace(/[^\w-]/g, ""));
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const key = createHash("sha256").update(JSON.stringify([agent ?? "", note])).digest("hex");
-  try {
-    closeSync(openSync(join(dir, key), "wx", 0o600));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function forgetIdleClaims(home: string, now = Date.now()) {
-  const dir = claimedDir(home);
-  if (!existsSync(dir)) return;
-  for (const session of readdirSync(dir)) {
-    if (now - statSync(join(dir, session)).mtimeMs > claimIdleDays * 24 * 3600 * 1000) rmSync(join(dir, session), { recursive: true, force: true });
-  }
 }
 
 export function clip(text: string, limit: number) {

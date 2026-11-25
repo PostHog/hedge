@@ -504,7 +504,7 @@ describe("the wake guard", () => {
     expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)) }), home("Robin"))).stdout).toBe("");
   });
 
-  test("lets the stop through when the deadline the proof check started ends during the wake check", async () => {
+  test("lets the stop through when the deadline the hook started ends during the wake check", async () => {
     const ends: (() => void)[] = [];
     const deadline = () => new Promise<void>((resolve) => { ends.push(resolve); });
     const wakeStalls = { pid: 30, table: () => new Promise<string>(() => { ends[0]?.(); }) };
@@ -513,9 +513,9 @@ describe("the wake guard", () => {
     expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)) }), home("Robin"))).stdout).toBe("");
   });
 
-  test("lets the stop through when reads that do not yield in the proof check and the wake check together run past the one deadline", async () => {
+  test("lets the stop through when a read in the wake check that does not yield runs past the deadline", async () => {
     let clock = 0;
-    const slowRead = { pid: 30, table: async () => { clock += 6_000; return lone.table(); } };
+    const slowRead = { pid: 30, table: async () => { clock += 10_001; return lone.table(); } };
     const threads = [{ id: conductor, title: "Conductor", projectId: "p", status: "completed" }] as ShellThread[];
     const routed = hookWith(() => async () => ({ threads }), { threadId: conductor, processes: slowRead, deadline: () => new Promise<void>(() => {}), now: () => clock });
     expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)), cwd: "/" }), home("Robin"))).stdout).toBe("");
@@ -526,5 +526,22 @@ describe("the wake guard", () => {
     const threads = [{ id: conductor, title: "Conductor", projectId: "p", status: "completed" }] as ShellThread[];
     const routed = hookWith(() => async () => ({ threads }), { threadId: conductor, processes: stalled, deadline: async () => {} });
     expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)), cwd: "/" }), home("Robin"))).stdout).toBe("");
+  });
+
+  test("the hook process exits as soon as it has answered, without waiting out the deadline", async () => {
+    const env: Record<string, string | undefined> = { ...process.env, HOME: temp.make("home-") };
+    delete env.T3CODE_THREAD_ID;
+    const child = Bun.spawn([process.execPath, join(import.meta.dir, "ask-guard.ts"), "claude"], { env, stdin: new Blob([JSON.stringify({ cwd: "/", last_assistant_message: "Done." })]), stdout: "pipe", stderr: "pipe" });
+    const exited = await Promise.race([child.exited.then(() => "exited"), Bun.sleep(4_000).then(() => "still running")]);
+    child.kill();
+    expect(exited).toBe("exited");
+  });
+
+  test("reads the final message from a Codex transcript when the event names none", async () => {
+    const threads = [{ id: conductor, title: "Conductor", projectId: "p", status: "completed" }] as ShellThread[];
+    const routed = hookWith(() => async () => ({ threads }), { threadId: conductor, processes: lone });
+    const lines = [codexPrompt("Relay it"), codexSays(waitLine)];
+    const { stdout } = await routed("codex", async () => JSON.stringify({ transcript_path: transcript(...lines) }), home("Robin"));
+    expect(JSON.parse(stdout).reason).toContain("nothing will wake this thread");
   });
 });

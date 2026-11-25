@@ -122,7 +122,7 @@
       "settings": [
         "orchestration.proseTitles"
       ],
-      "sentence": "A top-level T3 thread that ends its turn with a decision for you in prose is stopped once and told to ask with the question tool, so the decision reaches you even while the thread waits on a watch. A thread whose title starts with one of your prose titles asks in prose instead, and its question cards are turned back, because a job queues messages into it. A top-level T3 thread that ends on a waiting (⏳) or check (🔕) line with nothing that can wake it, such as a PR watch held until merge, a running child task or a scheduled check, is sent back once to set one up; Hedge never snoozes or settles it. A T3 thread that owns an open pull request and ends its turn while the proof gate has not passed at the pushed head is sent back once, with the step still owed."
+      "sentence": "A top-level T3 thread that ends its turn with a decision for you in prose is stopped once and told to ask with the question tool, so the decision reaches you even while the thread waits on a watch. A thread whose title starts with one of your prose titles asks in prose instead, and its question cards are turned back, because a job queues messages into it. A top-level T3 thread that ends on a waiting (⏳) or check (🔕) line with nothing that can wake it, such as a PR watch held until merge, a running child task or a scheduled check, is sent back once to set one up; Hedge never snoozes or settles it."
     },
     {
       "id": "loop-pause",
@@ -131,7 +131,7 @@
       "settings": [
         "orchestration.loopLedger"
       ],
-      "sentence": "While the loop ledger's limits.md says Paused: yes, or cannot be read, a quality-loop or signal-loop coordinator cannot start a lane; it still settles lanes and keeps its watches, and every other thread starts subthreads as before."
+      "sentence": "While the loop ledger's limits.md says Paused: yes, or cannot be read, hedge loop next-id hands a quality-loop or signal-loop coordinator no lane id, so it starts no lane; it still settles lanes, keeps its watches, and records signals."
     }
   ],
   "files": [
@@ -144,11 +144,6 @@
       "path": "hooks/ask-guard.ts",
       "target": ".config/hedge/hooks/PreToolUse/ask-guard.ts",
       "workflow": "question-guard"
-    },
-    {
-      "path": "hooks/loop-pause.ts",
-      "target": ".config/hedge/hooks/PreToolUse/loop-pause.ts",
-      "workflow": "loop-pause"
     }
   ],
   "subcommands": {

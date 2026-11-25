@@ -23,13 +23,12 @@ async function run(home: string, args: string[], extra: Record<string, string> =
 
 const fresh = { modified: "2026-11-01" };
 
-test("budget checks the one memory root of the subtree layout: repo indexes, triggers, status age, wiki links, stale repo paths and kept conflicts", async () => {
+test("budget checks the one memory root of the subtree layout: repo indexes, status age, wiki links, stale repo paths and kept conflicts", async () => {
   const repoIndexLines = Array.from({ length: 100 }, (_, index) => `- line ${index}`).join("\n");
   const home = subtreeHome({
-    "MEMORY.md": "# Memory index\n- [Good](good.md) — fine\n- [Links](links.md) — wiki\n- [Short](short.md) — trigger\n- [Odd](odd.md) — status\n- [Old](old.md) — unconfirmed\n",
-    "good.md": note("good", { ...fresh, status: "confirmed", triggers: "[hedge proof]" }, "See [[links]]."),
+    "MEMORY.md": "# Memory index\n- [Good](good.md) — fine\n- [Links](links.md) — wiki\n- [Odd](odd.md) — status\n- [Old](old.md) — unconfirmed\n",
+    "good.md": note("good", { ...fresh, status: "confirmed" }, "See [[links]]."),
     "links.md": note("links", fresh, "See [[good]] and [[gone]]."),
-    "short.md": note("short", { ...fresh, triggers: "[gh, hedge apply]" }),
     "odd.md": note("odd", { ...fresh, status: "maybe" }),
     "old.md": note("old", { modified: "2026-10-01", status: "unconfirmed" }),
     "projects/app/INDEX.md": `# app\n- [Paths](paths.md) — paths\n${repoIndexLines}\n`,
@@ -49,7 +48,6 @@ test("budget checks the one memory root of the subtree layout: repo indexes, tri
     "old.md: unconfirmed since 2026-10-01; confirm it against a session or the code, or delete it",
     "projects/app/INDEX.md: 102 lines; the limit is 100",
     "projects/app/paths.md: names `src/gone.ts`, which the hub's app checkout lacks; check it, then fix or delete the memory",
-    'short.md: trigger "gh" is shorter than 4 characters and never fires; name the command or tool',
   ]);
 });
 

@@ -4,13 +4,13 @@ import { join } from "node:path";
 import { type Hook, printing, runHook } from "../../base/lib/hook.ts";
 import { matchThread, type ShellThread, t3CliRunner, withT3Session } from "../../base/lib/t3/index.ts";
 import { backgroundReason, unwaitedBackgroundTasks } from "../lib/background-stop.ts";
-import { awaitsChecks, claudeTaskRuns, isSnoozed, proofStop, proofStopDeadlineMs, waits, type ProofStopEvent, type ProofStopOptions } from "../lib/proof-stop.ts";
+import { awaitsChecks, claudeTaskRuns, isSnoozed, stopCheckDeadlineMs, waits, type ProcessTable, type StopHookEvent } from "../lib/thread-waits.ts";
 import { asksForDecision, asksInProse, personName, proseTitles } from "../lib/prose-question.ts";
 import { wakeStop } from "../lib/wake-stop.ts";
 
 export type StopEvent = { transcript_path?: string; stop_hook_active?: boolean; last_assistant_message?: string };
 export type StopBlock = { decision: "block"; reason: string };
-export type IsHidden = (threadId: string | undefined, home: string, event: ProofStopEvent) => Promise<boolean>;
+export type IsHidden = (threadId: string | undefined, home: string, event: StopHookEvent) => Promise<boolean>;
 
 type Line = { type?: string; isMeta?: boolean; message?: { role?: string; content?: unknown }; payload?: { type?: string; role?: string; name?: string; content?: unknown } };
 type Block = { type?: string; text?: string; name?: string };
@@ -88,7 +88,7 @@ export const hiddenIn = (shell: ReadShell, now = Date.now): IsHidden => async (t
   }
 };
 
-export async function guardStop(event: StopEvent & ProofStopEvent, home: string, threadId = process.env.T3CODE_THREAD_ID, hidden: IsHidden = hiddenIn(liveShell(home))): Promise<StopBlock | undefined> {
+export async function guardStop(event: StopEvent & StopHookEvent, home: string, threadId = process.env.T3CODE_THREAD_ID, hidden: IsHidden = hiddenIn(liveShell(home))): Promise<StopBlock | undefined> {
   if (event.stop_hook_active || !event.transcript_path) return undefined;
   let turn: string[];
   try {
@@ -146,15 +146,15 @@ const liveShell = (home: string): ReadShell => {
   return () => (snapshot ??= readShell(home));
 };
 
-export type StopDeps = Partial<Pick<ProofStopOptions, "threadId" | "git" | "processes" | "deadline">> & { hidden?: IsHidden; now?: () => number };
+export type StopDeps = { threadId?: string; processes?: ProcessTable; deadline?: () => Promise<void>; hidden?: IsHidden; now?: () => number };
 
-export async function guardBackground(event: StopEvent & ProofStopEvent, home: string, threadId: string | undefined): Promise<StopBlock | undefined> {
+export async function guardBackground(event: StopEvent & StopHookEvent, home: string, threadId: string | undefined): Promise<StopBlock | undefined> {
   if (event.stop_hook_active || !threadId || !event.transcript_path || !event.background_tasks?.length) return undefined;
   const ids = unwaitedBackgroundTasks(currentTurn(await readFile(event.transcript_path, "utf8")), event.background_tasks);
   return ids.length ? { decision: "block", reason: backgroundReason(ids, personName(home)) } : undefined;
 }
 
-async function guardStopAndProof(event: StopEvent & ProofStopEvent, home: string, shell: ReadShell, deps: StopDeps) {
+async function guardTurnEnd(event: StopEvent & StopHookEvent, home: string, shell: ReadShell, deps: StopDeps) {
   const threadId = "threadId" in deps ? deps.threadId : process.env.T3CODE_THREAD_ID;
   const prose = await guardStop(event, home, threadId, deps.hidden ?? hiddenIn(shell)).catch(() => undefined);
   if (prose || existsSync(join(home, killSwitch))) return prose;
@@ -164,12 +164,10 @@ async function guardStopAndProof(event: StopEvent & ProofStopEvent, home: string
   const now = deps.now ?? Date.now;
   const started = now();
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const end = deps.deadline?.() ?? new Promise<void>((resolve) => { timer = setTimeout(resolve, proofStopDeadlineMs); });
-  const deadline = () => end;
+  const end = deps.deadline?.() ?? new Promise<void>((resolve) => { timer = setTimeout(resolve, stopCheckDeadlineMs); });
   try {
-    const proof = await proofStop({ ...event, last_assistant_message: last }, { home, shell, ...deps, deadline, threadId });
-    const answer = proof ?? await wakeStop(event, last, { home, threadId, shell, processes: deps.processes, deadline });
-    return now() - started < proofStopDeadlineMs ? answer : undefined;
+    const answer = await wakeStop(event, last, { home, threadId, shell, processes: deps.processes, deadline: () => end });
+    return now() - started < stopCheckDeadlineMs ? answer : undefined;
   } finally {
     clearTimeout(timer);
   }
@@ -177,12 +175,12 @@ async function guardStopAndProof(event: StopEvent & ProofStopEvent, home: string
 
 export const hookWith = (shell: (home: string) => ReadShell, stop: StopDeps = {}): Hook => async (_provider, readInput, home) => {
   try {
-    const event = JSON.parse(await readInput()) as StopEvent & ProofStopEvent & ToolEvent;
+    const event = JSON.parse(await readInput()) as StopEvent & StopHookEvent & ToolEvent;
     if (event.tool_name !== undefined) {
       const options = { home, shell: shell(home) };
       return printing(await guardCard(event, options, "threadId" in stop ? stop.threadId : process.env.T3CODE_THREAD_ID));
     }
-    return printing(await guardStopAndProof(event, home, shell(home), stop));
+    return printing(await guardTurnEnd(event, home, shell(home), stop));
   } catch {
     return printing(undefined);
   }

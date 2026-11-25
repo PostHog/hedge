@@ -60,10 +60,12 @@ export const pausedReason = (why: string) => `The loops are paused: ${why}. `
 
 function checkPause(args: string[], io: LoopIo): number {
   const pause = pauseState(ledgerDir(args, io, ["--ledger"]));
-  if (pause.state === "runs") {
-    io.print("The loops run: start lanes up to the WIP limits.");
-    return 0;
-  }
+  if (pause.state !== "runs") return refused(pause, io);
+  io.print("The loops run: start lanes up to the WIP limits.");
+  return 0;
+}
+
+function refused(pause: Exclude<PauseState, { state: "runs" }>, io: LoopIo): number {
   io.print(pausedReason(pause.why));
   return pause.state === "paused" ? 1 : cannotTell;
 }
@@ -107,7 +109,10 @@ function printNextId(args: string[], io: LoopIo): number {
   const known = ["--ledger", "--kind"];
   const kind = option(args, "--kind", known);
   if (kind !== "lane" && kind !== "signal") throw new Error(`name the id with --kind lane or --kind signal. ${usage}`);
-  io.print(nextId(ledgerDir(args, io, known), kind, io.home));
+  const ledger = ledgerDir(args, io, known);
+  const pause = kind === "lane" ? pauseState(ledger) : { state: "runs" as const };
+  if (pause.state !== "runs") return refused(pause, io);
+  io.print(nextId(ledger, kind, io.home));
   return 0;
 }
 

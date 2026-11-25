@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "name": "guards",
-  "summary": "Hooks stop an agent's shell commands from running network code, using GitHub outside your owners, pushing past review, or polling in loops.",
+  "summary": "Hooks stop an agent's shell commands from running network code, using GitHub outside your owners, or pushing past review.",
   "day": "A prompt injection that tells an agent to pipe a script into a shell gets a refusal that names you, and the agent stops to ask.",
   "cost": "You run nothing. A hook checks each shell command before it starts.",
   "risk": "A guard can refuse a command you meant. The refusal says why and what to do instead. Every guard is off until you turn it on.",
@@ -54,7 +54,7 @@
       "id": "shell-guards",
       "name": "Shell guards",
       "default": true,
-      "sentence": "Agents cannot pipe network code into a shell, run a package the project lacks, change how Git maps URLs, use gh outside your GitHub owners, poll in a loop of turns, hide the exit status of a push, commit, merge or gate behind a pipe, kill their own shell with pkill -f, skip Git hooks, force-push without a lease, or push to main of a repository that takes pull requests.",
+      "sentence": "Agents cannot pipe network code into a shell, run a package the project lacks, change how Git maps URLs, use gh outside your GitHub owners, kill their own shell with pkill -f, skip Git hooks, force-push without a lease, or push to main of a repository that takes pull requests.",
       "settings": [
         "guards.owners",
         "guards.main-push-repos",
