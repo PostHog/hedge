@@ -45,7 +45,7 @@ const codexLimit = (fiveHour: number, weeklyUsed: number, fields: Record<string,
   ...fields,
 });
 
-function managementApi(state: { strategy?: string; usage?: Record<string, unknown>; codexUsage?: Record<string, unknown>; files?: unknown[] } = {}) {
+function managementApi(state: { strategy?: string; usage?: Record<string, unknown>; codexUsage?: Record<string, unknown>; files?: Record<string, unknown>[] } = {}) {
   const calls: Call[] = [];
   const iso = (days: number) => new Date(now + days * day).toISOString();
   const usage: Record<string, unknown> = state.usage ?? {
@@ -54,29 +54,54 @@ function managementApi(state: { strategy?: string; usage?: Record<string, unknow
     "3": { seven_day: { utilization: 100, resets_at: iso(2) } },
   };
   const codexUsage: Record<string, unknown> = state.codexUsage ?? { "5": { rate_limit: codexLimit(30, 10) } };
-  const files = state.files ?? [
+  let strategy = state.strategy ?? "round-robin";
+  const resumedAtPriority = new Map<string, number>();
+  const files: Record<string, unknown>[] = structuredClone(state.files ?? [
     { name: "a.json", provider: "claude", auth_index: "1", priority: 2 },
     { name: "b.json", provider: "claude", auth_index: "2", priority: 1, unavailable: true, cooldowns: [{ reason: "quota" }] },
     { name: "c.json", provider: "claude", auth_index: "3", priority: 0 },
     { name: "off.json", provider: "claude", auth_index: "4", disabled: true },
     { name: "codex.json", provider: "codex", auth_index: "5", priority: 7 },
-  ];
+  ]);
   const fetch = async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    calls.push({ method: init?.method ?? "GET", path: url.pathname.replace("/v0/management/", ""), ...(body === undefined ? {} : { body }), auth: new Headers(init?.headers).get("authorization") ?? "" });
+    const method = init?.method ?? "GET";
+    const path = url.pathname.replace("/v0/management/", "");
+    calls.push({ method, path, ...(body === undefined ? {} : { body }), auth: new Headers(init?.headers).get("authorization") ?? "" });
     if (url.origin !== "http://127.0.0.1:8317") throw new TypeError("refused");
-    if (url.pathname.endsWith("routing/strategy")) return Response.json({ strategy: state.strategy ?? "round-robin" });
-    if (url.pathname.endsWith("auth-files")) return Response.json({ files });
-    if (url.pathname.endsWith("api-call")) {
+    if (method === "GET" && path === "routing/strategy") return Response.json({ strategy });
+    if (method === "PUT" && path === "routing/strategy" && body?.value === "fill-first") {
+      strategy = body.value;
+      return Response.json({ status: "ok" });
+    }
+    if (method === "GET" && path === "auth-files") return Response.json({ files });
+    if (method === "POST" && path === "api-call") {
       expect(body.header.Authorization).toBe("Bearer $TOKEN$");
       const account = body.header["Chatgpt-Account-Id"];
       const found = body.url === codexUsageUrl ? codexUsage[account ? `${body.auth_index}@${account}` : body.auth_index] : body.url === "https://api.anthropic.com/api/oauth/usage" ? usage[body.auth_index] : undefined;
       return Response.json(found ? { status_code: 200, body: JSON.stringify(found) } : { status_code: 401, body: "" });
     }
-    return Response.json({});
+    const file = files.find((file) => file.name === body?.name);
+    if (method === "PATCH" && path === "auth-files/status" && file && typeof body.disabled === "boolean") {
+      file.disabled = body.disabled;
+      if (!body.disabled) resumedAtPriority.set(body.name, Number(file.priority ?? 0));
+      return Response.json({ status: "ok", disabled: file.disabled });
+    }
+    if (method === "PATCH" && path === "auth-files/fields" && file && Number.isInteger(body.priority)) {
+      file.priority = body.priority;
+      return Response.json({ status: "ok" });
+    }
+    if (method === "POST" && path === "reset-quota" && files.some((file) => file.auth_index === body?.auth_index)) {
+      return Response.json({ status: "ok" });
+    }
+    if (method === "POST" && path === "quota-ledger/samples" && Array.isArray(body?.samples)) {
+      return Response.json({ status: "ok" });
+    }
+    return new Response("Unsupported management request", { status: 400 });
   };
-  return { fetch, calls };
+  const subscriptions = () => fetch("http://127.0.0.1:8317/v0/management/auth-files").then((response) => response.json()) as Promise<{ files: Record<string, unknown>[] }>;
+  return { fetch, calls, subscriptions, resumedAtPriority };
 }
 
 test("balance sets fill-first routing, ranks the Claude subscriptions by weekly reset, and clears a cooldown that live usage disproves", async () => {
@@ -343,25 +368,17 @@ test("the hub keeps its exempt Claude subscription enabled at quota and resumes 
   const manual = { name: "manual.json", provider: "claude", auth_index: "manual-auth-index", priority: 0, disabled: true };
   const full = { seven_day: { utilization: 100, resets_at: new Date(now + day).toISOString() }, extra_usage: { is_enabled: true } };
   const usage = { [exempt.auth_index]: full, [guarded.auth_index]: full, [manual.auth_index]: full };
-  const run = async (files: unknown[]) => {
-    const { fetch, calls } = managementApi({ strategy: "fill-first", files, usage });
-    expect(await balanceCommand([], { home, fetch, now: () => now, ledger: false, env: {}, log: () => {} })).toBe(0);
-    return calls;
-  };
-  const statusWrites = (calls: Call[]) => calls.filter((call) => call.path === "auth-files/status").map((call) => call.body);
-
-  const first = await run([{ ...exempt, disabled: true }, guarded, manual]);
-  expect(statusWrites(first)).toEqual([{ name: guarded.name, disabled: true }, { name: exempt.name, disabled: false }]);
-  const priorityWrite = first.findIndex((call) => call.method === "PATCH" && call.path === "auth-files/fields" && (call.body as { name: string }).name === exempt.name);
-  const resumeWrite = first.findIndex((call) => call.method === "PATCH" && call.path === "auth-files/status" && (call.body as { name: string }).name === exempt.name);
-  expect(first[priorityWrite]?.body).toEqual({ name: exempt.name, priority: 0 });
-  expect(resumeWrite).toBeGreaterThan(priorityWrite);
+  const api = managementApi({ strategy: "fill-first", files: [{ ...exempt, disabled: true }, guarded, manual], usage });
+  const run = () => balanceCommand([], { home, fetch: api.fetch, now: () => now, ledger: false, env: {}, log: () => {} });
+  const expected = { files: [{ ...exempt, disabled: false, priority: 0 }, { ...guarded, disabled: true }, manual] };
+  expect(await run()).toBe(0);
+  expect(await api.subscriptions()).toEqual(expected);
+  expect(api.resumedAtPriority.get(exempt.name)).toBe(0);
   expect(JSON.parse(readFileSync(pausedPath, "utf8"))).toEqual([guarded.name]);
 
-  const next = await run([{ ...exempt, priority: 0 }, { ...guarded, disabled: true }, manual]);
-  expect(statusWrites(next)).toEqual([]);
+  expect(await run()).toBe(0);
+  expect(await api.subscriptions()).toEqual(expected);
 });
-
 
 test("a malformed exemption file logs why the default billing guard is used", async () => {
   const home = roleHome(temp.make("hedge-balance-"), "hub");
@@ -389,9 +406,9 @@ test("a rejected pause does not give the balancer ownership of a later manual di
   };
   await expect(balance({ fetch, managementKey, now, dryRun: false, pausedPath, log: () => {} })).rejects.toThrow("auth-files/status returned 503");
 
-  const manual = managementApi({ strategy: "fill-first", files: [{ ...seat, disabled: true }] });
-  await balance({ fetch: manual.fetch, managementKey, now, dryRun: false, pausedPath, allowExtraUsage: new Set(["1"]), log: () => {} });
-  expect(manual.calls.filter((call) => call.path === "auth-files/status")).toEqual([]);
+  await api.fetch("http://127.0.0.1:8317/v0/management/auth-files/status", { method: "PATCH", body: JSON.stringify({ name: seat.name, disabled: true }) });
+  await balance({ fetch: api.fetch, managementKey, now, dryRun: false, pausedPath, allowExtraUsage: new Set(["1"]), log: () => {} });
+  expect(await api.subscriptions()).toEqual({ files: [{ ...seat, disabled: true }] });
 });
 
 test("a pause stays owned by the balancer when a later status update fails", async () => {
@@ -408,5 +425,6 @@ test("a pause stays owned by the balancer when a later status update fails", asy
     return api.fetch(input, init);
   };
   await expect(balance({ fetch, managementKey, now, dryRun: false, pausedPath, allowExtraUsage: new Set(["2"]), log: () => {} })).rejects.toThrow("auth-files/status returned 503");
+  expect(await api.subscriptions()).toEqual({ files: files.map((file) => ({ ...file, disabled: true })) });
   expect(JSON.parse(readFileSync(pausedPath, "utf8"))).toEqual(["at-quota.json", "previously-paused.json"]);
 });

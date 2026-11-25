@@ -115,18 +115,17 @@ export async function balance(options: Balance): Promise<void> {
     options.log(`${label(credential)}: resumed, ${reason}`);
   }
   const credentials = all.filter((credential) => (!credential.paused || resume.includes(credential)) && !pause.includes(credential));
+  const fallbackResumes = new Set(resume.filter((credential) => !hasCapacity(credential)));
   if (!options.dryRun && options.pausedPath) {
     for (const credential of [...pause, ...resume]) {
       const disabled = pause.includes(credential);
-      if (!disabled && credential.priority !== 0 && !hasCapacity(credential)) {
+      if (fallbackResumes.has(credential) && credential.priority !== 0) {
         await call("auth-files/fields", { method: "PATCH", body: JSON.stringify({ name: credential.name, priority: 0 }) });
-        credential.priority = 0;
       }
       await call("auth-files/status", { method: "PATCH", body: JSON.stringify({ name: credential.name, disabled }) });
-      if (disabled) {
-        pausedBefore.add(credential.name);
-        writeStateFile(options.pausedPath, [...pausedBefore].sort());
-      }
+      if (disabled) pausedBefore.add(credential.name);
+      else pausedBefore.delete(credential.name);
+      writeStateFile(options.pausedPath, [...pausedBefore].sort());
     }
     const paused = all.filter((credential) => !credentials.includes(credential)).map((credential) => credential.name).sort();
     if (paused.length !== pausedBefore.size) writeStateFile(options.pausedPath, paused);
@@ -134,7 +133,7 @@ export async function balance(options: Balance): Promise<void> {
   const claude = credentials.filter((credential) => credential.provider === "claude");
   if (!credentials.length) options.log("The proxy holds no enabled Claude or Codex subscription.");
   const planned = new Map([...credentials.map((credential) => [credential.name, credential.priority] as const), ...priorities(claude)]);
-  const changed = claude.filter((credential) => planned.get(credential.name) !== credential.priority);
+  const changed = claude.filter((credential) => !fallbackResumes.has(credential) && planned.get(credential.name) !== credential.priority);
   if (options.dryRun || changed.length || credentials.some((credential) => !credential.usage)) {
     for (const credential of credentials) options.log(describe(credential, planned.get(credential.name)!, options.now));
     for (const credential of all.filter((item) => !credentials.includes(item) && !pause.includes(item))) options.log(describe(credential, undefined, options.now));
