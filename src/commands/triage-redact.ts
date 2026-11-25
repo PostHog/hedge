@@ -175,7 +175,12 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
   const entryBases = validEntries.map((entry) => {
     const minLength = entry.after ? 1 : 2;
     const safeAs = applyRules(entry.as, secretRules);
-    const baseVariants = [entry.text, applyRules(entry.text, secretRules), encodeUri(entry.text), entry.text.replace(/ /g, "+")];
+    const rawVariants = [entry.text, applyRules(entry.text, secretRules), encodeUri(entry.text), entry.text.replace(/ /g, "+")];
+    const lowerFixed = applyRules(entry.text.toLowerCase(), fixedSecretRules);
+    if (lowerFixed !== entry.text.toLowerCase()) rawVariants.push(lowerFixed);
+    const upperFixed = applyRules(entry.text.toUpperCase(), fixedSecretRules);
+    if (upperFixed !== entry.text.toUpperCase()) rawVariants.push(upperFixed);
+    const baseVariants = [...new Set(rawVariants)];
     return { entry, minLength, safeAs, baseVariants };
   });
   let transformed: Map<string, string> | undefined;
@@ -349,7 +354,7 @@ function applySpellings(text: string, matcher: CompiledMatcher, exempt?: Set<str
 }
 
 const deferToAfter = new RegExp(
-  String.raw`[:?&#="']|-----BEGIN|PRIVATE KEY|\beyJ[A-Za-z0-9_-]{8,}|\b(?:bearer|basic|token)\b|(?:^|[^\w])(?:${secretKey}|[A-Za-z_]*(?:token|key|secret|password|auth|code|sig)[A-Za-z_]*|users|home|private repos?)\s*$`,
+  String.raw`[:?&#="']|-----BEGIN|PRIVATE KEY|\beyJ[A-Za-z0-9_-]{8,}|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,}|xox[abposr]-[A-Za-z0-9-]{10,}|xapp-[A-Za-z0-9-]{10,}|(?:AKIA|ASIA)[0-9A-Z]{16})\b|\b(?:bearer|basic|token)\b|(?:^|[^\w])(?:${secretKey}|[A-Za-z_]*(?:token|key|secret|password|auth|code|sig)[A-Za-z_]*|users|home|private repos?)\s*$`,
   "i",
 );
 

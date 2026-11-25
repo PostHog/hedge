@@ -803,6 +803,37 @@ throw new Error("broken pack");
       chmodSync(woFh, 0o600);
     }
     expect(await followsBranch({ name: "team", repo: woRepo, ref: "main" }, woCache)).toBe(true);
+
+    const gcTagRepo = await packRepo("GC tag packs.");
+    await spawnGit(gcTagRepo, "tag", "-a", "v2-ann", "-m", "annotated");
+    const gcTagSha = await spawnGit(gcTagRepo, "rev-parse", "v2-ann");
+    const gcCommitSha = await spawnGit(gcTagRepo, "rev-parse", "v2-ann^{commit}");
+    const gcTagCache = temp.make("cache-gc-tag-");
+    const gcTagDir = join(gcTagCache, "team");
+    mkdirSync(gcTagDir, { recursive: true });
+    await spawnGit(gcTagDir, "init", "-q");
+    await spawnGit(gcTagDir, "fetch", "-q", "--depth", "1", "--no-tags", gcTagRepo, gcTagSha);
+    await spawnGit(gcTagDir, "checkout", "-q", "--detach", gcCommitSha);
+    writeFileSync(join(gcTagDir, ".git", "hedge-source.json"), JSON.stringify({ repo: gcTagRepo, ref: gcTagSha, commit: gcCommitSha }) + "\n");
+    await spawnGit(gcTagDir, "gc", "--prune=now", "-q");
+    rmSync(gcTagRepo, { recursive: true, force: true });
+    const gcTagOffline = await fetchSource({ name: "team", repo: gcTagRepo, ref: gcTagSha }, gcTagCache);
+    if ("error" in gcTagOffline) throw new Error(gcTagOffline.error);
+    expect(gcTagOffline.packs[0]?.manifest.summary).toBe("GC tag packs.");
+    expect(gcTagOffline.stale).toContain(`could not fetch ${gcTagSha}`);
+
+    const colonRepo = await packRepo("Empty dest refspec.");
+    const colonCache = temp.make("cache-colon-refspec-");
+    const colonRes = await fetchSource({ name: "team", repo: colonRepo, ref: "main:" }, colonCache);
+    if ("error" in colonRes) throw new Error(colonRes.error);
+    expect(colonRes.packs[0]?.manifest.summary).toBe("Empty dest refspec.");
+    expect(await followsBranch({ name: "team", repo: colonRepo, ref: "main:" }, colonCache)).toBe(true);
+
+    const badCommitCache = temp.make("cache-bad-commit-");
+    const badCommitDir = join(badCommitCache, "team");
+    mkdirSync(join(badCommitDir, ".git"), { recursive: true });
+    writeFileSync(join(badCommitDir, ".git", "hedge-source.json"), JSON.stringify({ repo: colonRepo, ref: "main", commit: 42, branch: true }) + "\n");
+    expect(await followsBranch({ name: "team", repo: colonRepo, ref: "main" }, badCommitCache)).toBe(false);
   });
 });
 

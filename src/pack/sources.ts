@@ -103,7 +103,17 @@ async function resolvedRepoUrl(dir: string, repo: string) {
 }
 
 const gitHash = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
-const isInvalidRef = (ref: string) => !ref || ref.startsWith("-") || ref.startsWith("^") || ref.includes(":") || /[\0\r\n]/.test(ref);
+const stripSourceRefspec = (ref: string) => {
+  const noPlus = ref.startsWith("+") ? ref.slice(1) : ref;
+  return noPlus.endsWith(":") ? noPlus.slice(0, -1) : noPlus;
+};
+const isInvalidRef = (ref: string) => {
+  if (!ref || ref.startsWith("-") || ref.startsWith("^") || /[\0\r\n]/.test(ref)) return true;
+  const colon = ref.indexOf(":");
+  if (colon !== -1 && colon !== ref.length - 1) return true;
+  const src = stripSourceRefspec(ref);
+  return !src || src.startsWith("-") || src.startsWith("^");
+};
 
 async function repoHashLength(dir: string): Promise<number> {
   if (!existsSync(join(dir, ".git"))) return 40;
@@ -148,10 +158,11 @@ async function fetchHeadEntry(dir: string, refs?: Array<string | undefined>): Pr
   const descOffset = first.length - desc.length;
   for (const ref of refs ?? []) {
     if (typeof ref !== "string" || !ref) continue;
-    const short = ref.replace(/^refs\/(?:heads|tags)\//, "");
-    const names = short.startsWith("+") && short.length > 1 ? [short, short.slice(1)] : [short];
+    const stripped = stripSourceRefspec(ref);
+    const short = stripped.replace(/^refs\/(?:heads|tags)\//, "");
+    const names = [...new Set([short, stripped, ref])].filter(Boolean);
     for (const name of names) {
-      for (const prefix of [`branch '${name}' of `, `tag '${name}' of `, `'${name}' of `, `'${ref}' of `]) {
+      for (const prefix of [`branch '${name}' of `, `tag '${name}' of `, `'${name}' of `]) {
         const latinPrefix = Buffer.from(prefix, "utf8").toString("latin1");
         if (desc.startsWith(latinPrefix)) {
           return { oid, url: decodeRepoBytes(raw.subarray(descOffset + latinPrefix.length, first.length)) };
@@ -203,12 +214,22 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
   if (edits.length) return keepEdits(ref, dir, edits, loadLimitMs);
   const rawGood = await lastGood(dir);
   const rawGoodDigest = goodResolvedDigest(rawGood);
-  const legacyPeeled =
+  const legacyPeeledCandidate =
     rawGood !== undefined &&
     rawGoodDigest === undefined &&
     rawGood.peeled !== true &&
     rawGood.branch !== true &&
-    (await isPeeledTagInRepo(dir, rawGood.ref, rawGood.commit));
+    typeof rawGood.ref === "string" &&
+    typeof rawGood.commit === "string" &&
+    gitHash.test(rawGood.commit) &&
+    isCommitPin(rawGood.ref, rawGood.commit.length) &&
+    rawGood.ref.toLowerCase() !== rawGood.commit.toLowerCase();
+  const legacyPeeled =
+    legacyPeeledCandidate &&
+    ((await isPeeledTagInRepo(dir, rawGood.ref, rawGood.commit)) ||
+      (existsSync(join(dir, ".git")) &&
+        !(await git(dir, "cat-file", "-e", rawGood.ref)).ok &&
+        (await fetchHeadEntry(dir, [rawGood.ref]))?.oid === rawGood.ref.toLowerCase()));
   const legacyBranch =
     !legacyPeeled &&
     rawGood !== undefined &&
@@ -486,22 +507,6 @@ async function recordPinRef(dir: string, repoHash: string, oid: string): Promise
   return updated.ok ? undefined : updated.stderr || "could not record pinned commit";
 }
 
-async function recordPinRefs(dir: string, repoHash: string, oids: string[]): Promise<string | undefined> {
-  const unique = [...new Set(oids.map((oid) => oid.toLowerCase()).filter((oid) => gitHash.test(oid)))];
-  if (!unique.length) return undefined;
-  const lines = unique.map((oid) => `update ${pinRef(repoHash, oid)} ${oid}\n`).join("");
-  const proc = Bun.spawn(["git", "-C", dir, "update-ref", "--stdin"], {
-    stdin: new TextEncoder().encode(lines),
-    stdout: "ignore",
-    stderr: "pipe",
-    env: gitEnv(),
-    timeout: fetchTimeoutMs,
-  });
-  const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
-  if (code === 0) return undefined;
-  return (proc.signalCode ? `git timed out after ${fetchTimeoutMs / 1000} seconds` : stderr.trim().split("\n").at(-1)) || "could not record pinned commits";
-}
-
 async function saveGood(dir: string, good: Good): Promise<string | undefined> {
   const before = await lastGood(dir);
   const unchanged =
@@ -520,7 +525,7 @@ async function saveGood(dir: string, good: Good): Promise<string | undefined> {
   if (currentCommit) {
     const recorded = await recordPinRef(dir, currentCommit.repoHash, currentCommit.commit);
     if (recorded && !unchanged) return recorded;
-    if (good.peeled === true && isCommitPin(good.ref, currentCommit.commit.length)) {
+    if (good.peeled === true && isCommitPin(good.ref, currentCommit.commit.length) && (await git(dir, "cat-file", "-e", good.ref)).ok) {
       const recordedTag = await recordPinRef(dir, currentCommit.repoHash, good.ref);
       if (recordedTag && !unchanged) return recordedTag;
     }
@@ -644,7 +649,7 @@ async function fetchExact(dir: string, repo: string, ref: string, shallow: boole
   if (!fetched.ok && !unsupportedPorcelain) {
     return { ok: false, stderr: fetched.stderr };
   }
-  const src = ref.startsWith("+") ? ref.slice(1) : ref;
+  const src = stripSourceRefspec(ref);
   const tmpRef = `refs/hedge/tmp/${crypto.randomUUID()}`;
   try {
     const fallbackArgs = shallow ? ["fetch", "-q", "--depth", "1", "--no-tags", repo, `+${src}:${tmpRef}`] : ["fetch", "-q", "--no-tags", repo, `+${src}:${tmpRef}`];
@@ -714,7 +719,7 @@ export function sourceCache(home: string) {
   return join(home, ".local", "share", "hedge", "sources");
 }
 
-const branchName = (ref: unknown) => (typeof ref === "string" ? ref.replace(/^refs\/heads\//, "") : undefined);
+const branchName = (ref: unknown) => (typeof ref === "string" ? stripSourceRefspec(ref).replace(/^refs\/heads\//, "") : undefined);
 
 async function fetchHeadIsBranch(dir: string, ref: string, expectedOid?: string): Promise<boolean | undefined> {
   const branch = branchName(ref);
@@ -738,7 +743,7 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
   const good = await lastGood(dir);
   const branch = branchName(ref.ref);
   const repo = repoUrl(ref.repo);
-  if (!good || !branch) return false;
+  if (!good || !branch || typeof good.commit !== "string" || !gitHash.test(good.commit)) return false;
   if (Array.isArray(good.blocked) && good.blocked.length) {
     const effectiveDigest = repoDigest(await resolvedRepoUrl(dir, repo));
     if (good.blocked.some((entry) => entry && entry.repo === repo && goodResolvedDigest(entry) === effectiveDigest)) return false;
@@ -757,7 +762,8 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
 }
 
 export async function loadedCommit(ref: SourceRef, cacheRoot: string) {
-  return (await lastGood(join(cacheRoot, ref.name)))?.commit;
+  const commit = (await lastGood(join(cacheRoot, ref.name)))?.commit;
+  return typeof commit === "string" && gitHash.test(commit) ? commit : undefined;
 }
 
 export type Advance =
@@ -789,7 +795,7 @@ export async function advanceSource(ref: SourceRef, cacheRoot: string, from: str
 
 async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimitMs: number): Promise<Advance> {
   const repo = repoUrl(ref.repo);
-  const branch = ref.ref.replace(/^refs\/heads\//, "");
+  const branch = stripSourceRefspec(ref.ref).replace(/^refs\/heads\//, "");
   const head = `refs/heads/${branch}`;
   if (!branch || isInvalidRef(head)) return { state: "failed", say: `invalid ref ${JSON.stringify(ref.ref)} for ${ref.repo}` };
   const effectiveRepo = await resolvedRepoUrl(dir, repo);
@@ -821,8 +827,6 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     await restoreFetchHead(dir, savedFetchHead);
     return rewritten(tip);
   }
-  const listedCommits = await git(dir, "rev-list", `${from}..${tip}`);
-  const refreshPins = listedCommits.ok ? listedCommits.stdout.split("\n").map((line) => line.trim()).filter(Boolean) : [tip];
   const before = await currentCheckout(dir);
   const moved = await git(dir, "checkout", "-q", "--detach", tip);
   if (!moved.ok) {
@@ -844,8 +848,7 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} changed checkout HEAD while loading` };
   }
   const effectiveDigest = repoDigest(effectiveRepo);
-  const pinError = await recordPinRefs(dir, effectiveDigest, refreshPins);
-  const saveError = pinError ?? (await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest }));
+  const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest });
   if (saveError) {
     if (before) await restoreCheckout(dir, before);
     else if ((await git(dir, "checkout", "-q", "--detach", from)).ok) clearLoadedModules(dir);
