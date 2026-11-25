@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { constants, tmpdir } from "node:os";
 import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { join } from "node:path";
 import { proofKind, pullRequestDirectory, saveProof, uiWalkRule, writeJson } from "./proof.ts";
+import { runRecordPath, type Provenance } from "./proof-provenance.ts";
 import { redactSecrets } from "../../base/hooks/secret-guard.ts";
 
 export type SpoolFile = { write: (bytes: Uint8Array, offset: number, length: number) => Promise<{ bytesWritten: number }>; close: () => Promise<void> };
@@ -14,15 +15,14 @@ export type RunIO = {
 };
 export type ProofRun = {
   home: string; pr: { repository: string; pr: number }; kind: string; command: string[];
-  cwd: string; env: Record<string, string | undefined>; print: (text: string) => void; io?: RunIO;
+  cwd: string; env: Record<string, string | undefined>; print: (text: string) => void; io?: RunIO; now?: () => Date;
 };
 
 const sha = /^[0-9a-f]{40}$/;
 const forwarded: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
-const recordPath = (pullRequest: string, commit: string, kind: string, digest: string) => join(pullRequest, "runs", commit, kind, `${digest}.json`);
 const signalExit = (signal: NodeJS.Signals) => 128 + (constants.signals[signal] ?? 0);
 
-export async function runProof({ home, pr, kind, command, cwd, env, print, io = {} }: ProofRun): Promise<number> {
+export async function runProof({ home, pr, kind, command, cwd, env, print, io = {}, now = () => new Date() }: ProofRun): Promise<number> {
   const owed = proofKind(kind);
   if (owed === "ui-walk") throw new Error(uiWalkRule);
   const refuse = (problem: string, code: number) => { print(redactSecrets(`hedge proof run: ${problem}; nothing saved`)); return code; };
@@ -39,7 +39,9 @@ export async function runProof({ home, pr, kind, command, cwd, env, print, io = 
   let spool: string | undefined;
   try {
     spool = await mkdtemp(join(env.TMPDIR || tmpdir(), "hedge-proof-run-"));
+    const startedAt = now().toISOString();
     const outcome = await capture(command, cwd, env, join(spool, "spool"), io, cancel);
+    const finishedAt = now().toISOString();
     if (cancel.signal) return refuse(`the run was stopped by ${cancel.signal}`, signalExit(cancel.signal));
     if ("cannotStart" in outcome) return refuse(`cannot start ${command[0]}: ${outcome.cannotStart}`, 127);
     if ("failed" in outcome) return refuse(`the spool failed: ${outcome.failed}`, 1);
@@ -55,8 +57,9 @@ export async function runProof({ home, pr, kind, command, cwd, env, print, io = 
     const text = Buffer.from(redactSecrets(new TextDecoder().decode(outcome.bytes)));
     const digest = createHash("sha256").update(text).digest("hex");
     const identity = { ...pr, commit: before.head };
-    const record = recordPath(pullRequestDirectory(home, identity), before.head, owed, digest);
-    await writeJson(record, { command: command.map(redactSecrets) });
+    const record = runRecordPath(pullRequestDirectory(home, identity), before.head, owed, digest);
+    const provenance: Provenance = { commit: before.head, exitCode: 0, startedAt, finishedAt, cwd: redactSecrets(cwd) };
+    await writeJson(record, { command: command.map(redactSecrets), ...provenance });
     const output = join(spool, "output.log");
     await writeFile(output, text, { flag: "wx", mode: 0o600 });
     print(redactSecrets(await saveProof(home, identity, output, owed)));
@@ -124,18 +127,4 @@ async function gitRead(args: string[], cwd: string, env: Record<string, string |
     const [text, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
     return { ok: code === 0, text: text.trimEnd() };
   } catch { return { ok: false, text: "" }; }
-}
-
-export async function runRecordOf(evidence: string): Promise<string[] | undefined> {
-  const match = /^([0-9a-f]{64})\.log$/.exec(basename(evidence));
-  const kindDirectory = dirname(evidence);
-  const commit = basename(dirname(kindDirectory));
-  if (!match || !sha.test(commit)) return undefined;
-  try {
-    const record = JSON.parse(await readFile(recordPath(dirname(dirname(kindDirectory)), commit, basename(kindDirectory), match[1]!), "utf8")) as { command?: unknown };
-    const command = record?.command;
-    if (!Array.isArray(command) || !command.length || !command.every((part) => typeof part === "string")) return undefined;
-    if (createHash("sha256").update(await readFile(evidence)).digest("hex") !== match[1]) return undefined;
-    return command as string[];
-  } catch { return undefined; }
 }

@@ -5,6 +5,7 @@ import { normalized, type HeardAnswer } from "./proof-answers.ts";
 import { agentRefusal, agentsAcceptance, covers, fold, keptOwed, panelRefusal, usersAcceptance, type Decision, type DecisionState, type Ledger, type Mark, type PrRef, type Tier } from "./decision-ledger.ts";
 import type { Family, Usage } from "./proof-models.ts";
 import { quietReason, type DeltaKind, type QuietStep } from "./proof-delta.ts";
+import { captureText, runnerCapture, type Capture } from "./proof-provenance.ts";
 import { isProductionFile } from "./proof-checkout.ts";
 import { panelOutcome, unansweredPanelCause } from "./proof-panel.ts";
 import { redactSecrets } from "../../base/hooks/secret-guard.ts";
@@ -1169,9 +1170,9 @@ type Status = { problem: "missing" | "gap" | undefined; line: string; covered?: 
 export type KindProof = { kind: ProofKind; line: string } & (
   | { state: "pending" }
   | { state: "waiting"; dev: string; reason: string }
-  | { state: "ran"; commit: string; directory: string }
+  | { state: "ran"; commit: string; directory: string; capture?: Capture }
   | { state: "reused"; from: string; reason: string; directory: string }
-  | { state: "carried"; from: string; origin?: string; merges: number; directory: string }
+  | { state: "carried"; from: string; origin?: string; merges: number; quiet?: number; reason?: string; directory: string; capture?: Capture }
   | { state: "gap"; accepted: boolean; gap: GapProof }
   | { state: "missing"; newest?: string });
 type KindState = KindProof extends infer P ? P extends KindProof ? Omit<P, "kind" | "line"> : never : never;
@@ -1180,9 +1181,9 @@ function kindLine(kind: ProofKind, proof: KindState) {
   switch (proof.state) {
     case "pending": return `${kind}: pending until the PR lands`;
     case "waiting": return `${kind}: waiting on the dev result of ${proof.dev}: ${proof.reason}`;
-    case "ran": return `${kind}: evidence at HEAD in ${proof.directory}`;
+    case "ran": return `${kind}: evidence at HEAD in ${proof.directory}${captured(proof.capture)}`;
     case "reused": return `${kind}: evidence reused from ${short(proof.from)}: ${proof.reason}`;
-    case "carried": return `${kind}: evidence of ${short(proof.from)} carried across ${proof.merges} clean merge(s) of the base`;
+    case "carried": return `${kind}: evidence of ${short(proof.from)} carried across ${carriedAcross(proof)}${captured(proof.capture)}`;
     case "gap": return `${kind}: ${gapText(proof.gap)}`;
     case "missing": return proof.newest
       ? `${kind}: missing at HEAD; the newest evidence is at ${short(proof.newest)}. Save new evidence, or run hedge proof save --kind ${kind} --reuse-from ${short(proof.newest)} --reason <why it still proves HEAD>`
@@ -1190,17 +1191,30 @@ function kindLine(kind: ProofKind, proof: KindState) {
   }
 }
 
+const captured = (capture: Capture | undefined) => capture ? `; ${captureText(capture)}` : "";
+export const carriedAcross = ({ merges, quiet, reason }: { merges: number; quiet?: number; reason?: string }) =>
+  quiet ? `${quiet} quiet commit(s) (${reason})${merges ? ` and ${merges} clean merge(s) of the base` : ""}` : `${merges} clean merge(s) of the base`;
+
 const evidenceDirectory = (home: string, identity: ProofIdentity, kind: ProofKind, proof: Proved) => proof.directory ?? join(pullRequestDirectory(home, identity), proof.reuse!.from, kind);
-const evidenceState = (identity: ProofIdentity, proof: Proved, directory: string): KindState =>
-  proof.reuse ? { state: "reused", from: proof.reuse.from, reason: proof.reuse.reason, directory } : { state: "ran", commit: identity.commit, directory };
+const evidenceState = async (identity: ProofIdentity, proof: Proved, directory: string): Promise<KindState> => {
+  if (proof.reuse) return { state: "reused", from: proof.reuse.from, reason: proof.reuse.reason, directory };
+  const capture = await runnerCapture(directory);
+  return { state: "ran", commit: identity.commit, directory, ...capture ? { capture } : {} };
+};
+
+async function carriedState(found: NonNullable<ReturnType<typeof reviewedThrough>>, proof: Proved, directory: string): Promise<KindState> {
+  const capture = proof.reuse ? undefined : await runnerCapture(directory);
+  const quiet = found.quiet.length ? { quiet: found.quiet.length, reason: quietReason(found.kinds) } : {};
+  return { state: "carried", from: found.from, origin: proof.reuse?.from ?? found.from, merges: found.merges.length, ...quiet, directory, ...capture ? { capture } : {} };
+}
 
 type KindStatus = Pick<Status, "problem" | "condition" | "lapsed"> & { proof: KindProof; evidence?: string; dev?: DevResult };
 
 const kindStatusOf = (kind: ProofKind, problem: Status["problem"], state: KindState, evidence?: string): KindStatus =>
   ({ problem, proof: { kind, line: kindLine(kind, state), ...state } as KindProof, evidence });
 
-async function kindStatus(weigh: Weigh, kind: ProofKind, landed: boolean, cleanBaseMerge: CleanBaseMerge, dev?: DevState): Promise<KindStatus> {
-  if (kind === "dev-observed") return devObservedStatus(weigh, cleanBaseMerge, dev);
+async function kindStatus(weigh: Weigh, kind: ProofKind, landed: boolean, cleanBaseMerge: CleanBaseMerge, quietCommit: QuietCommit, dev?: DevState): Promise<KindStatus> {
+  if (kind === "dev-observed") return devObservedStatus(weigh, cleanBaseMerge, quietCommit, dev);
   const { home, identity, decisions } = weigh;
   const status = (problem: Status["problem"], state: KindState, evidence?: string) => kindStatusOf(kind, problem, state, evidence);
   if (kind === "post-deploy-watch" && !landed) return status(undefined, { state: "pending" });
@@ -1211,12 +1225,12 @@ async function kindStatus(weigh: Weigh, kind: ProofKind, landed: boolean, cleanB
   if (acceptance?.by === "the user") return { ...status(undefined, gapState()), ...countedGap(weighed) };
   const proved = await provedCommits(home, identity, kind);
   const head = proved.get(identity.commit);
-  if (head) { const directory = evidenceDirectory(home, identity, kind, head); return status(undefined, evidenceState(identity, head, directory), directory); }
-  const carried = reviewedThroughMerges(identity.commit, new Set(proved.keys()), cleanBaseMerge);
+  if (head) { const directory = evidenceDirectory(home, identity, kind, head); return status(undefined, await evidenceState(identity, head, directory), directory); }
+  const carried = reviewedThrough(identity.commit, new Set(proved.keys()), cleanBaseMerge, quietCommit);
   if (carried) {
     const proof = proved.get(carried.from)!;
     const directory = evidenceDirectory(home, identity, kind, proof);
-    return status(undefined, { state: "carried", from: carried.from, origin: proof.reuse?.from ?? carried.from, merges: carried.merges.length, directory }, directory);
+    return status(undefined, await carriedState(carried, proof, directory), directory);
   }
   if (gap) return { ...status(acceptance ? undefined : "gap", gapState()), ...countedGap(weighed) };
   const newest = [...proved].sort(([, a], [, b]) => (a.time < b.time ? 1 : -1))[0]?.[0];
@@ -1236,7 +1250,7 @@ const isoOf = (nanos: bigint) => new Date(Number(nanos / 1_000_000n)).toISOStrin
  * dev-observed counts only evidence saved after the dev PR merged: an observation before the merge saw the old dev.
  * Until then the kind waits on the dev result, and a gap stands in as for any kind.
  */
-async function devObservedStatus(weigh: Weigh, cleanBaseMerge: CleanBaseMerge, dev: DevState | undefined): Promise<KindStatus> {
+async function devObservedStatus(weigh: Weigh, cleanBaseMerge: CleanBaseMerge, quietCommit: QuietCommit, dev: DevState | undefined): Promise<KindStatus> {
   const { home, identity, decisions } = weigh;
   const kind = "dev-observed";
   const status = (problem: Status["problem"], state: KindState, evidence?: string) => kindStatusOf(kind, problem, state, evidence);
@@ -1246,23 +1260,31 @@ async function devObservedStatus(weigh: Weigh, cleanBaseMerge: CleanBaseMerge, d
   const gapState = (): KindState => ({ state: "gap", accepted: acceptance !== undefined, gap: gapProof(gap, weighed, decisions) });
   if (acceptance?.by === "the user") return { ...status(undefined, gapState()), ...countedGap(weighed) };
   const proved = await provedCommits(home, identity, kind);
-  const head = proved.get(identity.commit);
-  const carried = head ? undefined : reviewedThroughMerges(identity.commit, new Set(proved.keys()), cleanBaseMerge);
-  const found = head ?? (carried && proved.get(carried.from));
+  const savedAt = new Map(await Promise.all([...proved].map(async ([commit, proof]) => [commit, await newestFile(evidenceDirectory(home, identity, kind, proof))] as const)));
+  const mergedAt = dev?.mergedAt !== undefined && !Number.isNaN(Date.parse(dev.mergedAt)) ? nanosOf(dev.mergedAt) : undefined;
+  const afterMerge = new Set([...savedAt].filter(([, saved]) => mergedAt !== undefined && saved !== undefined && saved >= mergedAt).map(([commit]) => commit));
+  const locate = (commits: Set<string>) => {
+    if (commits.has(identity.commit)) return { from: identity.commit, carried: undefined };
+    const carried = reviewedThrough(identity.commit, commits, cleanBaseMerge, quietCommit);
+    return carried && { from: carried.from, carried };
+  };
+  const located = (afterMerge.size ? locate(afterMerge) : undefined) ?? locate(new Set(proved.keys()));
+  const found = located && proved.get(located.from);
   const directory = found && evidenceDirectory(home, identity, kind, found);
-  const saved = directory ? await newestFile(directory) : undefined;
-  if (dev?.mergedAt && found && directory && saved !== undefined && saved >= nanosOf(dev.mergedAt)) {
+  const saved = located && savedAt.get(located.from);
+  if (dev?.mergedAt && mergedAt !== undefined && found && directory && saved !== undefined && saved >= mergedAt) {
     const result: DevResult = {
       pr: devText(dev.ref), mergedAt: dev.mergedAt, ...dev.mergeCommit ? { mergeCommit: dev.mergeCommit } : {}, savedAt: isoOf(saved),
       line: `dev result: ${devText(dev.ref)} merged at ${dev.mergedAt}${dev.mergeCommit ? ` as ${short(dev.mergeCommit)}` : ""}; the dev-observed evidence was saved at ${isoOf(saved)}, after the merge`,
     };
-    const state: KindState = head ? evidenceState(identity, head, directory) : { state: "carried", from: carried!.from, origin: found.reuse?.from ?? carried!.from, merges: carried!.merges.length, directory };
+    const state: KindState = located.carried ? await carriedState(located.carried, found, directory) : await evidenceState(identity, found, directory);
     return { ...status(undefined, state, directory), dev: result };
   }
   if (gap) return { ...status(acceptance ? undefined : "gap", gapState()), ...countedGap(weighed) };
   const merged = dev?.mergedAt && `the dev PR merged at ${dev.mergedAt}${dev.mergeCommit ? ` as ${short(dev.mergeCommit)}` : ""}`;
   const reason = !dev ? "no dev PR is recorded; run hedge proof require --after-dev <owner/name>#<number>"
     : dev.error ? `cannot read the dev PR (${dev.error})`
+    : dev.mergedAt !== undefined && mergedAt === undefined ? `cannot read the dev PR's merge time (${dev.mergedAt})`
     : !merged ? "the dev PR is not merged yet"
     : saved !== undefined ? `${merged}, after the newest dev-observed evidence, saved at ${isoOf(saved)}. Observe dev again and save the result with hedge proof run --kind dev-observed -- <command>`
     : `${merged}. Observe dev and save the result with hedge proof run --kind dev-observed -- <command>`;
@@ -1489,7 +1511,7 @@ export async function proofGate(home: string, identity: ProofIdentity, { ci, pus
   const weigh: Weigh = { home, identity, now, decisions, tier, decidesAll };
   const owed = await readOwed(home, identity);
   const dev = owed?.kinds.includes("dev-observed") ? await readDev(owed.afterDev, devPull) : undefined;
-  const kinds = await Promise.all((owed?.kinds ?? []).map((kind) => kindStatus(weigh, kind, landed, cleanBaseMerge, dev)));
+  const kinds = await Promise.all((owed?.kinds ?? []).map((kind) => kindStatus(weigh, kind, landed, cleanBaseMerge, quietCommit, dev)));
   const devResult = kinds.find((kind) => kind.dev)?.dev;
   const review = await reviewStatus(weigh, cleanBaseMerge, quietCommit);
   const responses = await responseStatuses(home, identity, landed || !("body" in before) ? undefined : before.body ?? "");
@@ -1516,7 +1538,7 @@ export async function proofGate(home: string, identity: ProofIdentity, { ci, pus
     lapsed, ...lapsed.length ? { lapsedLine: lapsedLine(lapsed) } : {}, voided, ...receipt ? { receipt } : {}, ...knownHold ? { held: knownHold.line } : {}, ...botFindings ? { botFindings: botFindings.line } : {},
   };
   const summary = `kinds: ${owed?.kinds.length ? owed.kinds.join(", ") : "none"}; review: ${review.covered}; CI: ${checks.covered}`;
-  const evidence = kinds.map(({ proof, evidence }) => ({ kind: proof.kind, line: proof.line, directory: evidence }));
+  const evidence = kinds.map(({ proof, evidence }) => ({ kind: proof.kind, line: proof.line, directory: evidence, ...proof.state === "carried" ? { carriedFrom: proof.from } : {} }));
   return { code, failure, lines: summaryLines(proofSummary), summary, owed, evidence, ci: ciResult, decisions, tier, grade, conditions, voided, proofSummary };
 }
 

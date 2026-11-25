@@ -5,7 +5,7 @@ import type { Display } from "./proof-display.ts";
 import { storedVerdicts, verdictLines, type JudgeRecord } from "./proof-judge.ts";
 import { at, kindSource, type ReceiptReview } from "./proof-receipt.ts";
 import type { PublishRequest } from "./proof-receipt-publisher.ts";
-import { entries, judgeDirectory, pullRequestDirectory, readJson, reviewedFindings, summaryGaps, type GapProof, type KindProof, type ProofIdentity, type ProofKind, type ProofSummary } from "./proof.ts";
+import { carriedAcross, entries, judgeDirectory, pullRequestDirectory, readJson, reviewedFindings, summaryGaps, type GapProof, type KindProof, type ProofIdentity, type ProofKind, type ProofSummary } from "./proof.ts";
 
 export const receiptBudget = 900_000;
 
@@ -183,7 +183,7 @@ export async function gatherPage(home: string, head: ProofIdentity, input: PageI
   for (const kind of summary.kinds) {
     if (kind.state === "carried") {
       add(summary.commit, kind.kind, `carried from ${at(kind.from)}`);
-      records.push(`- ${at(summary.commit)} ${kind.kind} carried from ${at(kind.from)} across ${kind.merges} clean merge(s) of the base`);
+      records.push(`- ${at(summary.commit)} ${kind.kind} carried from ${at(kind.from)} across ${carriedAcross(kind)}`);
     }
     if (kind.state === "gap") add(summary.commit, kind.kind, "gap");
   }
