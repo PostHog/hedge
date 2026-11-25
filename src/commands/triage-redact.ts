@@ -130,7 +130,8 @@ function replaceKnown(text: string, entries: KnownName[], transform?: (value: st
 export function redact(text: string, home: string, known: KnownName[] = []): string {
   const stripHome = (value: string) => (home.length > 1 ? value.split(home.replace(/\/$/, "")).join("~") : value);
   const primary = known.filter((entry) => !entry.after);
-  const passOne = (value: string) => applyRules(stripHome(replaceKnown(applyRules(value, secretRules), primary)), rules);
+  const allRules = [...secretRules, ...rules];
+  const passOne = (value: string) => applyRules(stripHome(replaceKnown(value, primary)), allRules);
   const result = passOne(text);
   const exempt = new Set([...redactorLabels, ...known.map((entry) => applyRules(entry.as, secretRules))]);
   return replaceKnown(result, known.filter((entry) => entry.after), passOne, exempt);

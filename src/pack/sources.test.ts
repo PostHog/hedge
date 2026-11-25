@@ -449,6 +449,52 @@ describe("fetchSource", () => {
     }
   });
 
+  test("preserves a locally committed cache HEAD on an unreachable repo switch and rolls back when writing metadata fails", async () => {
+    const repoA = await packRepo("Repo A v1.");
+    const commitA1 = await spawnGit(repoA, "rev-parse", "HEAD");
+    writePack(repoA, "Repo A v2.");
+    await spawnGit(repoA, "commit", "-q", "-am", "v2");
+    const repoB = await packRepo("Repo B v1.");
+    const commitB = await spawnGit(repoB, "rev-parse", "HEAD");
+
+    const cache = temp.make("cache-");
+    await fetchSource({ name: "team", repo: repoA, ref: commitA1 }, cache);
+    const cacheDir = join(cache, "team");
+    writePack(cacheDir, "Local cache edit.");
+    await spawnGit(cacheDir, "commit", "-q", "-am", "local edit");
+    const localCommit = await spawnGit(cacheDir, "rev-parse", "HEAD");
+
+    const unreachable = await fetchSource({ name: "team", repo: join(temp.make("missing-"), "gone.git"), ref: "main" }, cache);
+    expect("error" in unreachable).toBe(true);
+    expect(await spawnGit(cacheDir, "rev-parse", "HEAD")).toBe(localCommit);
+
+    const metaPath = join(cacheDir, ".git", "hedge-source.json");
+    rmSync(metaPath, { force: true });
+    mkdirSync(metaPath, { recursive: true });
+    writeFileSync(join(metaPath, "keep"), "x");
+    try {
+      const switchFailed = await fetchSource({ name: "team", repo: repoB, ref: commitB }, cache);
+      expect(switchFailed).toMatchObject({ error: expect.stringContaining(`could not record ${commitB}`) });
+      expect(await spawnGit(cacheDir, "rev-parse", "HEAD")).toBe(localCommit);
+    } finally {
+      rmSync(metaPath, { recursive: true, force: true });
+    }
+
+    const refreshCache = temp.make("refresh-meta-");
+    const refreshDir = await legacyPinnedCache(refreshCache, "team", repoA, commitA1, { asked: "main" });
+    const refreshMeta = join(refreshDir, ".git", "hedge-source.json");
+    rmSync(refreshMeta, { force: true });
+    mkdirSync(refreshMeta, { recursive: true });
+    writeFileSync(join(refreshMeta, "keep"), "x");
+    try {
+      const refreshFailed = await advanceSource({ name: "team", repo: repoA, ref: "main" }, refreshCache, commitA1);
+      expect(refreshFailed).toMatchObject({ state: "failed", say: expect.stringContaining("could not record main") });
+      expect(await spawnGit(refreshDir, "rev-parse", "HEAD")).toBe(commitA1);
+    } finally {
+      rmSync(refreshMeta, { recursive: true, force: true });
+    }
+  });
+
   test("records pinned history even for a relative repository path named after an Object property", async () => {
     const cache = temp.make("cache-");
     const repo = join(cache, "team", "constructor");

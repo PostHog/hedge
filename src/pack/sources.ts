@@ -48,22 +48,41 @@ export async function fetchSource(ref: SourceRef, cacheRoot: string, loadLimitMs
   }
 }
 
+type CheckoutState = { commit: string; branch?: string };
+
+async function currentCheckout(dir: string): Promise<CheckoutState | undefined> {
+  if (!existsSync(join(dir, ".git"))) return undefined;
+  const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
+  if (!head.ok || !head.stdout) return undefined;
+  const branch = await git(dir, "symbolic-ref", "--short", "-q", "HEAD");
+  return { commit: head.stdout, ...(branch.ok && branch.stdout ? { branch: branch.stdout } : {}) };
+}
+
+async function restoreCheckout(dir: string, before: CheckoutState | undefined) {
+  if (!before) return;
+  const now = await currentCheckout(dir);
+  if (now?.commit === before.commit && now.branch === before.branch) return;
+  if (before.branch) await git(dir, "checkout", "-q", before.branch);
+  else await git(dir, "checkout", "-q", "--detach", before.commit);
+}
+
 async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Promise<FetchedSource> {
   const repo = repoUrl(ref.repo);
   const edits = await localEdits(dir);
   if (edits.length) return keepEdits(ref, dir, edits, loadLimitMs);
   const good = await lastGood(dir);
+  const before = await currentCheckout(dir);
   const fetchError = (await checkedOutFromCache(dir, repo, ref, good)) ? undefined : await checkout(dir, repo, ref.ref);
   if (!fetchError) {
     const loaded = await load(dir, loadLimitMs);
     if (!("error" in loaded)) {
       const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: (await git(dir, "rev-parse", "HEAD")).stdout });
       if (!saveError) return { ref, dir, packs: loaded.packs };
-      return fallBack(ref, dir, repo, good, `could not record ${ref.ref} from ${ref.repo}: ${saveError}`, loadLimitMs);
+      return fallBack(ref, dir, repo, good, `could not record ${ref.ref} from ${ref.repo}: ${saveError}`, loadLimitMs, before);
     }
-    return fallBack(ref, dir, repo, good, `${ref.ref} from ${ref.repo} does not load: ${loaded.error}`, loadLimitMs);
+    return fallBack(ref, dir, repo, good, `${ref.ref} from ${ref.repo} does not load: ${loaded.error}`, loadLimitMs, before);
   }
-  return fallBack(ref, dir, repo, good, `could not fetch ${ref.ref} from ${ref.repo}: ${fetchError}`, loadLimitMs);
+  return fallBack(ref, dir, repo, good, `could not fetch ${ref.ref} from ${ref.repo}: ${fetchError}`, loadLimitMs, before);
 }
 
 function cacheDir(ref: SourceRef, cacheRoot: string): string | { error: string } {
@@ -98,9 +117,9 @@ export function repoUrl(repo: string) {
   return /^[\w.-]+\/[\w.-]+$/.test(repo) ? `https://github.com/${repo}.git` : repo;
 }
 
-async function fallBack(ref: SourceRef, dir: string, repo: string, good: Good | undefined, reason: string, loadLimitMs: number): Promise<FetchedSource> {
+async function fallBack(ref: SourceRef, dir: string, repo: string, good: Good | undefined, reason: string, loadLimitMs: number, before?: CheckoutState): Promise<FetchedSource> {
   if (!good || good.repo !== repo) {
-    if (good && typeof good.commit === "string" && commitSha.test(good.commit)) await git(dir, "checkout", "-q", "--detach", good.commit);
+    await restoreCheckout(dir, before);
     return { ref, error: reason };
   }
   if (!(await git(dir, "checkout", "-q", "--detach", good.commit)).ok) return { ref, error: reason };
@@ -188,7 +207,11 @@ async function saveGood(dir: string, good: Good): Promise<string | undefined> {
     const recorded = await recordPinRef(dir, currentPin.repo, currentPin.commit);
     if (recorded) return recorded;
   }
-  await writeAtomic(goodPath(dir), JSON.stringify(good) + "\n");
+  try {
+    await writeAtomic(goodPath(dir), JSON.stringify(good) + "\n");
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
   return undefined;
 }
 
