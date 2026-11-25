@@ -2,7 +2,7 @@ import { closeSync, existsSync, openSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { askGap, summaryGaps, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity } from "./proof.ts";
+import { answerNumbers, askGap, savedFindings, summaryGaps, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity } from "./proof.ts";
 import { AnswerTaken, appendOnce, decideAlone, hearUser, ledgerHolds, ledgerOf } from "./decision-cli.ts";
 import { HubUnreachable, keptOwed, refText, usersAcceptance, thisMachine, type Decision, type Ssh } from "./decision-ledger.ts";
 import { autonomyOf, decidesAll, gradeOf, type Autonomy, type Grade } from "./proof-autonomy.ts";
@@ -99,8 +99,9 @@ const subcommands: Record<string, Subcommand> = {
   },
   save: {
     usage: "save [--kind <kind> [--ran <what ran> --result <what it showed>]] <file>... | save --kind <kind> --ran <what ran> --result <what it showed> | save --kind ui-walk --caption <caption> <screenshot> | save --kind <kind> --reuse-from <sha> --reason <why>",
-    summary: `Save evidence files for the commit. With --kind, the files prove that owed kind. Evidence counts for HEAD
-and for clean merges of the base on top of it. When the evidence of an earlier commit still proves HEAD, record
+    summary: `Save evidence files for the commit. With --kind, the files prove that owed kind. Evidence counts for HEAD,
+for clean merges of the base on top of it, and for commits on top of it that change only test files no production
+file names. When the evidence of an earlier commit still proves HEAD, record
 that with --reuse-from and the reason; the gate prints it.
 --ran and --result give one line each of what ran and what it showed, for the proof receipt. Without files they
 record only the lines, such as for evidence that hedge proof run saved. A later save of the kind at the commit with
@@ -144,11 +145,14 @@ captions live in the PR's display/ directory, outside the evidence: the gate and
 output passes through to the terminal, and stdout and stderr go together into one private spool. hedge reads HEAD
 and the status before and after the run: a tree with modified or untracked files refuses with exit 2, so commit
 first. Only a run that exits 0 with text output, with HEAD unchanged and the tree clean at both checks, saves: the
-output, with known secrets redacted, as <kind> evidence of the HEAD read before the run, and a run record of the
-redacted command in runs/<commit>/<kind>/. Every other run saves nothing, says why, and exits with the command's
-status: 128 + n when signal n stopped it, 127 when it cannot start, and 1 when it printed nothing, printed a null
-byte, or HEAD or the tree changed. The judge marks runner files as captured by the Hedge runner. --commit is not
-taken; ui-walk takes screenshots, so save them with hedge proof save.`,
+output, with known secrets redacted, as <kind> evidence of the HEAD read before the run, and a run record in
+runs/<commit>/<kind>/: the redacted command, the commit, exit 0, when the run started and finished, and the directory
+it ran in. Every other run saves nothing, says why, and exits with the command's status: 128 + n when signal n
+stopped it, 127 when it cannot start, and 1 when it printed nothing, printed a null byte, or HEAD or the tree
+changed. The judge marks runner files as captured by the Hedge runner. When every file of a kind has a run record of
+the commit the gate counts, the gate prints that capture and tells the judge its provenance is verified by code, so
+the judge asks only whether the evidence shows the changed behavior. --commit is not taken; ui-walk takes
+screenshots, so save them with hedge proof save.`,
     examples: ["hedge proof run --kind live-run -- bun test src/send.test.ts", "hedge proof run --kind live-run -- sh -c 'curl -s localhost:8000/health | jq .status'"],
     options: ["--kind"], takesCommand: true,
     run: async ({ options, command }, _, context) => {
@@ -156,7 +160,7 @@ taken; ui-walk takes screenshots, so save them with hedge proof save.`,
       if (!command?.length) throw usageError("run", "Pass the command after --");
       const kind = required(options, "--kind", "run");
       const pr = resolvePullRequest(options.get("--repo"), options.get("--pr"), context.run);
-      return runProof({ home: context.home, pr, kind, command, cwd: context.cwd, env: context.env, print: context.print, io: context.runIO });
+      return runProof({ home: context.home, pr, kind, command, cwd: context.cwd, env: context.env, print: context.print, io: context.runIO, now: context.now });
     },
   },
   publish: {
@@ -316,14 +320,20 @@ ${overrideHelp}`,
     usage: "show [--round <number|final|final-n>]",
     summary: `Print the latest review round, or --round: who reviewed it and where its findings are. --round final is the
 latest final read. For a panel, print each lens: its state, family and model, how long it ran, and its raw answer, or
-its log while it runs. Then print each final read that hedge dropped unanswered, with its cause.`,
+its log while it runs. Then print the round's findings by the numbers hedge proof respond pairs answers with, and each
+final read that hedge dropped unanswered, with its cause.`,
     examples: ["hedge proof show", "hedge proof show --round 2", "hedge proof show --round final-1"],
     options: ["--round"],
     run: async ({ options }, identity, context) => {
       const directory = await reviewDirectory(context.home, identity(), roundOption(options));
       const dropped = (await droppedFinalReads(context.home, identity())).map(({ line, cause }) => cause ? `${line}; cause: ${cause}` : line);
-      for (const line of [...await roundLines(directory, context), ...dropped]) context.print(line);
-      return 0;
+      const { lines, findings } = await roundLines(directory, context);
+      for (const line of lines) context.print(line);
+      if (typeof findings === "string") printAnswerNumbers(findings, context.print);
+      for (const line of dropped) context.print(line);
+      if (!(findings instanceof Error)) return 0;
+      context.print(`hedge cannot read the findings of this round: ${findings.message}`);
+      return 1;
     },
   },
   "panel-lens": {
@@ -337,11 +347,13 @@ its log while it runs. Then print each final read that hedge dropped unanswered,
   respond: {
     usage: "respond --round <number|final-n> <responses.md>",
     summary: `Save your answer to each finding of a finished review: fixed in which commit, or rejected and why. Number the
-answers in the order of the findings, one line each, such as "1. fixed in 1a2b3c4: <how>" or "2. rejected: <why>". Once
+answers by the list that hedge proof review and hedge proof show print under "Answer each finding by these numbers",
+never by counting findings.md yourself. One line each, such as "1. fixed in 1a2b3c4: <how>" or "2. rejected: <why>". Once
 the review budget is spent, "3. known: <why>" answers a finding that the PR body lists by its file:line under Known
-issues; a known blocker holds the merge. Each
-list item of findings.md is one finding; findings without a list are one. The gate fails while a finding has no
-answer. A new call replaces the earlier answer. A final read takes the id that review-start printed. The judge in hedge proof gate checks
+issues; a known blocker holds the merge. In a review with a FINDINGS block, the block runs to the next TESTS line or
+unindented COVERED line, and prose outside FINDINGS and TESTS is no finding. An answer numbered past the last finding is refused, and so is a code fence, also one that
+opens a list item: quote an earlier answer with > and write code in single
+backticks. The gate fails while a finding has no answer. A new call replaces the earlier answer. A final read takes the id that review-start printed. The judge in hedge proof gate checks
 each answer against HEAD.`,
     examples: ["hedge proof respond --round 1 responses.md", "hedge proof respond --round final-1 responses.md"],
     options: ["--round"],
@@ -465,7 +477,11 @@ panel gap (gap --kind panel) stands in for the panel. The review also carries ac
 an earlier commit of the PR, and single-parent commits that only change, add, or delete test files, named *.test.*, *.spec.*, *_test.go, *_test.py or test_*.py, or snapshots in __snapshots__, as regular
 files with an unchanged mode. A mode change, a symlink, a comment, a file in a test folder, or a test
 file whose name other code holds, such as an import of limits.test.ts, needs a review. The gate then prints "final read carried from <sha>: test-only delta" or "revert of a PR commit", and the receipt in
-carried/<HEAD>.json names the quiet commits and the reason. Evidence does not carry across quiet commits.
+carried/<HEAD>.json names the quiet commits and the reason. Evidence carries across the same quiet commits and clean
+base merges, and the gate line names them; the judge reads that carry as checked by code. When every file of this diff
+is such a test file, the judge learns the diff is test-only, so a critical path that only test files match does not
+make the Tier critical. A judge answer that fails a question without a reason shows "the judge gave no reason", and
+every failing gate names a reason on its last line.
 When those checks pass, the judge runs on the reviewer's row of the model table, with that reviewer's tools, as hedge proof review
 picks it. hedge hands it the diff from the merge base, CI, the owed kinds, the counted evidence, every review's
 findings and responses, and the coding standards in ~/.agents/guides/coding-standards.md. It answers four questions:
@@ -673,12 +689,23 @@ async function runReview(options: Map<string, string>, head: ProofIdentity, cont
   });
 }
 
+function printAnswerNumbers(findings: string, print: CommandContext["print"]) {
+  const numbers = answerNumbers(findings);
+  if (numbers) print(`\n${numbers}`);
+}
+
 async function printSavedReview({ round, id, directory }: SingleRound, { print }: CommandContext) {
   const reservation = await readReservation(directory);
-  print(JSON.stringify({ round, id, directory, reviewer: reservation?.reviewer, ...await readTriage(directory) }));
-  print((await readFile(join(directory, "findings.md"), "utf8")).trim());
+  const findings = await readFile(join(directory, "findings.md"), "utf8");
   const anchors = await readFile(join(directory, "anchors.md"), "utf8").catch(() => "");
+  return printReview({ round, id, directory, reviewer: reservation?.reviewer, ...await readTriage(directory) }, findings, anchors, print);
+}
+
+function printReview(header: object, findings: string, anchors: string, print: CommandContext["print"]) {
+  print(JSON.stringify(header));
+  print(findings.trim());
   if (anchors) print(`\n${anchors.trim()}`);
+  printAnswerNumbers(findings, print);
   return 0;
 }
 
@@ -709,10 +736,7 @@ async function askReviewer(reserved: SingleRound, head: ProofIdentity, author: F
   const anchors = anchorCheck(answer.text, diff, await reviewRecords(home, head));
   await storeCapturedFindings(reserved.directory, head, roundId(reserved.id), answer.text, answer.model, answer.usage);
   if (anchors) await writeFile(join(reserved.directory, "anchors.md"), anchors + "\n", { mode: 0o600 });
-  print(JSON.stringify({ round: reserved.round, id: reserved.id, directory: reserved.directory, reviewer: answer.model, ...await readTriage(reserved.directory) }));
-  print(answer.text.trim());
-  if (anchors) print(`\n${anchors}`);
-  return 0;
+  return printReview({ round: reserved.round, id: reserved.id, directory: reserved.directory, reviewer: answer.model, ...await readTriage(reserved.directory) }, answer.text, anchors, print);
 }
 
 async function reserveHedgeReview(options: Map<string, string>, head: ProofIdentity, context: CommandContext, panel = false) {
@@ -992,8 +1016,13 @@ async function waitForReview(options: Map<string, string>, head: ProofIdentity, 
   await startStaged(directory, context);
   const restart = (name: string) => roundStep(directory, context, async () => { if (await lensIdle(directory, name)) await startLens(directory, name, context); }).catch(unless(RoundBusy));
   const code = await waitForPanel(directory, panelIO(context), restart, waitPolls);
-  for (const line of await roundLines(directory, context)) context.print(line);
-  if (code === 0) context.print(await readFile(join(directory, "findings.md"), "utf8"));
+  const round = await roundLines(directory, context);
+  for (const line of round.lines) context.print(line);
+  if (code === 0) {
+    const findings = typeof round.findings === "string" ? round.findings : await readFile(join(directory, "findings.md"), "utf8");
+    context.print(findings);
+    printAnswerNumbers(findings, context.print);
+  }
   if (code === 1) context.print("A lens failed, and the round stays unfinished. Run the same hedge proof review --lens command to rerun the failed lenses.");
   if (code === 2) context.print("Lenses still run. Run hedge proof review --wait again.");
   if (code === quotaExitCode) context.print("A lens stopped on spent quota, and the round stays unfinished. Run the same hedge proof review --lens command once the quota is back, or move the lens to the family that is up with :same or :other.");
@@ -1065,14 +1094,15 @@ function positive(value: string, option: string, name: string) {
 async function roundLines(directory: string, { now }: CommandContext) {
   const round = await readJson<{ round: number | "final"; commit: string; reviewer?: string; capturedBy?: string; standing?: { reason: string; until: string }; decision?: { mark: string; id: string } } | undefined>(join(directory, "round.json"), undefined);
   if (!round) throw new Error(`${directory} has no reservation`);
-  const finished = round.reviewer ? `finished by ${round.reviewer}, ${round.capturedBy === "hedge" ? "captured by hedge" : "saved by the author"}: ${join(directory, "findings.md")}` : "reserved, no findings yet";
+  const findings = await savedFindings(directory).catch((error: unknown) => error instanceof Error ? error : new Error(String(error)));
+  const finished = round.reviewer ? `finished by ${round.reviewer}, ${round.capturedBy === "hedge" ? "captured by hedge" : "saved by the author"}: ${join(directory, "findings.md")}` : typeof findings === "string" ? `findings saved, no reviewer recorded yet: ${join(directory, "findings.md")}` : "reserved, no findings yet";
   const header = `${round.round === "final" ? "final read" : `round ${round.round}`} on ${short(round.commit)}: ${finished}`;
   const anchors = join(directory, "anchors.md");
   const standing = round.standing ? [`accepted by the standing rule until ${round.standing.until}: ${round.standing.reason}`] : [];
   if (round.decision) standing.push(`decided by ${round.decision.mark} decision ${round.decision.id}`);
   const plan = await readPlan(directory);
   const panel = plan ? [...plan.tier ? [tierLine(plan.tier)] : [], ...await panelLines(directory, now?.() ?? new Date())] : [];
-  return [header, ...(existsSync(anchors) ? [`anchor check by hedge: ${anchors}`] : []), ...standing, ...panel];
+  return { lines: [header, ...(existsSync(anchors) ? [`anchor check by hedge: ${anchors}`] : []), ...standing, ...panel], findings };
 }
 
 const tierLine = ({ name, why }: ReviewTier) => `review tier: ${name}: ${why}`;
@@ -1205,7 +1235,7 @@ export async function proofCommand(args: string[], context: ProofContext): Promi
 
 async function gateReporting(json: boolean, { print }: ProofContext, gate: () => Promise<number>) {
   try { return await gate(); } catch (error) {
-    const reason = String((error as Error).message ?? error).replace(/\s*[\r\n]+\s*/g, " ");
+    const reason = String((error as Error)?.message ?? error).replace(/\s*[\r\n]+\s*/g, " ").trim() || `the gate stopped on ${(error as Error)?.name ?? "an error"} without a message`;
     print(json ? JSON.stringify({ code: 1, reason }) : `gate: fail (exit 1): ${reason}`);
     return 1;
   }

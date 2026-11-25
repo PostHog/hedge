@@ -34,6 +34,65 @@
   PR's timeline for the card line, so a slow GitHub read cannot keep a pass
   from counting.
 
+### Proof provenance is checked in code, and the judge asks less
+
+- `hedge proof run` now records the commit, exit 0, when the run started and
+  finished, and the directory it ran in, beside the command. Records from
+  before keep their runner mark.
+- The gate prints that capture on each kind whose files all came from the
+  runner at the commit it counts. The judge then learns that the kind's
+  provenance is verified by code, and no longer fails it as typed by hand, as
+  evidence of an earlier commit, or for how it was captured.
+- Evidence now carries to HEAD across commits that change only test files no
+  production file names, as the review already did, dev-observed evidence
+  included. The gate line names the quiet commits. A changed snapshot that a
+  production file names is not such a test file.
+- When every file of the diff is such a test file, the judge learns the diff
+  is test-only, so a critical path that only test files match does not make
+  the Tier critical.
+- A judge answer that fails a question without a reason, a high quality
+  finding without a problem, and an error without a message still give the
+  gate's last line a reason.
+
+### A Waits guide, and a to-do for repeated guide headings
+
+- The Orchestration pack writes a new guide, `~/.agents/guides/waits.md`. It
+  says how a T3 thread waits on a pull request, a child task, another thread,
+  a command, or its own schedule; who owns each open pull request and how to
+  hand one over; and what Hedge's hooks check before a turn ends.
+  If one of your own packs owns a guide named `waits`, rename it before you
+  update, together with every section and reference that names it: two packs
+  cannot own one guide, and a section that still names `waits` lands in the
+  new guide.
+- `hedge apply` and `hedge doctor` now report a pack section that repeats a
+  heading of the guide it adds to, such as a second `Tests` in
+  `coding-standards.md`, as a to-do. Hedge still writes the section. A
+  section adds what the guide does not say, under a heading of its own, and a
+  setting changes a rule.
+- The Pull requests pack's rules no longer contradict **Ready on green**: when
+  your agent instructions turn it on, the agent marks a pull request ready
+  once it passes your gate.
+
+### A wait needs something that wakes it
+
+- The question guard's Stop hook stops a top-level T3 thread once when its
+  last line starts with ⏳ or 🔕 and nothing can wake it: no PR watch held
+  until merge or on running checks, no running child task or thread wait, and
+  no scheduled task bound to the thread. It tells the agent to call
+  `watch_pull_request` with `until: "merged"`, keep the lane's child, or
+  schedule the check. It runs after the proof check, and it never snoozes or
+  settles the thread.
+
+### A revoked app sign-in on the MCP gateway asks for a re-auth
+
+- When ChatGPT revokes the sign-in of a Codex app on the MCP gateway, such as
+  the Slack bridge, a call that fails with `token_revoked`, `invalid_auth` or a
+  like auth error now answers the agent with one line, such as `Slack needs
+  re-auth: on the hub, run: hedge mcp-gateway sign-in slack`, in place of a
+  bare 401. A tool list that fails this way gets the same line. MCPHub can
+  still answer with its own error instead: when a JSON 401 stays after its
+  retry, or when no tools were ever listed.
+
 ### A message steers a thread that waits on a question card
 
 - `hedge thread send` no longer turns `auto` into `queue` when the target
