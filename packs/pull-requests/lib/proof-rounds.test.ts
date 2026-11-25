@@ -473,6 +473,43 @@ test("the user's pick on an Antigravity card accepts the gap its question names,
   } finally { await t3.stop(); }
 });
 
+test("a newer Antigravity pick that keeps the gap open refuses an earlier acceptance, though its question names the PR past the answer cap", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "new\n");
+  const at = "2026-11-25T04:03:04Z";
+  const question = "Accept the prod-shape gap? example/product#42: No sandbox";
+  const long = `Accept the prod-shape gap? ${"Why: the sandbox has no network. ".repeat(32)}example/product#42`;
+  const card = (id: string, other: string, question: string, pick: string) => ({
+    item: {
+      id, requestId: `${id}-request`, type: "user_input_request", nativeItemRef: { driver: "antigravity" }, startedAt: at,
+      questions: [
+        { id: "q1", header: question, question: "The agent has a question.", options: [{ label: "Accept the gap (Recommended)", description: "", value: "1" }, { label: "Keep the gap open", description: "", value: "2" }], allowCustomAnswer: false },
+        { id: "q1_other", header: "Other", question: `Optional free-form answer to: ${question}`, options: [], required: false },
+      ],
+      questionAnswer: { questionTextById: { q1: "The agent has a question.", q1_other: `Optional free-form answer to: ${question}` }, answers: { q1: pick, q1_other: other } },
+    },
+  });
+  const items = [card("earlier", "O", question, "1"), card("conditional", "", long, "2")];
+  const t3 = await startT3Stub({
+    shell: { projects: [], threads: [{ id: "mcp:thread-9", title: "Proof", projectId: "project", status: "idle" }] },
+    turnItems: { "mcp:thread-9": items },
+    resolutions: [
+      { thread: "mcp:thread-9", request: "earlier-request", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000003" },
+      { thread: "mcp:thread-9", request: "conditional-request", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000001" },
+      { thread: "mcp:thread-9", request: "card-request", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000002" },
+    ],
+  });
+  try {
+    mkdirSync(join(pr.home, ".t3/userdata"), { recursive: true });
+    for (const file of ["server-runtime.json", "statev2.sqlite"]) writeFileSync(join(pr.home, ".t3/userdata", file), readFileSync(join(t3.home, ".t3/userdata", file)));
+    pr.reader.words = undefined;
+    await pr.hedge("gap", "--kind", "prod-shape", "--reason", "No sandbox");
+    const accept = (...quote: string[]) => pr.decide("record", "--mark", "👤", "--class", "proof-gap", "--kind", "prod-shape", "--pr", "example/product#42", "--thread", "thread-9", ...quote);
+
+    await expect(accept()).rejects.toThrow(`The user chose "Keep the gap open", which does not accept the gap`);
+  } finally { await t3.stop(); }
+});
+
 test("an answer typed by the user never counts, whatever its message id looks like", async () => {
   const pr = await checkout();
   const third = await twoRounds(pr);

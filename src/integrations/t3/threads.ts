@@ -123,7 +123,8 @@ export async function readThreadWords(client: T3HttpClient, value: string, state
     if (item.type === "assistant_message" && item.text) lastAssistant = item.text;
     if (typedByUser(item) && item.text) words.push({ thread: threadId, id: item.messageId ?? item.id ?? "", text: item.text, answered: lastAssistant.slice(0, answeredCap), at: item.updatedAt ?? item.startedAt, source: "typed" });
     const answer = item.type === "user_input_request" && answeredInClient().has(item.requestId ?? "") ? item.questionAnswer : undefined;
-    cardAnswers(item, answer).forEach((card, index) => {
+    Object.entries(answer?.answers ?? {}).forEach(([question, chosen], index) => {
+      const card = (item.nativeItemRef?.driver === "antigravity" ? antigravityAnswer : cardAnswer)(item.questions ?? [], answer!, question, chosen);
       if (card) words.push({ thread: threadId, id: `${item.id}:${index}`, text: card.text, answered: card.answered, at: item.updatedAt ?? item.startedAt, source: "question" });
     });
   }
@@ -140,28 +141,21 @@ function cardAnswer(_questions: CardQuestion[], { questionTextById }: QuestionAn
 
 function antigravityAnswer(questions: CardQuestion[], answer: QuestionAnswer, id: string, chosen: string | string[]) {
   const byId = (wanted: string) => questions.find((question) => question.id === wanted);
+  const shown = (question: CardQuestion) => promptOf(question, answer.questionTextById[question.id]);
+  const pairs = (pick: CardQuestion | undefined, other: CardQuestion | undefined): pick is CardQuestion => !!pick && !!other && shown(other) === `${otherPrompt}${shown(pick)}`;
   const asked = byId(id);
+  if (!asked) return { text: [chosen].flat().join(", "), answered: answer.questionTextById[id] ?? id };
+  const raw = { text: [chosen].flat().join(", "), answered: shown(asked) };
+  const pick = byId(id.slice(0, -otherSuffix.length));
+  if (pairs(pick, asked)) return typed(answer.answers[pick.id] ?? "") !== "" && !typedInOtherField(chosen) ? undefined : raw;
   const other = byId(`${id}${otherSuffix}`);
-  const picked = id.slice(0, -otherSuffix.length);
-  if (asked && isOtherField(asked) && byId(picked)) {
-    const beside = typed(answer.answers[picked] ?? "") !== "";
-    return beside && !typedInOtherField(chosen) ? undefined : { text: [chosen].flat().join(", "), answered: answer.questionTextById[id] ?? asked.question! };
-  }
-  if (other && isOtherField(other) && typedInOtherField(answer.answers[other.id] ?? "")) return undefined;
-  if (!asked) return cardAnswer(questions, answer, id, chosen);
-  const labels = [chosen].flat().map((value) => onlyLabelOf(asked.options ?? [], value));
-  return { text: labels.join(", "), answered: promptOf(asked, answer.questionTextById[id]) };
+  if (!other) return label(asked, chosen, raw.answered);
+  if (!pairs(asked, other)) return raw;
+  return typedInOtherField(answer.answers[other.id] ?? "") ? undefined : label(asked, chosen, raw.answered);
 }
 
-function cardAnswers({ nativeItemRef, questions = [] }: TurnItem["item"], answer: QuestionAnswer | undefined) {
-  const entries = Object.entries(answer?.answers ?? {});
-  const read = (reader: typeof antigravityAnswer) => entries.map(([id, chosen]) => reader(questions, answer!, id, chosen));
-  const antigravity = nativeItemRef?.driver === "antigravity" ? read(antigravityAnswer) : undefined;
-  return antigravity?.every((card) => !card || card.answered.length <= answeredCap) ? antigravity : read(cardAnswer);
-}
-
-function isOtherField(question: CardQuestion) {
-  return question.id.endsWith(otherSuffix) && question.header === "Other" && (question.question ?? "").startsWith(otherPrompt) && !question.options?.length;
+function label(asked: CardQuestion, chosen: string | string[], answered: string) {
+  return { text: [chosen].flat().map((value) => onlyLabelOf(asked.options ?? [], value)).join(", "), answered };
 }
 
 function onlyLabelOf(options: NonNullable<CardQuestion["options"]>, value: string) {
