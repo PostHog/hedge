@@ -148,16 +148,15 @@ async function writeAtomic(path: string, content: string) {
   try {
     await rename(temp, path);
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "EISDIR" || code === "ENOTEMPTY") {
-      await rm(path, { recursive: true, force: true });
-      await rename(temp, path);
-    } else {
-      await rm(temp, { force: true }).catch(() => {});
-      throw error;
-    }
+    await rm(temp, { force: true }).catch(() => {});
+    throw error;
   }
 }
+
+const isDirectoryError = (error: unknown) => {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === "EISDIR" || code === "ENOTEMPTY" || code === "ERR_FS_EISDIR";
+};
 
 async function readPins(dir: string): Promise<Pins | undefined> {
   try {
@@ -179,8 +178,12 @@ async function saveGood(dir: string, good: Good) {
     known.add(before.commit.toLowerCase());
   }
   if (commitSha.test(good.ref) && commitSha.test(good.commit)) known.add(good.commit.toLowerCase());
-  if (known.size) await writeAtomic(pinsPath(dir), JSON.stringify({ repoHash: digest, commits: [...known] }) + "\n");
-  else await rm(pinsPath(dir), { recursive: true, force: true });
+  try {
+    if (known.size) await writeAtomic(pinsPath(dir), JSON.stringify({ repoHash: digest, commits: [...known] }) + "\n");
+    else await rm(pinsPath(dir), { force: true });
+  } catch (error) {
+    if (!isDirectoryError(error)) throw error;
+  }
   await writeAtomic(goodPath(dir), JSON.stringify(good) + "\n");
 }
 

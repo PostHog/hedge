@@ -2,8 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { main } from "../cli.ts";
-import type { CommandRunner } from "../adapters/run.ts";
-import { isolateGit, tempDirs } from "../testing/git.ts";
+import { spawnRunner, type CommandRunner } from "../adapters/run.ts";
+import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
 import { engineRoot, fakeMachine, hedgeSetup, scripted } from "../setup/testing.ts";
 
 isolateGit();
@@ -274,15 +274,51 @@ describe("hedge triage", () => {
   test("redacts unpinned source aliases from an inherited HEDGE_PROFILE_DIR without printing its engine fork in Versions", async () => {
     const home = temp.make("home-");
     const inherited = temp.make("inherited-profile-");
+    await spawnGit(inherited, "init", "-q");
+    await spawnGit(inherited, "remote", "add", "origin", "https://github.com/nora/inherited-profile.git");
     writeFileSync(join(inherited, "hedge.json"), JSON.stringify({ schema: 1, engine: { repo: "private-org/private-engine", ref: "secret-track", channel: "track" }, sources: [{ name: "inherited-secret", repo: "PostHog/hedge", ref: "main" }], packs: [], plan: "both", settings: {}, workflows: {} }));
     const sent: Sent[] = [];
     const io = scripted([]);
-    const code = await main(["triage", "--send"], { home, engineRoot, platform: "darwin", env: { HEDGE_PROFILE_DIR: inherited }, print: io.terminal.print, terminal: io.terminal, capture: capture(sent), hostname: () => "noras-mbp.local", run: async () => 0 });
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      sent.push({ command, ...(options.input === undefined ? {} : { input: options.input }) });
+      if (command[0] === "git") return spawnRunner(command, options);
+      return capture([], undefined)(command, options);
+    };
+    const code = await main(["triage", "--send"], { home, engineRoot, platform: "darwin", env: { HEDGE_PROFILE_DIR: inherited }, print: io.terminal.print, terminal: io.terminal, capture: runRealGit, hostname: () => "noras-mbp.local", run: async () => 0 });
     expect(code).toBe(0);
     const issue = sent.find((call) => call.command[1] === "issue")!;
     expect(issue.input).toContain("The pack source <private source> is not pinned to a commit SHA.");
     expect(issue.input).toContain("- Profile engine pin: no profile");
-    for (const leaked of ["inherited-secret", "private-org/private-engine", "secret-track"]) expect(issue.input).not.toContain(leaked);
+    for (const leaked of ["inherited-secret", "private-org/private-engine", "secret-track", "nora/inherited-profile"]) expect(issue.input).not.toContain(leaked);
+  });
+
+  test("redacts private source aliases added to the saved profile between triage's initial read and doctor's read", async () => {
+    const home = temp.make("home-");
+    const profileDir = join(home, "profile");
+    mkdirSync(profileDir, { recursive: true });
+    await spawnGit(profileDir, "init", "-q");
+    const profilePath = join(profileDir, "hedge.json");
+    const baseProfile = { schema: 1, engine: { repo: "PostHog/hedge", ref: "main", channel: "track" }, sources: [], packs: [], plan: "both", settings: {}, workflows: {} };
+    writeFileSync(profilePath, JSON.stringify(baseProfile));
+    mkdirSync(join(home, ".config/hedge"), { recursive: true });
+    writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "mac", name: "noras-mbp", profileDir }));
+    const sent: Sent[] = [];
+    const io = scripted([]);
+    let updated = false;
+    const raceCapture: CommandRunner = async (command, options = {}) => {
+      if (!updated) {
+        updated = true;
+        writeFileSync(profilePath, JSON.stringify({ ...baseProfile, sources: [{ name: "race-secret", repo: "PostHog/hedge", ref: "main" }] }));
+      }
+      sent.push({ command, ...(options.input === undefined ? {} : { input: options.input }) });
+      if (command[0] === "git") return spawnRunner(command, options);
+      return capture([], undefined)(command, options);
+    };
+    const code = await main(["triage", "--send"], { home, engineRoot, platform: "darwin", env: {}, print: io.terminal.print, terminal: io.terminal, capture: raceCapture, hostname: () => "noras-mbp.local", run: async () => 0 });
+    expect(code).toBe(0);
+    const issue = sent.find((call) => call.command[1] === "issue")!;
+    expect(issue.input).toContain("The pack source <private source> is not pinned to a commit SHA.");
+    expect(issue.input).not.toContain("race-secret");
   });
 
   test("a long title is cut after redaction, so no part of a secret reaches the issue", async () => {
