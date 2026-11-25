@@ -54,15 +54,16 @@ async function currentCheckout(dir: string): Promise<CheckoutState | undefined> 
   if (!existsSync(join(dir, ".git"))) return undefined;
   const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
   if (!head.ok || !head.stdout) return undefined;
-  const branch = await git(dir, "symbolic-ref", "--short", "-q", "HEAD");
-  return { commit: head.stdout, ...(branch.ok && branch.stdout ? { branch: branch.stdout } : {}) };
+  const symbolic = await git(dir, "symbolic-ref", "-q", "HEAD");
+  const branch = symbolic.ok && symbolic.stdout.startsWith("refs/heads/") ? symbolic.stdout.slice("refs/heads/".length) : undefined;
+  return { commit: head.stdout, ...(branch ? { branch } : {}) };
 }
 
 async function restoreCheckout(dir: string, before: CheckoutState | undefined) {
   if (!before) return;
   const now = await currentCheckout(dir);
   if (now?.commit === before.commit && now.branch === before.branch) return;
-  if (before.branch) await git(dir, "checkout", "-q", before.branch);
+  if (before.branch) await git(dir, "switch", "-q", before.branch);
   else await git(dir, "checkout", "-q", "--detach", before.commit);
 }
 
@@ -194,19 +195,26 @@ const pinnedCommit = (record: Good | undefined) =>
 
 async function saveGood(dir: string, good: Good): Promise<string | undefined> {
   const before = await lastGood(dir);
+  const unchanged =
+    before !== undefined &&
+    before.repo === good.repo &&
+    before.ref === good.ref &&
+    before.commit === good.commit &&
+    before.asked === good.asked;
   const previousPin = pinnedCommit(before);
   if (previousPin) {
     const exists = await git(dir, "cat-file", "-e", `${previousPin.commit}^{commit}`);
     if (exists.ok) {
       const migrated = await recordPinRef(dir, previousPin.repo, previousPin.commit);
-      if (migrated) return migrated;
+      if (migrated && !unchanged) return migrated;
     }
   }
   const currentPin = pinnedCommit(good);
   if (currentPin) {
     const recorded = await recordPinRef(dir, currentPin.repo, currentPin.commit);
-    if (recorded) return recorded;
+    if (recorded && !unchanged) return recorded;
   }
+  if (unchanged) return undefined;
   try {
     await writeAtomic(goodPath(dir), JSON.stringify(good) + "\n");
   } catch (error) {

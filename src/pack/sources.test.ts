@@ -216,14 +216,14 @@ describe("fetchSource", () => {
   });
 
   test("loads the pinned commit of a cache that an older Hedge wrote without reaching the source", async () => {
+    const repo = await packRepo("Legacy rules v1.");
+    const commit = await spawnGit(repo, "rev-parse", "HEAD");
     const cache = temp.make("cache-");
-    const checkout = join(cache, "team");
-    mkdirSync(checkout);
-    await spawnGit(checkout, "init", "-q");
-    await spawnGit(checkout, "commit", "-q", "--allow-empty", "-m", "cached");
-    const ref = { name: "team", repo: join(temp.make(), "gone"), ref: await spawnGit(checkout, "rev-parse", "HEAD") };
-    writeFileSync(join(checkout, ".git", "hedge-source.json"), JSON.stringify({ repo: ref.repo, ref: ref.ref, commit: ref.ref }));
-    expect(await fetchSource(ref, cache)).toEqual({ ref, dir: checkout, packs: [] });
+    await legacyPinnedCache(cache, "team", repo, commit);
+    rmSync(repo, { recursive: true, force: true });
+    const fetched = await fetchSource({ name: "team", repo, ref: commit }, cache);
+    if ("error" in fetched) throw new Error(fetched.error);
+    expect([fetched.packs[0]?.manifest.summary, fetched.stale]).toEqual(["Legacy rules v1.", undefined]);
   });
 
   test("loads a commit pinned in capitals from the cache without reaching the source", async () => {
@@ -401,6 +401,10 @@ describe("fetchSource", () => {
     const refsDir = join(dir, ".git", "refs");
     setDirModes(refsDir, 0o555);
     try {
+      const reapplied = await fetchSource({ name: "team", repo, ref: commit }, cache);
+      if ("error" in reapplied) throw new Error(reapplied.error);
+      expect([reapplied.packs[0]?.manifest.summary, reapplied.stale]).toEqual(["Legacy pinned v1.", undefined]);
+
       const fallback = await fetchSource({ name: "team", repo, ref: "main" }, cache);
       if ("error" in fallback) throw new Error(fallback.error);
       expect(fallback.packs[0]?.manifest.summary).toBe("Legacy pinned v1.");
@@ -460,13 +464,16 @@ describe("fetchSource", () => {
     const cache = temp.make("cache-");
     await fetchSource({ name: "team", repo: repoA, ref: commitA1 }, cache);
     const cacheDir = join(cache, "team");
+    await spawnGit(cacheDir, "checkout", "-q", "-b", "topic");
     writePack(cacheDir, "Local cache edit.");
     await spawnGit(cacheDir, "commit", "-q", "-am", "local edit");
+    await spawnGit(cacheDir, "tag", "topic");
     const localCommit = await spawnGit(cacheDir, "rev-parse", "HEAD");
 
     const unreachable = await fetchSource({ name: "team", repo: join(temp.make("missing-"), "gone.git"), ref: "main" }, cache);
     expect("error" in unreachable).toBe(true);
     expect(await spawnGit(cacheDir, "rev-parse", "HEAD")).toBe(localCommit);
+    expect(await spawnGit(cacheDir, "symbolic-ref", "-q", "HEAD")).toBe("refs/heads/topic");
 
     const metaPath = join(cacheDir, ".git", "hedge-source.json");
     rmSync(metaPath, { force: true });
@@ -476,6 +483,7 @@ describe("fetchSource", () => {
       const switchFailed = await fetchSource({ name: "team", repo: repoB, ref: commitB }, cache);
       expect(switchFailed).toMatchObject({ error: expect.stringContaining(`could not record ${commitB}`) });
       expect(await spawnGit(cacheDir, "rev-parse", "HEAD")).toBe(localCommit);
+      expect(await spawnGit(cacheDir, "symbolic-ref", "-q", "HEAD")).toBe("refs/heads/topic");
     } finally {
       rmSync(metaPath, { recursive: true, force: true });
     }

@@ -262,6 +262,7 @@ describe("hedge triage", () => {
               { name: "team-i", repo: "PostHog/hedge", ref: "home/demo/private-release" },
               { name: "team-j", repo: "PostHog/hedge", ref: `${home.replace(/^\//, "")}/secret-home-branch` },
               { name: "team-k", repo: "/work/private project.git", ref: "main" },
+              { name: "team-l", repo: "/work/repo", ref: "main" },
             ],
           },
         },
@@ -281,6 +282,8 @@ describe("hedge triage", () => {
         "browse https://github.com/org/repo/tree/home/demo/private-release",
         `browse https://github.com/org/repo/tree${home}/secret-home-branch`,
         "TOKEN=/work/private project.git",
+        "TOKEN=prefix/work/repo/super-secret-suffix",
+        "GET https://example.com/cb?token=prefix/work/repo/query-secret-suffix",
       ].join("\n") + "\n",
     );
     const result = await triageWithRealGit(home, ["--send"]);
@@ -295,7 +298,9 @@ describe("hedge triage", () => {
     expect(issue.input).toContain("quick remote ref <branch> at <branch>");
     expect(issue.input).toContain("browse https://github.com/org/repo/tree/<branch>");
     expect(issue.input).toContain("browse https://github.com/org/repo/tree<branch>");
-    for (const leaked of ["correct-horse-battery-staple", "super-secret-value", "alice", "topsecret", "secret-owner", "secret-repo", "internal-release", keyLikeAlias, "private-project", "customer.internal", "embargoed-release", "top-secret", "private-release", "secret-home-branch", "project.git", "/work/private"]) expect(issue.input).not.toContain(leaked);
+    expect(issue.input).toContain("TOKEN=<redacted>");
+    expect(issue.input).toContain("https://example.com/cb?token=<redacted>");
+    for (const leaked of ["correct-horse-battery-staple", "super-secret-value", "alice", "topsecret", "secret-owner", "secret-repo", "internal-release", keyLikeAlias, "private-project", "customer.internal", "embargoed-release", "top-secret", "private-release", "secret-home-branch", "project.git", "/work/private", "super-secret-suffix", "query-secret-suffix"]) expect(issue.input).not.toContain(leaked);
   });
 
   test("redacts unpinned source aliases and repos from an inherited HEDGE_PROFILE_DIR without disclosing its alias or engine fork", async () => {
