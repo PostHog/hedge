@@ -454,6 +454,17 @@ test("preserves ancestor HEDGE_SUPERVISOR_TAG across nested capture so outer tag
   }
 });
 
+test("isolates capture supervisor from target BUN_OPTIONS and flushes oversized spawn errors", async () => {
+  const okRes = await capture(["sh", "-c", "printf ok"], {
+    env: { ...process.env, BUN_OPTIONS: "--preload /nonexistent-hedge-review-preload.ts" },
+    timeoutMs: 5_000,
+  });
+  expect(okRes).toEqual({ code: 0, stdout: "ok", stderr: "" });
+
+  const hugeMissing = `/${"a".repeat(256 * 1024)}/no-such-bin`;
+  await expect(capture([hugeMissing], { timeoutMs: 5_000 })).rejects.toMatchObject({ code: expect.stringMatching(/ENOENT|ENAMETOOLONG/) });
+});
+
 test("kills a background child holding stdout open after the command exits under a box lock", async () => {
   const dir = temp.make("hedge-lock-pipe-");
   const [ready, gone, leaderGone] = [join(dir, "ready"), join(dir, "gone"), join(dir, "leader-gone")];

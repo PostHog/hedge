@@ -3,6 +3,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFile
 import { join } from "node:path";
 import { main, type CliOptions } from "../cli.ts";
 import type { AvailableSource, PackManifest, ProfileFile } from "../pack/types.ts";
+import { humanStepsLeft } from "../reconciler/apply.ts";
 import { defaultSources } from "../setup/defaults.ts";
 import { cachedCheckout, isolateGit, spawnGit, template, tempDirs } from "../testing/git.ts";
 import { engineSource, resolveEngine } from "../testing/packs.ts";
@@ -523,13 +524,13 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     expect(linuxPlan.onHub).toBe(true);
     const lines: string[] = [];
     const profile = { schema: 1, engine: { repo: "PostHog/hedge", ref: "main", channel: "track" }, sources: [team.ref], packs: ["team"], plan: "both", settings: {}, workflows: {} } satisfies ProfileFile;
-    const failingStep = linuxPlan.human.find((step) => step.pack === "team" && step.id === "sign-in")!;
+    const osHome = temp.make("home-os-served-");
     const ctx = {
       profile,
       plan: linuxPlan,
       packs: [...engine.packs, ...team.packs],
       print: (line: string) => lines.push(line),
-      humanStepsLeft: async () => ({ failing: [failingStep], unchecked: [] }),
+      humanStepsLeft: () => humanStepsLeft(linuxPlan, { home: osHome, giveUp: new Promise<void>(() => {}) }),
     } as unknown as Parameters<typeof packsCommand>[1];
     expect(await packsCommand([], ctx)).toBe(0);
     expect(lines.join("\n")).toContain(`  ~ team  Team rules.\n      Workflows: linux-wf needs setup, mac-wf on\n${needsSetup}`);

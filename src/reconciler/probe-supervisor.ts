@@ -1,4 +1,4 @@
-import { closeSync, readdirSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, readdirSync, readFileSync, writeSync } from "node:fs";
 
 export type StopSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT";
 export type Timer = (ms: number, fire: () => void) => () => void;
@@ -16,9 +16,19 @@ export function ownTag(value: string | undefined): string | undefined {
   return last || undefined;
 }
 
+export function supervisorEnv(fullTag: string): Record<string, string> {
+  const clean: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key === "BUN_OPTIONS" || value === undefined) continue;
+    clean[key] = value;
+  }
+  clean[tagEnvVar] = fullTag;
+  return clean;
+}
+
 export type SupervisorHost = {
   spawn: (command: string[]) => { pid?: number; exited: Promise<number>; kill?: (signal?: NodeJS.Signals) => void };
-  killGroup: (signal: NodeJS.Signals) => void | Promise<void>;
+  killGroup: (signal: NodeJS.Signals, includeTagged?: boolean) => void | Promise<void>;
   hasGroupMembers?: (targetPid?: number) => Promise<boolean> | boolean;
   timer: Timer;
   onSignal: (signal: StopSignal, handler: () => void) => void;
@@ -105,12 +115,13 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string): ProcTarg
 }
 
 const psLookupLimitMs = 200;
+const psBin = existsSync("/bin/ps") ? "/bin/ps" : existsSync("/usr/bin/ps") ? "/usr/bin/ps" : "ps";
 
 async function runBoundedPs(args: string[]): Promise<{ pid: number; text: string } | undefined> {
   let ps: ReturnType<typeof Bun.spawn> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    ps = Bun.spawn(["ps", ...args], { stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: psLookupLimitMs, killSignal: "SIGKILL" });
+    ps = Bun.spawn([psBin, ...args], { stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: psLookupLimitMs, killSignal: "SIGKILL" });
     const stream = ps.stdout as ReadableStream<Uint8Array>;
     const reader = stream.getReader();
     const decoder = new TextDecoder();
@@ -328,7 +339,7 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
 
   const finishGroup = () => {
     if (finished) return;
-    const killed = host.killGroup("SIGKILL");
+    const killed = host.killGroup("SIGKILL", Boolean(stop) && !normalCleanupStarted);
     if (killed && typeof (killed as Promise<void>).then === "function") {
       void (killed as Promise<void>).finally(() => exit(143));
       return;
@@ -339,7 +350,7 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
   const forwardGroup = (name: StopSignal) => {
     if (forwarded.has(name)) return;
     forwarded.add(name);
-    host.killGroup(name);
+    host.killGroup(name, Boolean(stop) && !normalCleanupStarted);
   };
 
   const armHard = () => {
@@ -430,6 +441,7 @@ if (import.meta.main) {
     else pendingStops.push(sig);
   };
   let command: string[] = [];
+  let targetEnv: Record<string, string | undefined> | undefined;
   let cleanupGraceMs = graceMs;
   let controlFd: number | undefined;
   try {
@@ -438,8 +450,15 @@ if (import.meta.main) {
     if (Array.isArray(parsed) && parsed.every((arg) => typeof arg === "string")) {
       command = parsed;
     } else if (parsed && typeof parsed === "object" && Array.isArray((parsed as { command?: unknown }).command)) {
-      const record = parsed as { command: unknown[]; graceMs?: unknown; controlFd?: unknown };
+      const record = parsed as { command: unknown[]; env?: unknown; graceMs?: unknown; controlFd?: unknown };
       if (record.command.every((arg) => typeof arg === "string")) command = record.command as string[];
+      if (record.env && typeof record.env === "object" && !Array.isArray(record.env)) {
+        const cleanEnv: Record<string, string> = {};
+        for (const [k, v] of Object.entries(record.env as Record<string, unknown>)) {
+          if (typeof v === "string") cleanEnv[k] = v;
+        }
+        targetEnv = cleanEnv;
+      }
       if (typeof record.graceMs === "number" && record.graceMs >= 0) cleanupGraceMs = record.graceMs;
       if (typeof record.controlFd === "number" && Number.isInteger(record.controlFd) && record.controlFd >= 3) controlFd = record.controlFd;
     }
@@ -474,9 +493,9 @@ if (import.meta.main) {
   }
   const runTag = ownTag(process.env[tagEnvVar]);
   await supervise(command, {
-    spawn: (argv) => Bun.spawn(argv, { stdio: ["ignore", "ignore", "ignore"] }),
-    killGroup: (signal) => killSession(process.pid, signal, runTag),
-    hasGroupMembers: () => hasOtherGroupMember(runTag),
+    spawn: (argv) => Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio: ["ignore", "ignore", "ignore"] }),
+    killGroup: (signal, includeTagged) => killSession(process.pid, signal, includeTagged ? runTag : undefined),
+    hasGroupMembers: () => hasOtherGroupMember(),
     timer: realTimer,
     onSignal: (signal, handler) => {
       handlers.set(signal, handler);

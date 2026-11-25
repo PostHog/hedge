@@ -10,7 +10,7 @@ import { hublessReason, listedPack } from "./resolve.ts";
 import { wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
 import { withLegacyNames } from "../legacy.ts";
 import { bunScript } from "../runner/bun.ts";
-import { appendTag, graceMs, interruptGraceMs, killSession, killSessionSync, tagEnvVar } from "./probe-supervisor.ts";
+import { appendTag, graceMs, interruptGraceMs, killSession, killSessionSync, supervisorEnv, tagEnvVar } from "./probe-supervisor.ts";
 
 export type AdapterContext = { home: string; dryRun: boolean; adopt: string[]; adoptFrom?: string[] };
 export type AdapterResult = { actions: Action[]; findings: Finding[]; blocked?: boolean; failed?: boolean };
@@ -698,12 +698,15 @@ async function runDetached(command: string[], env: Record<string, string | undef
   let handedToExit = false;
   try {
     const tag = crypto.randomUUID();
-    const payload = { command, controlFd: 3, ...(cleanupGraceMs === undefined ? {} : { graceMs: cleanupGraceMs }) };
+    const fullTag = appendTag(env[tagEnvVar], tag);
+    const targetEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(env)) if (v !== undefined) targetEnv[k] = v;
+    targetEnv[tagEnvVar] = fullTag;
+    const payload = { command, env: targetEnv, controlFd: 3, ...(cleanupGraceMs === undefined ? {} : { graceMs: cleanupGraceMs }) };
     const encoded = JSON.stringify(payload);
-    const overStdin = Buffer.byteLength(encoded) > 65_536;
-    child = Bun.spawn(overStdin ? bunScript(probeSupervisor) : bunScript(probeSupervisor, encoded), {
-      stdio: [overStdin ? new TextEncoder().encode(encoded) : "ignore", "pipe", "ignore", "pipe"],
-      env: { ...env, [tagEnvVar]: appendTag(env[tagEnvVar], tag) },
+    child = Bun.spawn(bunScript(probeSupervisor), {
+      stdio: [new TextEncoder().encode(encoded), "pipe", "ignore", "pipe"],
+      env: supervisorEnv(fullTag),
       detached: true,
     });
     const aliveFd = typeof child.stdio[3] === "number" ? child.stdio[3] : undefined;

@@ -85,7 +85,21 @@ async function listPacks(context: ChangeContext) {
     const waitsOn = (steps: typeof failing) => {
       const ids = new Set(steps.filter((step) => firstHuman.get(step.id) === step).map((step) => step.id));
       const waiting = new Set(steps.map((step) => step.workflow).filter((id): id is string => id !== undefined));
-      const catalog = context.plan.onHub ? (context.plan.catalog ?? []) : [];
+      const activeWorkflowIds = new Set(workflows.filter((workflow) => workflow.active).map((workflow) => workflow.id));
+      const servedWorkflow = new Map(
+        (manifest.served ?? [])
+          .filter(
+            (service) =>
+              service.workflow &&
+              (!service.on || service.on.includes(context.plan.os)) &&
+              (!service.plans || service.plans.includes(context.plan.ai)) &&
+              activeWorkflowIds.has(service.workflow),
+          )
+          .map((service) => [service.port, service.workflow!]),
+      );
+      const catalog = context.plan.onHub
+        ? (context.plan.catalog ?? []).map((entry) => ({ ...entry, workflow: entry.pack === manifest.name ? servedWorkflow.get(entry.port) : undefined }))
+        : [];
       for (const item of [...context.plan.steps, ...context.plan.jobs, ...context.plan.config, ...catalog]) {
         if (item.pack === manifest.name && item.after && ids.has(item.after) && item.workflow) waiting.add(item.workflow);
       }

@@ -2,7 +2,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, re
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { boxPrefix } from "../../../src/hub/names.ts";
-import { appendTag, killSession, killSessionSync, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { appendTag, killSession, killSessionSync, supervisorEnv, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 import { bunScript } from "../../../src/runner/bun.ts";
 import { heldLocks } from "./box-lock.ts";
 
@@ -169,8 +169,12 @@ export function captureWith(timer: Timer): Capture {
     try {
       const command = holdingLocks(argv, locks, timeoutMs, env?.PATH ?? process.env.PATH ?? "");
       const childEnv = env ?? process.env;
+      const fullTag = appendTag(childEnv[tagEnvVar], tag);
+      const targetEnv: Record<string, string> = {};
+      for (const [k, v] of Object.entries(childEnv)) if (v !== undefined) targetEnv[k] = v;
+      targetEnv[tagEnvVar] = fullTag;
       child = Bun.spawn(bunScript(captureSupervisor), {
-        env: { ...childEnv, [tagEnvVar]: appendTag(childEnv[tagEnvVar], tag) } as Record<string, string>,
+        env: supervisorEnv(fullTag),
         stdio: [input, output, output, ...locks, "pipe"],
         detached: true,
         ipc(message) {
@@ -199,7 +203,7 @@ export function captureWith(timer: Timer): Capture {
       if (stopped) {
         stopChild();
       } else {
-        live.send({ argv: command, lockCount: locks.length, controlFd: 3 + locks.length });
+        live.send({ argv: command, env: targetEnv, lockCount: locks.length, controlFd: 3 + locks.length });
       }
       let hardKill: ReturnType<typeof setTimeout> | undefined;
       let forceExpired = false;

@@ -527,4 +527,35 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
       } catch {}
     }
   });
+
+  test("leaves an intentionally detached daemon alive on normal probe exit while still killing detached workers on stop", async () => {
+    const dir = temp.make("sup-detached-normal-");
+    const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+    mkfifo(ready, gone);
+    const started = fifoRead(ready);
+    const closed = fifoRead(gone);
+    const tag = crypto.randomUUID();
+    const daemonScript = `const c = Bun.spawn(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" }); c.unref(); process.exit(0);`;
+    const payload = JSON.stringify({ command: [process.execPath, "-e", daemonScript], controlFd: 3 });
+    const sup = Bun.spawn([process.execPath, supervisorPath], {
+      stdio: [new TextEncoder().encode(payload), "pipe", "ignore", "pipe"],
+      env: { ...process.env, [tagEnvVar]: tag },
+      detached: true,
+    });
+    const aliveFd = sup.stdio[3] as number;
+    let daemonPid = 0;
+    try {
+      daemonPid = Number((await started).trim());
+      expect(daemonPid).toBeGreaterThan(0);
+      expect(await sup.exited).toBe(0);
+      expect(() => process.kill(daemonPid, 0)).not.toThrow();
+    } finally {
+      if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
+      sup.kill("SIGKILL");
+      try {
+        closeSync(aliveFd);
+      } catch {}
+      await closed.catch(() => {});
+    }
+  });
 });

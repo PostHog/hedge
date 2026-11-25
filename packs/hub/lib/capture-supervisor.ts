@@ -1,7 +1,7 @@
 import { closeSync } from "node:fs";
 import { killSession, ownTag, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
-type StartMessage = { argv: string[]; lockCount: number; controlFd?: number };
+type StartMessage = { argv: string[]; env?: Record<string, string>; lockCount: number; controlFd?: number };
 
 const runTag = ownTag(process.env[tagEnvVar]);
 let target: ReturnType<typeof Bun.spawn> | undefined;
@@ -79,18 +79,27 @@ process.on("message", async (message: unknown) => {
     return;
   }
   if (!message || typeof message !== "object" || !Array.isArray((message as StartMessage).argv)) return;
-  const { argv, lockCount, controlFd } = message as StartMessage;
+  const { argv, env, lockCount, controlFd } = message as StartMessage;
   if (typeof controlFd === "number" && Number.isInteger(controlFd) && controlFd >= 3) watchControl(controlFd);
   const lockFds = Array.from({ length: lockCount }, (_, index) => index + 3);
   const stdio: [number, number, number, ...number[]] = [0, 1, 2, ...lockFds];
   try {
-    target = Bun.spawn(argv, { stdio });
+    target = Bun.spawn(argv, { ...(env ? { env } : {}), stdio });
   } catch (error) {
+    for (const fd of [...lockFds, 1, 2]) {
+      try {
+        closeSync(fd);
+      } catch {}
+    }
+    targetReaped = true;
+    targetCode = 127;
     const err = error as NodeJS.ErrnoException;
     try {
       process.send?.({ error: err?.message ?? String(error), ...(err?.code ? { code: err.code } : {}) });
-    } catch {}
-    process.exit(127);
+    } catch {
+      process.exit(127);
+    }
+    return;
   }
   for (const fd of lockFds) {
     try {

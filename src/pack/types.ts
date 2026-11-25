@@ -119,7 +119,7 @@ export type ConfigEntry = Scope & { provider: Provider; key: string; value: unkn
 export type ServedService = Scope & { id: string; port: number; health: string; after?: string };
 
 /** One entry of the service catalog, which every node computes from the same profile. */
-export type CatalogEntry = { pack: string; id: string; port: number; health: string; after?: string; workflow?: string };
+export type CatalogEntry = { pack: string; id: string; port: number; health: string; after?: string };
 
 /** A file from the pack, linked at target under the home directory. */
 export type PackFile = Scope & { path: string; target: string };

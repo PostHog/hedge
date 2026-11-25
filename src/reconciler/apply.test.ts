@@ -698,24 +698,44 @@ describe("humanStepsLeft", () => {
 
   test("drains an already-written failure exit code when the deadline fires after a busy event loop", async () => {
     const home = temp.make("home-busy-deadline-");
-    const doneMarker = join(home, "done");
+    const ppidFile = join(home, "sup-pid");
     let fire!: () => void;
     const giveUp = new Promise<void>((resolve) => (fire = resolve));
     const step = {
       id: "quick-fail",
       pack: "team",
       say: "Quick fail.",
-      probe: ["sh", "-c", 'printf x > "$1"; exit 1', "probe", doneMarker],
+      probe: ["sh", "-c", 'printf "%s" "$PPID" > "$1.tmp" && mv "$1.tmp" "$1"; exit 1', "probe", ppidFile],
+    };
+    const supFinished = (pid: number) => {
+      if (process.platform === "linux") {
+        try {
+          const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+          const close = stat.lastIndexOf(")");
+          return close !== -1 && stat.slice(close + 2, close + 3) === "Z";
+        } catch {
+          return true;
+        }
+      }
+      const res = Bun.spawnSync(["/bin/ps", "-o", "stat=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" });
+      const state = res.stdout.toString().trim();
+      return !state || state.startsWith("Z");
     };
     const pending = humanStepsLeft(plan({ human: [step] }), { home, giveUp });
-    await Bun.sleep(1);
-    const limit = performance.now() + 2000;
+    await Promise.resolve();
+    await Promise.resolve();
+    const limit = performance.now() + 3000;
     const sab = new Int32Array(new SharedArrayBuffer(4));
-    while (!existsSync(doneMarker) && performance.now() < limit) {
+    while (!existsSync(ppidFile) && performance.now() < limit) {
       Atomics.wait(sab, 0, 0, 2);
     }
-    expect(existsSync(doneMarker)).toBe(true);
-    Atomics.wait(sab, 0, 0, 25);
+    expect(existsSync(ppidFile)).toBe(true);
+    const supPid = Number(readFileSync(ppidFile, "utf8").trim());
+    expect(supPid).toBeGreaterThan(0);
+    while (!supFinished(supPid) && performance.now() < limit) {
+      Atomics.wait(sab, 0, 0, 2);
+    }
+    expect(supFinished(supPid)).toBe(true);
     fire();
     const res = await pending;
     expect(res.failing.map((item) => item.id)).toEqual(["quick-fail"]);
