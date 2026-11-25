@@ -2,20 +2,175 @@
 
 ## Unreleased
 
-### A one-way door stops the review loop at an escalation
+### The merge card line names what the hold needs
 
-- With `pull-requests.autonomy` set to `end`, when the review arbiter
-  escalates or gives no verdict on a one-way door, `hedge proof review` no
-  longer tells the agent to ask the user for another round. The loop stops:
-  revert each production commit since the latest review, and revert or list
-  each open blocker or major under Known issues, as at the review budget.
-- `--agent` cannot pass the stop. The user's `--override` still runs a round.
-- `hedge proof` records the stop in the pull request's reviews. While it
-  stands, every later round and final read refuses until the user's
-  `--override`, also after a switch to `ask`. `hedge proof respond` takes a
-  `known` answer after it, the gate's judge reads the stop, and the end table
-  in `hedge decision report` shows it.
-- On `ask`, a pull request that never stopped on `end` runs as before.
+- When an agent accepted a gap, the `merge card:` line of `hedge proof gate`
+  adds `held:` with each 🤖 decision as the merge-gate hook names it, such as `d-1a2b3c4d for live-run/prod-shape`.
+  Copy those names into the merge card question: before, only the hook's
+  refusal on a merge showed them. The line that `hedge proof receipt` prints
+  has no `held:`, so copy the merge card from the gate's line.
+
+### The merge card line, and a hold on gaps the agent accepted
+
+- A passing `hedge proof gate` prints one `merge card:` line, and
+  `hedge proof receipt` prints it too: the merge-risk grade and door, with
+  "one-way door" spelled out, the review rounds and final reads and how many
+  ran past the review budget, each gap with who accepted it and why, each item
+  under Known issues, and the minutes from opened to ready and from ready to
+  this line. Copy it onto the merge card.
+- The receipt writes the same summary at the top of its section of the PR
+  body, as a **Merge card** line without the minutes to the card.
+- A read past the budget now counts on the user's `--override` too. It does
+  not take one of the agent's 3 reads.
+- A gate pass records the gaps that an agent accepted with 🤖 decisions. The
+  merge-gate hook refuses an enqueue or merge of that head until the person
+  chooses "Merge" on a merge card that names the PR, its full head sha, and
+  each held decision as the refusal names it, its id with every proof kind
+  it accepts, such as `d-1a2b3c4d for live-run/prod-shape`:
+  `hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full head sha>: merge card'`.
+  The recorder refuses any other choice, and a question without that head.
+  The answer lifts only the decisions its question named that way,
+  so a gap that a decision accepts later still shows on a card. A push leaves
+  it behind. A gate override for the head lifts the hold too.
+- The hold covers repositories in `guards.merge-gate-exempt` too, which still
+  need no gate pass. There, the hook reads the decision ledger on every merge,
+  and refuses it when the ledger cannot be read. A 🤖 gap decision of the PR
+  holds it until a gate pass at its head that read that decision shows no
+  such gap.
+- While the decision ledger cannot be read, the hook now refuses every
+  enqueue and merge, since it cannot tell whether a gap an agent accepted
+  holds the head. Before, a gate pass on this machine let it through.
+- `hedge proof gate` saves its run and shares its pass before it reads the
+  PR's timeline for the card line, so a slow GitHub read cannot keep a pass
+  from counting.
+
+### The landed gate survives a renamed required check, and the thread query costs less
+
+- `hedge proof gate --landed` no longer waits on a required check that never
+  reported on a merged pull request when every ruleset that requires it
+  changed after the merge. A renamed or new check in a ruleset opened a gap on
+  every merged pull request before. The CI line names each such check as not
+  judged. A check that reported still counts, and a check that classic branch
+  protection also requires still waits.
+- The review-thread query that `hedge proof gate` and `hedge pr bot-threads`
+  send reads the viewer's 👍 from `reactionGroups` instead of a page of
+  reactions, and asks for smaller pages. It costs 1 GraphQL point instead of
+  about 100 on a pull request with few threads.
+
+### Proof provenance is checked in code, and the judge asks less
+
+- `hedge proof run` now records the commit, exit 0, when the run started and
+  finished, and the directory it ran in, beside the command. Records from
+  before keep their runner mark.
+- The gate prints that capture on each kind whose files all came from the
+  runner at the commit it counts. The judge then learns that the kind's
+  provenance is verified by code, and no longer fails it as typed by hand, as
+  evidence of an earlier commit, or for how it was captured.
+- Evidence now carries to HEAD across commits that change only test files no
+  production file names, as the review already did, dev-observed evidence
+  included. The gate line names the quiet commits. A changed snapshot that a
+  production file names is not such a test file.
+- When every file of the diff is such a test file, the judge learns the diff
+  is test-only, so a critical path that only test files match does not make
+  the Tier critical.
+- A judge answer that fails a question without a reason, a high quality
+  finding without a problem, and an error without a message still give the
+  gate's last line a reason.
+
+### A Waits guide, and a to-do for repeated guide headings
+
+- The Orchestration pack writes a new guide, `~/.agents/guides/waits.md`. It
+  says how a T3 thread waits on a pull request, a child task, another thread,
+  a command, or its own schedule; who owns each open pull request and how to
+  hand one over; and what Hedge's hooks check before a turn ends.
+  If one of your own packs owns a guide named `waits`, rename it before you
+  update, together with every section and reference that names it: two packs
+  cannot own one guide, and a section that still names `waits` lands in the
+  new guide.
+- `hedge apply` and `hedge doctor` now report a pack section that repeats a
+  heading of the guide it adds to, such as a second `Tests` in
+  `coding-standards.md`, as a to-do. Hedge still writes the section. A
+  section adds what the guide does not say, under a heading of its own, and a
+  setting changes a rule.
+- The Pull requests pack's rules no longer contradict **Ready on green**: when
+  your agent instructions turn it on, the agent marks a pull request ready
+  once it passes your gate.
+
+### A wait needs something that wakes it
+
+- The question guard's Stop hook stops a top-level T3 thread once when its
+  last line starts with ⏳ or 🔕 and nothing can wake it: no PR watch held
+  until merge or on running checks, no running child task or thread wait, and
+  no scheduled task bound to the thread. It tells the agent to call
+  `watch_pull_request` with `until: "merged"`, keep the lane's child, or
+  schedule the check. It runs after the proof check, and it never snoozes or
+  settles the thread.
+
+### A revoked app sign-in on the MCP gateway asks for a re-auth
+
+- When ChatGPT revokes the sign-in of a Codex app on the MCP gateway, such as
+  the Slack bridge, a call that fails with `token_revoked`, `invalid_auth` or a
+  like auth error now answers the agent with one line, such as `Slack needs
+  re-auth: on the hub, run: hedge mcp-gateway sign-in slack`, in place of a
+  bare 401. A tool list that fails this way gets the same line. MCPHub can
+  still answer with its own error instead: when a JSON 401 stays after its
+  retry, or when no tools were ever listed.
+
+### A message steers a thread that waits on a question card
+
+- `hedge thread send` no longer turns `auto` into `queue` when the target
+  thread waits on a question card or an approval, on this machine or a linked
+  one, when the thread runs on Claude or Codex: T3 steers the turn, the card
+  stays open, and the agent reads the message once the person answers. A
+  slash command, such as `/goal`, and a message to a card thread on any other
+  provider still go out as `queue`.
+- The `question-guard` workflow no longer turns back a `t3_thread_send` to a
+  thread that waits on a card. The prose-title card check stays.
+- Hedge's own jobs that message threads, such as mail watch, review wait and
+  library shares, follow the same rule.
+- The base rule tells agents to omit `mode`, to leave a message that T3
+  queued as it is, to queue a slash command and a card thread on another
+  provider, and never to send `restart` to a thread that waits on a card.
+
+### The gate holds on an unanswered bot finding
+
+- `hedge proof gate` now reads the pull request's review threads on GitHub
+  and fails while a review bot's thread is unresolved and has no answer from
+  you: no reply of yours after the bot's last comment, and no 👍 of yours on
+  it. This covers PostHog Review, the security review bot, ParameterAI, Veria,
+  CodeQL and every other GitHub App. The refusal names each open thread by its
+  URL. Fix it and resolve it with
+  `hedge pr bot-threads --repo <owner/repo> --pr <number> --fixed <URL>`, or
+  reply with why it does not hold.
+- A person's thread does not hold the gate. `--landed` checks it too, so it
+  cannot pass an open pull request past a finding.
+- When GitHub cannot list the threads, the gate fails and says why.
+- `hedge pr bot-threads` and the gate share one reader, and both now know the
+  logins of these bots.
+
+### On `end`, the agent decides every round and gap
+
+- With `pull-requests.autonomy` set to `end`, `hedge proof` tells the agent to
+  decide every review round and every proof gap alone, as a 🤖 decision: panel
+  gaps, every gap kind on a critical pull request, and one-way doors included.
+  `hedge decision record --mark 🤖` takes them, and the gate counts them. Only
+  an ungraded pull request and a gap the user keeps owed stay with the user.
+- A one-way door no longer stops the review loop at an escalation: it goes to
+  the agent like any other round. This replaces the stop from the previous
+  release. A saved `one-way-stop.json` is ignored on `ask` too, so on `ask` an
+  escalation on a one-way door goes to the user again, as before that release.
+- At the review budget, a treated budget included, `--agent` runs up to 3 more
+  reads past it, one 🤖 review decision each, even when a read finds nothing.
+  After them, hedge stops the loop and tells the agent to ask the user nothing
+  about another read. Only review and proof-gap asks go to the agent: on a
+  critical pull request, design, scope, deploy, secret and merge asks stay
+  with the user.
+- When the judge's arbiter stops the retries, the gate tells the agent to
+  record a judge gap and decide it alone.
+- A gate pass saved on `end` marks itself, in the local run and in the shared
+  ledger. Once the profile is back on `ask`, the merge-gate hook does not count
+  it: run `hedge proof gate` again.
+- Otherwise, on `ask`, the default, nothing changes.
 
 ### A hard read budget for treated pull requests
 
@@ -25,7 +180,7 @@
   nothing to fix spends none of it. A control or excluded pull request keeps
   the profile's `pull-requests.reviewCeiling`. The profile's ceiling can lower a
   treated budget, never raise it.
-- At the budget the usual stop holds: `--agent` cannot pass it, and only the
+- At the budget the usual stop holds: on `ask`, `--agent` cannot pass it, and only the
   user's `--override` runs another read. A finding listed under Known issues
   takes a `known` answer once the same budget is spent; `hedge proof respond`
   works the budget out at the current head, as the review does.

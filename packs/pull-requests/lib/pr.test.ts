@@ -147,15 +147,16 @@ test("bot-threads --resolve never resolves a thread a person opened, even when o
   expect(box.calls().filter((call) => call.includes("resolveReviewThread"))).toEqual([]);
 });
 
-const thumbs = (url: string, ...logins: (string | null)[]) => ({ ...comment(user("reviewer"), url), reactions: { nodes: logins.map((login) => ({ user: login === null ? null : { login } })) } });
+const reacted = (...mine: string[]) => ({ reactionGroups: ["THUMBS_UP", "THUMBS_DOWN", "HEART"].map((content) => ({ content, viewerHasReacted: mine.includes(content) })) });
+const thumbs = (url: string, ...mine: string[]) => ({ ...comment(user("reviewer"), url), ...reacted(...mine) });
 
 test("a 👍 from the viewer on the latest comment answers a thread, and human threads that still wait on the viewer are counted", () => {
   const box = sandbox();
   box.reply("threads", threads("me", [
-    thread("H1", "src/a.ts", 1, [thumbs("https://example.test/h1", "someone", "me")]),
-    thread("H2", "src/b.ts", 2, [thumbs("https://example.test/h2", "someone", null)]),
-    thread("H3", "src/c.ts", 3, [thumbs("https://example.test/h3", "me"), comment(user("reviewer"), "https://example.test/h3b")]),
-    thread("B1", "src/d.ts", 4, [{ ...comment(bot("coderabbitai"), "https://example.test/b1"), reactions: { nodes: [{ user: { login: "me" } }] } }]),
+    thread("H1", "src/a.ts", 1, [thumbs("https://example.test/h1", "THUMBS_UP", "HEART")]),
+    thread("H2", "src/b.ts", 2, [thumbs("https://example.test/h2", "THUMBS_DOWN", "HEART")]),
+    thread("H3", "src/c.ts", 3, [thumbs("https://example.test/h3", "THUMBS_UP"), comment(user("reviewer"), "https://example.test/h3b")]),
+    thread("B1", "src/d.ts", 4, [{ ...comment(bot("coderabbitai"), "https://example.test/b1"), ...reacted("THUMBS_UP") }]),
   ]));
   box.reply("resolve", { data: {} });
   const result = box.run("bot-threads", "--repo", "acme/widgets", "--pr", "12", "--resolve");
@@ -168,7 +169,7 @@ test("a 👍 from the viewer on the latest comment answers a thread, and human t
     "2 human threads wait on me: react 👍 to a fix, or draft the reply for me to post.",
   ].join("\n"));
   expect(result.code).toBe(0);
-  expect(box.calls()[0]).toContain("reactions(content: THUMBS_UP");
+  expect(box.calls()[0]).toContain("reactionGroups { content viewerHasReacted }");
 });
 
 test("one human thread that waits is named in the singular", () => {
@@ -216,9 +217,31 @@ test("--fixed that resolves the last waiting bot thread passes, and --resolve th
   expect(box.calls().filter((call) => call.includes("resolveReviewThread")).map((call) => call.match(/id=(\w+)/)![1])).toEqual(["F6", "F5"]);
 });
 
-test("bot-threads reads every page of threads and of each thread's comments", () => {
+test("--fixed and --resolve treat the review bots Hedge names as bots when GitHub reports them as user accounts", () => {
   const box = sandbox();
-  const resolved = Array.from({ length: 100 }, (_, index) => thread(`R${index}`, "src/old.ts", index, [comment(bot("codecov"), `https://example.test/r${index}`)], true));
+  box.reply("threads", threads("me", [
+    thread("K1", "src/a.ts", 1, [comment(user("posthog-security-review-bot"), "https://example.test/k1")]),
+    thread("K2", "src/b.ts", 2, [comment(user("posthog"), "https://example.test/k2"), comment(user("me"), "https://example.test/k2r")]),
+    thread("K3", "src/c.ts", 3, [comment(user("veria-ai"), "https://example.test/k3"), comment(user("reviewer"), "https://example.test/k3b")]),
+  ]));
+  box.reply("resolve", { data: {} });
+  const result = box.run("bot-threads", "--repo", "acme/widgets", "--pr", "12", "--resolve", "--fixed", "https://example.test/k1", "--fixed", "https://example.test/k3");
+  expect(result.out).toBe([
+    "bot unanswered src/a.ts:1 https://example.test/k1",
+    "bot answered src/b.ts:2 https://example.test/k2",
+    "human unanswered src/c.ts:3 https://example.test/k3",
+    "resolved fixed src/a.ts:1 https://example.test/k1",
+    "skipped human thread, the person resolves it: https://example.test/k3",
+    "resolved src/b.ts:2 https://example.test/k2",
+    "1 human thread waits on me: react 👍 to a fix, or draft the reply for me to post.",
+  ].join("\n"));
+  expect(result.code).toBe(0);
+  expect(box.calls().filter((call) => call.includes("resolveReviewThread")).map((call) => call.match(/id=(\w+)/)![1])).toEqual(["K1", "K2"]);
+});
+
+test("bot-threads reads every page of threads and of each open thread's comments, and no more comments of a resolved one", () => {
+  const box = sandbox();
+  const resolved = Array.from({ length: 50 }, (_, index) => thread(`R${index}`, "src/old.ts", index, [comment(bot("codecov"), `https://example.test/r${index}`)], true, `more-r${index}`));
   box.reply("threads", threads("me", resolved, "page2"));
   box.reply("threads-page2", threads("me", [thread("T8", "src/h.ts", 8, [comment(bot("greptile-apps"), "https://example.test/8"), comment(user("me"), "https://example.test/8r")], false, "c2")]));
   box.reply("comments-T8-c2", comments([comment(bot("greptile-apps"), "https://example.test/8f")]));
@@ -227,6 +250,7 @@ test("bot-threads reads every page of threads and of each thread's comments", ()
   expect(result.out).toBe(["bot unanswered src/h.ts:8 https://example.test/8", "1 unanswered bot thread remains."].join("\n"));
   expect(result.code).toBe(1);
   expect(box.calls().filter((call) => call.includes("resolveReviewThread"))).toEqual([]);
+  expect(box.calls().filter((call) => call.includes("PullRequestReviewThread"))).toHaveLength(1);
 });
 
 test("bot-threads says so when no thread is open", () => {

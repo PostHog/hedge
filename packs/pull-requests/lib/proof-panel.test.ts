@@ -904,6 +904,7 @@ test("a late single-reviewer command, after a retry finished its round, prints t
   const ended = await late;
   expect(ended.code).toBe(0);
   expect(ended.output).toContain("No findings, the greeting is right.");
+  expect(ended.output).toContain("Answer each finding by these numbers, in hedge proof respond:\n1. No findings, the greeting is right.");
   expect(reviewer.prompts()).toHaveLength(1);
 });
 

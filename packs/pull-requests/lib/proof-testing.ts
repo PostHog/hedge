@@ -48,6 +48,11 @@ base=main; [ -f "${github}/base" ] && read -r base < "${github}/base"
 if [ -f "${github}/base-sha" ]; then read -r basesha < "${github}/base-sha"; else basesha=\\"$(git -C "${repository}" rev-parse refs/remotes/origin/main 2>/dev/null)\\"; fi
 body='"Adds the greeting. Merge risk: medium."'; [ -f "${github}/body" ] && body=$(cat "${github}/body")
 case "$*" in
+  "api graphql "*)
+    case "$*" in *"reviewThreads(first: 50, after: "*"-f owner=example -f repo=product -F number="[0-9]*) ;; *) echo "gh: the fake serves the review threads of example/product only" >&2; exit 1;; esac
+    all="$*"; n=\${all##*-F number=}; n=\${n%%[!0-9]*}
+    [ -f "${github}/threads-error" ] && { cat "${github}/threads-error" >&2; exit 1; }
+    cat "${github}/threads-$n" 2>/dev/null || printf '{"data":{"viewer":{"login":"%s"},"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\\n' "$(cat "${github}/user" 2>/dev/null || echo the-user)"; exit 0;;
   "api "*"/pulls/"[0-9]*" --method PATCH --input "*)
     [ -f "${github}/patch-error" ] && { cat "${github}/patch-error" >&2; exit 1; }
     all="$*"; n=\${all##*/pulls/}; n=\${n%%[!0-9]*}; target="${github}/body"; [ -f "${github}/body-$n" ] && target="${github}/body-$n"
@@ -60,12 +65,22 @@ case "$*" in
     all="$*"; n=\${all##*/pulls/}; n=\${n%%[!0-9]*}
     [ -f "${github}/pull-error-$n" ] && { cat "${github}/pull-error-$n" >&2; exit 1; }
     [ -f "${github}/body-$n" ] && body=$(cat "${github}/body-$n")
-    state=open; merged=null; [ -f "${github}/merged-$n" ] && { state=closed; merged='"2026-10-25T09:00:00Z"'; }; [ -f "${github}/closed-$n" ] && state=closed
-    printf '{"number":%s,"title":"Greet new members","body":%s,"draft":%s,"state":"%s","merged_at":%s,"head":{"sha":"%s"},"base":{"ref":"%s","sha":%s,"repo":{"default_branch":"main"}}}\\n' "$n" "$body" "$draft" "$state" "$merged" "$head" "$base" "$basesha"; exit 0;;
+    state=open; merged=null; [ -f "${github}/merged-$n" ] && { state=closed; merged='"2026-10-25T09:00:00Z"'; [ -s "${github}/merged-$n" ] && merged=$(cat "${github}/merged-$n"); }; [ -f "${github}/closed-$n" ] && state=closed
+    created=null; [ -f "${github}/created" ] && created=$(cat "${github}/created")
+    printf '{"number":%s,"title":"Greet new members","body":%s,"draft":%s,"state":"%s","created_at":%s,"merged_at":%s,"head":{"sha":"%s"},"base":{"ref":"%s","sha":%s,"repo":{"default_branch":"main"}}}\\n' "$n" "$body" "$draft" "$state" "$created" "$merged" "$head" "$base" "$basesha"; exit 0;;
+  "api --paginate "*"/issues/"[0-9]*"/events "*)
+    filter=; previous=
+    for arg in "$@"; do [ "$previous" = "--jq" ] && filter=$arg; previous=$arg; done
+    [ -f "${github}/events-error" ] && { cat "${github}/events-error" >&2; exit 1; }
+    [ -f "${github}/events" ] || exit 0
+    jq -r "$filter" "${github}/events"; exit $?;;
   "api "*"/rules/branches/"*)
     all="$*"; branch=\${all##*/rules/branches/}; page=\${all##*page=}; branch=\${branch%%\\?*}
     [ -f "${github}/rules-error-$branch" ] && { cat "${github}/rules-error-$branch" >&2; exit 1; }
     cat "${github}/rules-$branch-$page" 2>/dev/null || echo '[]'; exit 0;;
+  "api "*"/rulesets/"*)
+    all="$*"; id=\${all##*/rulesets/}
+    cat "${github}/ruleset-$id" 2>/dev/null || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }; exit 0;;
   "api user")
     printf '{"login":"%s"}\\n' "$(cat "${github}/user" 2>/dev/null || echo the-user)"; exit 0;;
   "api "*"/issues/comments/"*)
@@ -97,16 +112,17 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
   const runs: Record<string, { status: string; conclusion: string | null }> = { pass: { status: "completed", conclusion: "success" }, fail: { status: "completed", conclusion: "failure" }, cancel: { status: "completed", conclusion: "cancelled" }, pending: { status: "in_progress", conclusion: null } };
   const lines = (items: object[]) => items.map((item) => JSON.stringify(item) + "\n").join("");
   const ci = (checks: { name: string; bucket: string; app?: number }[] | "none", commit = "any") => writeFileSync(join(github, `check-runs-${commit}`), checks === "none" ? "" : lines(checks.map(({ name, bucket, app = 1 }, index) => ({ id: index + 1, name, ...runs[bucket], app }))));
-  const required = (branch: string, rules: { context: string; integration_id?: number }[] | { error: string }, { classic, page = 1, others = 0 }: { classic?: string[]; page?: number; others?: number } = {}) => {
+  const required = (branch: string, rules: { context: string; integration_id?: number }[] | { error: string }, { classic, page = 1, others = 0, ruleset }: { classic?: (string | { context: string; app: number })[]; page?: number; others?: number; ruleset?: { id: number; updatedAt: string } } = {}) => {
     rmSync(join(github, `rules-error-${branch}`), { force: true });
     if ("error" in rules) writeFileSync(join(github, `rules-error-${branch}`), rules.error);
-    else writeFileSync(join(github, `rules-${branch}-${page}`), JSON.stringify([...Array.from({ length: others }, () => ({ type: "deletion" })), ...(rules.length ? [{ type: "required_status_checks", parameters: { required_status_checks: rules } }] : [])]));
-    if (classic) writeFileSync(join(github, `branch-${branch}`), JSON.stringify({ protected: true, protection: { required_status_checks: { enforcement_level: "everyone", contexts: classic, checks: classic.map((context) => ({ context, app_id: null })) } } }));
+    else writeFileSync(join(github, `rules-${branch}-${page}`), JSON.stringify([...Array.from({ length: others }, () => ({ type: "deletion" })), ...(rules.length ? [{ type: "required_status_checks", ...ruleset ? { ruleset_id: ruleset.id } : {}, parameters: { required_status_checks: rules } }] : [])]));
+    if (ruleset) writeFileSync(join(github, `ruleset-${ruleset.id}`), JSON.stringify({ id: ruleset.id, updated_at: ruleset.updatedAt }));
+    if (classic) writeFileSync(join(github, `branch-${branch}`), JSON.stringify({ protected: true, protection: { required_status_checks: { enforcement_level: "everyone", contexts: classic.map((check) => typeof check === "string" ? check : check.context), checks: classic.map((check) => typeof check === "string" ? { context: check, app_id: null } : { context: check.context, app_id: check.app }) } } }));
   };
-  const pullRequestState = ({ draft, base, baseSha, body, number, merged, closed, unreadable }: { draft?: boolean; base?: string; baseSha?: string | number; body?: string; number?: number; merged?: boolean; closed?: boolean; unreadable?: string }) => {
+  const pullRequestState = ({ draft, base, baseSha, body, number, merged, mergedAt, closed, unreadable }: { draft?: boolean; base?: string; baseSha?: string | number; body?: string; number?: number; merged?: boolean; mergedAt?: string; closed?: boolean; unreadable?: string }) => {
     if (unreadable !== undefined) writeFileSync(join(github, `pull-error-${number ?? 42}`), unreadable);
     if (body !== undefined) writeFileSync(join(github, number === undefined ? "body" : `body-${number}`), JSON.stringify(body));
-    if (merged) writeFileSync(join(github, `merged-${number ?? 42}`), "");
+    if (merged) writeFileSync(join(github, `merged-${number ?? 42}`), mergedAt === undefined ? "" : JSON.stringify(mergedAt));
     if (closed) writeFileSync(join(github, `closed-${number ?? 42}`), "");
     if (draft !== undefined) { if (draft) writeFileSync(join(github, "draft"), ""); else rmSync(join(github, "draft"), { force: true }); }
     if (base !== undefined) writeFileSync(join(github, "base"), base);
@@ -120,8 +136,18 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
   };
   const whileGithubReadsPull = (script: string) => writeFileSync(join(github, "while-reading"), script);
   const githubComment = (id: number, author: string, body: string, createdAt = "2026-10-25T11:00:00Z", on = 42) => writeFileSync(join(github, `comment-${id}`), JSON.stringify({ user: { login: author }, body, created_at: createdAt, issue_url: `https://api.github.com/repos/example/product/issues/${on}` }));
+  const timeline = (opened: string, ready: string[] = []) => {
+    writeFileSync(join(github, "created"), JSON.stringify(opened));
+    writeFileSync(join(github, "events"), JSON.stringify([{ event: "labeled", created_at: opened }, ...ready.map((at) => ({ event: "ready_for_review", created_at: at }))]));
+  };
   const githubBody = (number = 42) => JSON.parse(readFileSync(join(github, existsSync(join(github, `body-${number}`)) ? `body-${number}` : "body"), "utf8")) as string;
   const githubFault = (fault: "patch-error" | "patch-mangle", text: string | undefined) => text === undefined ? rmSync(join(github, fault), { force: true }) : writeFileSync(join(github, fault), text);
+  const reviewThreads = (threads: ReviewThread[] | { error: string }, number = 42) => {
+    rmSync(join(github, "threads-error"), { force: true });
+    if ("error" in threads) return writeFileSync(join(github, "threads-error"), threads.error);
+    const viewer = existsSync(join(github, "user")) ? readFileSync(join(github, "user"), "utf8").trim() : "the-user";
+    writeFileSync(join(github, `threads-${number}`), JSON.stringify({ data: { viewer: { login: viewer }, repository: { pullRequest: { reviewThreads: page(threads.map((thread, index) => threadNode(thread, index, viewer))) } } } }));
+  };
   const githubCalls = () => readFileSync(join(github, "calls"), "utf8").trim().split("\n");
   ci([{ name: "test", bucket: "pass" }]);
   mkdirSync(join(home, ".agents/guides"), { recursive: true });
@@ -195,10 +221,19 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
   const decide = (...args: string[]) => decideIn(repository, ...args);
   const pullRequest = join(home, ".local/state/hedge/proof/example/product/42");
   await seedRepository(repository);
-  return { home, repository, pullRequest, env, git, commit, advanceBase, hedge, hedgeIn, hedgeAs, ci, statuses, githubApp, required, pullRequestState, githubHead, githubCalls, githubBody, githubFault, githubComment, whileGithubReadsPull, clock, say, choose, chooseGap, reader, panel, hub, pendingCards, decide, decideIn, startTimes };
+  return { home, repository, pullRequest, env, git, commit, advanceBase, hedge, hedgeIn, hedgeAs, ci, statuses, githubApp, required, pullRequestState, timeline, githubHead, githubCalls, githubBody, githubFault, githubComment, reviewThreads, whileGithubReadsPull, clock, say, choose, chooseGap, reader, panel, hub, pendingCards, decide, decideIn, startTimes };
 }
 
 export type Checkout = Awaited<ReturnType<typeof checkout>>;
+
+export type ThreadComment = { by: string; app?: boolean; url: string; thumbsUp?: string[] };
+export type ReviewThread = { path: string; line: number; comments: ThreadComment[]; resolved?: boolean };
+
+const page = (nodes: unknown[]) => ({ nodes, pageInfo: { hasNextPage: false, endCursor: null } });
+const threadNode = ({ path, line, comments, resolved = false }: ReviewThread, index: number, viewer: string) => ({
+  id: `thread-${index + 1}`, isResolved: resolved, path, line, originalLine: line,
+  comments: page(comments.map(({ by, app = by !== "the-user", url, thumbsUp = [] }) => ({ url, author: { __typename: app ? "Bot" : "User", login: by }, reactionGroups: [{ content: "THUMBS_UP", viewerHasReacted: thumbsUp.includes(viewer) }] }))),
+});
 
 export async function githubRepository(pr: Checkout, user = "git") {
   const served = join(pr.repository, "../github.com");

@@ -5,7 +5,7 @@ import { readLinkedItemText, readLinkedMessages, type LinkedTimelineItem } from 
 import { t3StatePath, t3UserData } from "./server.ts";
 import type { T3Client, T3HttpClient } from "./session.ts";
 
-export type PullRequestWatch = { headSha?: string; passed?: boolean; checksPending?: boolean; failedChecks?: string[]; awaitingApproval?: string[] };
+export type PullRequestWatch = { headSha?: string; passed?: boolean; checksPending?: boolean; failedChecks?: string[]; awaitingApproval?: string[]; until?: string };
 export type ShellPullRequest = { repository: string; number: number; url: string; source?: string; snapshot?: { state?: string; headBranch?: string } | null; watch?: PullRequestWatch | null };
 
 export type ShellThread = {
@@ -15,10 +15,10 @@ export type ShellThread = {
   createdAt?: string; latestUserMessageAt?: string | null; latestRunRequestedAt?: string | null;
   latestRunStartedAt?: string | null; latestRunCompletedAt?: string | null;
   archivedAt?: string | null; deletedAt?: string | null; settledAt?: string | null; pinnedAt?: string | null; snoozedUntil?: string | null; worktreePath?: string | null;
-  modelSelection?: { model: string }; lastError?: string | null;
+  modelSelection?: { model: string }; providerInstanceId?: string; lastError?: string | null;
   pendingRuntimeRequest?: unknown; latestVisibleMessage?: { updatedAt: string; text: string } | null;
   branch?: string | null; latestUserAuthoredMessageAt?: string | null;
-  lineage?: { parentThreadId?: string | null; rootThreadId?: string | null; relationshipToParent?: string | null }; pullRequests?: ShellPullRequest[];
+  lineage?: { parentThreadId?: string | null; rootThreadId?: string | null; relationshipToParent?: string | null; sideChat?: boolean; workflowStep?: boolean }; pullRequests?: ShellPullRequest[];
 };
 
 export type ShellProject = { id: string; title: string; workspaceRoot: string };
@@ -73,10 +73,21 @@ export const sendModes = ["auto", "queue", "steer", "restart"] as const;
 export type SendMode = (typeof sendModes)[number];
 export type SentMessage = { threadId: string; messageId: string; delivery: "started" | "queued" | "steered" | "restarted" };
 
+const slashCommandOnly = /^\/[\w:-]+(?:\s|$)/u;
+
+const steersKeepingCard = ["claudeAgent", "codex"];
+
+export type SendTarget = { waitsOnCard: boolean; providerInstanceId?: string };
+
+export function queuesBehindCard(mode: SendMode, text: string, target: SendTarget): boolean {
+  if (mode !== "auto" || !target.waitsOnCard) return false;
+  return slashCommandOnly.test(text.trim()) || !steersKeepingCard.includes(target.providerInstanceId ?? "");
+}
+
 export async function sendMessage(client: Pick<T3HttpClient, "callTool">, thread: ShellThread, text: string, mode: SendMode = "auto"): Promise<SentMessage> {
   if (thread.archivedAt) throw new Error(`Thread ${thread.id} is archived. Unarchive it before you send it a message.`);
-  const resolvedMode: SendMode = mode === "auto" && thread.activeRunId && Boolean(thread.pendingRuntimeRequest) ? "queue" : mode;
-  const sent = await client.callTool<SentMessage>("t3_thread_send", { threadId: thread.id, message: text, mode: resolvedMode, clientRequestId: `hedge-thread-send:${randomUUID()}` });
+  const target = { waitsOnCard: Boolean(thread.activeRunId && thread.pendingRuntimeRequest), providerInstanceId: thread.providerInstanceId };
+  const sent = await client.callTool<SentMessage>("t3_thread_send", { threadId: thread.id, message: text, mode: queuesBehindCard(mode, text, target) ? "queue" : mode, clientRequestId: `hedge-thread-send:${randomUUID()}` });
   return { threadId: sent.threadId, messageId: sent.messageId, delivery: sent.delivery };
 }
 

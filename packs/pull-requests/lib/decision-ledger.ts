@@ -19,7 +19,7 @@ export type Decision = {
 };
 export type Reversal = { type: "reverse"; id: string; words: string; thread?: string; message?: string; comment?: string; machine: string; at: string };
 export type Lift = { type: "lift"; class: AskClass; words: string; thread: string; message: string; machine: string; at: string };
-export type GateResult = { type: "gate"; repository: string; pr: number; commit: string; passed: boolean; machine: string; at: string };
+export type GateResult = { type: "gate"; repository: string; pr: number; commit: string; passed: boolean; machine: string; at: string; onEnd?: true; agentGaps?: string[]; seenGaps?: string[] };
 export type LedgerEvent =
   | { type: "decide"; decision: Decision }
   | { type: "void"; id: string; reason: string; at: string }
@@ -29,6 +29,10 @@ export type LedgerEvent =
 
 export const gateOverride = "gate-override";
 export const overrideChoice = "Override the gate";
+export const mergeCardChoice = "Merge";
+export const mergeCardCondition = (head: string) => `${head}: merge card`;
+export const namesHead = (text: string, head: string) => new RegExp(`(?<![0-9a-f])${head}(?![0-9a-f])`, "i").test(text);
+export const namesId = (text: string, id: string) => new RegExp(`(?<![\\w-])${id.replace(/[^\w-]/g, "\\$&")}(?![\\w-])`).test(text);
 
 export { HubUnreachable, type Env, type Ssh, type SshResult };
 
@@ -246,9 +250,11 @@ export function tierOf(body: string): Tier {
 
 export const processGapKinds = ["judge", "post-deploy-watch"];
 const processClasses: AskClass[] = ["review", "status"];
+const roundsAndGaps: AskClass[] = ["review", "proof-gap"];
 export const panelRefusal = "a panel gap is the user's to accept";
 
-export function agentRefusal(tier: Tier, decisionClass: AskClass, kinds: string[] = []) {
+export function agentRefusal(tier: Tier, decisionClass: AskClass, kinds: string[] = [], decidesAll = false) {
+  if (decidesAll && roundsAndGaps.includes(decisionClass)) return tier === "ungraded" ? "ungraded" : undefined;
   if (decisionClass === "proof-gap" && kinds.includes("panel")) return "panel";
   if (tier === "ungraded") return "ungraded";
   const process = processClasses.includes(decisionClass) || (decisionClass === "proof-gap" && kinds.length > 0 && kinds.every((kind) => processGapKinds.includes(kind)));

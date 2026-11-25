@@ -5,11 +5,13 @@ import { normalized, type HeardAnswer } from "./proof-answers.ts";
 import { agentRefusal, agentsAcceptance, covers, fold, keptOwed, panelRefusal, usersAcceptance, type Decision, type DecisionState, type Ledger, type Mark, type PrRef, type Tier } from "./decision-ledger.ts";
 import type { Family, Usage } from "./proof-models.ts";
 import { quietReason, type DeltaKind, type QuietStep } from "./proof-delta.ts";
+import { captureText, runnerCapture, type Capture } from "./proof-provenance.ts";
 import { isProductionFile } from "./proof-checkout.ts";
 import { panelOutcome, unansweredPanelCause } from "./proof-panel.ts";
 import { redactSecrets } from "../../base/hooks/secret-guard.ts";
 import { anchorHeading } from "./finding-anchors.ts";
 import type { Growth } from "./proof-end-table.ts";
+import type { Thread } from "./pr-threads.ts";
 import type { ReadBudget, TriageMark } from "./proof-triage.ts";
 import { endTableNote, gradeOf, shellQuoted, type Autonomy } from "./proof-autonomy.ts";
 
@@ -33,7 +35,7 @@ export function proofDirectory(home: string, identity: ProofIdentity) {
   return join(pullRequestDirectory(home, identity), identity.commit);
 }
 
-export type GateRecord = { code: number; reason: string };
+export type GateRecord = { code: number; reason: string; onEnd?: true; agentGaps?: string[]; seenGaps?: string[] };
 
 export const gateRunDirectory = (home: string, identity: ProofIdentity) =>
   join(pullRequestDirectory(home, { ...identity, repository: identity.repository.toLowerCase() }), "gate-record", identity.commit);
@@ -64,16 +66,18 @@ export async function startGateRun(home: string, identity: ProofIdentity, starte
   }
 }
 
-export type GateResult = { passed: boolean; at: number };
+export type GateResult = { passed: boolean; at: number; onEnd?: true; agentGaps?: string[]; seenGaps?: string[] };
+
+export const isTextList = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === "string");
 
 export const latestGateResult = (results: GateResult[]) => results.toSorted((a, b) => a.at - b.at || Number(b.passed) - Number(a.passed)).at(-1);
 
 export async function lastGateResult(home: string, identity: ProofIdentity): Promise<GateResult | undefined> {
   const directory = gateRunDirectory(home, identity);
   const results = await Promise.all((await gateRunNames(directory)).map(async (name) => {
-    const { code, startedAt } = (await readJson<{ code?: unknown; startedAt?: unknown } | null>(join(directory, name), null)) ?? {};
+    const { code, startedAt, onEnd, agentGaps, seenGaps } = (await readJson<{ code?: unknown; startedAt?: unknown; onEnd?: unknown; agentGaps?: unknown; seenGaps?: unknown } | null>(join(directory, name), null)) ?? {};
     const at = typeof startedAt === "string" ? Date.parse(startedAt) : Number.NaN;
-    return Number.isNaN(at) ? { passed: false, at: -Infinity } : { passed: code === 0, at };
+    return Number.isNaN(at) ? { passed: false, at: -Infinity } : { passed: code === 0, at, ...onEnd === true ? { onEnd: true as const } : {}, ...isTextList(agentGaps) ? { agentGaps } : {}, ...isTextList(seenGaps) ? { seenGaps } : {} };
   }));
   return latestGateResult(results);
 }
@@ -160,11 +164,11 @@ function finalReadPhase(value: string): FinalReadPhase {
 }
 
 type Spending = "unfinished spends" | "finished only";
-type Spent = { spent: number; names: string[]; reservations: string[]; finished: string[]; stopped: boolean; round?: number; counted?: string[] };
-type ReservedAs = { reservationId?: string; startedAt?: string; commit?: string; scope?: string; phase?: FinalReadPhase };
+type Spent = { spent: number; pastBudget: number; names: string[]; reservations: string[]; finished: string[]; round?: number; counted?: string[] };
+type ReservedAs = { reservationId?: string; startedAt?: string; commit?: string; scope?: string; phase?: FinalReadPhase; pastBudget?: true; decision?: DecisionMark };
 const reservationOf = ({ reservationId, startedAt, commit, scope, phase }: ReservedAs) => JSON.stringify([reservationId, startedAt, commit, scope, phase]);
 
-async function savedFindings(directory: string) {
+export async function savedFindings(directory: string) {
   try { return await readFile(join(directory, "findings.md"), "utf8"); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
 }
@@ -175,16 +179,16 @@ async function reviewsSpent(reviews: string, phase: FinalReadPhase, spending: Sp
     if (!round) return undefined;
     const findings = await savedFindings(join(reviews, name));
     const leadsToFixes = findings === undefined ? spending === "unfinished spends" : unanswered(findings, "").length > 0;
-    return { name, reservation: reservationOf(round), finished: findings !== undefined, spends: (round.phase ?? "review") === phase && leadsToFixes };
+    const inPhase = (round.phase ?? "review") === phase;
+    return { name, reservation: reservationOf(round), finished: findings !== undefined, spends: inPhase && leadsToFixes, pastBudget: inPhase && round.pastBudget === true && round.decision?.mark === "🤖" };
   }));
   const present = rounds.filter((round) => round !== undefined).sort((a, b) => a.name.localeCompare(b.name));
-  const stopped = await readJson<OneWayStop | undefined>(join(reviews, oneWayStopFile), undefined) !== undefined;
-  return { stopped, spent: present.filter(({ spends }) => spends).length, names: present.map(({ name }) => name), reservations: present.map(({ reservation }) => reservation), finished: present.filter(({ finished }) => finished).map(({ name }) => name) };
+  return { spent: present.filter(({ spends }) => spends).length, pastBudget: present.filter(({ pastBudget }) => pastBudget).length, names: present.map(({ name }) => name), reservations: present.map(({ reservation }) => reservation), finished: present.filter(({ finished }) => finished).map(({ name }) => name) };
 }
 
-const budgetState = ({ spent, names, reservations, finished, stopped, round, counted }: Spent) => JSON.stringify([spent, names, reservations, finished, stopped, round, counted]);
+const budgetState = ({ spent, names, reservations, finished, round, counted }: Spent) => JSON.stringify([spent, names, reservations, finished, round, counted]);
 
-async function reserveWeighed<T extends Spent>(reviews: string, lockBudget: LockBudget, snapshot: () => Promise<T>, permit: (weighed: T) => Promise<ArbiterVerdict | undefined>, reserveIt: (weighed: T, verdict: ArbiterVerdict | undefined) => Promise<Reserved>) {
+async function reserveWeighed<T extends Spent>(reviews: string, lockBudget: LockBudget, snapshot: () => Promise<T>, permit: (weighed: T) => Promise<Permitted>, reserveIt: (weighed: T, permitted: Permitted) => Promise<Reserved>) {
   const before = await lockBudget(reviews, snapshot);
   const verdict = await permit(before);
   return lockBudget(reviews, async () => {
@@ -240,47 +244,41 @@ export function parseVerdict(output: string, model: string): ArbiterVerdict {
 
 export type ReviewLimits = { free: number; ceiling: number };
 
-export const atCeiling = `hedge proof asks nothing more. For each open blocker or major, revert the fix that brought it in, or list it in a "## Known issues" section of the PR body, one "- <blocker|major>: <file:line> <finding>" item each, and answer its finding "<n>. known: <why>". A blocker or major that the last read found in the fixes since the panel is reverted, never listed. An open blocker holds the merge; the user's merge word accepts the rest. Only the user's --override runs another review or final read, such as a read of the fix of an open blocker`;
+const knownIssuesStep = `For each open blocker or major, revert the fix that brought it in, or list it in a "## Known issues" section of the PR body, one "- <blocker|major>: <file:line> <finding>" item each, and answer its finding "<n>. known: <why>". A blocker or major that the last read found in the fixes since the panel is reverted, never listed. An open blocker holds the merge; the user's merge word accepts the rest.`;
+export const atCeiling = `hedge proof asks nothing more. ${knownIssuesStep} Only the user's --override runs another review or final read, such as a read of the fix of an open blocker`;
 
-const budgetSpent = ({ ceiling }: ReviewLimits) => `The review budget of ${ceiling} reviews is spent. ${atCeiling}`;
-const fixesUnread = ({ ceiling }: ReviewLimits, latest: string) => `The review budget of ${ceiling} reviews is spent, and no read checks the production changes since ${short(latest)}. Revert each commit of the PR since ${short(latest)} that changes production code, never a merge of the base: the gate carries a revert of a PR commit. When a merge of the base holds them, such as a conflict resolution, only the user's --override reads them. ${atCeiling}`;
+type Stop = { lead: string; text: string; agentNext: string };
+const stopWith = (lead: string, rest: string, agentNext: string): Stop => ({ lead, text: `${lead} ${rest}`, agentNext });
+const budgetSpent = ({ ceiling }: ReviewLimits) => stopWith(`The review budget of ${ceiling} reviews is spent.`, atCeiling, knownIssuesStep);
+const revertSince = (latest: string) => `Revert each commit of the PR since ${short(latest)} that changes production code, never a merge of the base: the gate carries a revert of a PR commit.`;
+const fixesUnread = ({ ceiling }: ReviewLimits, latest: string) => stopWith(`The review budget of ${ceiling} reviews is spent, and no read checks the production changes since ${short(latest)}.`, `${revertSince(latest)} When a merge of the base holds them, such as a conflict resolution, only the user's --override reads them. ${atCeiling}`, `${revertSince(latest)} When a merge of the base holds them, such as a conflict resolution, a revert cannot reach them, and the PR stays held until a read checks them. ${knownIssuesStep}`);
 
-async function permitReview(home: string, identity: ProofIdentity, due: boolean, ceiling: string | undefined, decision: DecisionMark | undefined, permit: Permit) {
-  if (decision?.mark === "👤") return undefined;
-  if (ceiling) throw new Error(ceiling);
-  const stopped = await readOneWayStop(home, identity);
-  if (stopped) throw new Error(`The review loop stopped at an escalation on a one-way door: ${stopped.reason}. ${await oneWayStop(home, identity, permit.onHistory)}`);
-  if (!due) return undefined;
-  const verdict = await permit.arbiter(await arbiterPrompt(home, identity));
-  if (verdict.verdict === "continue") return verdict;
-  const stop = verdict.verdict === "escalate" ? `The arbiter escalates: ${verdict.reason}.` : `The arbiter gave no verdict: ${verdict.reason}.`;
-  const decides = permit.autonomy?.() ?? "ask";
-  if (decides === "user") {
-    const saved: OneWayStop = { commit: identity.commit, reason: verdict.reason, at: permit.now().toISOString() };
-    await permit.lockBudget(join(pullRequestDirectory(home, identity), "reviews"), () => writeJson(oneWayStopPath(home, identity), saved));
-    throw new Error(`${stop} ${await oneWayStop(home, identity, permit.onHistory)}`);
+export const agentExtraReads = 3;
+
+const pastBudget = (stop: Stop, left: number) => `${stop.lead} Decide yourself whether one more read is worth it: run this command again with --agent '<your reason>'. You may run ${left} more read${left === 1 ? "" : "s"} past the budget this way; then hedge stops the review loop. It lands in the ledger as a 🤖 review decision, and ${endTableNote}. Ask the user nothing about it. When no read is worth it: ${stop.agentNext}`;
+
+type Budget = { stop?: Stop; pastBudget: number };
+type Permitted = { arbiter?: ArbiterVerdict; pastBudget?: true };
+
+async function permitReview(home: string, identity: ProofIdentity, due: boolean, budget: Budget, decision: DecisionMark | undefined, { arbiter, autonomy }: Permit): Promise<Permitted> {
+  if (decision?.mark === "👤") return budget.stop ? { pastBudget: true } : {};
+  const decides = autonomy?.() ?? "ask";
+  if (budget.stop) {
+    const left = agentExtraReads - budget.pastBudget;
+    if (decides !== "end") throw new Error(budget.stop.text);
+    if (left <= 0) throw new Error(`${budget.stop.text}. The agent's ${agentExtraReads} reads past the budget are spent too: ask the user nothing about another read.`);
+    if (!decision) throw new Error(pastBudget(budget.stop, left));
+    return { pastBudget: true };
   }
-  if (!decision) throw new Error(askUser(identity, stop, decides));
-  return verdict;
+  if (!due) return {};
+  const verdict = await arbiter(await arbiterPrompt(home, identity));
+  if (verdict.verdict !== "continue" && !decision) throw new Error(askUser(identity, verdict.verdict === "escalate" ? `The arbiter escalates: ${verdict.reason}.` : `The arbiter gave no verdict: ${verdict.reason}.`, decides));
+  return { arbiter: verdict };
 }
 
 export const roundQuestion = "Run one more review round?";
 export const runOption = "Run one more round";
 export const stopOption = "Stop here";
-
-export type OneWayStop = { commit: string; reason: string; at: string };
-const oneWayStopFile = "one-way-stop.json";
-const oneWayStopPath = (home: string, identity: ProofIdentity) => join(pullRequestDirectory(home, identity), "reviews", oneWayStopFile);
-export const readOneWayStop = (home: string, identity: ProofIdentity) => readJson<OneWayStop | undefined>(oneWayStopPath(home, identity), undefined);
-
-async function oneWayStop(home: string, identity: ProofIdentity, onHistory: OnHistory | undefined) {
-  const finished = await finishedReviews(home, identity);
-  const reviewed = onHistory ? finished.findLast((review) => onHistory(review.commit)) : finished.at(-1);
-  const revert = reviewed
-    ? `Revert each commit of the PR since ${short(reviewed.commit)} that changes production code, never a merge of the base: the gate carries a revert of a PR commit.`
-    : "No finished review of this PR is on HEAD's history, so hedge names no commit to revert: only the user's --override reads HEAD.";
-  return `On a one-way door the review loop stops here: ask the user nothing about another round. ${revert} ${atCeiling}`;
-}
 
 function askUser(identity: ProofIdentity, stop: string, autonomy: Autonomy) {
   if (autonomy === "end") return `${stop} Decide the round yourself: run this command again with --agent '<your reason>'. It lands in the ledger as a 🤖 review decision, and ${endTableNote}.`;
@@ -293,7 +291,7 @@ export type DropRead = (directory: string) => Promise<boolean>;
 export type OnHistory = (commit: string) => boolean;
 export type ReviewRequest = { dropUnanswered?: DropRead; onHistory?: OnHistory; autonomy?: () => Autonomy; opening?: () => Promise<boolean>; sanity?: () => Promise<void>; scope: string; base?: string; from?: string; forkBase?: string; decision?: Decision; phase?: string; arbiter: Arbiter; limits: ReviewLimits; cleanBaseMerge?: CleanBaseMerge; quietCommit?: QuietCommit; capturedBy?: CapturedBy; lock?: LockRound; lockBudget: LockBudget; now: () => Date; emptyRange?: () => boolean; triage?: TriageMark; budget?: ReadBudget };
 export type Reserved = { round: number | "final"; id: string; directory: string };
-type Permit = { arbiter: Arbiter; limits: ReviewLimits; autonomy?: () => Autonomy; now: () => Date; onHistory?: OnHistory; lockBudget: LockBudget };
+type Permit = { arbiter: Arbiter; limits: ReviewLimits; autonomy?: () => Autonomy };
 
 async function reserveDecided(reviews: string, name: string, record: object, decision: Decision | undefined, stamping: Stamping) {
   if (!await reserve(reviews, name, { ...record, ...decision ? { decision } : {} }, stamping)) throw new Error(`Review ${name} started while this one weighed the budget. ${weighAgain}`);
@@ -319,7 +317,7 @@ async function startFinalRead(home: string, identity: ProofIdentity, base: strin
     const counted = await finishedReviews(home, identity);
     return { ...await reviewsSpent(reviews, phase, "unfinished spends", dropping), reviews: counted, counted: counted.map(({ name }) => name), dropping };
   };
-  const permitRead = async ({ spent, names, finished: saved, reviews: finished }: Awaited<ReturnType<typeof snapshot>>) => {
+  const permitRead = async ({ spent, pastBudget, names, finished: saved, reviews: finished }: Awaited<ReturnType<typeof snapshot>>) => {
     const { counted, found: carried } = gateCarry(identity, finished, cleanBaseMerge, quietCommit);
     const latest = finished.at(-1);
     if (!latest) throw new Error("A final read needs a finished earlier review");
@@ -330,20 +328,21 @@ async function startFinalRead(home: string, identity: ProofIdentity, base: strin
     const offPanel = !fromLatest && finished.find((review) => review.panel && !onHistory?.(review.commit));
     if (offPanel) throw new Error(`The first panel read ${offPanel.commit}, which is not on HEAD's history, so a final read from ${short(base)} would skip what no panel of this PR read. Ask the user how to review this PR again`);
     const unfinished = (await Promise.all(names.map(async (name) => !saved.includes(name) || await panelOutcome(join(reviews, name)) === "unfinished"))).some(Boolean);
-    const retry = unfinished ? "" : ` To read it anyway, pass ${spent < ceiling ? "--agent '<your reason>', or " : ""}the user's --override`;
+    const agentMayRead = spent < ceiling || (permit.autonomy?.() === "end" && pastBudget < agentExtraReads);
+    const retry = unfinished ? "" : ` To read it anyway, pass ${agentMayRead ? "--agent '<your reason>', or " : ""}the user's --override`;
     if (emptyRange?.()) throw new Error(nothingToRead(from ?? base, carried));
     if (!decision && carried) throw new Error(`HEAD needs no final read: ${carried.quiet.length ? `final read carried from ${short(carried.from)}: ${quietReason(carried.kinds)}. hedge proof gate counts the carry.` : `hedge proof gate carries the review of ${short(carried.from)} across ${carried.merges.length} clean merge(s) of the base.`}${retry}`);
     if (unfinished) throw new Error("A review is unfinished. Finish it before a final read.");
     const stop = spent < ceiling ? undefined : carried ? budgetSpent(permit.limits) : onlyQuietSince(identity, counted, cleanBaseMerge, quietCommit) ? undefined : fixesUnread(permit.limits, (latestOnHistory || latest).commit);
-    return permitReview(home, identity, spent >= free, stop, decision, permit);
+    return permitReview(home, identity, spent >= free, { stop, pastBudget }, decision, permit);
   };
-  return reserveWeighed(reviews, lockBudget, snapshot, permitRead, async ({ dropping }, verdict) => {
+  return reserveWeighed(reviews, lockBudget, snapshot, permitRead, async ({ dropping }, { arbiter: verdict, pastBudget }) => {
     for (const name of dropping) if (!await dropUnanswered!(join(reviews, name))) throw new Error(`The reviews changed while this one weighed the budget. ${weighAgain}`);
     const taken = new Set([...await reviewNames(reviews), ...(await entries(droppedDirectory(reviews))).filter((entry) => droppedEntry.test(entry)).map(droppedName)]);
     let read = 1;
     while (taken.has(finalReadPrefix + read)) read++;
     const name = finalReadPrefix + read;
-    await reserveDecided(reviews, name, { ...identity, round: "final", read, scope: "final", base, from, phase, arbiter: verdict, capturedBy, ...triage ? { ...budget, triage } : {} }, decision, stamping);
+    await reserveDecided(reviews, name, { ...identity, round: "final", read, scope: "final", base, from, phase, arbiter: verdict, ...pastBudget ? { pastBudget } : {}, capturedBy, ...triage ? { ...budget, triage } : {} }, decision, stamping);
     return { round: "final", id: name, directory: join(reviews, name) };
   });
 }
@@ -359,7 +358,7 @@ const coversReview = (base: string, reviewed: string, cleanBaseMerge: CleanBaseM
 export async function startReview(home: string, identity: ProofIdentity, request: ReviewRequest): Promise<Reserved> {
   const { scope, base, phase, decision, cleanBaseMerge = () => undefined, quietCommit = () => undefined, capturedBy = "author", lock, lockBudget, now } = request;
   const from = request.from ?? base;
-  const permit = { arbiter: request.arbiter, limits: request.limits, autonomy: request.autonomy, now, onHistory: request.onHistory, lockBudget };
+  const permit = { arbiter: request.arbiter, limits: request.limits, autonomy: request.autonomy };
   if (!["full", "fixes", "final"].includes(scope)) throw new Error("Review scope must be full, fixes, or final");
   if (phase !== undefined && scope !== "final") throw new Error("--phase applies only to final reads");
   if (base !== undefined && !sha.test(base)) throw new Error("Review base needs a full commit SHA");
@@ -375,17 +374,17 @@ type RoundStart = { scope: string; base?: string; from?: string; forkBase?: stri
 async function startRound(home: string, identity: ProofIdentity, reviews: string, { scope, base, from, forkBase, decision, permit, cleanBaseMerge, capturedBy, opening, sanity, reserving: { lockBudget, triage, budget, ...stamping } }: RoundStart): Promise<Reserved> {
   const { free, ceiling } = permit.limits;
   const snapshot = async () => ({ ...await reviewsSpent(reviews, "review", "unfinished spends"), round: await nextRound(reviews) });
-  const permitRound = async ({ round, spent }: Awaited<ReturnType<typeof snapshot>>) => {
+  const permitRound = async ({ round, spent, pastBudget }: Awaited<ReturnType<typeof snapshot>>) => {
     if (round === 1 && scope !== "full") throw new Error("Round 1 is --scope full: it reviews the whole PR diff. Drop --base");
     if (round > 1) await requireFinished(reviews, round);
     const opened = round > 1 && scope === "full" && await opening();
     if (round > 1 && decision?.mark !== "👤" && !opened) await requireBoughtRound(home, identity);
     if (round > 1 && !opened) await checkLaterRound(reviews, round, scope, base, decision, cleanBaseMerge);
     if (round > 1) await sanity();
-    return permitReview(home, identity, spent >= free, spent >= ceiling ? budgetSpent(permit.limits) : undefined, decision, permit);
+    return permitReview(home, identity, spent >= free, { stop: spent >= ceiling ? budgetSpent(permit.limits) : undefined, pastBudget }, decision, permit);
   };
-  return reserveWeighed(reviews, lockBudget, snapshot, permitRound, async ({ round }, verdict) => {
-    await reserveDecided(reviews, String(round), { ...identity, round, scope, base, from, ...forkBase ? { forkBase } : {}, arbiter: verdict, capturedBy, ...triage ? { ...budget, triage } : {} }, decision, stamping);
+  return reserveWeighed(reviews, lockBudget, snapshot, permitRound, async ({ round }, { arbiter: verdict, pastBudget }) => {
+    await reserveDecided(reviews, String(round), { ...identity, round, scope, base, from, ...forkBase ? { forkBase } : {}, arbiter: verdict, ...pastBudget ? { pastBudget } : {}, capturedBy, ...triage ? { ...budget, triage } : {} }, decision, stamping);
     return { round, id: String(round), directory: join(reviews, String(round)) };
   });
 }
@@ -646,13 +645,17 @@ export async function respondToReview(home: string, identity: ProofIdentity, rou
   const directory = await roundDirectory(home, identity, round);
   const findings = await savedFindings(directory);
   if (findings === undefined) throw new Error(`Review round ${round} has no findings yet`);
+  if (bytes.toString().split(/\r\n?|\n/).some((line) => fenceLine.test(line))) throw new Error(`${responses} holds a code fence, a line that starts with \`\`\` or ~~~. A numbered line that says fixed, rejected or known counts as an answer, also inside a fence. Quote an earlier answer with >, which answers nothing, and write code in single backticks.`);
+  const { count, past } = numbersPast(findings, bytes.toString());
+  if (past.length && !count) throw new Error(`Round ${round} has no findings, so it needs no answers.`);
+  if (past.length) throw new Error(`Round ${round} has ${count} findings; answers numbered past them: ${spans(past)}. Number your answers by this list, which hedge proof show --round ${round} prints too:\n${answerNumbers(findings)}`);
   const missing = unanswered(findings, bytes.toString());
-  if (missing.length) throw new Error(`Answer findings ${missing.join(", ")} too: one line each, numbered in the order of findings.md, such as "${missing[0]}. fixed in 1a2b3c4: <how>", "${missing[0]}. rejected: <why>", or, at the review budget or a one-way stop, "${missing[0]}. known: <why>" for a finding listed under Known issues. Minor and nit findings need no answer; a TESTS item gets a test-only rewrite or delete`);
+  if (missing.length) throw new Error(`Answer findings ${missing.join(", ")} too: one line each, numbered by the list below, such as "${missing[0]}. fixed in 1a2b3c4: <how>", "${missing[0]}. rejected: <why>", or, at the review budget, "${missing[0]}. known: <why>" for a finding listed under Known issues. Minor and nit findings need no answer; a TESTS item gets a test-only rewrite or delete\n${answerNumbers(findings)}`);
   if (answeredFindings(findings, bytes.toString()).findings.some(({ answer }) => answer?.verdict === "known")) {
     const reviews = join(pullRequestDirectory(home, identity), "reviews");
     const phase = (await readJson<{ phase?: FinalReadPhase }>(join(directory, "round.json"), {})).phase ?? "review";
     const { spent } = await reviewsSpent(reviews, phase, "finished only");
-    if (spent < ceiling && !await readOneWayStop(home, identity)) throw new Error(`Answer a finding "known" only once the review budget of ${ceiling} reviews is spent; ${spent} ran. Fix or reject it now. A stop of the review loop at an escalation on a one-way door allows it too`);
+    if (spent < ceiling) throw new Error(`Answer a finding "known" only once the review budget of ${ceiling} reviews is spent; ${spent} ran. Fix or reject it now`);
   }
   const destination = join(directory, "responses.md");
   const temporary = `${destination}.${crypto.randomUUID()}`;
@@ -662,6 +665,7 @@ export async function respondToReview(home: string, identity: ProofIdentity, rou
 }
 
 const findingItem = /^\s*(?:[-*]|\d+[.)])\s+\S/;
+const fenceLine = /^\uFEFF?\s*(?:(?:[-*+]|\d+[.)])\s+)*(?:`{3}|~{3})/;
 const answerItem = /^\s*(?:[-*]\s+)?(\d+)[.):]\s+\**(fixed|rejected|known)\b/i;
 
 const noFinding = /^(?:#.*|no findings\.?|findings:?|\(none\))$/i;
@@ -796,6 +800,35 @@ function listedItems(reviewed: ReviewedLine[]): { items: ReviewedItem[]; recover
 }
 
 export type Answer = { verdict: "fixed" | "rejected" | "known"; text: string };
+
+const listMark = /^[^\S\n]*(?:[-*]|\d+[.)])[^\S\n]+/;
+
+export function answerNumbers(findings: string) {
+  const items = reviewedItems(findings);
+  if (!items.length) return "";
+  const lines = items.map(({ text, test, note }, index) => `${index + 1}. ${note ? "anchor check note, no answer needed: " : test ? "TESTS: " : ""}${text.replace(listMark, "").split("\n").join("\n   ")}`);
+  return ["Answer each finding by these numbers, in hedge proof respond:", ...lines].join("\n");
+}
+
+function numbersPast(findings: string, responses: string) {
+  const count = reviewedItems(findings).length;
+  const written = new Map<bigint, string>();
+  for (const line of responses.split("\n")) {
+    const digits = answerItem.exec(line)?.[1];
+    if (digits && BigInt(digits) > BigInt(count) && !written.has(BigInt(digits))) written.set(BigInt(digits), digits);
+  }
+  return { count, past: [...written].sort(([a], [b]) => a < b ? -1 : 1) };
+}
+
+function spans(numbers: [bigint, string][]) {
+  const runs: [bigint, string][][] = [];
+  for (const number of numbers) {
+    const run = runs.at(-1);
+    if (run && run.at(-1)![0] === number[0] - 1n) run.push(number);
+    else runs.push([number]);
+  }
+  return runs.map((run) => run.length > 2 ? `${run[0]![1]} to ${run.at(-1)![1]}` : run.map(([, digits]) => digits).join(", ")).join(", ");
+}
 
 export function answeredFindings(findings: string, responses: string) {
   const items = reviewedItems(findings);
@@ -1022,10 +1055,10 @@ function standingCommands(instructions: string) {
   return [...commands].map(([, kinds, until, repositories, rule]) => ({ kinds: kinds!.split(","), until: until!, repositories: repositories?.split(","), rule: rule! }));
 }
 
-export async function judgeGap(home: string, identity: ProofIdentity, now: Date, decisions: Decisions, tier: Tier) {
+export async function judgeGap(home: string, identity: ProofIdentity, now: Date, decisions: Decisions, tier: Tier, decidesAll = false) {
   const gap = await readJson<Gap | undefined>(gapPath(home, identity, "judge"), undefined);
   if (gap?.commit !== identity.commit) return undefined;
-  const weighed = await gapAcceptance({ home, identity, now, decisions, tier }, gap, "judge");
+  const weighed = await gapAcceptance({ home, identity, now, decisions, tier, decidesAll }, gap, "judge");
   return { reason: gap.reason, acceptance: weighed.acceptance, lapsed: weighed.lapsed, kept: weighed.kept, line: weighed.acceptance?.line ?? notAccepted(decisions, weighed), condition: weighed.condition };
 }
 
@@ -1053,11 +1086,11 @@ export async function readDecisions(ledger: Ledger): Promise<Decisions> {
 
 type Acceptance = { by: "the user" | "agent" | "standing rule"; line: string; id?: string; mark?: Mark };
 export type Condition = { id: string; kind: string; condition: string };
-type Weigh = { home: string; identity: ProofIdentity; now: Date; decisions: Decisions; tier: Tier; ci?: CiResult };
+type Weigh = { home: string; identity: ProofIdentity; now: Date; decisions: Decisions; tier: Tier; decidesAll: boolean; ci?: CiResult };
 type Weighed = { acceptance?: Acceptance; lapsed?: { id: string; reason: string }; condition?: Condition; kept?: string };
 
 async function gapAcceptance(weigh: Weigh, gap: Gap | undefined, kind: GapKind): Promise<Weighed> {
-  const { home, identity, now, decisions, tier, ci } = weigh;
+  const { home, identity, now, decisions, tier, decidesAll, ci } = weigh;
   if (gap?.acceptance) return { acceptance: { by: "the user", line: `accepted ("${gap.acceptance.instruction}")` } };
   const afterGap = (decision: DecisionState) => kind !== "judge" || !gap || decision.at >= gap.recordedAt;
   const ledger = (Array.isArray(decisions) ? decisions : []).filter(afterGap);
@@ -1069,7 +1102,7 @@ async function gapAcceptance(weigh: Weigh, gap: Gap | undefined, kind: GapKind):
   if (users) return accepted(users, "the user");
   const kept = keptOwed(ledger, identity, kind);
   const agent = agentsAcceptance(ledger, identity, kind);
-  const refusal = agentRefusal(tier, "proof-gap", [kind]);
+  const refusal = agentRefusal(tier, "proof-gap", [kind], decidesAll);
   const lapse = agent && (refusal === "panel" ? panelRefusal
     : kept ? `the user keeps it owed, decision ${kept.id}`
     : refusal ?? (kind === "ci" && ci?.state !== "none" ? `CI on HEAD is ${ci?.state ?? "unknown"}` : undefined));
@@ -1139,9 +1172,9 @@ type Status = { problem: "missing" | "gap" | undefined; line: string; covered?: 
 export type KindProof = { kind: ProofKind; line: string } & (
   | { state: "pending" }
   | { state: "waiting"; dev: string; reason: string }
-  | { state: "ran"; commit: string; directory: string }
+  | { state: "ran"; commit: string; directory: string; capture?: Capture }
   | { state: "reused"; from: string; reason: string; directory: string }
-  | { state: "carried"; from: string; origin?: string; merges: number; directory: string }
+  | { state: "carried"; from: string; origin?: string; merges: number; quiet?: number; reason?: string; directory: string; capture?: Capture }
   | { state: "gap"; accepted: boolean; gap: GapProof }
   | { state: "missing"; newest?: string });
 type KindState = KindProof extends infer P ? P extends KindProof ? Omit<P, "kind" | "line"> : never : never;
@@ -1150,9 +1183,9 @@ function kindLine(kind: ProofKind, proof: KindState) {
   switch (proof.state) {
     case "pending": return `${kind}: pending until the PR lands`;
     case "waiting": return `${kind}: waiting on the dev result of ${proof.dev}: ${proof.reason}`;
-    case "ran": return `${kind}: evidence at HEAD in ${proof.directory}`;
+    case "ran": return `${kind}: evidence at HEAD in ${proof.directory}${captured(proof.capture)}`;
     case "reused": return `${kind}: evidence reused from ${short(proof.from)}: ${proof.reason}`;
-    case "carried": return `${kind}: evidence of ${short(proof.from)} carried across ${proof.merges} clean merge(s) of the base`;
+    case "carried": return `${kind}: evidence of ${short(proof.from)} carried across ${carriedAcross(proof)}${captured(proof.capture)}`;
     case "gap": return `${kind}: ${gapText(proof.gap)}`;
     case "missing": return proof.newest
       ? `${kind}: missing at HEAD; the newest evidence is at ${short(proof.newest)}. Save new evidence, or run hedge proof save --kind ${kind} --reuse-from ${short(proof.newest)} --reason <why it still proves HEAD>`
@@ -1160,17 +1193,30 @@ function kindLine(kind: ProofKind, proof: KindState) {
   }
 }
 
+const captured = (capture: Capture | undefined) => capture ? `; ${captureText(capture)}` : "";
+export const carriedAcross = ({ merges, quiet, reason }: { merges: number; quiet?: number; reason?: string }) =>
+  quiet ? `${quiet} quiet commit(s) (${reason})${merges ? ` and ${merges} clean merge(s) of the base` : ""}` : `${merges} clean merge(s) of the base`;
+
 const evidenceDirectory = (home: string, identity: ProofIdentity, kind: ProofKind, proof: Proved) => proof.directory ?? join(pullRequestDirectory(home, identity), proof.reuse!.from, kind);
-const evidenceState = (identity: ProofIdentity, proof: Proved, directory: string): KindState =>
-  proof.reuse ? { state: "reused", from: proof.reuse.from, reason: proof.reuse.reason, directory } : { state: "ran", commit: identity.commit, directory };
+const evidenceState = async (identity: ProofIdentity, proof: Proved, directory: string): Promise<KindState> => {
+  if (proof.reuse) return { state: "reused", from: proof.reuse.from, reason: proof.reuse.reason, directory };
+  const capture = await runnerCapture(directory);
+  return { state: "ran", commit: identity.commit, directory, ...capture ? { capture } : {} };
+};
+
+async function carriedState(found: NonNullable<ReturnType<typeof reviewedThrough>>, proof: Proved, directory: string): Promise<KindState> {
+  const capture = proof.reuse ? undefined : await runnerCapture(directory);
+  const quiet = found.quiet.length ? { quiet: found.quiet.length, reason: quietReason(found.kinds) } : {};
+  return { state: "carried", from: found.from, origin: proof.reuse?.from ?? found.from, merges: found.merges.length, ...quiet, directory, ...capture ? { capture } : {} };
+}
 
 type KindStatus = Pick<Status, "problem" | "condition" | "lapsed"> & { proof: KindProof; evidence?: string; dev?: DevResult };
 
 const kindStatusOf = (kind: ProofKind, problem: Status["problem"], state: KindState, evidence?: string): KindStatus =>
   ({ problem, proof: { kind, line: kindLine(kind, state), ...state } as KindProof, evidence });
 
-async function kindStatus(weigh: Weigh, kind: ProofKind, landed: boolean, cleanBaseMerge: CleanBaseMerge, dev?: DevState): Promise<KindStatus> {
-  if (kind === "dev-observed") return devObservedStatus(weigh, cleanBaseMerge, dev);
+async function kindStatus(weigh: Weigh, kind: ProofKind, landed: boolean, cleanBaseMerge: CleanBaseMerge, quietCommit: QuietCommit, dev?: DevState): Promise<KindStatus> {
+  if (kind === "dev-observed") return devObservedStatus(weigh, cleanBaseMerge, quietCommit, dev);
   const { home, identity, decisions } = weigh;
   const status = (problem: Status["problem"], state: KindState, evidence?: string) => kindStatusOf(kind, problem, state, evidence);
   if (kind === "post-deploy-watch" && !landed) return status(undefined, { state: "pending" });
@@ -1181,12 +1227,12 @@ async function kindStatus(weigh: Weigh, kind: ProofKind, landed: boolean, cleanB
   if (acceptance?.by === "the user") return { ...status(undefined, gapState()), ...countedGap(weighed) };
   const proved = await provedCommits(home, identity, kind);
   const head = proved.get(identity.commit);
-  if (head) { const directory = evidenceDirectory(home, identity, kind, head); return status(undefined, evidenceState(identity, head, directory), directory); }
-  const carried = reviewedThroughMerges(identity.commit, new Set(proved.keys()), cleanBaseMerge);
+  if (head) { const directory = evidenceDirectory(home, identity, kind, head); return status(undefined, await evidenceState(identity, head, directory), directory); }
+  const carried = reviewedThrough(identity.commit, new Set(proved.keys()), cleanBaseMerge, quietCommit);
   if (carried) {
     const proof = proved.get(carried.from)!;
     const directory = evidenceDirectory(home, identity, kind, proof);
-    return status(undefined, { state: "carried", from: carried.from, origin: proof.reuse?.from ?? carried.from, merges: carried.merges.length, directory }, directory);
+    return status(undefined, await carriedState(carried, proof, directory), directory);
   }
   if (gap) return { ...status(acceptance ? undefined : "gap", gapState()), ...countedGap(weighed) };
   const newest = [...proved].sort(([, a], [, b]) => (a.time < b.time ? 1 : -1))[0]?.[0];
@@ -1206,7 +1252,7 @@ const isoOf = (nanos: bigint) => new Date(Number(nanos / 1_000_000n)).toISOStrin
  * dev-observed counts only evidence saved after the dev PR merged: an observation before the merge saw the old dev.
  * Until then the kind waits on the dev result, and a gap stands in as for any kind.
  */
-async function devObservedStatus(weigh: Weigh, cleanBaseMerge: CleanBaseMerge, dev: DevState | undefined): Promise<KindStatus> {
+async function devObservedStatus(weigh: Weigh, cleanBaseMerge: CleanBaseMerge, quietCommit: QuietCommit, dev: DevState | undefined): Promise<KindStatus> {
   const { home, identity, decisions } = weigh;
   const kind = "dev-observed";
   const status = (problem: Status["problem"], state: KindState, evidence?: string) => kindStatusOf(kind, problem, state, evidence);
@@ -1216,40 +1262,48 @@ async function devObservedStatus(weigh: Weigh, cleanBaseMerge: CleanBaseMerge, d
   const gapState = (): KindState => ({ state: "gap", accepted: acceptance !== undefined, gap: gapProof(gap, weighed, decisions) });
   if (acceptance?.by === "the user") return { ...status(undefined, gapState()), ...countedGap(weighed) };
   const proved = await provedCommits(home, identity, kind);
-  const head = proved.get(identity.commit);
-  const carried = head ? undefined : reviewedThroughMerges(identity.commit, new Set(proved.keys()), cleanBaseMerge);
-  const found = head ?? (carried && proved.get(carried.from));
+  const savedAt = new Map(await Promise.all([...proved].map(async ([commit, proof]) => [commit, await newestFile(evidenceDirectory(home, identity, kind, proof))] as const)));
+  const mergedAt = dev?.mergedAt !== undefined && !Number.isNaN(Date.parse(dev.mergedAt)) ? nanosOf(dev.mergedAt) : undefined;
+  const afterMerge = new Set([...savedAt].filter(([, saved]) => mergedAt !== undefined && saved !== undefined && saved >= mergedAt).map(([commit]) => commit));
+  const locate = (commits: Set<string>) => {
+    if (commits.has(identity.commit)) return { from: identity.commit, carried: undefined };
+    const carried = reviewedThrough(identity.commit, commits, cleanBaseMerge, quietCommit);
+    return carried && { from: carried.from, carried };
+  };
+  const located = (afterMerge.size ? locate(afterMerge) : undefined) ?? locate(new Set(proved.keys()));
+  const found = located && proved.get(located.from);
   const directory = found && evidenceDirectory(home, identity, kind, found);
-  const saved = directory ? await newestFile(directory) : undefined;
-  if (dev?.mergedAt && found && directory && saved !== undefined && saved >= nanosOf(dev.mergedAt)) {
+  const saved = located && savedAt.get(located.from);
+  if (dev?.mergedAt && mergedAt !== undefined && found && directory && saved !== undefined && saved >= mergedAt) {
     const result: DevResult = {
       pr: devText(dev.ref), mergedAt: dev.mergedAt, ...dev.mergeCommit ? { mergeCommit: dev.mergeCommit } : {}, savedAt: isoOf(saved),
       line: `dev result: ${devText(dev.ref)} merged at ${dev.mergedAt}${dev.mergeCommit ? ` as ${short(dev.mergeCommit)}` : ""}; the dev-observed evidence was saved at ${isoOf(saved)}, after the merge`,
     };
-    const state: KindState = head ? evidenceState(identity, head, directory) : { state: "carried", from: carried!.from, origin: found.reuse?.from ?? carried!.from, merges: carried!.merges.length, directory };
+    const state: KindState = located.carried ? await carriedState(located.carried, found, directory) : await evidenceState(identity, found, directory);
     return { ...status(undefined, state, directory), dev: result };
   }
   if (gap) return { ...status(acceptance ? undefined : "gap", gapState()), ...countedGap(weighed) };
   const merged = dev?.mergedAt && `the dev PR merged at ${dev.mergedAt}${dev.mergeCommit ? ` as ${short(dev.mergeCommit)}` : ""}`;
   const reason = !dev ? "no dev PR is recorded; run hedge proof require --after-dev <owner/name>#<number>"
     : dev.error ? `cannot read the dev PR (${dev.error})`
+    : dev.mergedAt !== undefined && mergedAt === undefined ? `cannot read the dev PR's merge time (${dev.mergedAt})`
     : !merged ? "the dev PR is not merged yet"
     : saved !== undefined ? `${merged}, after the newest dev-observed evidence, saved at ${isoOf(saved)}. Observe dev again and save the result with hedge proof run --kind dev-observed -- <command>`
     : `${merged}. Observe dev and save the result with hedge proof run --kind dev-observed -- <command>`;
   return { ...status("missing", { state: "waiting", dev: dev ? devText(dev.ref) : "an unrecorded dev PR", reason }), ...lapseOf(weighed) };
 }
 
-type FinishedReview = { name: string; commit: string; reviewer?: string; finishedAt: bigint; panel: boolean; scope?: string; from?: string; forkBase?: string };
+type FinishedReview = { name: string; commit: string; reviewer?: string; finishedAt: bigint; panel: boolean; scope?: string; from?: string; forkBase?: string; pastBudget: boolean };
 
 export async function finishedReviews(home: string, identity: ProofIdentity) {
   const reviews = join(pullRequestDirectory(home, identity), "reviews");
   const finished: FinishedReview[] = [];
   for (const name of await reviewNames(reviews)) {
-    const reservation = await readJson<(ProofIdentity & { reviewer?: string; capturedBy?: CapturedBy; scope?: string; from?: string; forkBase?: string }) | undefined>(join(reviews, name, "round.json"), undefined);
+    const reservation = await readJson<(ProofIdentity & { reviewer?: string; capturedBy?: CapturedBy; scope?: string; from?: string; forkBase?: string; pastBudget?: unknown }) | undefined>(join(reviews, name, "round.json"), undefined);
     const findings = await stat(join(reviews, name, "findings.md"), { bigint: true }).catch(() => undefined);
     const panel = await panelOutcome(join(reviews, name));
     const counted = panel === "none" || (panel === "finished" && reservation?.capturedBy === "hedge");
-    if (reservation && findings && counted) finished.push({ name, commit: reservation.commit, reviewer: reservation.reviewer, finishedAt: findings.mtimeNs, panel: panel === "finished", scope: reservation.scope, from: reservation.from, forkBase: reservation.forkBase });
+    if (reservation && findings && counted) finished.push({ name, commit: reservation.commit, reviewer: reservation.reviewer, finishedAt: findings.mtimeNs, panel: panel === "finished", scope: reservation.scope, from: reservation.from, forkBase: reservation.forkBase, pastBudget: reservation.pastBudget === true });
   }
   return finished.sort((a, b) => (a.finishedAt < b.finishedAt ? -1 : a.finishedAt > b.finishedAt ? 1 : 0));
 }
@@ -1387,12 +1441,22 @@ function headStatus(identity: ProofIdentity, before: PushedHead, after: PushedHe
 }
 
 /** devPull reads the dev PR that a prod PR waits on (hedge proof require --after-dev). */
-export type GateOptions = { ci: () => CiResult; pushedHead: () => PushedHead; ledger: Ledger; landed?: boolean; cleanBaseMerge?: CleanBaseMerge; quietCommit?: QuietCommit; now?: Date; devPull?: (dev: DevPr) => DevPull | Promise<DevPull> };
+export type GateOptions = { ci: () => CiResult; pushedHead: () => PushedHead; openBotFindings: () => Promise<Thread[]>; ledger: Ledger; landed?: boolean; cleanBaseMerge?: CleanBaseMerge; quietCommit?: QuietCommit; now?: Date; devPull?: (dev: DevPr) => DevPull | Promise<DevPull>; decidesAll?: boolean };
 
 // A fenced block is an example, never the section: drop it before looking for the heading.
 const unfenced = (body: string) => body.replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[^\n]*$/gm, "");
-const knownIssues = (body: string) => (/^#+\s*Known issues\b.*$([\s\S]*?)(?=^#|(?![\s\S]))/im.exec(unfenced(body))?.[1] ?? "").split("\n").filter((line) => /^\s*[-*]\s+\S/.test(line)).map((line) => line.trim());
+export const knownIssues = (body: string) => (/^#+\s*Known issues\b.*$([\s\S]*?)(?=^#|(?![\s\S]))/im.exec(unfenced(body))?.[1] ?? "").split("\n").filter((line) => /^\s*[-*]\s+\S/.test(line)).map((line) => line.trim());
 const knownBlocker = (body: string) => knownIssues(body).find((line) => /^[-*]\s+\**blocker\b/i.test(line));
+
+async function botFindingStatus(identity: ProofIdentity, openBotFindings: () => Promise<Thread[]>): Promise<Status | undefined> {
+  let open: Thread[];
+  try { open = await openBotFindings(); }
+  catch (error) { return { problem: "missing", line: `bot threads: cannot read the PR's review threads on GitHub (${(error as Error).message.trim().split("\n")[0]}); run the gate again` }; }
+  if (!open.length) return undefined;
+  const waiting = open.length === 1 ? "1 bot finding waits" : `${open.length} bot findings wait`;
+  const threads = open.map((thread) => `${thread.url} (${thread.location})`).join(", ");
+  return { problem: "missing", line: `bot threads: ${waiting} for an answer: ${threads}. Fix each one and run hedge pr bot-threads --repo ${identity.repository} --pr ${identity.pr} --fixed <URL>, or reply in the thread with why it does not hold, then run the gate again` };
+}
 
 function heldStatus(head: PushedHead): Status | undefined {
   const blocker = "body" in head && head.body !== undefined ? knownBlocker(head.body) : undefined;
@@ -1409,7 +1473,7 @@ export type ProofSummary = {
   head: { state: "pushed" | "missing"; line: string };
   ci: { state: CiResult["state"]; detail: string; checks?: string[]; gap?: GapProof; line: string };
   judge: JudgeSummary;
-  lapsed: string[]; lapsedLine?: string; voided: string[]; receipt?: string; held?: string; growth?: Growth;
+  lapsed: string[]; lapsedLine?: string; voided: string[]; receipt?: string; held?: string; botFindings?: string; growth?: Growth;
 };
 
 export type JudgeSummary = { state: "pass" | "fail" | "unavailable" | "skipped"; model?: string; gap?: GapProof; lines: string[] };
@@ -1424,7 +1488,7 @@ export const summaryGaps = (summary: ProofSummary): { kind: string; gap: GapProo
 
 export const summaryLines = (summary: CheckedSummary) => [
   ...summary.owed.line ? [summary.owed.line] : [], ...summary.kinds.map((kind) => kind.line), ...summary.dev ? [summary.dev.line] : [], summary.review.line, ...summary.review.dropped ?? [], ...summary.review.unanswered,
-  summary.head.line, summary.ci.line, ...summary.lapsedLine ? [summary.lapsedLine] : [], ...summary.held ? [summary.held] : [],
+  summary.head.line, summary.ci.line, ...summary.lapsedLine ? [summary.lapsedLine] : [], ...summary.held ? [summary.held] : [], ...summary.botFindings ? [summary.botFindings] : [],
 ];
 
 const owedPart = (owed: Owed | undefined): CheckedSummary["owed"] =>
@@ -1441,15 +1505,15 @@ async function readDev(dev: DevPr | undefined, devPull: GateOptions["devPull"]):
   catch (error) { return { ref: dev, error: (error as Error).message.trim().split("\n")[0] || "unknown error" }; }
 }
 
-export async function proofGate(home: string, identity: ProofIdentity, { ci, pushedHead, ledger, landed = false, cleanBaseMerge = () => undefined, quietCommit = () => undefined, now = new Date(), devPull }: GateOptions) {
+export async function proofGate(home: string, identity: ProofIdentity, { ci, pushedHead, openBotFindings, ledger, landed = false, cleanBaseMerge = () => undefined, quietCommit = () => undefined, now = new Date(), devPull, decidesAll = false }: GateOptions) {
   const before = pushedHead();
   const grade = gradeOf("error" in before ? undefined : before.body);
   const tier = grade.tier;
   const decisions = await readDecisions(ledger);
-  const weigh: Weigh = { home, identity, now, decisions, tier };
+  const weigh: Weigh = { home, identity, now, decisions, tier, decidesAll };
   const owed = await readOwed(home, identity);
   const dev = owed?.kinds.includes("dev-observed") ? await readDev(owed.afterDev, devPull) : undefined;
-  const kinds = await Promise.all((owed?.kinds ?? []).map((kind) => kindStatus(weigh, kind, landed, cleanBaseMerge, dev)));
+  const kinds = await Promise.all((owed?.kinds ?? []).map((kind) => kindStatus(weigh, kind, landed, cleanBaseMerge, quietCommit, dev)));
   const devResult = kinds.find((kind) => kind.dev)?.dev;
   const review = await reviewStatus(weigh, cleanBaseMerge, quietCommit);
   const responses = await responseStatuses(home, identity, landed || !("body" in before) ? undefined : before.body ?? "");
@@ -1458,7 +1522,8 @@ export async function proofGate(home: string, identity: ProofIdentity, { ci, pus
   const head = headStatus(identity, before, pushedHead());
   const checks = await ciStatus(weigh, ciResult);
   const knownHold = landed ? undefined : heldStatus(before);
-  const held = [{ problem: owed ? undefined : "missing", line: owedPart(owed).line }, ...kinds.map((kind) => ({ problem: kind.problem, line: kind.proof.line })), review, ...responses, head, checks, ...knownHold ? [knownHold] : []];
+  const botFindings = await botFindingStatus(identity, openBotFindings);
+  const held = [{ problem: owed ? undefined : "missing", line: owedPart(owed).line }, ...kinds.map((kind) => ({ problem: kind.problem, line: kind.proof.line })), review, ...responses, head, checks, ...knownHold ? [knownHold] : [], ...botFindings ? [botFindings] : []];
   const weighed = [...kinds, review, checks];
   const lapsed = [...new Set(weighed.flatMap((status) => status.problem && status.lapsed ? [status.lapsed] : []))];
   const conditions = weighed.flatMap((status) => status.condition ? [status.condition] : []);
@@ -1472,10 +1537,10 @@ export async function proofGate(home: string, identity: ProofIdentity, { ci, pus
     review: { state: review.problem ?? "covered", ...review.covered ? { covered: review.covered } : {}, ...review.panelGap ? { panelGap: review.panelGap } : {}, unanswered: responses.map((response) => response.line), line: review.line, ...dropped.length ? { dropped } : {} },
     head: { state: head.problem ? "missing" : "pushed", line: head.line },
     ci: { state: ciResult.state, detail: ciResult.detail, ...ciResult.checks ? { checks: ciResult.checks } : {}, ...checks.gap ? { gap: checks.gap } : {}, line: checks.line },
-    lapsed, ...lapsed.length ? { lapsedLine: lapsedLine(lapsed) } : {}, voided, ...receipt ? { receipt } : {}, ...knownHold ? { held: knownHold.line } : {},
+    lapsed, ...lapsed.length ? { lapsedLine: lapsedLine(lapsed) } : {}, voided, ...receipt ? { receipt } : {}, ...knownHold ? { held: knownHold.line } : {}, ...botFindings ? { botFindings: botFindings.line } : {},
   };
   const summary = `kinds: ${owed?.kinds.length ? owed.kinds.join(", ") : "none"}; review: ${review.covered}; CI: ${checks.covered}`;
-  const evidence = kinds.map(({ proof, evidence }) => ({ kind: proof.kind, line: proof.line, directory: evidence }));
+  const evidence = kinds.map(({ proof, evidence }) => ({ kind: proof.kind, line: proof.line, directory: evidence, ...proof.state === "carried" ? { carriedFrom: proof.from } : {} }));
   return { code, failure, lines: summaryLines(proofSummary), summary, owed, evidence, ci: ciResult, decisions, tier, grade, conditions, voided, proofSummary };
 }
 

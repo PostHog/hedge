@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { checkout, cleanFixtures, fakeModel, graded, markPanel, productionMajor, reviewHeadFixed, settings, verdict, type Checkout } from "./proof-testing.ts";
+import { checkout, cleanFixtures, fakeModel, markPanel, productionMajor, reviewHeadFixed, settings, verdict, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
@@ -55,18 +55,6 @@ test("at the review ceiling, a final read from the latest review on HEAD's histo
   const read = await finalRead(pr, fixed).then(() => "", (error: Error) => error.message);
 
   expect(read).toContain(`The review budget of 2 reviews is spent, and no read checks the production changes since ${short(fixed)}. Revert each commit of the PR since ${short(fixed)}`);
-  expect(read).not.toContain(short(stray));
-});
-
-test("on end, a one-way stop names the latest review on HEAD's history as the start of the fixes to revert", async () => {
-  const { pr, fixed, stray } = await prWithStrayRead();
-  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.autonomy": "end" });
-  pr.pullRequestState({ body: graded("critical", "medium").replace("two-way door", "one-way door") });
-  pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo 'ESCALATE: The reviews disagree.'";
-
-  const read = await finalRead(pr, fixed).then(() => "", (error: Error) => error.message);
-
-  expect(read).toContain(`On a one-way door the review loop stops here: ask the user nothing about another round. Revert each commit of the PR since ${short(fixed)}`);
   expect(read).not.toContain(short(stray));
 });
 

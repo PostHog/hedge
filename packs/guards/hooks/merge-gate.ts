@@ -28,14 +28,14 @@ function shellCommand(input: Record<string, unknown> = {}) {
   return typeof command === "string" ? command : "";
 }
 
-/** Refuses an enqueue or merge until `hedge proof gate` passed at the head of each open layer of the PR's stack, or the person's gate override covers that head. */
+/** Refuses an enqueue or merge until `hedge proof gate` passed at the head of each open layer of the PR's stack, or the person's gate override covers that head, and while a layer holds a gap an agent accepted without the person's merge word for its head, exempt repositories included. */
 export async function mergeGate(call: ToolCall, where: Where): Promise<Denial | undefined> {
   let settings: GateSettings | undefined;
   let problem = "";
   try { settings = gateSettings(where.home); }
   catch (error) { problem = (error as Error).message; }
   const intent = mergeIntent(call, shellCommand(call.tool_input), settings?.exempt ?? [], where.intent ?? realIntentIO);
-  if (!intent.refusal && !intent.targets.length) return undefined;
+  if (!intent.refusal && !intent.targets.length && !intent.exempt?.length) return undefined;
   if (!settings) return deny(`Hedge blocked this merge: the merge gate could not read its settings (${problem}), so it cannot tell which repositories skip the gate. Fix that file.`);
   const env = { ...where.env, HEDGE_SETTINGS: where.env.HEDGE_SETTINGS ?? settings.text };
   const io = where.gate ?? { ...realGateIO(where.home, env), ...where.github };

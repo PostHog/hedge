@@ -41,32 +41,18 @@ The `question-guard` workflow is on by default. It installs one hook file,
 
 - **Stop.** A top-level T3 thread that ends its turn with a decision in prose
   is stopped once and told to ask with the question tool. When that check lets
-  the stop pass, the proof check below runs.
-- **PreToolUse on `t3_thread_send`.** An agent sends to a thread on this
-  machine whose running turn waits on a question card. When the send's mode is
-  `auto`, `steer` or `restart`, or has no mode, it interrupts that turn, and T3
-  cancels the card. The hook denies such a send and tells the agent to send
-  again with `mode: "queue"`. The queued message reaches the thread after the
-  person answers. A send in mode `queue`, or to an idle thread, passes. T3
-  queues a send with `freshContext: true` in mode `steer` or `restart`, so it
-  passes too. With `freshContext: true` in mode `auto`, T3 still steers, so it
-  is denied. The hook reads the card from `pendingRuntimeRequest` in T3's shell
-  snapshot. A card without an id counts as one card for each running turn.
+  the stop pass, the proof check and then the wake check below run.
+- **PreToolUse on the question tool.** A card in a thread whose title starts
+  with one of your prose titles is turned back. See below.
 
-The send guard never traps an agent:
-
-- It denies a send once for each session, card, thread and message. Only the
-  same message to the same thread again passes, for an agent whose message
-  replaces what the card asks. A different message is denied again. It keeps
-  these records in `~/.local/state/hedge/ask-guard/`, and removes records
-  older than one day when it writes a new one.
-- It lets the send pass on any error: when T3 cannot be read, when a T3 call
-  does not answer within 3 seconds, when it cannot write its record, and when
-  the send names another machine's `environmentId`. The hook makes three T3
-  calls: it opens a session, reads the shell snapshot, and closes the session.
-  So a send waits at most about 9 seconds.
-- While `~/.config/hedge/ask-guard.off` exists, every send passes. The prose
-  Stop check stays on.
+A message that an agent or `hedge thread send` sends to a thread whose
+running turn waits on a question card steers that turn by default on Claude
+and Codex, which steer without interrupting. The card stays open, and the
+thread's agent reads the message when the person answers. In mode `auto`,
+`hedge thread send` sends `queue` to a thread that waits on a card when the
+message is a slash command, such as `/goal`, which T3 can run at once and
+stop the turn, or when the thread runs on another provider, such as
+Antigravity, whose steer can fail a turn that waits on a card.
 
 ### Threads that ask in prose
 
@@ -83,6 +69,43 @@ empty by default. A thread whose title starts with one of them:
 The match ignores the emoji variation selector, so `⚠️` also matches `⚠`. The
 card check lets a card pass on any error, and while
 `~/.config/hedge/ask-guard.off` exists.
+
+### Wake check at Stop
+
+A top-level T3 thread whose last line starts with ⏳ (it waits on someone
+else) or 🔕 (it waits on its own scheduled check) is stopped once when nothing
+can wake it. A fork counts as top-level. It runs after the proof check, so a
+thread that owes a proof step hears that step first. Hedge never snoozes or
+settles the thread. A thread that waits
+belongs in T3's waiting state, so the reply tells the agent to give the wait
+something that wakes it: `watch_pull_request` with `until: "merged"` for a PR,
+including one in the merge queue; the lane's `delegate_task` child or
+`t3_thread_wait`; or `schedule_task` bound to the thread for a check at a time.
+
+The stop passes when any of these holds:
+
+- the kill switch file exists, or a stop hook already continued this turn;
+- the thread waits on a child task, a thread wait, or a command or monitor it
+  awaits, as in the proof check below;
+- T3 awaits a PR watch of the thread: the watch runs `until: "merged"`,
+  its checks still run or are not read yet after a push, or its PR merged,
+  and the PR's stack did not dismiss it. This is T3's own rule for an
+  awaited watch task. T3 shows no task while a turn runs, so the check
+  reads the watch on the PR itself. A watch whose checks finished, such as
+  one on a PR in the merge queue, one that waits on an approval, or one on
+  a closed PR, is no wait unless it runs `until: "merged"`;
+- on Claude, a subagent, a monitor, a background shell, or a session cron
+  runs;
+- an enabled scheduled task bound to the thread has a next run time in
+  T3's state, a real time in the UTC form T3 writes, also one that is due
+  and has not run yet;
+- the thread is snoozed, waits on a question card, is a subagent thread, a
+  side chat or a workflow agent step, or was delegated from another machine;
+- the hook runs in a model session that another one started, as in the proof
+  check below;
+- any read fails, or the proof check and this check together take longer
+  than 10 seconds. The two share one deadline, and a check that answers
+  after it lets the stop pass.
 
 ### Proof check at Stop
 
@@ -118,8 +141,8 @@ call. It trusts `origin/<branch>` as the pushed head.
 
 The stop passes when any of these holds:
 
-- `~/.config/hedge/ask-guard.off` exists. It turns off the send guard and this
-  check;
+- `~/.config/hedge/ask-guard.off` exists. It turns off the prose-title card
+  check and this check;
 - a stop hook already continued this turn (`stop_hook_active`), so the check
   blocks at most once per turn;
 - the thread waits on a question card, or its last line starts with
@@ -142,3 +165,45 @@ The stop passes when any of these holds:
 - any read fails, or the check takes longer than 10 seconds. At the deadline
   it stops the git and `ps` commands it started, and the hook process exits
   once it has answered, even when a helper of those commands still runs.
+
+## Loop pause
+
+The `loop-pause` workflow is on by default. It installs
+`hooks/loop-pause.ts` for PreToolUse in Claude and Codex. The setting
+`orchestration.loopLedger` names the loops' ledger directory, which holds
+`limits.md`, `lanes.md` and `signals.md`. With a context library, it defaults
+to its `quality-loop` directory. Without the setting, or when that directory
+does not exist, such as on a machine whose loops keep their ledger in
+`orchestration.ledgerRepo` elsewhere, the hook does nothing. Any other error
+reading the directory denies. Set it to that
+ledger's checkout to turn the hook on there.
+
+A thread whose first prompt opens, after any bracketed note on who sent it
+(as T3's scheduled tasks add), with a line that starts with "Run" or "Start"
+and names a coordinator and the `quality-loop` or `signal-loop` skill, or with
+the skill's slash command, is a loop coordinator, whether a schedule or a
+person started it. A prompt that asks about a coordinator run, or quotes one
+further down, is not. A prompt that opens with "Run" and names both, such as
+"Run the quality-loop coordinator audit", counts: while the loops are paused,
+start such an audit with "Audit" instead. When such a thread calls
+`delegate_task` while `limits.md` says `Paused: yes`, or while the file cannot
+be read, has no `Paused:` line, says anything but a plain `yes` or `no` (a
+note may follow after a comma, a semicolon, a spaced dash, or in closed
+brackets, and any markup around the word must match), or has `Paused:` lines that disagree, the call is denied: the coordinator settles the lanes that ended, keeps
+its watches and post-deploy checks, records a no-op run, and starts no lane.
+Settling, `watch_pull_request`, `schedule_task`, `t3_thread_send`, and every
+other thread pass.
+
+Two commands give the loop skills the same facts:
+
+- `hedge loop check-pause [--ledger <dir>]` exits 0 while the loops run, 1
+  while they are paused, and 3 when `limits.md` cannot be read or does not
+  clearly say yes or no.
+- `hedge loop next-id --kind lane|signal [--ledger <dir>]` prints the next
+  lane or signal id, one past the highest row in `lanes.md` or `signals.md`,
+  follow-up rows such as `L012b` included.
+  It reserves each id with an exclusive file create under
+  `~/.local/state/hedge/loop-ids/`, keyed by the ledger directory's real
+  path, so two coordinators on one machine that share a checkout never get
+  the same id. Two checkouts are like two machines: write the row and push the
+  ledger right after.

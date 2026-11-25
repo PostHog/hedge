@@ -150,6 +150,68 @@ for (const [runtime, command] of Object.entries(runtimes)) describe.skipIf(!node
     expect(await bridge.exited).toBe(0);
   });
 
+  test("a revoked ChatGPT sign-in reaches the agent as one re-auth step, and a call that works after it answers as before", async () => {
+    const bridge = upstream("", { FAKE_CODEX_REPLIES: "revoked,ok" });
+    await bridge.initialize();
+    const read = await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } });
+    expect(read.error!.message).toStartWith("Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps. Cause: MCP startup failed: HTTP 401");
+    expect((await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } })).result.content).toEqual([{ type: "text", text: "slack.slack_read_thread done" }]);
+  });
+
+  test("a revoked sign-in that fails the tool list, as when the gateway starts, reaches the gateway as the re-auth step", async () => {
+    const bridge = upstream("", { FAKE_CODEX_LIST_REVOKED: "1" });
+    await bridge.initialize();
+    expect((await bridge.request("tools/list")).error!.message).toStartWith("Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack.");
+  });
+
+  test("a tool list whose only auth code is in the app's tools error names that code as the cause", async () => {
+    const bridge = upstream("", { FAKE_CODEX_LIST_TOOLS_ERROR: "1" });
+    await bridge.initialize();
+    expect((await bridge.request("tools/list")).error!.message).toEndWith("Cause: The Codex app backend could not list the Slack tools. (token_revoked)");
+  });
+
+  test("a call whose only auth code is in the backend's error data reaches the agent as the re-auth step that names the code", async () => {
+    const bridge = upstream("", { FAKE_CODEX_REPLIES: "revoked-data" });
+    await bridge.initialize();
+    const read = await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } });
+    expect(read.error!.message).toEndWith("Apps. Cause: Unauthorized (token_revoked)");
+  });
+
+  test("a failed result whose only auth code is in its structured content ends with the re-auth step", async () => {
+    const bridge = upstream("", { FAKE_CODEX_REPLIES: "structured-auth" });
+    await bridge.initialize();
+    const read = await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } });
+    expect(read.result).toEqual({ isError: true, structuredContent: { error: "invalid_auth" }, content: [
+      { type: "text", text: "Unauthorized" },
+      { type: "text", text: "Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps." },
+    ] });
+  });
+
+  test("Slack refusing the app's own grant ends the failed result with the re-auth step", async () => {
+    const bridge = upstream("", { FAKE_CODEX_REPLIES: "slack-auth" });
+    await bridge.initialize();
+    expect((await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } })).result).toEqual({ isError: true, content: [
+      { type: "text", text: '{"ok":false,"error":"invalid_auth"}' },
+      { type: "text", text: "Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps." },
+    ] });
+  });
+
+  test("a failed result that opens with a JSON 401 keeps it first, so the gateway still reconnects and retries the call", async () => {
+    const bridge = upstream("", { FAKE_CODEX_REPLIES: "json-401" });
+    await bridge.initialize();
+    const read = await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } });
+    expect(read.result).toEqual({ isError: true, content: [
+      { type: "text", text: '{"code":401,"error":"token_expired"}' },
+      { type: "text", text: "Slack needs re-auth: on the hub, run: hedge mcp-gateway sign-in slack. When calls still fail after it, reconnect Slack in ChatGPT, Settings, Apps." },
+    ] });
+  });
+
+  test("a failure that is not about the sign-in stays as Slack wrote it", async () => {
+    const bridge = upstream("", { FAKE_CODEX_REPLIES: "plain" });
+    await bridge.initialize();
+    expect((await bridge.request("tools/call", { name: "slack_read_thread", arguments: { channel_id: "C1", message_ts: "1.2" } })).result).toEqual({ isError: true, content: [{ type: "text", text: "channel_not_found" }] });
+  });
+
   test("an approval the Slack app asks for goes to the calling agent, and its answer goes back", async () => {
     const bridge = upstream();
     await bridge.initialize();

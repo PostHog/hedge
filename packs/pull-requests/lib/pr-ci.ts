@@ -13,17 +13,18 @@ export const runIn = (cwd: string, env: Record<string, string | undefined>): Run
     return { code: 127, stdout: "", stderr: `${command[0]}: ${(error as Error).message}` };
   }
 };
-export type PullRequest = { title: string; body: string; draft: boolean; state: "open" | "closed" | "merged"; head: string; base: string; baseSha: string; defaultBranch?: string; mergedAt?: string; mergeCommit?: string };
+export type PullRequest = { title: string; body: string; draft: boolean; state: "open" | "closed" | "merged"; head: string; base: string; baseSha: string; defaultBranch?: string; createdAt?: string; mergedAt?: string; mergeCommit?: string };
 
 type CheckRun = { id: number; name: string; status: string; conclusion: string | null; app?: number | null };
 type CommitStatus = { context: string; state: string; creator?: { login?: string; type?: string } | null };
-type RequiredCheck = { context: string; appId?: number; postedOnceReady?: true };
+type RequiredCheck = { context: string; appId?: number; rulesets?: number[]; postedOnceReady?: true; changedAfterMerge?: true };
 type Outcome = "pass" | "fail" | "pending";
 type Entry = { name: string; outcome: Outcome; appId?: number; status?: true; botLogin?: string };
 
 const passing = new Set(["success", "neutral", "skipped"]);
 const rank: Record<Outcome, number> = { pass: 0, pending: 1, fail: 2 };
 const cacheMs = 60 * 60_000;
+const cacheVersion = 2;
 const short = (commit: string) => commit.slice(0, 7);
 const firstLine = (text: string) => text.trim().split("\n")[0] || "no output";
 
@@ -34,10 +35,10 @@ export function restJson<T>(path: string, run: Run): T {
 }
 
 export function readPullRequest(identity: ProofIdentity, run: Run): PullRequest {
-  type Raw = { title?: string; body?: string | null; draft?: boolean; state?: string; merged_at?: string | null; merge_commit_sha?: string | null; head?: { sha?: string }; base?: { ref?: string; sha?: string; repo?: { default_branch?: string } } };
+  type Raw = { title?: string; body?: string | null; draft?: boolean; state?: string; created_at?: string; merged_at?: string | null; merge_commit_sha?: string | null; head?: { sha?: string }; base?: { ref?: string; sha?: string; repo?: { default_branch?: string } } };
   const raw = restJson<Raw>(`repos/${identity.repository}/pulls/${identity.pr}`, run);
   const state = raw.merged_at ? "merged" : raw.state === "closed" ? "closed" : "open";
-  return { title: raw.title ?? "", body: raw.body ?? "", draft: raw.draft === true, state, head: raw.head?.sha ?? "", base: raw.base?.ref ?? "", baseSha: raw.base?.sha ?? "", defaultBranch: raw.base?.repo?.default_branch, ...raw.merged_at ? { mergedAt: raw.merged_at } : {}, ...raw.merged_at && raw.merge_commit_sha ? { mergeCommit: raw.merge_commit_sha } : {} };
+  return { title: raw.title ?? "", body: raw.body ?? "", draft: raw.draft === true, state, head: raw.head?.sha ?? "", base: raw.base?.ref ?? "", baseSha: raw.base?.sha ?? "", defaultBranch: raw.base?.repo?.default_branch, ...raw.created_at ? { createdAt: raw.created_at } : {}, ...raw.merged_at ? { mergedAt: raw.merged_at } : {}, ...raw.merged_at && raw.merge_commit_sha ? { mergeCommit: raw.merge_commit_sha } : {} };
 }
 
 const commentPattern = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/(?:issues|pull)\/([1-9]\d*)#issuecomment-(\d+)$/;
@@ -62,8 +63,13 @@ export function readComment(url: string, run: Run): CommentUrl {
 
 function readRequired(repository: string, branch: string, run: Run): RequiredCheck[] {
   const checks = new Map<string, RequiredCheck>();
-  const add = (context: string, appId?: number | null) => checks.set(`${context}\n${appId ?? ""}`, appId ? { context, appId } : { context });
-  type Rule = { type: string; parameters?: { required_status_checks?: { context: string; integration_id?: number }[] } };
+  const add = (context: string, appId?: number | null, ruleset?: number) => {
+    const key = `${context}\n${appId ?? ""}`;
+    const known = checks.get(key);
+    const rulesets = ruleset === undefined || (known && !known.rulesets) ? undefined : [...new Set([...known?.rulesets ?? [], ruleset])];
+    checks.set(key, { context, ...appId ? { appId } : {}, ...rulesets ? { rulesets } : {} });
+  };
+  type Rule = { type: string; ruleset_id?: number; parameters?: { required_status_checks?: { context: string; integration_id?: number }[] } };
   const encoded = encodeURIComponent(branch);
   for (let page = 1; ; page++) {
     const rules = run(["gh", "api", `repos/${repository}/rules/branches/${encoded}?per_page=100&page=${page}`]);
@@ -72,7 +78,7 @@ function readRequired(repository: string, branch: string, run: Run): RequiredChe
       throw new Error(`cannot read the rulesets of ${branch} over REST (${firstLine(rules.stderr)})`);
     }
     const list = JSON.parse(rules.stdout) as Rule[];
-    for (const rule of list) if (rule.type === "required_status_checks") for (const check of rule.parameters?.required_status_checks ?? []) add(check.context, check.integration_id);
+    for (const rule of list) if (rule.type === "required_status_checks") for (const check of rule.parameters?.required_status_checks ?? []) add(check.context, check.integration_id, rule.ruleset_id);
     if (list.length < 100) break;
   }
   type Branch = { protection?: { required_status_checks?: { enforcement_level?: string; contexts?: string[]; checks?: { context: string; app_id?: number | null }[] } } };
@@ -81,22 +87,42 @@ function readRequired(repository: string, branch: string, run: Run): RequiredChe
   const classic = (JSON.parse(branchView.stdout) as Branch).protection?.required_status_checks;
   if (classic && classic.enforcement_level !== "off") {
     for (const check of classic.checks ?? []) add(check.context, check.app_id);
-    for (const context of classic.contexts ?? []) if (![...checks.values()].some((check) => check.context === context)) add(context);
+    const pinned = new Set((classic.checks ?? []).map((check) => check.context));
+    for (const context of classic.contexts ?? []) {
+      if (pinned.has(context)) continue;
+      const named = [...checks.values()].filter((check) => check.context === context);
+      if (!named.length) add(context);
+      for (const check of named) delete check.rulesets;
+    }
   }
   return [...checks.values()];
 }
 
-function requiredChecks(home: string, repository: string, branch: string, run: Run, now: Date): RequiredCheck[] {
+function requiredChecks(home: string, repository: string, branch: string, run: Run, now: Date, fresh: boolean): RequiredCheck[] {
   const path = join(home, ".local/state/hedge/required-checks", repository, `${encodeURIComponent(branch)}.json`);
-  try {
-    const cached = JSON.parse(readFileSync(path, "utf8")) as { fetchedAt: string; checks: RequiredCheck[] };
+  if (!fresh) try {
+    const cached = JSON.parse(readFileSync(path, "utf8")) as { version?: number; fetchedAt: string; checks: RequiredCheck[] };
     const age = now.getTime() - new Date(cached.fetchedAt).getTime();
-    if (age >= 0 && age < cacheMs) return cached.checks;
+    if (cached.version === cacheVersion && age >= 0 && age < cacheMs) return cached.checks;
   } catch {}
   const checks = readRequired(repository, branch, run);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify({ fetchedAt: now.toISOString(), checks }));
+  writeFileSync(path, JSON.stringify({ version: cacheVersion, fetchedAt: now.toISOString(), checks }));
   return checks;
+}
+
+function rulesetChangedAt(repository: string, ruleset: number, run: Run): number | undefined {
+  const result = run(["gh", "api", `repos/${repository}/rulesets/${ruleset}`]);
+  if (result.code !== 0) return undefined;
+  const changed = Date.parse((JSON.parse(result.stdout) as { updated_at?: string }).updated_at ?? "");
+  return Number.isFinite(changed) ? changed : undefined;
+}
+
+function markChangedAfterMerge(required: RequiredCheck[], repository: string, mergedAt: string, run: Run): RequiredCheck[] {
+  const merged = Date.parse(mergedAt);
+  const changed = new Map<number, number | undefined>();
+  const changedAt = (ruleset: number) => changed.has(ruleset) ? changed.get(ruleset) : changed.set(ruleset, rulesetChangedAt(repository, ruleset, run)).get(ruleset);
+  return required.map((check) => check.rulesets?.length && check.rulesets.every((ruleset) => (changedAt(ruleset) ?? -Infinity) > merged) ? { ...check, changedAfterMerge: true as const } : check);
 }
 
 function commitRecords<T>(identity: ProofIdentity, run: Run, path: string, jq: string): T[] {
@@ -191,22 +217,23 @@ function notRequired(entries: Entry[], { countRunning = true } = {}) {
 
 function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boolean): CiResult {
   const counted = new Set<Entry>();
-  const [failing, pending, missing, withheld, listed]: string[][] = [[], [], [], [], []];
+  const [failing, pending, missing, withheld, listed, later]: string[][] = [[], [], [], [], [], []];
   for (const check of required) {
     const named = entries.filter((entry) => entry.name === check.context);
     const own = named.filter((entry) => reportedBy(check, entry));
     const matches = own.some((entry) => entry.status) ? [...new Set([...own, ...named.filter((entry) => !entry.status)])] : own;
     matches.forEach((entry) => counted.add(entry));
-    if (!matches.length) { (!draft ? missing : check.postedOnceReady && !entries.some((entry) => entry.name.toLowerCase() === check.context.toLowerCase()) ? listed : withheldFromDraft(check, entries) ? withheld : missing).push(check.context); continue; }
+    if (!matches.length) { (check.changedAfterMerge ? later : !draft ? missing : check.postedOnceReady && !entries.some((entry) => entry.name.toLowerCase() === check.context.toLowerCase()) ? listed : withheldFromDraft(check, entries) ? withheld : missing).push(check.context); continue; }
     const worst = matches.reduce((a, b) => rank[b.outcome] > rank[a.outcome] ? b : a).outcome;
     if (worst === "fail") failing.push(check.context);
     else if (worst === "pending") pending.push(check.context);
   }
   const verdict: CiResult = failing.length ? { state: "red", detail: `required failing: ${listOf(failing)}` }
     : pending.length || missing.length ? { state: "pending", detail: [pending.length ? `required waiting on: ${listOf(pending)}` : "", missing.length ? `required not reported yet: ${listOf(missing)}` : ""].filter(Boolean).join("; ") }
-    : { state: "green", detail: `${required.length - withheld.length - listed.length} required check(s) pass` };
+    : { state: "green", detail: `${required.length - withheld.length - listed.length - later.length} required check(s) pass` };
   if (withheld.length) verdict.detail += `; withheld from drafts, required once ready: ${listOf(withheld)} (its workflow finished without posting it)`;
   if (listed.length) verdict.detail += `; withheld from drafts, required once ready: ${listOf(listed)} (pull-requests.draftSkippedChecks lists it)`;
+  if (later.length) verdict.detail += `; not judged, never reported and its ruleset changed after the merge: ${listOf(later)}`;
   verdict.detail += notRequired(entries.filter((entry) => !counted.has(entry)), { countRunning: verdict.state === "green" });
   return verdict;
 }
@@ -225,13 +252,15 @@ function postedOnceReady(repository: string, env: Record<string, string | undefi
 export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date, env: Record<string, string | undefined>): CiResult {
   try {
     const pr = readPullRequest(identity, run);
-    let required = requiredChecks(home, identity.repository, pr.base, run, now);
+    const fresh = pr.mergedAt !== undefined;
+    let required = requiredChecks(home, identity.repository, pr.base, run, now, fresh);
     const stacked = !required.length && pr.defaultBranch !== undefined && pr.defaultBranch !== pr.base;
-    if (stacked) required = requiredChecks(home, identity.repository, pr.defaultBranch!, run, now);
+    if (stacked) required = requiredChecks(home, identity.repository, pr.defaultBranch!, run, now, fresh);
     const entries = entriesOf(identity, run);
     if (!required.length) return { ...everyCheck(entries, identity.commit), checks: checksOf(entries) };
     const readyOnly = pr.draft ? postedOnceReady(identity.repository, env) : new Set<string>();
     required = required.map((check) => readyOnly.has(check.context) ? { ...check, postedOnceReady: true as const } : check);
+    if (pr.mergedAt) required = markChangedAfterMerge(required, identity.repository, pr.mergedAt, run);
     const counted = withPinnedStatuses(entries, required, pr.draft, run);
     const verdict = requiredVerdict(counted, required, pr.draft);
     return { ...stacked ? { ...verdict, detail: `${verdict.detail} (required by ${pr.defaultBranch}; the base ${pr.base} requires none)` } : verdict, checks: checksOf(counted) };

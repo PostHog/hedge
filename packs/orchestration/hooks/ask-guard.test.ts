@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { AvailableSource } from "../../../src/pack/types.ts";
 import { tempDirs } from "../../../src/testing/git.ts";
@@ -8,7 +9,7 @@ import { dispatch } from "../../base/hooks/run.ts";
 import { asksForDecision } from "../lib/prose-question.ts";
 import type { ShellThread } from "../../base/lib/t3/index.ts";
 import { startT3Stub } from "../../../src/integrations/t3/testing.ts";
-import { guardBackground, guardCard, guardSend, guardStop, hiddenIn, hook, hookWith, type IsHidden, type SendEvent, type SendGuardOptions, type StopEvent } from "./ask-guard.ts";
+import { guardBackground, guardCard, guardStop, hiddenIn, hook, hookWith, killSwitch, type IsHidden, type ToolEvent, type StopEvent } from "./ask-guard.ts";
 
 const temp = tempDirs();
 afterEach(() => temp.cleanup());
@@ -230,7 +231,7 @@ describe("the question guard workflow", () => {
     for (const entry of stops) expect(JSON.stringify(entry.value)).toContain(`run.sh\\" ${entry.provider} Stop`);
   });
 
-  test("installs the send guard as a PreToolUse hook, and the base pack routes PreToolUse to it for Claude and Codex", () => {
+  test("installs the card guard as a PreToolUse hook, and the base pack routes PreToolUse to it for Claude and Codex", () => {
     expect(plan().files.map((file) => file.target)).toContain(".config/hedge/hooks/PreToolUse/ask-guard.ts");
     expect(plan({ "question-guard": false }).files.map((file) => file.target)).not.toContain(".config/hedge/hooks/PreToolUse/ask-guard.ts");
     const preToolUse = plan().config.filter((entry) => entry.key === "hooks.PreToolUse");
@@ -252,144 +253,6 @@ describe("the question guard workflow", () => {
   });
 });
 
-describe("the send guard", () => {
-  const lane = "mcp:0aa3b648";
-  const card = { id: "card-7", kind: "user_input" };
-  const waiting: Partial<ShellThread> = { id: lane, activeRunId: "run-20", pendingRuntimeRequest: card };
-  const t3 = (...threads: Partial<ShellThread>[]) => async () => ({ threads: threads as ShellThread[] });
-  const send = (input: Record<string, unknown>, session = "conductor-session"): SendEvent =>
-    ({ session_id: session, tool_name: "mcp__t3-code__t3_thread_send", tool_input: { threadId: "0aa3b648", message: "S1 pushed", ...input } });
-  const guard = (event: SendEvent, options: Partial<SendGuardOptions> = {}) => guardSend(event, { home: home("Robin"), shell: t3(waiting), ...options });
-
-  test("denies a steering send to a thread whose running turn waits on a question card, and says to queue it", async () => {
-    const answer = await guard(send({ mode: "steer" }));
-    expect(answer?.hookSpecificOutput).toMatchObject({ hookEventName: "PreToolUse", permissionDecision: "deny" });
-    expect(answer!.hookSpecificOutput.permissionDecisionReason).toContain('mode: "queue"');
-    expect(answer!.hookSpecificOutput.permissionDecisionReason).toContain("Robin");
-  });
-
-  test("lets the same send through when it comes again in the same session, and denies it once for another session", async () => {
-    const where = home("Robin");
-    expect(await guard(send({ mode: "steer" }), { home: where })).toBeDefined();
-    expect(await guard(send({ mode: "steer" }), { home: where })).toBeUndefined();
-    expect(await guard(send({ mode: "steer" }, "other-session"), { home: where })).toBeDefined();
-    expect(await guard({ ...send({ mode: "steer" }), agent_id: "subagent-1" }, { home: where })).toBeDefined();
-  });
-
-  test("lets every send through while the kill switch file exists", async () => {
-    const where = home("Robin");
-    mkdirSync(join(where, ".config/hedge"), { recursive: true });
-    writeFileSync(join(where, ".config/hedge/ask-guard.off"), "");
-    expect(await guard(send({ mode: "auto" }), { home: where })).toBeUndefined();
-  });
-
-  test("lets the send through when T3 cannot be read", async () => {
-    expect(await guard(send({ mode: "auto" }), { shell: async () => { throw new Error("T3 is down"); } })).toBeUndefined();
-  });
-
-  test("denies a different message from the same session again, and lets only the identical send through", async () => {
-    const where = home("Robin");
-    expect(await guard(send({ mode: "auto" }), { home: where })).toBeDefined();
-    expect(await guard(send({ mode: "auto", message: "S2 pushed" }), { home: where })).toBeDefined();
-    expect(await guard(send({ mode: "auto", message: "S2 pushed" }), { home: where })).toBeUndefined();
-    expect(await guard(send({ mode: "auto", threadId: lane }), { home: where })).toBeUndefined();
-  });
-
-  test.each(["steer", "restart"])("lets a fresh-context send in mode %s through, as T3 queues it, and keeps the first denial for a later send", async (mode) => {
-    const where = home("Robin");
-    expect(await guard(send({ mode, freshContext: true }), { home: where })).toBeUndefined();
-    expect(await guard(send({ mode }), { home: where })).toBeDefined();
-  });
-
-  test("denies a fresh-context send in mode auto or with no mode, as T3 steers it into the running turn", async () => {
-    expect(await guard(send({ mode: "auto", freshContext: true }))).toBeDefined();
-    expect(await guard(send({ freshContext: true }))).toBeDefined();
-  });
-
-  test("keys a card without an id on its running turn, so a new turn's card is denied again", async () => {
-    const where = home("Robin");
-    const unnamed = (run: string) => t3({ id: lane, activeRunId: run, pendingRuntimeRequest: { kind: "user_input" } });
-    expect(await guard(send({ mode: "auto" }), { home: where, shell: unnamed("run-20") })).toBeDefined();
-    expect(await guard(send({ mode: "auto" }), { home: where, shell: unnamed("run-20") })).toBeUndefined();
-    expect(await guard(send({ mode: "auto" }), { home: where, shell: unnamed("run-21") })).toBeDefined();
-  });
-
-  test("forgets denials older than one day when it records a new one", async () => {
-    const where = home("Robin");
-    expect(await guard(send({ mode: "auto" }), { home: where })).toBeDefined();
-    const records = join(where, ".local/state/hedge/ask-guard");
-    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
-    for (const record of readdirSync(records)) utimesSync(join(records, record), twoDaysAgo, twoDaysAgo);
-    expect(await guard(send({ mode: "auto", message: "S2 pushed" }), { home: where })).toBeDefined();
-    expect(await guard(send({ mode: "auto", message: "S2 pushed" }), { home: where })).toBeUndefined();
-    expect(await guard(send({ mode: "auto" }), { home: where })).toBeDefined();
-  });
-
-  test("lets a send to another machine through even when a local thread shares its id, and denies one that names this machine", async () => {
-    const where = home("Robin");
-    mkdirSync(join(where, ".t3/userdata"), { recursive: true });
-    writeFileSync(join(where, ".t3/userdata/environment-id"), "local-env\n");
-    expect(await guard(send({ mode: "auto", environmentId: "remote-env" }), { home: where })).toBeUndefined();
-    expect(await guard(send({ mode: "auto", environmentId: "local-env" }), { home: where })).toBeDefined();
-  });
-
-  test("lets a queued send through", async () => {
-    expect(await guard(send({ mode: "queue" }))).toBeUndefined();
-  });
-
-  test.each([
-    ["an idle thread with a card", { id: lane, activeRunId: null, pendingRuntimeRequest: card }],
-    ["a running thread with no card", { id: lane, activeRunId: "run-20", pendingRuntimeRequest: null }],
-    ["a running thread waiting on an approval", { id: lane, activeRunId: "run-20", pendingRuntimeRequest: { id: "approval-1", kind: "approval" } }],
-  ])("lets a send to %s through", async (_, thread) => {
-    expect(await guard(send({ mode: "auto" }), { shell: t3(thread) })).toBeUndefined();
-  });
-
-  test("lets the send through when the guard cannot write its state", async () => {
-    const where = home("Robin");
-    writeFileSync(join(where, ".local/state/hedge/ask-guard"), "");
-    expect(await guard(send({ mode: "auto" }), { home: where })).toBeUndefined();
-  });
-
-  test("the installed hook sends a thread send to the send guard and a stop to the prose guard", async () => {
-    const where = home("Robin");
-    const routed = hookWith(() => t3(waiting));
-    const denied = await routed("codex", async () => JSON.stringify({ ...send({ mode: "auto" }), tool_name: "mcp__t3_code__t3_thread_send" }), where);
-    expect(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
-    expect(await routed("claude", async () => JSON.stringify({ ...send({ mode: "auto" }), tool_name: "Bash" }), where)).toEqual({ code: 0, stdout: "", stderr: "" });
-    const path = transcript(claudePrompt("Fix it"), claudeSays("Should I merge?"));
-    expect(await routed("claude", async () => JSON.stringify({ transcript_path: path }), where)).toEqual({ code: 0, stdout: "", stderr: "" });
-  });
-
-  test("outside T3, the installed hook lets a send through", async () => {
-    expect(await hook("claude", async () => JSON.stringify(send({ mode: "auto" })), home())).toEqual({ code: 0, stdout: "", stderr: "" });
-  });
-
-  test("the installed hook still denies a send when T3 session revocation fails after the shell read", async () => {
-    const stub = await startT3Stub({ shell: { projects: [], threads: [{ ...waiting, title: "Lane", projectId: "p", status: "running", pullRequests: [] }] } as never });
-    try {
-      const cliPath = join(stub.home, "t3-server.js");
-      writeFileSync(cliPath, (await Bun.file(cliPath).text()).replace("esac", '  *"auth session revoke"*) exit 1 ;;\nesac'));
-      const result = await hook("claude", async () => JSON.stringify(send({ mode: "auto" })), stub.home);
-      expect(result.stderr).toBe("");
-      expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
-      expect((await stub.cliCalls()).some((line) => line.includes("auth session revoke"))).toBe(true);
-    } finally {
-      await stub.stop();
-    }
-  });
-
-  test("the PreToolUse dispatcher hands the denial to the agent", async () => {
-    const where = home("Robin");
-    const target = join(where, ".config/hedge/hooks/PreToolUse/ask-guard.ts");
-    mkdirSync(dirname(target), { recursive: true });
-    symlinkSync(join(import.meta.dir, "ask-guard.ts"), target);
-    const routed = hookWith(() => t3(waiting));
-    const result = await dispatch(dirname(target), "codex", JSON.stringify(send({ mode: "steer" })), async (_path, provider, input) => routed(provider, async () => input, where));
-    expect(JSON.parse(result.stdout).hookSpecificOutput).toMatchObject({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining('mode: "queue"') });
-  });
-});
-
 const started = (id: string) => [
   { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: `toolu_${id}`, name: "Bash", input: { command: "bun run check", run_in_background: true } }] } },
   { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: `toolu_${id}`, content: `Command running in background with ID: ${id}. Output is being written to: /tmp/tasks/${id}.output.` }] }, toolUseResult: { backgroundTaskId: id } },
@@ -403,8 +266,8 @@ describe("the card guard", () => {
     AskUserQuestion: { questions: [{ question: "Roll the fix back?", header: "Rollback", multiSelect: false, options: [{ label: "Roll back", description: "Undo the deploy" }, { label: "Keep it", description: "Watch for an hour" }] }] },
     request_user_input: { questions: [{ id: "rollback", header: "Rollback", question: "Roll the fix back?", options: [{ label: "Roll back", description: "Undo the deploy" }, { label: "Keep it", description: "Watch for an hour" }] }] },
   } as Record<string, unknown>;
-  const card = (tool = "AskUserQuestion"): SendEvent => ({ session_id: "s", tool_name: tool, tool_input: (asked[tool] ?? {}) as Record<string, unknown> });
-  const guard = (event: SendEvent, where: string, threadId: string | undefined = "alert-1", shell = t3(alertThread)) => guardCard(event, { home: where, shell }, threadId);
+  const card = (tool = "AskUserQuestion"): ToolEvent => ({ session_id: "s", tool_name: tool, tool_input: (asked[tool] ?? {}) as Record<string, unknown> });
+  const guard = (event: ToolEvent, where: string, threadId: string | undefined = "alert-1", shell = t3(alertThread)) => guardCard(event, { home: where, shell }, threadId);
 
   test.each(["AskUserQuestion", "request_user_input"])("denies %s in a thread whose title starts with a prose title, and says to ask in the last message", async (tool) => {
     const answer = await guard(card(tool), home("Robin", proseTitles));
@@ -476,5 +339,192 @@ describe("the background work guard", () => {
     ["the session is outside T3", [...started("bgate1"), claudeSays("Done.")], [running("bgate1")], {}, ""],
   ] as const)("lets the stop through when %s", async (_, lines, inFlight, extra, threadId) => {
     expect(await background([...lines], [...inFlight], extra, threadId)).toBeUndefined();
+  });
+});
+
+describe("the wake guard", () => {
+  const conductor = "mcp:conductor-1";
+  const waitLine = "Lane #12 runs its review panel.\n\nTL;DR: the panel runs.\n\n⏳ **Waiting on** lane #12's review panel and the merge queue for #140205";
+  const checkLine = "Deployed.\n\n🔕 This thread **settles until its check at 25th Nov 08:00**";
+  const scheduleTable = `create table scheduled_tasks (task_id text primary key, title text not null, prompt text not null, enabled integer not null, schedule_json text not null,
+    project_id text not null, thread_id text, workspace_strategy_json text not null, model_selection_json text not null, runtime_mode text not null,
+    interaction_mode text not null, created_by text not null, creation_source text not null, created_at text not null, updated_at text not null,
+    next_run_at text, last_run_at text, last_run_status text not null, last_run_error text, run_count integer not null,
+    webhook_token text, webhook_secret text, last_run_webhook_delivery_id text, thread_mode text not null default 'new_thread')`;
+
+  function scheduled(where: string, threadId: string, nextRunAt: string | null, enabled = true, ran = nextRunAt === null) {
+    const dir = join(where, ".t3/userdata");
+    mkdirSync(dir, { recursive: true });
+    const db = new Database(join(dir, "statev2.sqlite"));
+    db.run(scheduleTable.replace("create table", "create table if not exists"));
+    db.run(`insert into scheduled_tasks (task_id, title, prompt, enabled, schedule_json, project_id, thread_id, workspace_strategy_json, model_selection_json,
+        runtime_mode, interaction_mode, created_by, creation_source, created_at, updated_at, next_run_at, last_run_at, last_run_status, run_count, thread_mode)
+      values (?, 'check', 'check', ?, ?, 'p', ?, ?, ?, 'full-access', 'default', 'agent', 'mcp', '2026-11-20T00:00:00Z', '2026-11-20T00:00:00Z', ?, ?, ?, ?, 'continue')`,
+      [crypto.randomUUID(), enabled ? 1 : 0, JSON.stringify({ type: "once", runAt: nextRunAt && Number.isFinite(Date.parse(nextRunAt)) && new Date(nextRunAt).toISOString() === nextRunAt ? nextRunAt : "2026-11-20T08:00:00.000Z" }), threadId, JSON.stringify({ type: "root" }),
+        JSON.stringify({ instanceId: "claudeAgent", model: "claude-opus-5-5", options: [{ id: "effort", value: "high" }] }), nextRunAt,
+        ran ? "2026-11-20T08:00:00.000Z" : null, ran ? "succeeded" : "never", ran ? 1 : 0]);
+    db.close();
+  }
+
+  const lone = { pid: 30, table: async () => "1 0 t3\n20 1 claude\n30 20 bun\n" };
+  const ends = async (thread: Partial<ShellThread>, message = waitLine, event: object = {}, where = home("Robin"), others: Partial<ShellThread>[] = [], processes = lone) => {
+    const threads = [{ id: conductor, title: "Conductor", projectId: "p", status: "completed", ...thread }, ...others] as ShellThread[];
+    const routed = hookWith(() => async () => ({ threads }), { threadId: conductor, processes });
+    const result = await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Relay it"), claudeSays(message)), last_assistant_message: message, ...event }), where);
+    return result.stdout ? JSON.parse(result.stdout) as { decision: string; reason: string } : undefined;
+  };
+  const watching = (watch: object) => ({ pullRequests: [{ repository: "o/r", number: 140205, url: "https://github.com/o/r/pull/140205", snapshot: { state: "open" }, watch: { headSha: "abc", passed: true, failedChecks: [], awaitingApproval: [], checksPending: false, ...watch } }] });
+  const queuedWatch = watching({});
+  const watchTask = { kind: "monitor", taskId: "pull-request-watch:github.com/o/r#140205" };
+
+  test("sends back once a top-level thread that ends on a wait line with nothing that can wake it", async () => {
+    const blocked = await ends({});
+    expect(blocked).toEqual({ decision: "block", reason: expect.stringContaining("nothing will wake this thread") });
+    expect(blocked!.reason).toContain('watch_pull_request with until: "merged"');
+    expect(await ends({}, waitLine, { stop_hook_active: true })).toBeUndefined();
+  });
+
+  test("sends back a check line with no scheduled check bound to the thread", async () => {
+    expect(await ends({}, checkLine)).toMatchObject({ decision: "block" });
+  });
+
+  test("sends back a wait whose only PR watch ended with its checks, though the PR still waits in the merge queue", async () => {
+    expect(await ends({ ...queuedWatch, pendingBackgroundTasks: [watchTask] })).toMatchObject({ decision: "block" });
+  });
+
+  test("sends back a wait whose only PR watch waits on an approval, which T3 does not hold the thread for", async () => {
+    expect(await ends({ ...watching({ passed: false, awaitingApproval: ["deploy"] }), status: "running" })).toMatchObject({ decision: "block" });
+  });
+
+  test.each([
+    ["held until merge, on a merged PR", { until: "merged" }, "merged"],
+    ["held until merge, on a closed PR", { until: "merged" }, "closed"],
+    ["by default with its checks done, on a merged PR", {}, "merged"],
+  ])("lets a wait through whose watch, %s, T3 still awaits", async (_, watch, state) => {
+    const ended = watching(watch);
+    ended.pullRequests[0]!.snapshot.state = state;
+    expect(await ends({ ...ended, status: "running" })).toBeUndefined();
+  });
+
+  test("sends back a wait whose only watch, by default with its checks done, is on a closed PR, which T3 no longer awaits", async () => {
+    const closed = watching({});
+    closed.pullRequests[0]!.snapshot.state = "closed";
+    expect(await ends({ ...closed, status: "running" })).toMatchObject({ decision: "block" });
+  });
+
+  test("sends back a wait whose only watch until merge is on a PR its stack dismissed, which T3 no longer awaits", async () => {
+    const dismissed = watching({ until: "merged" });
+    expect(await ends({ pullRequests: [{ ...dismissed.pullRequests[0]!, source: "stack-dismissed" }], status: "running" })).toMatchObject({ decision: "block" });
+  });
+
+  test("lets a wait through after a push, when T3 cleared checksPending and kept the old result", async () => {
+    const pushed = watching({});
+    delete (pushed.pullRequests[0]!.watch as { checksPending?: boolean }).checksPending;
+    expect(await ends({ ...pushed, status: "running" })).toBeUndefined();
+  });
+
+  test.each([
+    ["a PR watch held until merge, while T3 shows no task of the running turn", { ...watching({ until: "merged" }), status: "running", pendingBackgroundTasks: [] }],
+    ["a PR watch held until merge, which T3 awaits between turns", { ...watching({ until: "merged" }), pendingBackgroundTasks: [{ ...watchTask, awaited: true }] }],
+    ["a PR watch whose checks still run, while T3 shows no task of the running turn", { ...watching({ passed: false, checksPending: true }), status: "running", pendingBackgroundTasks: [] }],
+    ["a delegated lane still running", { pendingBackgroundTasks: [{ kind: "subagent", childThreadId: "thread:lane" }] }],
+    ["a thread wait", { blockedOnThreadWait: true }],
+    ["a snooze the person set", { snoozedUntil: "2999-01-01T00:00:00Z" }],
+    ["a pending question card", { pendingRuntimeRequest: { id: "card-1", kind: "user_input" } }],
+    ["a parent thread it runs under as a subagent", { lineage: { parentThreadId: "mcp:conductor-0", relationshipToParent: "subagent" } }],
+    ["a delegation from another machine", { delegatedFrom: { environmentId: "env-2", threadId: "mcp:x" } }],
+  ])("lets a wait line through when the thread has %s", async (_, thread) => {
+    expect(await ends(thread as Partial<ShellThread>)).toBeUndefined();
+  });
+
+  test.each([
+    ["a side chat", { parentThreadId: "mcp:conductor-0", relationshipToParent: "fork", sideChat: true }],
+    ["a workflow agent step", { parentThreadId: null, relationshipToParent: null, rootThreadId: "workflow:run-1", workflowStep: true }],
+  ])("lets %s through, which T3 keeps out of its top-level list", async (_, lineage) => {
+    expect(await ends({ lineage } as Partial<ShellThread>)).toBeUndefined();
+  });
+
+  test("sends back a fork, which T3 shows as a top-level thread, though it has a parent", async () => {
+    expect(await ends({ lineage: { parentThreadId: "mcp:conductor-0", relationshipToParent: "fork" } })).toMatchObject({ decision: "block" });
+  });
+
+  test("lets a wait line through in a model session that another session started, such as codex exec in a lane", async () => {
+    const nested = { pid: 40, table: async () => "1 0 t3\n20 1 claude\n30 20 bash\n35 30 codex\n40 35 bun\n" };
+    expect(await ends({}, waitLine, {}, home("Robin"), [], nested)).toBeUndefined();
+  });
+
+  test("lets a wait line through while a child thread of this one runs", async () => {
+    expect(await ends({}, waitLine, {}, home("Robin"), [{ id: "thread:lane", title: "Lane", projectId: "p", status: "running", lineage: { parentThreadId: conductor, relationshipToParent: "subagent" } }])).toBeUndefined();
+  });
+
+  test("lets a wait line through while Claude runs a background agent or shell, which wakes it when it ends, or a session cron", async () => {
+    expect(await ends({}, waitLine, { background_tasks: [{ id: "a1", type: "local_agent", status: "running" }] })).toBeUndefined();
+    expect(await ends({}, waitLine, { background_tasks: [{ id: "b1", type: "shell", status: "running" }] })).toBeUndefined();
+    expect(await ends({}, waitLine, { session_crons: [{ id: "c1" }] })).toBeUndefined();
+  });
+
+  test.each([
+    ["runs later", "2999-01-01T00:00:00.000Z"],
+    ["is due and T3 has not run it yet", "2026-11-21T08:00:00.000Z"],
+  ])("lets a wait or check line through when an enabled scheduled task bound to the thread %s", async (_, nextRunAt) => {
+    const where = home("Robin");
+    scheduled(where, conductor, nextRunAt);
+    expect(await ends({}, checkLine, {}, where)).toBeUndefined();
+    expect(await ends({}, waitLine, {}, where)).toBeUndefined();
+  });
+
+  test.each([
+    ["is turned off", (where: string) => scheduled(where, conductor, "2999-01-01T00:00:00.000Z", false)],
+    ["ran for the last time", (where: string) => scheduled(where, conductor, null)],
+    ["is bound to another thread", (where: string) => scheduled(where, "mcp:other", "2999-01-01T00:00:00.000Z")],
+    ["has a next run that is no time", (where: string) => scheduled(where, conductor, "soon")],
+    ["has a next run in a form T3 does not write", (where: string) => scheduled(where, conductor, "Sat, 21 Nov 2026 08:00:00 GMT")],
+    ["has a next run at a time that does not exist", (where: string) => scheduled(where, conductor, "2026-11-24T00:99:00.000Z")],
+  ])("sends back a check line whose scheduled task %s", async (_, arrange) => {
+    const where = home("Robin");
+    arrange(where);
+    expect(await ends({}, checkLine, {}, where)).toMatchObject({ decision: "block" });
+  });
+
+  test.each([
+    "Done.\n\n➡️ You can **settle** this thread",
+    "TL;DR: merged.\n\n💤 This thread **snoozes until 14th Nov 22:00**",
+    "⏳ **Waiting on** CI\n\nThen I merge it, and you can settle.",
+  ])("leaves a turn alone that does not close on a wait or check line: %s", async (message) => {
+    expect(await ends({}, message)).toBeUndefined();
+  });
+
+  test("lets the stop through when the kill switch is on or T3 cannot be read", async () => {
+    const off = home("Robin");
+    mkdirSync(join(off, ".config/hedge"), { recursive: true });
+    writeFileSync(join(off, killSwitch), "");
+    expect(await ends({}, waitLine, {}, off)).toBeUndefined();
+    const down = async () => { throw new Error("T3 down"); };
+    const routed = hookWith(() => down, { threadId: conductor, processes: lone });
+    expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)) }), home("Robin"))).stdout).toBe("");
+  });
+
+  test("lets the stop through when the deadline the proof check started ends during the wake check", async () => {
+    const ends: (() => void)[] = [];
+    const deadline = () => new Promise<void>((resolve) => { ends.push(resolve); });
+    const wakeStalls = { pid: 30, table: () => new Promise<string>(() => { ends[0]?.(); }) };
+    const threads = [{ id: conductor, title: "Conductor", projectId: "p", status: "completed" }] as ShellThread[];
+    const routed = hookWith(() => async () => ({ threads }), { threadId: conductor, processes: wakeStalls, deadline });
+    expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)) }), home("Robin"))).stdout).toBe("");
+  });
+
+  test("lets the stop through when reads that do not yield in the proof check and the wake check together run past the one deadline", async () => {
+    let clock = 0;
+    const slowRead = { pid: 30, table: async () => { clock += 6_000; return lone.table(); } };
+    const threads = [{ id: conductor, title: "Conductor", projectId: "p", status: "completed" }] as ShellThread[];
+    const routed = hookWith(() => async () => ({ threads }), { threadId: conductor, processes: slowRead, deadline: () => new Promise<void>(() => {}), now: () => clock });
+    expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)), cwd: "/" }), home("Robin"))).stdout).toBe("");
+  });
+
+  test("lets the stop through when the check does not answer before the deadline the hook passes on", async () => {
+    const stalled = { pid: 30, table: () => new Promise<string>(() => {}) };
+    const threads = [{ id: conductor, title: "Conductor", projectId: "p", status: "completed" }] as ShellThread[];
+    const routed = hookWith(() => async () => ({ threads }), { threadId: conductor, processes: stalled, deadline: async () => {} });
+    expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)), cwd: "/" }), home("Robin"))).stdout).toBe("");
   });
 });
