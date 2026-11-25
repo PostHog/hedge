@@ -84,7 +84,7 @@ export async function triageReport(context: TriageContext, note?: string): Promi
     ...knownNames(context.hostname, machine, profile, gitName, origin),
     ...(inspected ? knownNames(context.hostname, undefined, inspected.profile, undefined, doctorOrigin, true) : []),
   ];
-  const clean = (text: string) => redact(text, context.home, known);
+  const clean = (text: string) => redact(scrubUnpinnedAdvisory(text), context.home, known);
   const described = note?.trim() ? clean(note.trim()) : "Not described.";
   const facts = clean([...setupLines(machine, failure, timings), "", "## Versions", "", ...versions].join("\n"));
   const checked = clean(doctor.join("\n")).split("\n");
@@ -161,6 +161,14 @@ async function firstLine(context: TriageContext, command: string[]) {
   return line || undefined;
 }
 
+const publicSourceNames = new Set(defaultSources.map((source) => source.name));
+
+function scrubUnpinnedAdvisory(text: string): string {
+  return text.replace(/(The pack source )(\S+)( is not pinned to a commit SHA\.)/g, (match, prefix, name, suffix) =>
+    publicSourceNames.has(name) ? match : `${prefix}<private source>${suffix}`,
+  );
+}
+
 function knownNames(hostname: string, machine: MachineFile | undefined, profile: Profile | undefined, gitName: string | undefined, origin: string | undefined, anonymousSources = false): KnownName[] {
   const names: KnownName[] = [];
   const profileRepo = origin?.match(/github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?$/)?.[1];
@@ -175,22 +183,7 @@ function knownNames(hostname: string, machine: MachineFile | undefined, profile:
   const devboxes = [...new Set([...(machine?.devboxes ?? []), ...(profile?.devboxes ?? [])])].filter((host) => host !== profile?.hub);
   devboxes.forEach((host, index) => names.push({ text: host, as: `<devbox ${index + 1}>` }));
   const publicRepos = new Set([engineRepo, ...defaultSources.map((source) => source.repo)]);
-  const publicSourceNames = new Set(defaultSources.map((source) => source.name));
   for (const source of [...(machine?.setup?.draft?.sources ?? []), ...(profile?.sources ?? [])]) {
-    if (typeof source.name === "string" && !publicSourceNames.has(source.name)) names.push({ text: `The pack source ${source.name}`, as: "The pack source <private source>", after: true });
-    if (typeof source.ref === "string") {
-      const trimmedRef = source.ref.endsWith(":") ? source.ref.slice(0, -1) : source.ref;
-      const strippedRef = trimmedRef.startsWith("+") ? trimmedRef.slice(1) : trimmedRef;
-      if (!/^[0-9a-f]{40}$/i.test(strippedRef) && !/^[0-9a-f]{64}$/i.test(strippedRef)) {
-        const shortRef = trimmedRef.replace(/^refs\/heads\//, "");
-        const forcedRef = trimmedRef.startsWith("+") ? trimmedRef.slice(1).replace(/^refs\/heads\//, "") : undefined;
-        for (const candidate of new Set([source.ref, trimmedRef, shortRef, ...(forcedRef ? [forcedRef] : [])])) {
-          if (candidate && candidate !== "main" && candidate !== "master" && !/^[0-9a-f]{40}$/i.test(candidate) && !/^[0-9a-f]{64}$/i.test(candidate)) {
-            names.push({ text: candidate, as: "<branch>", after: true });
-          }
-        }
-      }
-    }
     if (typeof source.repo !== "string" || publicRepos.has(source.repo)) continue;
     names.push({ text: source.repo, as: anonymousSources ? "<private source>" : `<${source.name} source>` });
   }

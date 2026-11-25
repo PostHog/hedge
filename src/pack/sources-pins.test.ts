@@ -1183,6 +1183,115 @@ esac
     await spawnGit(plainDir, "commit", "-q", "-m", "v1");
     const afterPlainCreated = await fetchSource({ name: "team", repo: plainDir, ref: bareSha }, implicitCache);
     expect("error" in afterPlainCreated).toBe(true);
+
+    const ordinaryRoot = temp.make("ordinary-dir-dotgit-");
+    const ordPlain = join(ordinaryRoot, "packs");
+    const ordDotGit = join(ordinaryRoot, "packs.git");
+    mkdirSync(ordPlain, { recursive: true });
+    mkdirSync(ordDotGit, { recursive: true });
+    await spawnGit(ordDotGit, "init", "-q", "-b", "main");
+    writePack(ordDotGit, "DotGit behind ordinary dir.");
+    await spawnGit(ordDotGit, "add", ".");
+    await spawnGit(ordDotGit, "commit", "-q", "-m", "v1");
+    const ordSha = await spawnGit(ordDotGit, "rev-parse", "HEAD");
+    const ordCache = temp.make("cache-ordinary-dir-");
+    const ordFirst = await fetchSource({ name: "team", repo: ordPlain, ref: ordSha }, ordCache);
+    if ("error" in ordFirst) throw new Error(ordFirst.error);
+    expect([ordFirst.packs[0]?.manifest.summary, ordFirst.stale]).toEqual(["DotGit behind ordinary dir.", undefined]);
+    rmSync(ordDotGit, { recursive: true, force: true });
+    const ordOffline = await fetchSource({ name: "team", repo: ordPlain, ref: ordSha }, ordCache);
+    if ("error" in ordOffline) throw new Error(ordOffline.error);
+    expect([ordOffline.packs[0]?.manifest.summary, ordOffline.stale]).toEqual(["DotGit behind ordinary dir.", undefined]);
+    await spawnGit(ordPlain, "init", "-q", "-b", "main");
+    writePack(ordPlain, "Replaced plain repo.");
+    await spawnGit(ordPlain, "add", ".");
+    await spawnGit(ordPlain, "commit", "-q", "-m", "v1");
+    const ordAfterInit = await fetchSource({ name: "team", repo: ordPlain, ref: ordSha }, ordCache);
+    expect("error" in ordAfterInit).toBe(true);
+
+    if (process.platform === "linux") {
+      const rawRoot = temp.make("raw-bytes-symlink-");
+      const targetA = Buffer.concat([Buffer.from(`${rawRoot}/repo-`), Buffer.from([0xff])]);
+      const targetB = Buffer.concat([Buffer.from(`${rawRoot}/repo-`), Buffer.from([0xfe])]);
+      mkdirSync(targetA, { recursive: true });
+      mkdirSync(targetB, { recursive: true });
+      const initRaw = async (dirBuf: Buffer, summary: string) => {
+        const tmpLink = join(rawRoot, "init-link");
+        rmSync(tmpLink, { force: true });
+        symlinkSync(dirBuf, tmpLink);
+        await spawnGit(tmpLink, "init", "-q", "-b", "main");
+        writePack(tmpLink, summary);
+        await spawnGit(tmpLink, "add", ".");
+        await spawnGit(tmpLink, "commit", "-q", "-m", "v1");
+        const sha = await spawnGit(tmpLink, "rev-parse", "HEAD");
+        rmSync(tmpLink, { force: true });
+        return sha;
+      };
+      const rawShaA = await initRaw(targetA, "Raw byte A.");
+      await initRaw(targetB, "Raw byte B.");
+      const rawLink = join(rawRoot, "mirror");
+      symlinkSync(targetA, rawLink);
+      const rawCache = temp.make("cache-raw-symlink-");
+      const rawFirst = await fetchSource({ name: "team", repo: rawLink, ref: rawShaA }, rawCache);
+      if ("error" in rawFirst) throw new Error(rawFirst.error);
+      expect([rawFirst.packs[0]?.manifest.summary, rawFirst.stale]).toEqual(["Raw byte A.", undefined]);
+      rmSync(rawLink);
+      symlinkSync(targetB, rawLink);
+      const rawSecond = await fetchSource({ name: "team", repo: rawLink, ref: rawShaA }, rawCache);
+      expect("error" in rawSecond).toBe(true);
+    }
+  });
+
+  test("anchors >256-commit refreshes with valid Git timestamps so intermediate commits survive shallow fetches and git gc", async () => {
+    const repo = temp.make("large-refresh-repo-");
+    await spawnGit(repo, "init", "-q", "-b", "main");
+    const lines: string[] = [];
+    for (let i = 1; i <= 262; i++) {
+      const manifest = JSON.stringify({ schema: 1, name: "team", summary: `Bulk ${i}.` });
+      lines.push(
+        `commit refs/heads/main`,
+        `mark :${i}`,
+        `committer Test <test@example.com> ${1700000000 + i} +0000`,
+        `data 4`,
+        `c${String(i).padStart(3, "0")}`,
+        ...(i > 1 ? [`from :${i - 1}`] : []),
+        `M 100644 inline packs/team/pack.json`,
+        `data ${Buffer.byteLength(manifest)}`,
+        manifest,
+        "",
+      );
+    }
+    const fi = Bun.spawn(["git", "-C", repo, "fast-import", "--quiet"], {
+      stdin: new TextEncoder().encode(lines.join("\n")),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(await fi.exited).toBe(0);
+    await spawnGit(repo, "checkout", "-q", "main");
+    const allCommits = (await spawnGit(repo, "rev-list", "--reverse", "main")).split("\n").map((s) => s.trim()).filter(Boolean);
+    expect(allCommits.length).toBe(262);
+    const c1 = allCommits[0]!;
+    const cMid = allCommits[130]!;
+    const cNearTip = allCommits[260]!;
+
+    await spawnGit(repo, "checkout", "-q", "-B", "track", c1);
+    const cache = temp.make("cache-large-refresh-");
+    const init = await fetchSource({ name: "team", repo, ref: "track" }, cache);
+    if ("error" in init) throw new Error(init.error);
+    await spawnGit(repo, "checkout", "-q", "-B", "track", "main");
+    const moved = await advanceSource({ name: "team", repo, ref: "track" }, cache, c1);
+    expect(moved.state).toBe("moved");
+
+    const cacheDir = join(cache, "team");
+    await spawnGit(cacheDir, "fetch", "-q", "--depth", "1", "--no-tags", repo, cNearTip);
+    await spawnGit(cacheDir, "checkout", "-q", "--detach", `${cNearTip}^{commit}`);
+    writeFileSync(join(cacheDir, ".git", "hedge-source.json"), JSON.stringify({ repo, ref: cNearTip, commit: cNearTip }) + "\n");
+    await spawnGit(cacheDir, "gc", "-q", "--prune=now");
+
+    rmSync(repo, { recursive: true, force: true });
+    const offlineMid = await fetchSource({ name: "team", repo, ref: cMid }, cache);
+    if ("error" in offlineMid) throw new Error(offlineMid.error);
+    expect([offlineMid.packs[0]?.manifest.summary, offlineMid.stale]).toEqual(["Bulk 131.", undefined]);
   });
 
 });

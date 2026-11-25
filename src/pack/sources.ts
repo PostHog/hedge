@@ -90,32 +90,69 @@ function decodeRepoBytes(bytes: Uint8Array): string {
   }
 }
 
-function resolvePosixPath(base: string, rawPath: string): string {
-  const queue = rawPath.split("/");
-  const stack: string[] = [];
-  if (!rawPath.startsWith("/")) {
-    for (const part of base.split("/")) if (part && part !== ".") stack.push(part);
+const slashByte = 0x2f;
+const dotBuf = Buffer.from(".");
+const dotDotBuf = Buffer.from("..");
+const dotGitBuf = Buffer.from(".git");
+const slashDotGitBuf = Buffer.from("/.git");
+const slashHeadBuf = Buffer.from("/HEAD");
+const slashObjectsBuf = Buffer.from("/objects");
+const filePrefixBuf = Buffer.from("file://");
+
+function splitPosixBytes(buf: Buffer): Buffer[] {
+  const parts: Buffer[] = [];
+  let start = 0;
+  for (let i = 0; i <= buf.length; i++) {
+    if (i === buf.length || buf[i] === slashByte) {
+      if (i > start) parts.push(buf.subarray(start, i));
+      start = i + 1;
+    }
+  }
+  return parts;
+}
+
+function joinPosixBytes(parts: Buffer[]): Buffer {
+  if (!parts.length) return Buffer.from("/");
+  let total = parts.length;
+  for (const p of parts) total += p.length;
+  const out = Buffer.allocUnsafe(total);
+  let pos = 0;
+  for (const p of parts) {
+    out[pos++] = slashByte;
+    p.copy(out, pos);
+    pos += p.length;
+  }
+  return out;
+}
+
+function resolvePosixPathBytes(base: Buffer, rawPath: Buffer): Buffer {
+  const queue = splitPosixBytes(rawPath);
+  const stack: Buffer[] = [];
+  if (rawPath[0] !== slashByte) {
+    for (const part of splitPosixBytes(base)) {
+      if (!part.equals(dotBuf)) stack.push(part);
+    }
   }
   let hops = 0;
   let index = 0;
   while (index < queue.length) {
     const seg = queue[index++]!;
-    if (!seg || seg === ".") continue;
-    if (seg === "..") {
+    if (seg.length === 0 || seg.equals(dotBuf)) continue;
+    if (seg.equals(dotDotBuf)) {
       stack.pop();
       continue;
     }
-    const candidate = `/${[...stack, seg].join("/")}`;
+    const candidate = joinPosixBytes([...stack, seg]);
     if (hops < 40) {
       try {
         const info = lstatSync(candidate);
         if (info.isSymbolicLink()) {
           hops++;
-          const linked = readlinkSync(candidate);
+          const linked = readlinkSync(candidate, "buffer");
           const rest = queue.slice(index);
-          if (linked.startsWith("/")) stack.length = 0;
+          if (linked[0] === slashByte) stack.length = 0;
           queue.length = 0;
-          queue.push(...linked.split("/"), ...rest);
+          queue.push(...splitPosixBytes(linked), ...rest);
           index = 0;
           continue;
         }
@@ -123,62 +160,95 @@ function resolvePosixPath(base: string, rawPath: string): string {
     }
     stack.push(seg);
   }
-  return `/${stack.join("/")}`;
+  return joinPosixBytes(stack);
 }
 
-function isLocalPath(url: string): boolean {
-  if (!url || url.startsWith("\0raw:")) return false;
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) return false;
-  if (process.platform === "win32" && /^[a-z]:[\\/]/i.test(url)) return true;
-  return !/^[^/\\]+:/.test(url);
+function isGitDirBytes(pathBuf: Buffer): boolean {
+  return (
+    existsSync(Buffer.concat([pathBuf, slashDotGitBuf])) ||
+    (existsSync(Buffer.concat([pathBuf, slashHeadBuf])) && existsSync(Buffer.concat([pathBuf, slashObjectsBuf])))
+  );
 }
 
-function canonicalLocalTarget(baseDir: string, localPath: string): string {
+function endsWithDotGit(pathBuf: Buffer): boolean {
+  return pathBuf.length >= 4 && pathBuf.subarray(pathBuf.length - 4).equals(dotGitBuf);
+}
+
+function decodePercentBytes(buf: Buffer): Buffer {
+  const out: number[] = [];
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 0x25 && i + 2 < buf.length) {
+      const hex = buf.subarray(i + 1, i + 3).toString("ascii");
+      if (/^[0-9a-f]{2}$/i.test(hex)) {
+        out.push(Number.parseInt(hex, 16));
+        i += 2;
+        continue;
+      }
+    }
+    out.push(buf[i]!);
+  }
+  return Buffer.from(out);
+}
+
+function encodeCanonicalLocal(resolvedBuf: Buffer, asFileUrl: boolean): string {
+  const decoded = decodeRepoBytes(resolvedBuf);
+  if (!asFileUrl) return decoded;
+  if (!decoded.startsWith("\0raw:")) {
+    try {
+      return pathToFileURL(decoded).href;
+    } catch {}
+  }
+  return decodeRepoBytes(Buffer.concat([filePrefixBuf, resolvedBuf]));
+}
+
+function parseLocalRepoBytes(dir: string, effective: string): { resolved: Buffer; asFileUrl: boolean } | undefined {
+  if (!effective) return undefined;
+  if (process.platform === "win32") return undefined;
+  const rawBytes = effective.startsWith("\0raw:") ? Buffer.from(effective.slice(5), "hex") : Buffer.from(effective, "utf8");
+  const asciiHead = rawBytes.subarray(0, 16).toString("latin1");
+  if (/^file:\/\//i.test(asciiHead)) {
+    const rest = rawBytes.subarray(/^file:\/\/localhost/i.test(asciiHead) ? 16 : 7);
+    if (rest[0] !== slashByte) return undefined;
+    const pathBytes = decodePercentBytes(rest);
+    return { resolved: resolvePosixPathBytes(Buffer.from("/"), pathBytes), asFileUrl: true };
+  }
+  const latin = rawBytes.toString("latin1");
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(latin) || /^[^/\\]+:/.test(latin)) return undefined;
+  const baseBuf = rawBytes[0] === slashByte ? Buffer.from("/") : resolvePosixPathBytes(Buffer.from("/"), Buffer.from(resolve(dir), "utf8"));
+  return { resolved: resolvePosixPathBytes(baseBuf, rawBytes), asFileUrl: false };
+}
+
+function canonicalLocalRepo(dir: string, effective: string, goodDigest?: string): string {
   if (process.platform === "win32") {
-    const abs = resolve(baseDir, localPath);
+    if (effective.startsWith("\0raw:")) return effective;
+    if (/^file:\/\//i.test(effective)) {
+      try {
+        const abs = resolve(fileURLToPath(effective));
+        return pathToFileURL(existsSync(abs) ? realpathSync(abs) : abs).href;
+      } catch {
+        return effective;
+      }
+    }
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(effective) || (!/^[a-z]:[\\/]/i.test(effective) && /^[^/\\]+:/.test(effective))) return effective;
+    const abs = resolve(dir, effective);
     try {
       return realpathSync(abs);
     } catch {
       return abs;
     }
   }
-  const canonicalBase = isAbsolute(localPath) ? "/" : resolvePosixPath("/", resolve(baseDir));
-  const resolved = resolvePosixPath(canonicalBase, localPath);
-  let exists = false;
-  try {
-    lstatSync(resolved);
-    exists = true;
-  } catch {}
-  if (!exists && !resolved.endsWith(".git")) {
-    try {
-      lstatSync(`${resolved}.git`);
-      return resolvePosixPath("/", `${resolved}.git`);
-    } catch {}
+  const parsed = parseLocalRepoBytes(dir, effective);
+  if (!parsed) return effective;
+  const { resolved, asFileUrl } = parsed;
+  const primary = encodeCanonicalLocal(resolved, asFileUrl);
+  if (isGitDirBytes(resolved) || endsWithDotGit(resolved)) return primary;
+  const dotGitResolved = resolvePosixPathBytes(Buffer.from("/"), Buffer.concat([resolved, dotGitBuf]));
+  const dotGitEncoded = encodeCanonicalLocal(dotGitResolved, asFileUrl);
+  if (isGitDirBytes(dotGitResolved)) return dotGitEncoded;
+  if (goodDigest !== undefined && repoDigest(primary) !== goodDigest && repoDigest(dotGitEncoded) === goodDigest) {
+    return dotGitEncoded;
   }
-  return resolved;
-}
-
-function canonicalLocalRepo(dir: string, effective: string): string {
-  if (effective.startsWith("\0raw:")) return effective;
-  if (/^file:\/\//i.test(effective)) {
-    try {
-      if (process.platform !== "win32") {
-        const raw = effective.replace(/^file:\/\/(?:localhost)?/i, "");
-        if (raw.startsWith("/")) {
-          let decoded = raw;
-          try {
-            decoded = decodeURIComponent(raw);
-          } catch {}
-          return pathToFileURL(canonicalLocalTarget("/", decoded)).href;
-        }
-      }
-      return pathToFileURL(canonicalLocalTarget("/", fileURLToPath(effective))).href;
-    } catch {
-      return effective;
-    }
-  }
-  if (!isLocalPath(effective)) return effective;
-  return canonicalLocalTarget(dir, effective);
+  return primary;
 }
 
 async function rawResolvedRepoUrl(dir: string, repo: string) {
@@ -194,8 +264,8 @@ async function rawResolvedRepoUrl(dir: string, repo: string) {
   return end > 0 ? decodeRepoBytes(read.rawBytes.subarray(0, end)) : repo;
 }
 
-async function resolvedRepoUrl(dir: string, repo: string) {
-  return canonicalLocalRepo(dir, await rawResolvedRepoUrl(dir, repo));
+async function resolvedRepoUrl(dir: string, repo: string, goodDigest?: string) {
+  return canonicalLocalRepo(dir, await rawResolvedRepoUrl(dir, repo), goodDigest);
 }
 
 const gitHash = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
@@ -336,7 +406,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
         !(await git(dir, "cat-file", "-e", rawStrippedRef)).ok &&
         (await fetchHeadEntry(dir, [rawGood.ref]))?.oid === rawStrippedRef.toLowerCase()));
   const rawEffectiveBefore = await rawResolvedRepoUrl(dir, repo);
-  const effectiveBefore = canonicalLocalRepo(dir, rawEffectiveBefore);
+  const effectiveBefore = canonicalLocalRepo(dir, rawEffectiveBefore, rawGoodDigest);
   const rawFhEntry =
     !legacyPeeled &&
     rawGood !== undefined &&
@@ -722,10 +792,10 @@ async function buildHistoryAnchor(dir: string, commits: string[]): Promise<strin
   const anchorEnv = {
     GIT_AUTHOR_NAME: "hedge",
     GIT_AUTHOR_EMAIL: "hedge@localhost",
-    GIT_AUTHOR_DATE: "0 +0000",
+    GIT_AUTHOR_DATE: "@0 +0000",
     GIT_COMMITTER_NAME: "hedge",
     GIT_COMMITTER_EMAIL: "hedge@localhost",
-    GIT_COMMITTER_DATE: "0 +0000",
+    GIT_COMMITTER_DATE: "@0 +0000",
   };
   let prev: string | undefined;
   for (let i = 0; i < commits.length; i += inlineHistoryPinLimit) {
@@ -894,7 +964,7 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string, cac
     const sameCachedRepo =
       dir !== undefined &&
       good?.repo === repo &&
-      (goodDigest === undefined || repoDigest(await resolvedRepoUrl(dir, repo)) === goodDigest);
+      (goodDigest === undefined || repoDigest(await resolvedRepoUrl(dir, repo, goodDigest)) === goodDigest);
     const hashLen = sameCachedRepo ? await repoHashLength(dir) : 40;
     const pinned = isCommitPin(stripSourceRefspec(ref.ref), hashLen) && !(sameCachedRepo && cacheRoot && (await followsBranch(ref, cacheRoot)));
     if (!pinned) unpinned.push(ref);
@@ -1031,19 +1101,30 @@ async function restoreKnownShallow(dir: string, beforeShallow: Set<string>, targ
   }
 }
 
-async function checkout(dir: string, repo: string, ref: string, savedFetchHead: SavedFetchHead, _good?: Good): Promise<{ effectiveRepo: string; commit?: string; fetchedOid?: string; error?: string }> {
-  const effectiveBefore = await resolvedRepoUrl(dir, repo);
+async function checkout(dir: string, repo: string, ref: string, savedFetchHead: SavedFetchHead, good?: Good): Promise<{ effectiveRepo: string; commit?: string; fetchedOid?: string; error?: string }> {
+  const goodDigest = goodResolvedDigest(good);
+  const effectiveBefore = await resolvedRepoUrl(dir, repo, goodDigest);
   if (isInvalidRef(ref)) return { effectiveRepo: effectiveBefore, error: `invalid ref ${JSON.stringify(ref)}` };
   await mkdir(dir, { recursive: true });
-  if (!existsSync(join(dir, ".git"))) await git(dir, "init", "-q");
-  const effectiveRepo = await resolvedRepoUrl(dir, repo);
+  const freshInit = !existsSync(join(dir, ".git"));
+  if (freshInit) await git(dir, "init", "-q");
+  const effectiveRepo = await resolvedRepoUrl(dir, repo, goodDigest);
   const beforeShallow = await readShallowSet(dir);
-  const fetched = await fetchExact(dir, repo, ref, true);
+  let fetched = await fetchExact(dir, repo, ref, true);
+  if (
+    !fetched.ok &&
+    freshInit &&
+    (isCommitPin(stripSourceRefspec(ref), 64) || /object format|sha256|mismatched algorithms/i.test(fetched.stderr))
+  ) {
+    await rm(join(dir, ".git"), { recursive: true, force: true }).catch(() => {});
+    const init256 = await git(dir, "init", "-q", "--object-format=sha256");
+    if (init256.ok) fetched = await fetchExact(dir, repo, ref, true);
+  }
   if (!fetched.ok || !fetched.oid) {
     await restoreFetchHead(dir, savedFetchHead);
     return { effectiveRepo, error: fetched.stderr || "could not fetch commit" };
   }
-  if ((await resolvedRepoUrl(dir, repo)) !== effectiveRepo) {
+  if ((await resolvedRepoUrl(dir, repo, goodDigest)) !== effectiveRepo) {
     await restoreFetchHead(dir, savedFetchHead);
     return { effectiveRepo, error: "git remote rewrite rule changed during fetch" };
   }
@@ -1140,8 +1221,8 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
     hasPlusPrefix(good.asked) ||
     (Array.isArray(good.blocked) && good.blocked.length > 0);
   if (!needsRepoCheck) return true;
-  const effectiveDigest = repoDigest(await resolvedRepoUrl(dir, repo));
   const goodDigest = goodResolvedDigest(good);
+  const effectiveDigest = repoDigest(await resolvedRepoUrl(dir, repo, goodDigest));
   const sameRepo = good.repo === repo && (goodDigest === undefined || goodDigest === effectiveDigest);
   if ((hasPlusPrefix(ref.ref) || hasPlusPrefix(good.ref) || hasPlusPrefix(good.asked)) && !sameRepo) return false;
   if (Array.isArray(good.blocked) && good.blocked.length) {
@@ -1187,13 +1268,13 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
   const branch = branchName(ref.ref);
   const head = branch ? `refs/heads/${branch}` : "";
   if (!branch || isInvalidRef(head)) return { state: "failed", say: `invalid ref ${JSON.stringify(ref.ref)} for ${ref.repo}` };
+  const cachedGood = await lastGood(dir);
+  const cachedDigest = goodResolvedDigest(cachedGood);
   const rawEffectiveRepo = await rawResolvedRepoUrl(dir, repo);
-  const effectiveRepo = canonicalLocalRepo(dir, rawEffectiveRepo);
+  const effectiveRepo = canonicalLocalRepo(dir, rawEffectiveRepo, cachedDigest);
   const effectiveDigest = repoDigest(effectiveRepo);
   const listed = await git(dir, "ls-remote", repo, head);
   if (!listed.ok) return { state: "failed", say: `could not reach ${ref.repo}: ${listed.stderr}` };
-  const cachedGood = await lastGood(dir);
-  const cachedDigest = goodResolvedDigest(cachedGood);
   const legacyRepoMismatch =
     cachedGood !== undefined &&
     cachedDigest === undefined &&

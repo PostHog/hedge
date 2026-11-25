@@ -460,9 +460,6 @@ describe("hedge doctor and pack sources", () => {
     await spawnGit(sha256Repo, "commit", "-q", "-m", "v1");
     const sha256Commit = await spawnGit(sha256Repo, "rev-parse", "HEAD");
     const home = temp.make("home-");
-    const cacheDir = join(home, ".local/share/hedge/sources/team");
-    mkdirSync(cacheDir, { recursive: true });
-    await spawnGit(cacheDir, "init", "-q", "--object-format=sha256");
     const profile = profileDir();
     const file = join(profile, "hedge.json");
     writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), sources: [{ name: "team", repo: sha256Repo, ref: sha256Commit }] }));
@@ -477,9 +474,6 @@ describe("hedge doctor and pack sources", () => {
     await spawnGit(sha256Hex40, "add", ".");
     await spawnGit(sha256Hex40, "commit", "-q", "-m", "v1");
     const home2 = temp.make("home-");
-    const cacheDir2 = join(home2, ".local/share/hedge/sources/team");
-    mkdirSync(cacheDir2, { recursive: true });
-    await spawnGit(cacheDir2, "init", "-q", "--object-format=sha256");
     const profile2 = profileDir();
     const file2 = join(profile2, "hedge.json");
     writeFileSync(file2, JSON.stringify({ ...JSON.parse(readFileSync(file2, "utf8")), sources: [{ name: "team", repo: sha256Hex40, ref: hex40Branch }] }));
