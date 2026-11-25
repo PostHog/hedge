@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, readdirSync, readFileSync, writeSync } from "node:fs";
 
 export type StopSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT";
 export type Timer = (ms: number, fire: () => void) => () => void;
@@ -9,10 +9,10 @@ export const interruptGraceMs = 300;
 export type SupervisorHost = {
   spawn: (command: string[]) => { exited: Promise<number> };
   killGroup: (signal: NodeJS.Signals) => void;
-  otherMembers: () => number[];
-  killPid: (pid: number, signal: NodeJS.Signals) => void;
+  hasOtherMembers: () => boolean;
   timer: Timer;
   onSignal: (signal: StopSignal, handler: () => void) => void;
+  reportResult: (code: number) => void;
   exit: (code: number) => void;
 };
 
@@ -21,10 +21,9 @@ const realTimer: Timer = (ms, fire) => {
   return () => clearTimeout(handle);
 };
 
-export function otherGroupMembers(pgid = process.pid): number[] {
+export function hasOtherGroupMembers(pgid = process.pid): boolean {
   if (process.platform === "linux") {
     try {
-      const members: number[] = [];
       for (const entry of readdirSync("/proc")) {
         if (!/^\d+$/.test(entry)) continue;
         const pid = Number(entry);
@@ -40,16 +39,15 @@ export function otherGroupMembers(pgid = process.pid): number[] {
         const fields = stat.slice(end + 2).split(" ");
         const state = fields[0];
         const group = Number(fields[2]);
-        if (group === pgid && state !== "Z" && state !== "X") members.push(pid);
+        if (group === pgid && state !== "Z" && state !== "X") return true;
       }
-      return members;
+      return false;
     } catch {}
   }
   try {
     const ps = existsSync("/bin/ps") ? "/bin/ps" : "ps";
     const proc = Bun.spawnSync([ps, "-axo", "pid=,pgid=,ppid=,stat="], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-    if (proc.exitCode !== 0) return [];
-    const members: number[] = [];
+    if (proc.exitCode !== 0) return false;
     for (const line of proc.stdout.toString("utf8").split("\n")) {
       const parts = line.trim().split(/\s+/);
       if (parts.length < 4) continue;
@@ -57,11 +55,11 @@ export function otherGroupMembers(pgid = process.pid): number[] {
       const group = Number(parts[1]);
       const ppid = Number(parts[2]);
       const state = parts[3]!;
-      if (group === pgid && pid > 0 && pid !== pgid && ppid !== pgid && !state.startsWith("Z")) members.push(pid);
+      if (group === pgid && pid > 0 && pid !== pgid && ppid !== pgid && !state.startsWith("Z")) return true;
     }
-    return members;
+    return false;
   } catch {
-    return [];
+    return false;
   }
 }
 
@@ -99,27 +97,17 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
     exit(143);
   };
 
-  const finishPeers = (code: number) => {
-    if (finished) return;
-    for (let pass = 0; pass < 3; pass++) {
-      const peers = host.otherMembers();
-      if (!peers.length) break;
-      for (const pid of peers) host.killPid(pid, "SIGKILL");
-    }
-    exit(code);
-  };
-
   const forwardGroup = (name: StopSignal) => {
     if (forwarded.has(name)) return;
     forwarded.add(name);
     host.killGroup(name);
   };
 
-  const armHard = (onExpire = finishGroup) => {
+  const armHard = () => {
     if (finished || cancelHard) return;
     cancelInterrupt?.();
     cancelInterrupt = undefined;
-    cancelHard = host.timer(graceMs, onExpire);
+    cancelHard = host.timer(graceMs, finishGroup);
   };
 
   const arm = (name: StopSignal) => {
@@ -164,11 +152,12 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
   leaderDone = true;
   if (finished) return settled;
   if (!stop) {
-    if (!host.otherMembers().length) {
+    if (!host.hasOtherMembers()) {
       exit(code);
       return settled;
     }
-    armHard(() => finishPeers(code));
+    host.reportResult(code);
+    armHard();
     forwardGroup("SIGTERM");
   }
   return settled;
@@ -195,14 +184,17 @@ if (import.meta.main) {
         process.kill(-process.pid, signal);
       } catch {}
     },
-    otherMembers: () => otherGroupMembers(process.pid),
-    killPid: (pid, signal) => {
-      try {
-        process.kill(pid, signal);
-      } catch {}
-    },
+    hasOtherMembers: () => hasOtherGroupMembers(process.pid),
     timer: realTimer,
     onSignal: (signal, handler) => void handlers.set(signal, handler),
+    reportResult: (code) => {
+      try {
+        writeSync(1, `${code}\n`);
+      } catch {}
+      try {
+        closeSync(1);
+      } catch {}
+    },
     exit: (code) => process.exit(code),
   });
 }

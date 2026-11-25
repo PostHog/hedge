@@ -35,7 +35,7 @@ async function fifoWrite(path: string, content: string): Promise<void> {
 
 function spawnControlledSupervisor(command: string[]) {
   const harness = `
-import { otherGroupMembers, supervise } from ${JSON.stringify(supervisorPath)};
+import { hasOtherGroupMembers, supervise } from ${JSON.stringify(supervisorPath)};
 const timers = [];
 const write = (line) => process.stdout.write(line + "\\n");
 const reader = Bun.stdin.stream().getReader();
@@ -64,10 +64,7 @@ await supervise(${JSON.stringify(command)}, {
   killGroup: (signal) => {
     try { process.kill(-process.pid, signal); } catch {}
   },
-  otherMembers: () => otherGroupMembers(process.pid),
-  killPid: (pid, signal) => {
-    try { process.kill(pid, signal); } catch {}
-  },
+  hasOtherMembers: () => hasOtherGroupMembers(process.pid),
   timer: (_ms, fire) => {
     const entry = { fire, cancelled: false };
     timers.push(entry);
@@ -75,6 +72,7 @@ await supervise(${JSON.stringify(command)}, {
     return () => { entry.cancelled = true; };
   },
   onSignal: (signal, handler) => void process.on(signal, handler),
+  reportResult: (code) => write("result:" + code),
   exit: (code) => process.exit(code),
 });
 `;
@@ -89,6 +87,12 @@ await supervise(${JSON.stringify(command)}, {
   let buffered = "";
   const armedWaiters: Array<() => void> = [];
   let armedCount = 0;
+  let exited = false;
+  let reported: number | undefined;
+  void proc.exited.then(() => {
+    exited = true;
+    for (const waiter of armedWaiters.splice(0)) waiter();
+  });
   void (async () => {
     for (;;) {
       const { value, done } = await reader.read();
@@ -101,18 +105,37 @@ await supervise(${JSON.stringify(command)}, {
           const waiter = armedWaiters.shift();
           if (waiter) waiter();
           else armedCount++;
+        } else if (line.startsWith("result:")) {
+          reported = Number(line.slice("result:".length));
         }
       }
     }
   })();
   const waitArmed = () =>
     armedCount > 0
-      ? (armedCount--, Promise.resolve())
-      : new Promise<void>((resolve) => armedWaiters.push(resolve));
+      ? (armedCount--, Promise.resolve(true))
+      : exited
+        ? Promise.resolve(false)
+        : new Promise<boolean>((resolve) => armedWaiters.push(() => resolve(!exited)));
   const advance = async () => {
-    await waitArmed();
-    proc.stdin.write("tick\n");
-    proc.stdin.flush();
+    if (!(await waitArmed())) return;
+    try {
+      proc.stdin.write("tick\n");
+      proc.stdin.flush();
+    } catch {}
+  };
+  const drain = async () => {
+    while (!exited) {
+      if (!(await waitArmed())) break;
+      try {
+        proc.stdin.write("tick\n");
+        proc.stdin.flush();
+      } catch {
+        break;
+      }
+    }
+    const code = await proc.exited;
+    return reported ?? code;
   };
   const cleanup = () => {
     try {
@@ -120,7 +143,7 @@ await supervise(${JSON.stringify(command)}, {
     } catch {}
     proc.kill("SIGKILL");
   };
-  return { proc, advance, cleanup };
+  return { proc, advance, drain, cleanup };
 }
 
 function mkfifo(...paths: string[]) {
@@ -211,8 +234,7 @@ describe("probe supervisor", () => {
       expect((await sawCleaned).trim()).toBe("cleaned");
       expect(await childClosed).toBe("");
 
-      await sup.advance();
-      expect(await sup.proc.exited).not.toBe(0);
+      expect(await sup.drain()).not.toBe(0);
     } finally {
       sup.cleanup();
     }
@@ -287,9 +309,7 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
       expect(await childClosed).toBe("");
       expect(existsSync(prematureTerm)).toBe(false);
 
-      await sup.advance();
-      await sup.advance();
-      expect(await sup.proc.exited).not.toBe(0);
+      expect(await sup.drain()).not.toBe(0);
     } finally {
       sup.cleanup();
     }
@@ -324,8 +344,7 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
       await fifoWrite(trapGate, "go\n");
       expect((await sawCleaned).trim()).toBe("cleaned");
       expect(await holderGone).toBe("");
-      await trapSup.advance();
-      expect(await trapSup.proc.exited).toBe(0);
+      expect(await trapSup.drain()).toBe(0);
     } finally {
       trapSup.cleanup();
     }
@@ -351,7 +370,7 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
       expect(() => process.kill(childPid, 0)).not.toThrow();
       await stubbornSup.advance();
       expect(await holderGone2).toBe("");
-      expect(await stubbornSup.proc.exited).toBe(0);
+      expect(await stubbornSup.drain()).toBe(0);
     } finally {
       stubbornSup.cleanup();
     }
