@@ -322,6 +322,22 @@ test("a call that hands its output through to the caller still has a time limit 
   expect(await result).toEqual({ code: 124, stdout: "", stderr: "timed out after 30 ms" });
 });
 
+test("returns at the time limit when a command exits while a descendant keeps its output pipe open", async () => {
+  const dir = temp.make("hedge-pipe-");
+  const ready = join(dir, "ready");
+  expect(Bun.spawnSync(["mkfifo", ready]).exitCode).toBe(0);
+  const started = Bun.file(ready).text();
+  const clock = handTimer();
+  const result = captureWith(clock.timer)(["sh", "-c", `sleep 30 & echo $! > ${JSON.stringify(ready)}`], { timeoutMs: 30 });
+  const childPid = Number((await started).trim());
+  try {
+    clock.fire();
+    expect(await result).toEqual({ code: 124, stdout: "", stderr: "timed out after 30 ms" });
+  } finally {
+    if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
+  }
+});
+
 test("terminates its detached child process group when the parent receives SIGTERM", async () => {
   const dir = temp.make("hedge-term-");
   const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];

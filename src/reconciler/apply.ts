@@ -464,7 +464,6 @@ async function runDetached(command: string[], env: Record<string, string | undef
   const onAbort = () => endGroup("SIGTERM");
   const interrupted = (name: NodeJS.Signals) => {
     endGroup(name);
-    if (name !== "SIGTERM") endGroup("SIGTERM");
     release();
     if (!process.listenerCount(name)) process.kill(process.pid, name);
   };

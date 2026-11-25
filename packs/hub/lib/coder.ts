@@ -55,6 +55,34 @@ function holdingLocks(argv: string[], locks: number[], timeoutMs: number): strin
   return ["timeout", "-s", "KILL", String(Math.ceil(timeoutMs / 1000) + orphanGraceSeconds), "/bin/sh", "-c", `exec "$@" ${closed}`, "hedge-box-lock", ...argv];
 }
 
+async function readStream(stream: ReadableStream<Uint8Array> | number | undefined, abort: AbortSignal) {
+  if (!(stream instanceof ReadableStream)) return "";
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let stop: (() => void) | undefined;
+  const aborted = new Promise<{ done: true; value: undefined }>((resolve) => {
+    stop = () => {
+      void reader.cancel().catch(() => {});
+      resolve({ done: true, value: undefined });
+    };
+    if (abort.aborted) stop();
+    else abort.addEventListener("abort", stop, { once: true });
+  });
+  try {
+    for (;;) {
+      const next = reader.read().catch(() => ({ done: true as const, value: undefined }));
+      const { done, value } = await Promise.race([next, aborted]);
+      if (done) break;
+      if (value) chunks.push(value);
+    }
+  } catch {
+  } finally {
+    if (stop) abort.removeEventListener("abort", stop);
+    try { reader.releaseLock(); } catch {}
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 export function captureWith(timer: Timer): Capture {
   return async (argv, { env, stdin, timeoutMs, inherit = false }) => {
     const output = inherit ? "inherit" : "pipe";
@@ -63,8 +91,10 @@ export function captureWith(timer: Timer): Capture {
     let child: ReturnType<typeof Bun.spawn> | undefined;
     let stopped = false;
     let reaped = false;
+    const done = new AbortController();
     const stopGroup = () => {
       stopped = true;
+      done.abort();
       if (!child || reaped) return;
       kill(-child.pid);
       kill(child.pid);
@@ -89,8 +119,7 @@ export function captureWith(timer: Timer): Capture {
         expired = true;
         stopGroup();
       });
-      const text = (stream: ReadableStream<Uint8Array> | number | undefined) => (stream instanceof ReadableStream ? new Response(stream).text() : "");
-      const [stdout, stderr, code] = await Promise.all([text(child.stdout), text(child.stderr), child.exited]);
+      const [stdout, stderr, code] = await Promise.all([readStream(child.stdout, done.signal), readStream(child.stderr, done.signal), child.exited]);
       return expired ? timeoutResult(timeoutMs, stdout) : { code, stdout, stderr };
     } finally {
       cancel();

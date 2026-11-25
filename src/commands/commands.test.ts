@@ -271,27 +271,31 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     }
   });
 
-  test("stops both foreground and background children of human steps when hedge packs is interrupted", async () => {
+  test("forwards SIGINT to human steps so SIGINT cleanup traps run without being preempted by SIGTERM", async () => {
     const { home } = await machineWithProfile();
-    const [ready, fgGone, bgGone] = [join(home, "ready"), join(home, "fg-gone"), join(home, "bg-gone")];
-    expect(Bun.spawnSync(["mkfifo", ready, fgGone, bgGone]).exitCode).toBe(0);
-    await withTeamPack(home, { workflows: [flow("allowlist")], human: [humanStep("allowlist", '{ sleep 30 & } 3>"$HOME/bg-gone"; trap "" TERM; exec 3>"$HOME/fg-gone"; echo $$ > "$HOME/ready"; sleep 30', "allowlist")] });
-    const [fgClosed, bgClosed, started] = [readFile(fgGone, "utf8"), readFile(bgGone, "utf8"), readFile(ready, "utf8")];
+    const [ready, fgGone, cleaned] = [join(home, "ready"), join(home, "fg-gone"), join(home, "cleaned")];
+    expect(Bun.spawnSync(["mkfifo", ready, fgGone, cleaned]).exitCode).toBe(0);
+    await withTeamPack(home, {
+      workflows: [flow("allowlist")],
+      human: [humanStep("allowlist", 'trap "" TERM; sleep 30 & pid=$!; trap \'kill $pid 2>/dev/null; echo cleaned > "$HOME/cleaned"; exit 130\' INT; exec 3>"$HOME/fg-gone"; echo $$ > "$HOME/ready"; wait', "allowlist")],
+    });
+    const [fgClosed, sawClean, started] = [readFile(fgGone, "utf8"), readFile(cleaned, "utf8"), readFile(ready, "utf8")];
     const listing = Bun.spawn([process.execPath, join(engineRoot, "src/cli.ts"), "packs"], { env: { ...Bun.env, HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
     try {
       await started;
       listing.kill("SIGINT");
+      expect((await sawClean).trim()).toBe("cleaned");
       expect(await fgClosed).toBe("");
-      expect(await bgClosed).toBe("");
       expect(await listing.exited).not.toBe(0);
     } finally {
       listing.kill("SIGKILL");
-      try { process.kill(-Number((await started).trim()), "SIGKILL"); } catch {}
+      const pgid = Number((await started).trim());
+      if (pgid > 0) try { process.kill(-pgid, "SIGKILL"); } catch {}
     }
   });
 
-  for (const sig of ["SIGHUP", "SIGQUIT"] as const) {
-    test(`stops human steps when hedge packs receives ${sig}`, async () => {
+  for (const sig of ["SIGTERM", "SIGHUP"] as const) {
+    test(`stops foreground and background children of human steps when hedge packs receives ${sig}`, async () => {
       const { home } = await machineWithProfile();
       const { holderGone, started } = await withBlockedProbe(home);
       const listing = Bun.spawn([process.execPath, join(engineRoot, "src/cli.ts"), "packs"], { env: { ...Bun.env, HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
@@ -306,6 +310,24 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
       }
     });
   }
+
+  test("stops human steps when hedge packs receives SIGQUIT", async () => {
+    const { home } = await machineWithProfile();
+    const [ready, gone] = [join(home, "ready"), join(home, "gone")];
+    expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+    await withTeamPack(home, { workflows: [flow("allowlist")], human: [humanStep("allowlist", 'exec 3>"$HOME/gone"; echo $$ > "$HOME/ready"; exec sleep 30', "allowlist")] });
+    const [holderGone, started] = [readFile(gone, "utf8"), readFile(ready, "utf8")];
+    const listing = Bun.spawn([process.execPath, join(engineRoot, "src/cli.ts"), "packs"], { env: { ...Bun.env, HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    try {
+      await started;
+      listing.kill("SIGQUIT");
+      expect(await holderGone).toBe("");
+      expect(await listing.exited).not.toBe(0);
+    } finally {
+      listing.kill("SIGKILL");
+      try { process.kill(-Number((await started).trim()), "SIGKILL"); } catch {}
+    }
+  });
 
   test("propagates pack-level human prerequisite timeouts to dependent workflows and prints both hints when another probe fails", async () => {
     const { home } = await machineWithProfile();
