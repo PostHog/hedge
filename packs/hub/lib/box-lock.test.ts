@@ -76,37 +76,35 @@ const alive = (pid: number) => {
   }
 };
 
-test("round 5, finding 2: the box lock outlives a crashed operation until the command and its descendants end, and a forward it started never holds it", async () => {
+test("round 5, finding 2: the box lock outlives a crashed operation until the command it ran ends, and a forward it started never holds it", async () => {
   const home = temp.make("hedge-lock-");
   const dir = temp.make("hedge-children-");
-  const gone = join(dir, "descendant-gone");
-  expect(Bun.spawnSync(["mkfifo", gone]).exitCode).toBe(0);
   const announce = (file: string, what: string) => `echo ${what} > ${dir}/${file}.tmp && /bin/mv ${dir}/${file}.tmp ${dir}/${file}`;
   const forward = stub(dir, "forward", `tail -f /dev/null < /dev/null > /dev/null 2>&1 &\n${announce("forward.pid", "$!")}`);
-  const act = stub(dir, "act", `{ tail -f /dev/null < /dev/null > /dev/null 2>&1 & } 3>${JSON.stringify(gone)}\n${announce("child.pid", "$!")}\n${announce("act.pid", "$$")}\nexec tail -f /dev/null`);
+  const act = stub(dir, "act", `${announce("act.pid", "$$")}\nexec tail -f /dev/null`);
   const code = `const { withBoxLock } = await import(${JSON.stringify(helper)});
 const { capture } = await import(${JSON.stringify(coderHelper)});
 await withBoxLock(${JSON.stringify(home)}, "box-a", { waitMs: 0 }, async () => {
   await capture([${JSON.stringify(forward)}], { timeoutMs: 600_000 });
   await capture([${JSON.stringify(act)}], { timeoutMs: 600_000 });
 });`;
-  const descendantGone = Bun.file(gone).text();
   const holder = Bun.spawn([process.execPath, "-e", code], { stdout: "inherit", stderr: "inherit" });
   const pids: number[] = [];
   try {
     await appeared(join(dir, "act.pid"));
-    pids.push(Number(readFileSync(join(dir, "forward.pid"), "utf8")), Number(readFileSync(join(dir, "act.pid"), "utf8")), Number(readFileSync(join(dir, "child.pid"), "utf8")));
+    pids.push(Number(readFileSync(join(dir, "forward.pid"), "utf8")), Number(readFileSync(join(dir, "act.pid"), "utf8")));
+    const holderOfAct = readFileSync(`/proc/${pids[1]}/stat`, "utf8").split(") ")[1]!.split(" ")[1];
+    expect(readFileSync(`/proc/${holderOfAct}/cmdline`, "utf8").split("\0").slice(0, 4)).toEqual(["timeout", "-s", "KILL", String(600 + orphanGraceSeconds)]);
     holder.kill("SIGKILL");
     expect(await holder.exited).not.toBe(0);
     await expect(lockBox(home, "box-a", { waitMs: 0 })).rejects.toBeInstanceOf(LockBusy);
     process.kill(pids[1]!, "SIGKILL");
     const unlock = await lockBox(home, "box-a", { waitMs: 60_000 });
-    expect(await descendantGone).toBe("");
     expect(alive(pids[0]!)).toBe(true);
     unlock();
   } finally {
     holder.kill("SIGKILL");
-    for (const pid of pids) if (pid > 0 && alive(pid)) process.kill(pid, "SIGKILL");
+    for (const pid of pids) if (alive(pid)) process.kill(pid, "SIGKILL");
   }
 });
 

@@ -49,86 +49,28 @@ const realTimer: Timer = (ms, fire) => {
 
 export const orphanGraceSeconds = 10;
 
-function holdingLocks(argv: string[], locks: number[], timeoutMs: number, firstLockFd = 3, foreground = false): string[] {
+function holdingLocks(argv: string[], locks: number[], timeoutMs: number): string[] {
   if (!locks.length) return argv;
-  const closed = locks.map((_, index) => `${index + firstLockFd}>&-`).join(" ");
-  return ["timeout", ...(foreground ? ["--foreground"] : []), "-s", "KILL", String(Math.ceil(timeoutMs / 1000) + orphanGraceSeconds), "/bin/sh", "-c", `exec "$@" ${closed}`, "hedge-box-lock", ...argv];
-}
-
-function resolveExecutable(argv: string[], env?: Env): string[] {
-  if (!argv[0] || argv[0].includes("/")) return argv;
-  const found = Bun.which(argv[0], { PATH: env?.PATH ?? process.env.PATH });
-  return found ? [found, ...argv.slice(1)] : ["env", "--", ...argv];
-}
-
-function supervisedCommand(argv: string[], locks: number[], timeoutMs: number): string[] {
-  const closeLocks = locks.map((_, index) => `${index + 4}>&-`).join(" ");
-  const inner = holdingLocks(argv, locks, timeoutMs, 4, true);
-  const closeAfter = closeLocks ? ` ${closeLocks}` : "";
-  const orphanKill = locks.length ? 'if [ "$code" = 124 ] || [ "$code" = 137 ]; then exec 1>&- 2>&-; kill -KILL 0; fi; ' : "";
-  const script = `trap ":" PIPE; exec 9<&3 3<&-; "$@" 9<&-; code=$?; ${orphanKill}exec 1>&- 2>&-${closeAfter}; read _ <&9; exit "$code"`;
-  return ["/bin/sh", "-c", script, "hedge-capture", ...inner];
-}
-
-async function readStream(stream: ReadableStream<Uint8Array> | number | undefined, abort: AbortSignal) {
-  if (!(stream instanceof ReadableStream)) return "";
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let stop: (() => void) | undefined;
-  const aborted = new Promise<void>((resolve) => {
-    stop = () => {
-      void reader.cancel().catch(() => {});
-      resolve();
-    };
-    if (abort.aborted) stop();
-    else abort.addEventListener("abort", stop, { once: true });
-  });
-  const drain = (async () => {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value) chunks.push(value);
-    }
-  })().catch(() => {});
-  try {
-    await Promise.race([drain, aborted]);
-  } finally {
-    if (stop) abort.removeEventListener("abort", stop);
-    try { reader.releaseLock(); } catch {}
-  }
-  return new TextDecoder().decode(Buffer.concat(chunks));
+  const closed = locks.map((_, index) => `${index + 3}>&-`).join(" ");
+  return ["timeout", "-s", "KILL", String(Math.ceil(timeoutMs / 1000) + orphanGraceSeconds), "/bin/sh", "-c", `exec "$@" ${closed}`, "hedge-box-lock", ...argv];
 }
 
 export function captureWith(timer: Timer): Capture {
   return async (argv, { env, stdin, timeoutMs, inherit = false }) => {
+    const output = inherit ? "inherit" : "pipe";
     const locks = heldLocks();
     const input = stdin === undefined ? "ignore" : new TextEncoder().encode(stdin);
-    const supervised = !inherit;
-    const resolved = resolveExecutable(argv, env);
-    const command = supervised ? supervisedCommand(resolved, locks, timeoutMs) : holdingLocks(resolved, locks, timeoutMs, 3);
-    const stdio = supervised ? ([input, "pipe", "pipe", "pipe", ...locks] as const) : ([input, "inherit", "inherit", ...locks] as const);
     let child: ReturnType<typeof Bun.spawn> | undefined;
-    let ctrl: number | undefined;
-    let ctrlClosed = false;
     let stopped = false;
     let reaped = false;
-    const done = new AbortController();
-    const closeCtrl = () => {
-      if (ctrlClosed || typeof ctrl !== "number") return;
-      ctrlClosed = true;
-      try { closeSync(ctrl); } catch {}
-    };
-    const stopGroup = () => {
+    const stopOnInterrupt = () => {
       stopped = true;
-      done.abort();
-      if (child && !reaped) {
-        kill(-child.pid);
-        kill(child.pid);
-      }
-      closeCtrl();
+      if (!child || reaped) return;
+      kill(-child.pid);
+      kill(child.pid);
     };
     const interrupted = (name: NodeJS.Signals) => {
-      stopGroup();
+      stopOnInterrupt();
       release();
       if (!process.listenerCount(name)) process.kill(process.pid, name);
     };
@@ -140,21 +82,23 @@ export function captureWith(timer: Timer): Capture {
     let expired = false;
     let cancel = () => {};
     try {
-      child = Bun.spawn(command, { env: env as Record<string, string> | undefined, stdio: [...stdio], detached: true });
-      if (supervised && typeof child.stdio[3] === "number") ctrl = child.stdio[3];
-      void child.exited.finally(() => { reaped = true; });
-      if (stopped) stopGroup();
+      child = Bun.spawn(holdingLocks(argv, locks, timeoutMs), { env: env as Record<string, string> | undefined, stdio: [input, output, output, ...locks], detached: true });
+      const live = child;
+      void live.exited.finally(() => {
+        reaped = true;
+        release();
+      });
+      if (stopped) stopOnInterrupt();
       cancel = timer(timeoutMs, () => {
         expired = true;
-        stopGroup();
+        kill(-live.pid);
+        kill(live.pid);
       });
-      const [stdout, stderr] = await Promise.all([readStream(child.stdout, done.signal), readStream(child.stderr, done.signal)]);
-      closeCtrl();
-      const code = await child.exited;
+      const text = (stream: ReadableStream<Uint8Array> | number | undefined) => (stream instanceof ReadableStream ? new Response(stream).text() : "");
+      const [stdout, stderr, code] = await Promise.all([text(live.stdout), text(live.stderr), live.exited]);
       return expired ? timeoutResult(timeoutMs, stdout) : { code, stdout, stderr };
     } finally {
       cancel();
-      closeCtrl();
       release();
     }
   };

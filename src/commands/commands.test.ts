@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { main, type CliOptions } from "../cli.ts";
@@ -272,29 +272,52 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     }
   });
 
-  test("resolves probe executables via PATH and rejects no-shebang scripts, matching hedge doctor", async () => {
+  test("lists the packs at the deadline and still stops descendants that ignore SIGTERM after a cooperative probe exits", async () => {
+    const { home } = await machineWithProfile();
+    const [ready, gone] = [join(home, "ready"), join(home, "gone")];
+    expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+    await withTeamPack(home, {
+      workflows: [flow("allowlist")],
+      human: [humanStep("allowlist", '(trap "" TERM; exec sleep 30) 3>"$HOME/gone" & echo $! > "$HOME/ready"; wait', "allowlist")],
+    });
+    const [holderGone, started] = [readFile(gone, "utf8"), readFile(ready, "utf8")];
+    const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await started) };
+    try {
+      expect((await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output).toContain(notChecked);
+      expect(await holderGone).toBe("");
+    } finally {
+      await endHolder(started);
+    }
+  });
+
+  test("resolves probe executables via PATH, allows execute-only binaries, and rejects no-shebang scripts, matching hedge doctor", async () => {
     const { home } = await machineWithProfile();
     const bin = join(home, "bin");
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, "set"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     const noShebang = join(bin, "plain-script");
     writeFileSync(noShebang, "exit 0\n", { mode: 0o755 });
+    const execOnly = join(bin, "exec-only-true");
+    copyFileSync(Bun.which("true")!, execOnly);
+    chmodSync(execOnly, 0o111);
     await withTeamPack(home, {
-      workflows: [flow("external"), flow("builtin"), flow("noshebang")],
+      workflows: [flow("external"), flow("builtin"), flow("noshebang"), flow("execonly")],
       human: [
         { id: "external", say: "Check external set.", probe: ["set", "--hedge-external-flag"], workflow: "external" },
         { id: "builtin", say: "Check builtin export.", probe: ["export", "HEDGE_BUILTIN=1"], workflow: "builtin" },
         { id: "noshebang", say: "Check plain script.", probe: [noShebang], workflow: "noshebang" },
+        { id: "execonly", say: "Check execute-only binary.", probe: [execOnly], workflow: "execonly" },
       ],
     });
     const prevPath = process.env.PATH;
     process.env.PATH = `${bin}:${prevPath ?? ""}`;
     try {
       const output = (await hedge(home, ["packs"])).output;
-      expect(output).toContain(`  ~ team  Team rules.\n      Workflows: external on, builtin needs setup, noshebang needs setup\n${needsSetup}`);
+      expect(output).toContain(`  ~ team  Team rules.\n      Workflows: external on, builtin needs setup, noshebang needs setup, execonly on\n${needsSetup}`);
     } finally {
       if (prevPath === undefined) delete process.env.PATH;
       else process.env.PATH = prevPath;
+      chmodSync(execOnly, 0o755);
     }
   });
 
