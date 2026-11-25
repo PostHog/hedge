@@ -6,6 +6,7 @@ let target: ReturnType<typeof Bun.spawn> | undefined;
 let targetReaped = false;
 let targetCode: number | undefined;
 let holdFd: number | undefined;
+let ownPgidActive = false;
 let parentGone = false;
 let killing = false;
 
@@ -22,7 +23,7 @@ const anchorAlive = () => {
 const killAll = () => {
   if (killing) return;
   killing = true;
-  if (target && (!targetReaped || anchorAlive())) {
+  if (target && (!targetReaped || anchorAlive() || ownPgidActive)) {
     try {
       process.kill(-target.pid, "SIGKILL");
     } catch {}
@@ -65,14 +66,12 @@ process.on("message", async (message: unknown) => {
     } catch {}
     process.exit(127);
   }
-  if (locked) {
-    if (typeof target.stdio[3] === "number") {
-      holdFd = target.stdio[3];
-    }
-    try {
-      process.send?.({ pgid: target.pid });
-    } catch {}
+  if (locked && typeof target.stdio[3] === "number") {
+    holdFd = target.stdio[3];
   }
+  try {
+    process.send?.({ pgid: target.pid });
+  } catch {}
   for (const fd of [1, 2]) {
     try {
       closeSync(fd);
@@ -80,10 +79,18 @@ process.on("message", async (message: unknown) => {
   }
   const code = await target.exited;
   targetReaped = true;
+  if (!locked && target.pid !== process.pid) {
+    try {
+      process.kill(-target.pid, 0);
+      ownPgidActive = true;
+    } catch {
+      ownPgidActive = false;
+    }
+  }
   targetCode = code;
   if (parentGone) process.exit(code);
   try {
-    process.send?.({ code });
+    process.send?.({ code, pgidActive: locked ? anchorAlive() : ownPgidActive });
   } catch {
     process.exit(code);
   }

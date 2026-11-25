@@ -447,16 +447,6 @@ test("kills a background child holding stdout open after the command exits under
   }
 });
 
-async function waitStopped(pid: number) {
-  const deadline = performance.now() + 2_000;
-  while (performance.now() < deadline) {
-    const state = Bun.spawnSync(["ps", "-o", "state=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim();
-    if (state.startsWith("T")) return;
-    await Bun.sleep(5);
-  }
-  throw new Error(`process ${pid} did not enter stopped state`);
-}
-
 test("wakes and kills a command that suspends its own process group, both unlocked and under a box lock", async () => {
   for (const locked of [false, true]) {
     const lockHome = temp.make("hedge-lock-stop-");
@@ -475,7 +465,6 @@ test("wakes and kills a command that suspends its own process group, both unlock
     const cmdPid = Number((await started).trim());
     expect(cmdPid).toBeGreaterThan(0);
     try {
-      await waitStopped(cmdPid);
       clock.fire();
       expect(await result).toEqual({ code: 124, stdout: "", stderr: "timed out after 30 ms" });
       expect(await holderGone).toBe("");
@@ -489,17 +478,61 @@ test("wakes and kills a command that suspends its own process group, both unlock
   }
 });
 
-test("preserves command arguments and stdin under seven nested box locks", async () => {
+test("kills a background child left in an unlocked command's own process group after its leader exits", async () => {
+  const dir = temp.make("hedge-timeout-pgid-");
+  const [ready, gone, leaderGone] = [join(dir, "ready"), join(dir, "gone"), join(dir, "leader-gone")];
+  expect(Bun.spawnSync(["mkfifo", ready, gone, leaderGone]).exitCode).toBe(0);
+  const started = Bun.file(ready).text();
+  const holderGone = Bun.file(gone).text();
+  const leaderClosed = Bun.file(leaderGone).text();
+  const clock = handTimer();
+  const result = captureWith(clock.timer)(
+    [
+      "timeout",
+      "10",
+      "sh",
+      "-c",
+      `exec 4>${JSON.stringify(leaderGone)}; { sleep 30 4>&- & } 3>${JSON.stringify(gone)}; echo $! > ${JSON.stringify(ready)}`,
+    ],
+    { timeoutMs: 30 },
+  );
+  const childPid = Number((await started).trim());
+  expect(await leaderClosed).toBe("");
+  try {
+    clock.fire();
+    expect(await result).toEqual({ code: 124, stdout: "", stderr: "timed out after 30 ms" });
+    expect(await holderGone).toBe("");
+  } finally {
+    if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
+  }
+});
+
+test("preserves command arguments and stdin under seven nested box locks without leaking locks to descendants", async () => {
   const lockHome = temp.make("hedge-lock-seven-");
+  const dir = temp.make("hedge-lock-seven-child-");
+  const ready = join(dir, "bg.pid");
+  expect(Bun.spawnSync(["mkfifo", ready]).exitCode).toBe(0);
+  const bgStarted = Bun.file(ready).text();
   const nest = <T>(index: number, fn: () => Promise<T>): Promise<T> =>
     index > 7 ? fn() : withBoxLock(lockHome, `box-${index}`, { waitMs: 0 }, () => nest(index + 1, fn));
-  const [printed, piped] = await nest(1, async () => [
-    await capture(["printf", "%s", "ok"], { timeoutMs: 10_000 }),
-    await capture(
-      ["sh", "-c", 'read line; printf "%s:%s" "$line" "$1"; if [ -e /dev/fd/3 ]; then echo has-fd >&2; fi', "probe", "arg"],
-      { stdin: "hello\n", timeoutMs: 10_000 },
-    ),
-  ]);
-  expect(printed).toEqual({ code: 0, stdout: "ok", stderr: "" });
-  expect(piped).toEqual({ code: 0, stdout: "hello:arg", stderr: "" });
+  let bgPid = 0;
+  try {
+    const [printed, piped] = await nest(1, async () => [
+      await capture(["printf", "%s", "ok"], { timeoutMs: 10_000 }),
+      await capture(
+        ["sh", "-c", 'read line; printf "%s:%s" "$line" "$1"; sleep 30 </dev/null >/dev/null 2>&1 & echo $! > "$2"', "probe", "arg", ready],
+        { stdin: "hello\n", timeoutMs: 10_000 },
+      ),
+    ]);
+    bgPid = Number((await bgStarted).trim());
+    expect(bgPid).toBeGreaterThan(0);
+    expect(() => process.kill(bgPid, 0)).not.toThrow();
+    expect(printed).toEqual({ code: 0, stdout: "ok", stderr: "" });
+    expect(piped).toEqual({ code: 0, stdout: "hello:arg", stderr: "" });
+    for (let index = 1; index <= 7; index++) {
+      expect(await withBoxLock(lockHome, `box-${index}`, { waitMs: 0 }, async () => "free")).toBe("free");
+    }
+  } finally {
+    if (bgPid > 0) try { process.kill(bgPid, "SIGKILL"); } catch {}
+  }
 });

@@ -87,33 +87,45 @@ export function captureWith(timer: Timer): Capture {
     const locks = heldLocks();
     const input = stdin === undefined ? "ignore" : new TextEncoder().encode(stdin);
     let child: ReturnType<typeof Bun.spawn> | undefined;
-    let lockedPgid: number | undefined;
+    let targetPgid: number | undefined;
     let stopped = false;
-    let reaped = false;
+    let supervisorReaped = false;
+    let targetExited = false;
+    let pgidActive = false;
     const stopStream = new AbortController();
-    const stopChild = () => {
-      stopped = true;
-      if (!child || reaped) return;
-      try {
-        process.kill(-child.pid, "SIGCONT");
-      } catch {}
-      try {
-        child.kill("SIGTERM");
-      } catch {}
-    };
-    const killStalled = () => {
-      if (!child || reaped) return;
-      if (lockedPgid !== undefined) {
+    const killGroups = () => {
+      if (!child) return;
+      if (targetPgid !== undefined) {
         try {
-          process.kill(-lockedPgid, "SIGKILL");
+          process.kill(-targetPgid, "SIGKILL");
         } catch {}
       }
       try {
         process.kill(-child.pid, "SIGKILL");
       } catch {}
-      try {
-        child.kill("SIGKILL");
-      } catch {}
+    };
+    const stopChild = () => {
+      stopped = true;
+      if (!child) return;
+      if (!supervisorReaped) {
+        try {
+          process.kill(-child.pid, "SIGCONT");
+        } catch {}
+        try {
+          child.kill("SIGTERM");
+        } catch {}
+        return;
+      }
+      if (!targetExited || pgidActive) killGroups();
+    };
+    const killStalled = () => {
+      if (!child) return;
+      if (!supervisorReaped || !targetExited || pgidActive) killGroups();
+      if (!supervisorReaped) {
+        try {
+          child.kill("SIGKILL");
+        } catch {}
+      }
     };
     const interrupted = (name: NodeJS.Signals) => {
       stopChild();
@@ -145,19 +157,23 @@ export function captureWith(timer: Timer): Capture {
         detached: true,
         ipc(message) {
           if (!message || typeof message !== "object") return;
-          const record = message as { code?: unknown; error?: unknown; pgid?: unknown };
+          const record = message as { code?: unknown; error?: unknown; pgid?: unknown; pgidActive?: unknown };
           if (typeof record.pgid === "number") {
-            lockedPgid = record.pgid;
+            targetPgid = record.pgid;
           } else if (typeof record.error === "string") {
+            targetExited = true;
             settle({ error: record.error, ...(typeof record.code === "string" ? { errCode: record.code } : {}) });
           } else if (typeof record.code === "number") {
+            targetExited = true;
+            pgidActive = Boolean(record.pgidActive);
             settle({ code: record.code });
           }
         },
       });
       const live = child;
       void live.exited.then((code) => {
-        reaped = true;
+        supervisorReaped = true;
+        if (!targetExited) killGroups();
         settle({ code });
       });
       if (stopped) {
@@ -187,7 +203,7 @@ export function captureWith(timer: Timer): Capture {
         statusPromise,
       ]);
       if (hardKill) clearTimeout(hardKill);
-      if (!reaped && !expired) {
+      if (!supervisorReaped && !expired) {
         try {
           live.send("done");
         } catch {}

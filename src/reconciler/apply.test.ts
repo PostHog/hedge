@@ -687,7 +687,7 @@ describe("humanStepsLeft", () => {
 
     const trueBin = Bun.which("true")!;
     const human = Array.from({ length: 35 }, (_, idx) => ({ id: `step-${idx}`, pack: "team", say: `Step ${idx}.`, probe: [trueBin] }));
-    const result = await humanStepsLeft(plan({ human }), { home, giveUp: new Promise<void>(() => {}), graceMs: 0 });
+    const result = await humanStepsLeft(plan({ human }), { home, giveUp: new Promise<void>(() => {}) });
     expect(result).toEqual({ failing: [], unchecked: [] });
   });
 
