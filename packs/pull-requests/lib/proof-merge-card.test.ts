@@ -33,6 +33,18 @@ test("a passing gate prints the merge card line: grade and door, reads, each gap
   expect(gate.output.split("\n").at(-1)).toStartWith("gate: pass");
 });
 
+test("the merge card line names each held decision once, with every kind it accepts", async () => {
+  const { pr, id } = await agentAcceptedGap();
+  await pr.hedge("require", "--kinds", "prod-shape,live-run,cross-version");
+  await pr.hedge("gap", "--kind", "live-run", "--reason", "No sandbox");
+  await pr.hedge("gap", "--kind", "cross-version", "--reason", "No old client");
+  const decided = await pr.decide("record", "--mark", "🤖", "--class", "proof-gap", "--kind", "live-run", "--kind", "cross-version", "--pr", "example/product#42", "--question", "Accept the live-run and cross-version gaps? example/product#42: No sandbox", "--answer", "Accept the gaps", "--rejected", "Keep the gaps open", "--reason", "The hook runs in its own tests");
+  const other = /\[(d-[0-9a-f]+)\]/.exec(decided.output)?.[1];
+  const gate = await pr.hedge("gate");
+  expect(gate.code).toBe(0);
+  expect(/ · held: ([^·]+) · /.exec(gate.output)?.[1]).toBe(`${other} for live-run/cross-version, ${id} for prod-shape`);
+});
+
 test("the merge card takes the door from the grade line, and a draft has no ready time yet", async () => {
   const { pr } = await agentAcceptedGap(`<!-- merge-risk -->\n> [!CAUTION]\n> 🔴 **Merge risk: high** · one-way door: the stored senders change shape\n> - **Tier:** non-critical\n<!-- /merge-risk -->\n`);
   pr.pullRequestState({ draft: true });
@@ -62,6 +74,8 @@ test("the receipt writes the merge card block into the PR body without the minut
   expect(receipt.code).toBe(0);
   expect(pr.githubBody()).toContain(`**Merge card:** medium, two-way door · 1 round · gaps: prod-shape (🤖 agent ${id}) · 2 known issues · 120 min opened to ready\n`);
   expect(receipt.output).toContain("· 120 min opened to ready, 60 min ready to card");
+  expect(receipt.output).not.toContain("held:");
+  expect(pr.githubBody()).not.toContain("held:");
   pr.clock.now = new Date("2026-10-25T13:00:00Z");
   expect((await pr.hedge("receipt")).output.split("\n").at(-1)).toBe("receipt current");
 });
