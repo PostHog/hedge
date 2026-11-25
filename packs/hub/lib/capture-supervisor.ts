@@ -1,5 +1,5 @@
 import { closeSync, writeSync } from "node:fs";
-import { drainControlFd, enableChildSubreaper, killSession, ownTag, setCloexec, shieldGroupSignals, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { drainControlFd, enableChildSubreaper, killSession, ownTag, redirectStdioOutputsToNull, setCloexec, shieldGroupSignals, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
 type StartConfig = { argv: string[]; env?: Record<string, string>; envEntries?: Array<[string, string]> };
 
@@ -114,12 +114,14 @@ setCloexec(configFd, true);
 const lockFds = Array.from({ length: lockCount }, (_, index) => index + 3);
 const drained = drainControlFd(controlFd);
 if (drained.closed || drained.lines.includes("kill")) {
-  for (const fd of [...lockFds, resultFd, configFd, 1, 2]) closeQuiet(fd);
+  for (const fd of [...lockFds, resultFd, configFd]) closeQuiet(fd);
+  redirectStdioOutputsToNull();
   process.exit(137);
 }
 if (drained.lines.includes("done")) {
   confirmedDone = true;
-  for (const fd of [...lockFds, resultFd, configFd, 1, 2]) closeQuiet(fd);
+  for (const fd of [...lockFds, resultFd, configFd]) closeQuiet(fd);
+  redirectStdioOutputsToNull();
   process.exit(0);
 }
 watchControl(controlFd, drained.rest);
@@ -137,7 +139,8 @@ try {
 }
 
 if (!parsed || killing) {
-  for (const fd of [...lockFds, resultFd, 1, 2]) closeQuiet(fd);
+  for (const fd of [...lockFds, resultFd]) closeQuiet(fd);
+  redirectStdioOutputsToNull();
   killAll();
 } else {
   const { argv, env, envEntries } = parsed;
@@ -155,14 +158,16 @@ if (!parsed || killing) {
   try {
     target = Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio });
   } catch (error) {
-    for (const fd of [...lockFds, 1, 2]) closeQuiet(fd);
+    for (const fd of lockFds) closeQuiet(fd);
+    redirectStdioOutputsToNull();
     targetReaped = true;
     targetCode = 127;
     const err = error as NodeJS.ErrnoException;
     writeResult(resultFd, { error: err?.message ?? String(error), ...(err?.code ? { code: err.code } : {}) });
   }
   if (target) {
-    for (const fd of [...lockFds, 1, 2]) closeQuiet(fd);
+    for (const fd of lockFds) closeQuiet(fd);
+    redirectStdioOutputsToNull();
     const code = await target.exited;
     targetReaped = true;
     targetCode = code;

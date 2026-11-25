@@ -681,21 +681,18 @@ test("watchdog kills a real stopped process group when its controlled clock reac
     { stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true },
   );
   let now = 0;
-  const sleepers: Array<() => void> = [];
   const clock: WatchClock = {
     now: () => now,
-    sleep: () => new Promise<void>((resolve) => sleepers.push(resolve)),
+    sleep: async (ms) => {
+      now += ms;
+    },
   };
   let targetPid = 0;
   try {
     targetPid = Number((await started).trim());
     expect(targetPid).toBeGreaterThan(0);
-    const watching = watchEntries([{ pid: child.pid, fd: pipe!.writeFd, delayMs: 150 }], clock);
-    await Bun.sleep(0);
-    expect(sleepers.length).toBeGreaterThan(0);
-    now = 150;
-    while (sleepers.length) sleepers.shift()!();
-    await watching;
+    await watchEntries([{ pid: child.pid, fd: pipe!.writeFd, delayMs: 150 }], clock);
+    expect(now).toBe(150);
     expect(await holderGone).toBe("");
   } finally {
     try { closeSync(pipe!.readFd); } catch {}

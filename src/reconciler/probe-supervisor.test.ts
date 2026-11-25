@@ -1008,6 +1008,75 @@ await slow.exited;`;
     }
   });
 
+  test("preserves a surviving worker whose detached session leader exited after a completed nested capture", async () => {
+    const dir = temp.make("sup-nested-capture-reparented-");
+    const [workerReady, workerGone, probeReady, probeGone] = [
+      join(dir, "worker-ready"),
+      join(dir, "worker-gone"),
+      join(dir, "probe-ready"),
+      join(dir, "probe-gone"),
+    ];
+    mkfifo(workerReady, workerGone, probeReady, probeGone);
+    const workerStarted = fifoRead(workerReady);
+    const workerClosed = fifoRead(workerGone);
+    const probeStarted = fifoRead(probeReady);
+    const probeClosed = fifoRead(probeGone);
+    const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
+    const { humanStepsLeft } = await import("./apply.ts");
+    const leaderScript = `const w = Bun.spawn(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "worker", ${JSON.stringify(workerGone)}, ${JSON.stringify(workerReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+w.unref();
+process.exit(0);`;
+    const daemonScript = `const leader = Bun.spawn([process.execPath, "-e", ${JSON.stringify(leaderScript)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await leader.exited;
+process.exit(0);`;
+    const probeScript = `import { capture } from ${JSON.stringify(coderPath)};
+const res = await capture([process.execPath, "-e", ${JSON.stringify(daemonScript)}], { timeoutMs: 5_000 });
+if (res.code !== 0) process.exit(2);
+const slow = Bun.spawn(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "slow", ${JSON.stringify(probeGone)}, ${JSON.stringify(probeReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await slow.exited;`;
+    let fireDeadline!: () => void;
+    let workerPid = 0;
+    let probePid = 0;
+    try {
+      const pending = humanStepsLeft(
+        {
+          machine: { schema: 1, role: "linux" },
+          os: process.platform === "darwin" ? "darwin" : "linux",
+          ai: "both",
+          packs: [],
+          workflows: [],
+          files: [],
+          config: [],
+          owners: {},
+          jobs: [],
+          human: [{ id: "cert", pack: "team", say: "Cert.", probe: [process.execPath, "-e", probeScript] }],
+          steps: [],
+          checks: [],
+          commands: {},
+          handlers: {},
+          models: [],
+          settings: {},
+          unanswered: [],
+          ask: [],
+          dropped: [],
+        },
+        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 0 },
+      );
+      [workerPid, probePid] = (await Promise.all([workerStarted, probeStarted])).map((s) => Number(s.trim())) as [number, number];
+      expect(workerPid).toBeGreaterThan(0);
+      expect(probePid).toBeGreaterThan(0);
+      fireDeadline();
+      const res = await pending;
+      expect(res.unchecked.map((step) => step.id)).toEqual(["cert"]);
+      expect(await probeClosed).toBe("");
+      expect(() => process.kill(workerPid, 0)).not.toThrow();
+    } finally {
+      if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
+      if (probePid > 0) try { process.kill(probePid, "SIGKILL"); } catch {}
+      await workerClosed.catch(() => {});
+    }
+  });
+
   test("forwards a __proto__ environment variable to supervised probes", async () => {
     const dir = temp.make("sup-proto-env-");
     const applyPath = join(import.meta.dir, "apply.ts");

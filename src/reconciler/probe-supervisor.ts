@@ -1,5 +1,5 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
-import { closeSync, existsSync, readdirSync, readFileSync, readSync, writeSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, writeSync } from "node:fs";
 
 export type StopSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT";
 export type Timer = (ms: number, fire: () => void) => () => void;
@@ -94,6 +94,7 @@ type PosixLib = {
   poll: (fds: ReturnType<typeof ptr>, nfds: number, timeout: number) => number;
   pipe: (fds: ReturnType<typeof ptr>) => number;
   fcntl: (fd: number, cmd: number, arg: number) => number;
+  dup2: (oldfd: number, newfd: number) => number;
 };
 
 let posixLib: PosixLib | null | undefined;
@@ -108,17 +109,45 @@ function getPosixLib(): PosixLib | null {
         poll: { args: [FFIType.pointer, nfdsType, FFIType.i32], returns: FFIType.i32 },
         pipe: { args: [FFIType.pointer], returns: FFIType.i32 },
         fcntl: { args: [FFIType.i32, FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+        dup2: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
       });
       posixLib = {
         poll: (fds, nfds, timeout) => lib.symbols.poll(fds, nfds, timeout),
         pipe: (fds) => lib.symbols.pipe(fds),
         fcntl: (fd, cmd, arg) => lib.symbols.fcntl(fd, cmd, arg),
+        dup2: (oldfd, newfd) => lib.symbols.dup2(oldfd, newfd),
       };
     } catch {
       posixLib = null;
     }
   }
   return posixLib;
+}
+
+export function redirectStdioOutputsToNull(): void {
+  const lib = getPosixLib();
+  if (lib) {
+    let devNull: number | undefined;
+    try {
+      devNull = openSync("/dev/null", "w");
+      lib.dup2(devNull, 1);
+      lib.dup2(devNull, 2);
+      return;
+    } catch {
+    } finally {
+      if (devNull !== undefined) {
+        try {
+          closeSync(devNull);
+        } catch {}
+      }
+    }
+  }
+  try {
+    closeSync(1);
+  } catch {}
+  try {
+    closeSync(2);
+  } catch {}
 }
 
 export function createPipe(): { readFd: number; writeFd: number } | undefined {
@@ -283,7 +312,7 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string, deadLeade
           matched.add(row.pid);
           grew = true;
         } else if (matched.has(row.ppid)) {
-          const foreignCompleted = Boolean(tag && row.envTag && row.sid === row.pid && !envMatchesAnyTag(row.envTag, activeTags));
+          const foreignCompleted = Boolean(tag && row.envTag && row.sid !== sessionId && row.sid !== self && !envMatchesAnyTag(row.envTag, activeTags));
           if (!foreignCompleted) {
             matched.add(row.pid);
             grew = true;
@@ -491,7 +520,8 @@ function buildTargetsFromPs(
           matched.add(row.pid);
           grew = true;
         } else if (matched.has(row.ppid)) {
-          const foreignCompleted = Boolean(tag && row.envTag && sessionIdDarwin(row.pid) === row.pid && !envMatchesAnyTag(row.envTag, activeTags));
+          const sid = sessionIdDarwin(row.pid);
+          const foreignCompleted = Boolean(tag && row.envTag && sid !== undefined && sid > 0 && sid !== sessionId && sid !== self && !envMatchesAnyTag(row.envTag, activeTags));
           if (!foreignCompleted) {
             matched.add(row.pid);
             grew = true;
