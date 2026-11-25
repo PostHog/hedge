@@ -388,10 +388,10 @@ test("a malformed exemption file logs why the default billing guard is used", as
   writeFileSync(join(proxy, "allow-extra-usage.json"), "invalid JSON");
   const files = [{ name: "at-quota.json", provider: "claude", auth_index: "1", priority: 0 }];
   const usage = { "1": { seven_day: { utilization: 100 }, extra_usage: { is_enabled: true } } };
-  const { fetch, calls } = managementApi({ strategy: "fill-first", files, usage });
+  const { fetch, subscriptions } = managementApi({ strategy: "fill-first", files, usage });
   const lines: string[] = [];
   expect(await balanceCommand([], { home, fetch, now: () => now, ledger: false, env: {}, log: (line) => lines.push(line) })).toBe(0);
-  expect(calls.find((call) => call.path === "auth-files/status")?.body).toEqual({ name: "at-quota.json", disabled: true });
+  expect(await subscriptions()).toEqual({ files: [{ ...files[0], disabled: true }] });
   expect(lines).toContain("Cannot read allow-extra-usage.json as a JSON array of Auth Index values. Using the default billing guard.");
 });
 
