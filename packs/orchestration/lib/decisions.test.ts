@@ -243,10 +243,10 @@ test("hedge decisions refuses a bad map", async () => {
   await expect(runDecisions(["acme/maps"], io)).rejects.toThrow(usage);
 });
 
-test("hedge decisions reads the comments over REST, with the same answer, when GitHub's GraphQL rate limit is spent", async () => {
+test("hedge decisions reads every page of comments over REST, with the same answer, when GitHub's GraphQL rate limit is spent", async () => {
   const home = await mkdtemp(join(tmpdir(), "hedge-decisions-"));
   cleanups.push(home);
-  const bin = await fakeGitHub(home, { ...fixture, graphqlError: "API rate limit already exceeded for user ID 1." });
+  const bin = await fakeGitHub(home, { ...fixture, graphqlError: "API rate limit already exceeded for user ID 1.", restPageSize: 1 });
 
   const result = await runPackCommand("decisions", ["acme/maps#1"], { HOME: home, PATH: `${bin}:${Bun.env.PATH}`, HEDGE_SETTINGS: "{}" });
 

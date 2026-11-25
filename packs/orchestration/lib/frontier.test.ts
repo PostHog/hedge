@@ -129,15 +129,15 @@ test("hedge frontier 12 asks for the tracker when the profile repo has no GitHub
 const rateLimited = "API rate limit already exceeded for user ID 1.";
 const restNotice = "hedge: GitHub's GraphQL rate limit is spent, so this command reads issues over REST.\n";
 
-test("hedge frontier reads the map over REST, with the same report, when GitHub's GraphQL rate limit is spent", async () => {
+test("hedge frontier reads the map over REST, every page of it, with the same report, when GitHub's GraphQL rate limit is spent", async () => {
   const home = await temporaryHome();
-  const bin = await fakeGitHub(home, { ...mapFixture("acme/maps"), graphqlError: rateLimited });
+  const bin = await fakeGitHub(home, { ...mapFixture("acme/maps"), graphqlError: rateLimited, restPageSize: 1 });
 
   const result = await runPackCommand("frontier", ["acme/maps#1"], { HOME: home, PATH: `${bin}:${Bun.env.PATH}`, HEDGE_SETTINGS: "{}" });
 
   expect(result).toEqual({ stdout: `${expected("acme/maps")}\n`, stderr: restNotice, code: 0 });
   expect((await readFile(join(bin, "calls.log"), "utf8")).split("\n").filter(Boolean)).toEqual(["acme/maps#1"]);
-  expect((await readFile(join(bin, "rest.log"), "utf8")).split("\n").filter(Boolean)).toEqual([
+  expect((await readFile(join(bin, "rest.log"), "utf8")).split("\n").filter(Boolean).sort()).toEqual([
     "repos/acme/maps/issues/1",
     "repos/acme/maps/issues/1/sub_issues?per_page=100",
     "repos/acme/maps/issues/3/dependencies/blocked_by?per_page=100",
@@ -146,12 +146,23 @@ test("hedge frontier reads the map over REST, with the same report, when GitHub'
   ]);
 });
 
-test("hedge frontier fails on any other GraphQL error and does not read over REST", async () => {
+test("hedge frontier over REST refuses a pull request number, as GraphQL does", async () => {
   const home = await temporaryHome();
-  const bin = await fakeGitHub(home, { ...mapFixture("acme/maps"), graphqlError: "Could not resolve to a Repository with the name 'acme/maps'." });
+  const bin = await fakeGitHub(home, { issues: [], pullRequests: ["acme/maps#9"], graphqlError: rateLimited });
 
-  const result = await runPackCommand("frontier", ["acme/maps#1"], { HOME: home, PATH: `${bin}:${Bun.env.PATH}`, HEDGE_SETTINGS: "{}" });
+  const result = await runPackCommand("frontier", ["acme/maps#9"], { HOME: home, PATH: `${bin}:${Bun.env.PATH}`, HEDGE_SETTINGS: "{}" });
 
-  expect(result).toEqual({ stdout: "", stderr: "hedge: gh api failed: gh: Could not resolve to a Repository with the name 'acme/maps'.\n", code: 1 });
-  expect(await Bun.file(join(bin, "rest.log")).exists()).toBe(false);
+  expect(result).toEqual({ stdout: "", stderr: `${restNotice}hedge: No issue acme/maps#9\n`, code: 1 });
+});
+
+test("hedge frontier fails on a secondary rate limit or any other GraphQL error, and does not read over REST", async () => {
+  for (const error of ["You have exceeded a secondary rate limit. Please wait a few minutes before you try again.", "Could not resolve to a Repository with the name 'acme/maps'."]) {
+    const home = await temporaryHome();
+    const bin = await fakeGitHub(home, { ...mapFixture("acme/maps"), graphqlError: error });
+
+    const result = await runPackCommand("frontier", ["acme/maps#1"], { HOME: home, PATH: `${bin}:${Bun.env.PATH}`, HEDGE_SETTINGS: "{}" });
+
+    expect(result).toEqual({ stdout: "", stderr: `hedge: gh api failed: gh: ${error}\n`, code: 1 });
+    expect(await Bun.file(join(bin, "rest.log")).exists()).toBe(false);
+  }
 });

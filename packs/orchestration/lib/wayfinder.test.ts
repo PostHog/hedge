@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
-import { readdir, readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fakeGitHub, issueNode } from "./testing.ts";
 import { mapRef, proseLines } from "./wayfinder.ts";
 
 const usage = "Usage: hedge map";
@@ -49,4 +51,22 @@ test("the Orchestration pack hardcodes no repository, owner, or tracker", async 
   }));
   expect(files).toContain("lib/frontier.ts");
   expect(hits.flat()).toEqual([]);
+});
+
+test("reads that run at once and all meet the spent GraphQL rate limit print the REST notice once", async () => {
+  const home = await mkdtemp(join(tmpdir(), "hedge-wayfinder-"));
+  try {
+    const repository = "acme/maps";
+    const tickets = [2, 3, 4, 5].map((number) => issueNode(repository, number));
+    const bin = await fakeGitHub(home, { issues: [issueNode(repository, 1, { children: tickets })], graphqlError: "API rate limit already exceeded for user ID 1." });
+    const script = `import { fetchDiscussionFromGitHub } from ${JSON.stringify(join(import.meta.dir, "wayfinder.ts"))};
+await Promise.all([2, 3, 4, 5].map((number) => fetchDiscussionFromGitHub("acme", "maps", number)));`;
+    const child = Bun.spawn(["bun", "--eval", script], { env: { ...Bun.env, HOME: home, PATH: `${bin}:${Bun.env.PATH}` }, stdout: "pipe", stderr: "pipe" });
+    const [stderr, code] = await Promise.all([new Response(child.stderr).text(), child.exited]);
+
+    expect({ stderr, code }).toEqual({ stderr: "hedge: GitHub's GraphQL rate limit is spent, so this command reads issues over REST.\n", code: 0 });
+    expect((await readFile(join(bin, "calls.log"), "utf8")).split("\n").filter(Boolean)).toHaveLength(4);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
