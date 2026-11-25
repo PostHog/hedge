@@ -1,5 +1,5 @@
 import { closeSync, writeSync } from "node:fs";
-import { discoverTargetsSync, drainControlFd, enableChildSubreaper, killSession, ownTag, recordSparedProcess, redirectStdioOutputsToNull, removeSpareFile, setCloexec, shieldGroupSignals, spareEnvVar, spareFilePath, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { discoverTargetsSync, drainControlFd, enableChildSubreaper, encodeSpareLine, killSession, ownTag, readFdChunk, recordSparedProcess, redirectStdioOutputsToNull, removeSpareFile, setCloexec, shieldGroupSignals, spareEnvVar, spareFilePath, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
 type StartConfig = { argv: string[]; env?: Record<string, string>; envEntries?: Array<[string, string]>; spareTag?: string; spareHome?: string };
 
@@ -30,7 +30,7 @@ const exitDone = () => {
   process.exit(targetCode ?? 0);
 };
 
-const killAll = () => {
+const killAll = (removeOwnSpare = false) => {
   if (killing) return;
   killing = true;
   const finish = () => {
@@ -39,6 +39,7 @@ const killAll = () => {
         target.kill("SIGKILL");
       } catch {}
     }
+    if (removeOwnSpare && !inheritedSpare && sparePath) removeSpareFile(sparePath);
     process.exit(137);
   };
   const done = killSession(process.pid, "SIGKILL", runTag, undefined, sparePath);
@@ -79,12 +80,12 @@ const watchControl = (fd: number, initialBuf = "") => {
   readingControl = true;
   void (async () => {
     try {
-      const reader = Bun.file(fd).stream().getReader();
       const decoder = new TextDecoder();
+      const chunk = new Uint8Array(256);
       let buf = initialBuf;
       const handleLine = (line: string): boolean => {
         if (line === "kill") {
-          killAll();
+          killAll(false);
           return true;
         }
         if (line === "done") {
@@ -94,9 +95,9 @@ const watchControl = (fd: number, initialBuf = "") => {
         return false;
       };
       for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
+        const n = await readFdChunk(fd, chunk);
+        if (n <= 0) break;
+        buf += decoder.decode(chunk.subarray(0, n), { stream: true });
         for (let nl = buf.indexOf("\n"); nl !== -1; nl = buf.indexOf("\n")) {
           if (handleLine(buf.slice(0, nl).trim())) return;
           buf = buf.slice(nl + 1);
@@ -107,7 +108,7 @@ const watchControl = (fd: number, initialBuf = "") => {
     if (!killing) {
       if (confirmedDone) exitDone();
       if (lockCount > 0 && !targetReaped && !hasParentTag) process.exit(0);
-      killAll();
+      killAll(true);
     }
   })();
 };
@@ -179,7 +180,7 @@ if (!parsed || killing) {
     sparePath = spareFilePath(spareTag, typeof spareHome === "string" && spareHome ? spareHome : undefined);
     if (spareFd !== undefined) {
       try {
-        writeSync(spareFd, `${sparePath}\n`);
+        writeSync(spareFd, encodeSpareLine(sparePath));
       } catch {}
       closeQuiet(spareFd);
       spareFd = undefined;

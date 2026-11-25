@@ -1,5 +1,5 @@
 import { closeSync, writeSync } from "node:fs";
-import { discoverTargets, drainControlFd, killDeadSession, probeResultReported, removeSpareFile, signalTargets, waitForFdClosed } from "./probe-supervisor.ts";
+import { discoverTargets, drainControlFd, killDeadSession, parseSpareLine, probeResultReported, removeSpareFile, signalTargets, waitForFdClosed } from "./probe-supervisor.ts";
 
 export type WatchEntry = {
   pid: number;
@@ -62,7 +62,7 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
   const resolveSpare = (entry: WatchEntry): string | undefined => {
     if (!entry.spareFile && entry.spareFd !== undefined) {
       const drained = drainControlFd(entry.spareFd);
-      const path = drained.lines.find((line) => line.length > 0);
+      const path = drained.lines.map(parseSpareLine).find((p) => p !== undefined);
       if (path) {
         entry.spareFile = path;
         close(entry.spareFd);

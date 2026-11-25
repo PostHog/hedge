@@ -1,6 +1,6 @@
 import { closeSync, existsSync, readdirSync, writeSync } from "node:fs";
-import { rm } from "node:fs/promises";
-import { join } from "node:path";
+import { rm, rmdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { install, plan as planFiles } from "../files/install.ts";
 import { packName } from "../pack/manifest.ts";
 import { cannotTell, waitsForPerson } from "../pack/types.ts";
@@ -11,7 +11,7 @@ import { hublessReason, listedPack } from "./resolve.ts";
 import { wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
 import { withLegacyNames } from "../legacy.ts";
 import { bunScript } from "../runner/bun.ts";
-import { appendTag, createPipe, drainControlFd, graceMs, interruptGraceMs, killDeadSession, killDeadSessionSync, killSessionSync, probeResultReported, setCloexec, supervisorEnv, tagEnvVar, waitForFdClosed, watchdogEnv } from "./probe-supervisor.ts";
+import { appendTag, createPipe, drainControlFd, graceMs, interruptGraceMs, killDeadSession, killDeadSessionSync, killSessionSync, parseSpareLine, probeResultReported, setCloexec, supervisorEnv, tagEnvVar, waitForFdClosed, watchdogEnv } from "./probe-supervisor.ts";
 
 export type AdapterContext = { home: string; dryRun: boolean; adopt: string[]; adoptFrom?: string[] };
 export type AdapterResult = { actions: Action[]; findings: Finding[]; blocked?: boolean; failed?: boolean };
@@ -559,7 +559,7 @@ let interruptHandlersAttached = false;
 function resolveProbeSpare(probe: LiveProbe): string | undefined {
   if (!probe.spareFile && probe.spareFd !== undefined) {
     const drained = drainControlFd(probe.spareFd);
-    const path = drained.lines.find((line) => line.length > 0);
+    const path = drained.lines.map(parseSpareLine).find((p) => p !== undefined);
     if (path) {
       probe.spareFile = path;
       try {
@@ -578,7 +578,9 @@ function resolveProbeSpare(probe: LiveProbe): string | undefined {
 
 function removeSpareAsync(filePath: string | undefined): void {
   if (!filePath) return;
-  void rm(filePath, { force: true }).catch(() => {});
+  void rm(filePath, { force: true })
+    .catch(() => {})
+    .then(() => rmdir(dirname(filePath)).catch(() => {}));
 }
 
 function handOffWatchdog(probes: Iterable<LiveProbe>) {
@@ -667,7 +669,7 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
       for (const entry of batch) {
         let spare = entry.spareFile;
         if (!spare && entry.spareFd !== undefined) {
-          spare = drainControlFd(entry.spareFd).lines.find((line) => line.length > 0);
+          spare = drainControlFd(entry.spareFd).lines.map(parseSpareLine).find((p) => p !== undefined);
         }
         let stillAlive = false;
         try {

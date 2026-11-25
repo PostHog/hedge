@@ -1,5 +1,5 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
-import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, writeSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, read, readdirSync, readFileSync, readSync, rmdirSync, rmSync, statSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { bunScript } from "../runner/bun.ts";
@@ -11,6 +11,54 @@ export const graceMs = 150;
 export const interruptGraceMs = 300;
 export const tagEnvVar = "HEDGE_SUPERVISOR_TAG";
 export const spareEnvVar = "HEDGE_SUPERVISOR_SPARE";
+
+export function encodeSpareLine(filePath: string): string {
+  return `${JSON.stringify(filePath)}\n`;
+}
+
+export function parseSpareLine(line: string): string | undefined {
+  if (!line) return undefined;
+  try {
+    const parsed = JSON.parse(line) as unknown;
+    return typeof parsed === "string" && parsed.length > 0 ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function readFdChunk(fd: number, buf: Uint8Array): Promise<number> {
+  return new Promise((resolve) => {
+    read(fd, buf, 0, buf.byteLength, null, (error, bytesRead) => {
+      resolve(error ? 0 : bytesRead);
+    });
+  });
+}
+
+function canUseSpareDir(dir: string): boolean {
+  try {
+    const info = lstatSync(dir);
+    if (!info.isDirectory() || info.isSymbolicLink()) return false;
+    if (typeof process.getuid === "function" && info.uid !== process.getuid()) return false;
+    accessSync(dir, constants.W_OK | constants.X_OK);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") return false;
+  }
+  let current = dirname(dir);
+  for (;;) {
+    try {
+      const info = statSync(current);
+      if (!info.isDirectory()) return false;
+      accessSync(current, constants.W_OK | constants.X_OK);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") return false;
+    }
+    const parent = dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+}
 
 export function spareFilePath(tag: string, home?: string): string {
   const uid = typeof process.getuid === "function" ? String(process.getuid()) : "u";
@@ -29,24 +77,8 @@ export function spareFilePath(tag: string, home?: string): string {
   add(join("/tmp", dirName));
   add(join("/var/tmp", dirName));
   if (process.platform === "linux") add(join("/dev/shm", dirName));
-  const flags = constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
   for (const dir of candidates) {
-    try {
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      if (!isOwnedDirectory(dir)) continue;
-      const candidate = join(dir, `${tag}.spare`);
-      const fd = openSync(candidate, flags, 0o600);
-      try {
-        const stat = fstatSync(fd);
-        if (stat.isFile() && (typeof process.getuid !== "function" || stat.uid === process.getuid())) {
-          return candidate;
-        }
-      } finally {
-        try {
-          closeSync(fd);
-        } catch {}
-      }
-    } catch {}
+    if (canUseSpareDir(dir)) return join(dir, `${tag}.spare`);
   }
   return join(tmpdir(), dirName, `${tag}.spare`);
 }
@@ -122,6 +154,9 @@ export function removeSpareFile(filePath: string | undefined): void {
   if (!filePath) return;
   try {
     rmSync(filePath, { force: true });
+  } catch {}
+  try {
+    rmdirSync(dirname(filePath));
   } catch {}
 }
 
@@ -1293,7 +1328,7 @@ if (import.meta.main) {
     spareFile = spareFilePath(spareTag, spareHome);
     if (spareFd !== undefined) {
       try {
-        writeSync(spareFd, `${spareFile}\n`);
+        writeSync(spareFd, encodeSpareLine(spareFile));
       } catch {}
       try {
         closeSync(spareFd);
@@ -1440,13 +1475,11 @@ if (import.meta.main) {
     } catch {}
     const drainedHolder = drainControlFd(holderFd);
     if (drainedHolder.closed) onHolderDead();
+    const watchHolderFd = holderFd;
     void (async () => {
       try {
-        const reader = Bun.file(holderFd).stream().getReader();
-        for (;;) {
-          const { done } = await reader.read();
-          if (done) break;
-        }
+        const chunk = new Uint8Array(64);
+        while ((await readFdChunk(watchHolderFd, chunk)) > 0) {}
       } catch {}
       onHolderDead();
     })();
@@ -1468,15 +1501,16 @@ if (import.meta.main) {
     process.exit(128);
   }
   if (controlFd !== undefined) {
+    const watchControlFd = controlFd;
     void (async () => {
       try {
-        const reader = Bun.file(controlFd).stream().getReader();
         const decoder = new TextDecoder();
+        const chunk = new Uint8Array(256);
         let buf = controlInitialBuf;
         for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
+          const n = await readFdChunk(watchControlFd, chunk);
+          if (n <= 0) break;
+          buf += decoder.decode(chunk.subarray(0, n), { stream: true });
           for (let nl = buf.indexOf("\n"); nl !== -1; nl = buf.indexOf("\n")) {
             const line = buf.slice(0, nl).trim() as StopSignal;
             buf = buf.slice(nl + 1);

@@ -1250,15 +1250,17 @@ console.log(JSON.stringify(res.unchecked.map((s) => s.id)));`;
     const dir = temp.make("sup-post-deadline-exit-");
     const shBin = Bun.which("sh") ?? "/bin/sh";
     const { humanStepsLeft } = await import("./apply.ts");
-    const [okReady, okGate, failReady, failGate] = [
+    const [okReady, failReady, okExited, failExited] = [
       join(dir, "ok-ready"),
-      join(dir, "ok-gate"),
       join(dir, "fail-ready"),
-      join(dir, "fail-gate"),
+      join(dir, "ok-exited"),
+      join(dir, "fail-exited"),
     ];
-    mkfifo(okReady, okGate, failReady, failGate);
+    mkfifo(okReady, failReady, okExited, failExited);
     const okStarted = fifoRead(okReady);
     const failStarted = fifoRead(failReady);
+    const okDone = fifoRead(okExited);
+    const failDone = fifoRead(failExited);
     let fireDeadline!: () => void;
     const pending = humanStepsLeft(
       {
@@ -1272,8 +1274,8 @@ console.log(JSON.stringify(res.unchecked.map((s) => s.id)));`;
         owners: {},
         jobs: [],
         human: [
-          { id: "late-ok", pack: "team", say: "Late ok.", probe: [shBin, "-c", 'trap "exit 0" TERM; echo ready > "$1"; read -r _ < "$2"; exit 0', "ok", okReady, okGate] },
-          { id: "late-fail", pack: "team", say: "Late fail.", probe: [shBin, "-c", 'trap "exit 7" TERM; echo ready > "$1"; read -r _ < "$2"; exit 7', "fail", failReady, failGate] },
+          { id: "late-ok", pack: "team", say: "Late ok.", probe: [shBin, "-c", 'trap \'echo ok > "$2"; exit 0\' TERM; echo ready > "$1"; sleep 30 & wait', "ok", okReady, okExited] },
+          { id: "late-fail", pack: "team", say: "Late fail.", probe: [shBin, "-c", 'trap \'echo fail > "$2"; exit 7\' TERM; echo ready > "$1"; sleep 30 & wait', "fail", failReady, failExited] },
         ],
         steps: [],
         checks: [],
@@ -1289,11 +1291,11 @@ console.log(JSON.stringify(res.unchecked.map((s) => s.id)));`;
     );
     await Promise.all([okStarted, failStarted]);
     fireDeadline();
-    void fifoWrite(okGate, "go\n");
-    void fifoWrite(failGate, "go\n");
     const res = await pending;
     expect(res.failing).toEqual([]);
     expect(res.unchecked.map((step) => step.id)).toEqual(["late-ok", "late-fail"]);
+    expect((await okDone).trim()).toBe("ok");
+    expect((await failDone).trim()).toBe("fail");
   });
 
   test("forwards a __proto__ environment variable to supervised probes", async () => {
@@ -1669,6 +1671,71 @@ await hold.exited;`;
       expect(await outerClosed).toBe("");
       expect(() => process.kill(daemonPid, 0)).not.toThrow();
     } finally {
+      if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
+      if (outerPid > 0) try { process.kill(outerPid, "SIGKILL"); } catch {}
+      await daemonClosed.catch(() => {});
+    }
+  });
+
+  test("preserves spare-file paths containing newlines without truncating or deleting unrelated files", async () => {
+    const base = temp.make("sup-newline-tmp-");
+    const decoy = join(base, "decoy");
+    const nlTmp = join(base, "decoy\nsub");
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(nlTmp, { recursive: true });
+    writeFileSync(decoy, "keep-me\n");
+    const envBin = Bun.which("env") ?? "/usr/bin/env";
+    const shBin = Bun.which("sh") ?? "/bin/sh";
+    const [daemonReady, daemonGone, outerReady, outerGone] = [
+      join(base, "daemon-ready"),
+      join(base, "daemon-gone"),
+      join(base, "outer-ready"),
+      join(base, "outer-gone"),
+    ];
+    mkfifo(daemonReady, daemonGone, outerReady, outerGone);
+    const daemonStarted = fifoRead(daemonReady);
+    const daemonClosed = fifoRead(daemonGone);
+    const outerStarted = fifoRead(outerReady);
+    const outerClosed = fifoRead(outerGone);
+    const { captureWith, timedOut } = await import("../../packs/hub/lib/coder.ts");
+    const { spareEnvVar } = await import("./probe-supervisor.ts");
+    const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
+    const daemonScript = `const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+d.unref();
+process.exit(0);`;
+    const outerScript = `import { capture } from ${JSON.stringify(coderPath)};
+const res = await capture([process.execPath, "-e", ${JSON.stringify(daemonScript)}], { timeoutMs: 5_000 });
+if (res.code !== 0) process.exit(2);
+const hold = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "outer", ${JSON.stringify(outerGone)}, ${JSON.stringify(outerReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await hold.exited;`;
+    const prevTmp = process.env.TMPDIR;
+    process.env.TMPDIR = nlTmp;
+    let fireTimeout!: () => void;
+    let daemonPid = 0;
+    let outerPid = 0;
+    try {
+      const cleanEnv: Record<string, string | undefined> = { ...process.env, TMPDIR: nlTmp };
+      delete cleanEnv[spareEnvVar];
+      const capture = captureWith((_ms, fire) => {
+        fireTimeout = fire;
+        return () => {};
+      }, 0);
+      const running = capture([process.execPath, "-e", outerScript], {
+        env: cleanEnv,
+        timeoutMs: 30_000,
+      });
+      [daemonPid, outerPid] = (await Promise.all([daemonStarted, outerStarted])).map((s) => Number(s.trim())) as [number, number];
+      expect(daemonPid).toBeGreaterThan(0);
+      expect(outerPid).toBeGreaterThan(0);
+      fireTimeout();
+      const result = await running;
+      expect(result.code).toBe(timedOut);
+      expect(await outerClosed).toBe("");
+      expect(() => process.kill(daemonPid, 0)).not.toThrow();
+      expect(existsSync(decoy)).toBe(true);
+    } finally {
+      if (prevTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = prevTmp;
       if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
       if (outerPid > 0) try { process.kill(outerPid, "SIGKILL"); } catch {}
       await daemonClosed.catch(() => {});

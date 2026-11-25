@@ -1,9 +1,9 @@
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, write, writeSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { rm, rmdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { boxPrefix } from "../../../src/hub/names.ts";
-import { appendTag, createPipe, drainControlFd, killDeadSession, killDeadSessionSync, killSession, killSessionSync, setCloexec, spareEnvVar, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
+import { appendTag, createPipe, drainControlFd, killDeadSession, killDeadSessionSync, killSession, killSessionSync, parseSpareLine, readFdChunk, setCloexec, spareEnvVar, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
 import { bunScript } from "../../../src/runner/bun.ts";
 import { heldLocks } from "./box-lock.ts";
 
@@ -102,6 +102,43 @@ const writeFd = (fd: number, data: Uint8Array, offset: number): Promise<number> 
     });
   });
 
+function removeSpareAsync(filePath: string | undefined): void {
+  if (!filePath) return;
+  void rm(filePath, { force: true })
+    .catch(() => {})
+    .then(() => rmdir(dirname(filePath)).catch(() => {}));
+}
+
+function readResultLine(fd: number, stop: AbortSignal): { result: Promise<string>; done: Promise<void> } {
+  const readLoop = (async () => {
+    const decoder = new TextDecoder("utf-8");
+    const chunk = new Uint8Array(1024);
+    let out = "";
+    for (;;) {
+      const n = await readFdChunk(fd, chunk);
+      if (n <= 0) break;
+      out += decoder.decode(chunk.subarray(0, n), { stream: true });
+      if (out.includes("\n")) break;
+    }
+    out += decoder.decode();
+    return out;
+  })();
+  const aborted = new Promise<string>((resolve) => {
+    if (stop.aborted) {
+      resolve("");
+      return;
+    }
+    stop.addEventListener("abort", () => resolve(""), { once: true });
+  });
+  return {
+    result: Promise.race([readLoop, aborted]),
+    done: readLoop.then(
+      () => {},
+      () => {},
+    ),
+  };
+}
+
 async function waitUpTo(promise: Promise<unknown>, ms: number): Promise<void> {
   let handle: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<void>((resolve) => {
@@ -181,7 +218,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     const resolveSpareFile = (): string | undefined => {
       if (!spareFile && sparePipe && !spareReadClosed) {
         const drained = drainControlFd(sparePipe.readFd);
-        const path = drained.lines.find((line) => line.length > 0);
+        const path = drained.lines.map(parseSpareLine).find((p) => p !== undefined);
         if (path) {
           spareFile = path;
           closeSpareRead();
@@ -198,6 +235,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     let tagSweep: Promise<void> | undefined;
     let configWrite: Promise<void> | undefined;
     let resultRead: Promise<{ code?: number; error?: string; errCode?: string } | undefined> | undefined;
+    let resultFdDone: Promise<void> | undefined;
     const stopStream = new AbortController();
     const closeControl = () => {
       if (controlFd === undefined) return;
@@ -283,13 +321,13 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
             const fallbackSpare =
               spare ??
               (watchdogSpareFd !== undefined && sparePipe
-                ? drainControlFd(sparePipe.readFd).lines.find((line) => line.length > 0)
+                ? drainControlFd(sparePipe.readFd).lines.map(parseSpareLine).find((p) => p !== undefined)
                 : undefined);
             killSessionSync(child.pid, "SIGKILL", tag, fallbackSpare);
             try {
               child.kill("SIGKILL");
             } catch {}
-            if (!inheritedSpare && fallbackSpare) void rm(fallbackSpare, { force: true }).catch(() => {});
+            if (!inheritedSpare) removeSpareAsync(fallbackSpare);
           }
           for (const extra of extraFds) {
             try {
@@ -306,7 +344,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
             child.kill("SIGKILL");
           } catch {}
         }
-        if (!inheritedSpare && spare) void rm(spare, { force: true }).catch(() => {});
+        if (!inheritedSpare) removeSpareAsync(spare);
       }
       release();
       if (!process.listenerCount(name)) {
@@ -364,7 +402,9 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         setCloexec(fd, true);
         controlFd = fd;
       }
-      resultRead = readText(Bun.file(resultPipe.readFd).stream(), stopStream.signal).then(
+      const reader = readResultLine(resultPipe.readFd, stopStream.signal);
+      resultFdDone = reader.done;
+      resultRead = reader.result.then(
         (raw) => {
           const line = raw.trim();
           if (!line) return undefined;
@@ -490,11 +530,14 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       else closeConfigWrite();
       stopStream.abort();
       if (resultRead) await resultRead.catch(() => {});
-      closeResultRead();
+      if (resultFdDone) {
+        void resultFdDone.finally(() => closeResultRead());
+      } else {
+        closeResultRead();
+      }
       closeControl();
       if (!spareHandedOff && (expired || !confirmedDone)) {
-        const spare = resolveSpareFile();
-        if (spare) void rm(spare, { force: true }).catch(() => {});
+        removeSpareAsync(resolveSpareFile());
       }
       closeSpareRead();
       release();
