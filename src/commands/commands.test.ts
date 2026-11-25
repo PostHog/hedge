@@ -246,12 +246,15 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
 
   test("says a human step that does not answer in time is not checked, even when it exits well once asked to stop, and stops every process it started", async () => {
     const { home } = await machineWithProfile();
-    const { holderGone, started } = await withBlockedProbe(home, '"echo trapped > \"$HOME/trapped\"; exit 0"');
+    const trapped = join(home, "trapped");
+    expect(Bun.spawnSync(["mkfifo", trapped]).exitCode).toBe(0);
+    const { holderGone, started } = await withBlockedProbe(home, '"echo trapped > \\"$HOME/trapped\\"; exit 0"');
+    const sawTrap = readFile(trapped, "utf8");
     const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await started) };
     try {
       expect((await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output).toContain(notChecked);
       expect(await holderGone).toBe("");
-      expect((await readFile(join(home, "trapped"), "utf8")).trim()).toBe("trapped");
+      expect((await sawTrap).trim()).toBe("trapped");
     } finally {
       await endHolder(started);
     }

@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tempDirs } from "../../../src/testing/git.ts";
 import { caddyfile, hubHttps, type HttpsHub } from "./https.ts";
@@ -170,18 +171,21 @@ test("trusted passes at once without an HTTPS host, and runs nothing", async () 
   expect(off.calls).toEqual([]);
 });
 
-function trustSandbox(fields: { trusted: boolean; answer?: string; sshCode?: number }) {
+function trustSandbox(fields: { trusted: boolean; answer?: string; sshCode?: number; securityBody?: string }) {
   const home = roleHome(temp.make("hedge-https-"), "mac");
   const bin = temp.make("hedge-bin-");
+  const tmp = temp.make("hedge-tmp-");
   const log = join(bin, "calls.log");
   writeFileSync(join(bin, "answer"), fields.answer ?? `Hub HTTPS root certificate: /home/me/.local/share/hedge-hub-https/caddy/pki/authorities/local/root.crt\n${certificate}`);
   writeFileSync(join(bin, "ssh"), `#!/bin/sh\necho "ssh $*" >> "${log}"\n/bin/cat "${join(bin, "answer")}"\nexit ${fields.sshCode ?? 0}\n`);
-  writeFileSync(join(bin, "security"), `#!/bin/sh\necho "security $*" >> "${log}"\nwhile [ $# -gt 0 ]; do [ "$1" = -c ] && /bin/cat "$2" > "${join(bin, "checked.crt")}"; shift; done\n${fields.trusted ? "exit 0" : "echo 'Cert Verify Result: CSSMERR_TP_NOT_TRUSTED' >&2; exit 1"}\n`);
+  writeFileSync(join(bin, "security"), fields.securityBody ?? `#!/bin/sh\necho "security $*" >> "${log}"\nwhile [ $# -gt 0 ]; do [ "$1" = -c ] && /bin/cat "$2" > "${join(bin, "checked.crt")}"; shift; done\n${fields.trusted ? "exit 0" : "echo 'Cert Verify Result: CSSMERR_TP_NOT_TRUSTED' >&2; exit 1"}\n`);
   for (const name of ["ssh", "security"]) chmodSync(join(bin, name), 0o755);
   const settings = { "hub.alias": "my-hub", "hub.httpsHost": host, "hub.relayPort": 60002 };
-  const probe = () => Bun.spawnSync([process.execPath, join(import.meta.dir, "../commands/hub-https.ts"), "trusted"], { env: { HOME: home, PATH: bin, TMPDIR: temp.make("hedge-tmp-"), HEDGE_SETTINGS: JSON.stringify(settings) } });
+  const env = { HOME: home, PATH: bin, TMPDIR: tmp, HEDGE_SETTINGS: JSON.stringify(settings) };
+  const probe = () => Bun.spawnSync([process.execPath, join(import.meta.dir, "../commands/hub-https.ts"), "trusted"], { env });
+  const spawn = () => Bun.spawn([process.execPath, join(import.meta.dir, "../commands/hub-https.ts"), "trusted"], { env, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
   const calls = () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : []);
-  return { bin, probe, calls };
+  return { bin, tmp, probe, spawn, calls };
 }
 
 test("trusted fetches the hub's root certificate over SSH and passes only when this Mac's keychain trust settings accept it", () => {
@@ -196,6 +200,28 @@ test("trusted fetches the hub's root certificate over SSH and passes only when t
   const present = trustSandbox({ trusted: false });
   expect(present.probe().exitCode).toBe(1);
   expect(present.calls()[1]).toStartWith("security verify-cert ");
+});
+
+test("trusted removes its temporary certificate directory and stops security when terminated mid-check", async () => {
+  const dir = temp.make("hedge-sig-");
+  const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+  expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+  const sandbox = trustSandbox({ trusted: true, securityBody: `#!/bin/sh\n{ /bin/sleep 30 & } 3>"${gone}"\necho $! > "${ready}"\nwait\n` });
+  const started = readFile(ready, "utf8");
+  const holderGone = readFile(gone, "utf8");
+  const child = sandbox.spawn();
+  try {
+    const pid = Number((await started).trim());
+    expect(readdirSync(sandbox.tmp).some((name) => name.startsWith("hedge-hub-ca-"))).toBe(true);
+    child.kill("SIGTERM");
+    expect(await child.exited).not.toBe(0);
+    expect(await holderGone).toBe("");
+    expect(readdirSync(sandbox.tmp)).toEqual([]);
+    try { process.kill(pid, 0); throw new Error("security child stayed alive"); } catch (error) { expect((error as NodeJS.ErrnoException).code).toBe("ESRCH"); }
+  } finally {
+    child.kill("SIGKILL");
+    try { process.kill(Number((await started).trim()), "SIGKILL"); } catch {}
+  }
 });
 
 test("trusted gives the SSH call and the keychain check a time limit", async () => {

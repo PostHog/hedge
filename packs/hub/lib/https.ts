@@ -1,3 +1,4 @@
+import { rmSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -155,11 +156,22 @@ async function trusted(hub: HttpsHub): Promise<number> {
   const certificate = answer.code === 0 ? answer.stdout.split("\n").filter((line) => !line.startsWith(caHeading)).join("\n").trim() + "\n" : "";
   if (!certificatePattern.test(certificate)) return hub.print(`${hub.alias} gave no public root certificate: ${(answer.stderr || answer.stdout).trim()}`), 1;
   const folder = await mkdtemp(join(tmpdir(), "hedge-hub-ca-"));
+  const remove = () => rmSync(folder, { recursive: true, force: true });
+  const release = () => {
+    process.off("SIGINT", interrupted).off("SIGTERM", interrupted);
+  };
+  const interrupted = (signal: NodeJS.Signals) => {
+    remove();
+    release();
+    if (!process.listenerCount(signal)) process.kill(process.pid, signal);
+  };
+  process.on("SIGINT", interrupted).on("SIGTERM", interrupted);
   try {
     const path = join(folder, "hub-ca.crt");
     await writePrivateFile(path, certificate);
     return (await hub.run(["security", "verify-cert", "-l", "-L", "-p", "ssl", "-c", path], { timeoutMs: trustProbeLimitMs })).code === 0 ? 0 : 1;
   } finally {
-    await rm(folder, { recursive: true, force: true });
+    release();
+    remove();
   }
 }
