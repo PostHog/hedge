@@ -365,6 +365,7 @@ if (import.meta.main) {
           }
         }
       } catch {}
+      dispatchStop("SIGTERM");
     })();
   }
   await supervise(command, {

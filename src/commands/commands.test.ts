@@ -240,7 +240,7 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     expect((await hedge(home, ["packs"])).output).toContain(`  ~ team  Team rules.\n      Workflows: allowlist on\n${needsSetup}`);
   });
 
-  const blockedProbe = (trap: string) => `trap ${trap} TERM; { sleep 30 & } 3>"$HOME/gone"; echo $! > "$HOME/ready"; wait`;
+  const blockedProbe = (trap: string) => `exec 3>"$HOME/gone"; trap ${trap} TERM; sleep 30 & echo $! > "$HOME/ready"; wait`;
 
   async function withBlockedProbe(home: string, trap = "-") {
     const [ready, gone] = [join(home, "ready"), join(home, "gone")];

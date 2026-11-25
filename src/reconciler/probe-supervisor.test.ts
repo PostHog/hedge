@@ -419,4 +419,22 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
       sup.cleanup();
     }
   });
+
+  test("wakes and escalates a probe that suspends itself with SIGSTOP and ignores SIGTERM", async () => {
+    const dir = temp.make("sup-sigstop-");
+    const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+    mkfifo(ready, gone);
+    const started = fifoRead(ready);
+    const closed = fifoRead(gone);
+    const sup = spawnControlledSupervisor(["sh", "-c", 'trap "" TERM; exec 3>"$1"; echo $$ > "$2"; kill -STOP $$', "probe", gone, ready]);
+    try {
+      expect(Number((await started).trim())).toBeGreaterThan(0);
+      sup.proc.kill("SIGTERM");
+      await sup.advance();
+      expect(await closed).toBe("");
+      expect(await sup.drain()).not.toBe(0);
+    } finally {
+      sup.cleanup();
+    }
+  });
 });
