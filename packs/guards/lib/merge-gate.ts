@@ -247,8 +247,16 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   return elsewhere(sent, raw);
 }
 
-const strings = (value: unknown): string[] =>
-  typeof value === "string" ? [value] : Array.isArray(value) ? value.flatMap(strings) : value && typeof value === "object" ? Object.values(value).flatMap(strings) : [];
+function strings(value: unknown): string[] {
+  const found: string[] = [];
+  const pending = [value];
+  while (pending.length) {
+    const next = pending.pop();
+    if (typeof next === "string") found.push(next);
+    else if (next && typeof next === "object") for (const inner of Object.values(next)) pending.push(inner);
+  }
+  return found;
+}
 
 const reads = /(?:^|_|__)(?:get|list|search|read|fetch)(?:_|$)/i;
 const repositoryKeys = ["repository_full_name", "repo_full_name", "full_name", "repository", "nameWithOwner"];
@@ -261,15 +269,33 @@ function mcpPr(input: Record<string, unknown>): { repository: string; pr: number
   return repository && repoSlug.test(repository) && number !== undefined ? { repository, pr: Number(number) } : undefined;
 }
 
+const t3Tool = /^mcp__t3[-_]code__/;
+
+function t3Pr(input: Record<string, unknown>): { repository: string; pr: number } | undefined {
+  const { repository, number } = input;
+  return typeof repository === "string" && repoSlug.test(repository) && Number.isSafeInteger(number) && Number(number) > 0 ? { repository, pr: Number(number) } : undefined;
+}
+
+const trimmed = (value: unknown) => typeof value === "string" ? [value.trim()] : [];
+
+function t3Posts(name: string, input: Record<string, unknown>): string[] {
+  if (name === "pull_request_respond") return trimmed(input.body);
+  if (name !== "pull_request_review") return [];
+  const comments = Array.isArray(input.comments) ? input.comments as unknown[] : [];
+  return [...typeof input.body === "string" ? [input.body] : [], ...comments.flatMap((comment) => trimmed((comment as { body?: unknown } | null)?.body))];
+}
+
 function mcpIntent(tool: string, input: Record<string, unknown>): MergeIntent {
   const name = tool.replace(/^mcp__.*?__/, "");
   if (reads.test(name)) return { targets: [] };
   const merges = /merge/i.test(name) && !/disable|update_pull_request_branch/i.test(name);
-  const writesComment = /comment|review/i.test(name);
-  if (!merges && !(writesComment && strings(input).some((text) => enqueueLine.test(text)))) return { targets: [] };
-  if (!merges && /review/i.test(name)) return { targets: [], refusal: otherEndpointReason };
-  const named = mcpPr(input);
-  return named ? { targets: [{ ...named, via: tool }] } : { targets: [], refusal: unnamedReason(merges ? "merges a PR" : "posts `/trunk merge`") };
+  const t3 = t3Tool.test(tool);
+  const writesComment = t3 || /comment|review/i.test(name);
+  const sent = () => t3 ? t3Posts(name, input) : strings(input);
+  if (!merges && !(writesComment && sent().some((text) => enqueueLine.test(text)))) return { targets: [] };
+  if (!merges && (/review/i.test(name) || input.reviewThreadId != null)) return { targets: [], refusal: otherEndpointReason };
+  const named = t3 ? t3Pr(input) : mcpPr(input);
+  return named ? { targets: [{ ...named, via: merges ? tool : `${tool} comment` }] } : { targets: [], refusal: unnamedReason(merges ? "merges a PR" : "posts `/trunk merge`") };
 }
 
 export type ToolCall = { tool_name?: string; tool_input?: Record<string, unknown>; cwd?: string };
@@ -300,7 +326,7 @@ export function mergeIntent(call: ToolCall, command: string, exempt: string[], i
       const one = commandIntent(found, command, cwdIn(found.scope), io);
       intent = { targets: [...intent.targets, ...one.targets], refusal: intent.refusal ?? one.refusal };
     }
-  } else if (/github/i.test(tool)) intent = mcpIntent(tool, call.tool_input ?? {});
+  } else if (/github/i.test(tool) || t3Tool.test(tool)) intent = mcpIntent(tool, call.tool_input ?? {});
   const skipping = intent.targets.filter((target) => isExempt(target.repository, exempt));
   return { ...intent, targets: intent.targets.filter((target) => !skipping.includes(target)), ...skipping.length ? { exempt: skipping } : {} };
 }
