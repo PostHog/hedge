@@ -278,7 +278,7 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
     await withTeamPack(home, {
       workflows: [flow("allowlist")],
-      human: [humanStep("allowlist", '(trap "" TERM; exec sleep 30) 3>"$HOME/gone" & echo $! > "$HOME/ready"; wait', "allowlist")],
+      human: [humanStep("allowlist", 'sh -c \'trap "" TERM; exec 3>"$HOME/gone"; echo $$ > "$HOME/ready"; exec sleep 30\' & wait', "allowlist")],
     });
     const [holderGone, started] = [readFile(gone, "utf8"), readFile(ready, "utf8")];
     const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await started) };

@@ -17,8 +17,9 @@ const realTimer: Timer = (ms, fire) => {
   return () => clearTimeout(handle);
 };
 
-export async function supervise(command: string[], host: SupervisorHost): Promise<void> {
-  if (!command.length) return host.exit(127);
+export async function supervise(command: string[], host: SupervisorHost): Promise<number> {
+  let resolveDone!: (code: number) => void;
+  const settled = new Promise<number>((resolve) => (resolveDone = resolve));
 
   let stop: StopSignal | undefined;
   let target: { exited: Promise<number> } | undefined;
@@ -26,16 +27,34 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
   let finished = false;
   let cancelInterrupt: (() => void) | undefined;
   let cancelHard: (() => void) | undefined;
+  const forwarded = new Set<StopSignal>();
 
-  const finishGroup = () => {
+  const exit = (code: number) => {
     if (finished) return;
     finished = true;
     cancelInterrupt?.();
     cancelInterrupt = undefined;
     cancelHard?.();
     cancelHard = undefined;
+    host.exit(code);
+    resolveDone(code);
+  };
+
+  if (!command.length) {
+    exit(127);
+    return settled;
+  }
+
+  const finishGroup = () => {
+    if (finished) return;
     host.killGroup("SIGKILL");
-    host.exit(143);
+    exit(143);
+  };
+
+  const forwardGroup = (name: StopSignal) => {
+    if (forwarded.has(name)) return;
+    forwarded.add(name);
+    host.killGroup(name);
   };
 
   const armHard = () => {
@@ -55,42 +74,48 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
       cancelInterrupt = host.timer(interruptGraceMs, () => {
         cancelInterrupt = undefined;
         armHard();
-        host.killGroup("SIGTERM");
+        forwardGroup("SIGTERM");
       });
     }
   };
 
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
     host.onSignal(sig, () => {
+      if (forwarded.has(sig)) return;
       if (!stop) stop = sig;
-      if (!target) return host.exit(128);
+      if (!target) return exit(128);
       if (leaderDone) return;
       arm(sig);
+      forwardGroup(sig);
     });
   }
 
   try {
     target = host.spawn(command);
   } catch {
-    return host.exit(127);
+    exit(127);
+    return settled;
   }
 
-  if (stop) arm(stop);
+  if (stop) {
+    arm(stop);
+    forwardGroup(stop);
+  }
 
   const code = await target.exited;
   leaderDone = true;
-  if (finished) return;
+  if (finished) return settled;
   if (!stop) {
-    cancelInterrupt?.();
-    cancelHard?.();
-    return host.exit(code);
+    exit(code);
+    return settled;
   }
   if (!cancelHard) {
     cancelInterrupt?.();
     cancelInterrupt = undefined;
     armHard();
-    host.killGroup("SIGTERM");
+    forwardGroup("SIGTERM");
   }
+  return settled;
 }
 
 if (import.meta.main) {
