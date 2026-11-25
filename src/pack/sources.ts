@@ -183,13 +183,16 @@ async function readPins(dir: string): Promise<Map<string, string[]> | undefined>
 async function saveGood(dir: string, good: Good) {
   const before = await lastGood(dir);
   const pins = (await readPins(dir)) ?? new Map<string, string[]>();
-  const digest = repoDigest(good.repo);
-  const known = new Set(pins.get(digest) ?? []);
-  if (before?.repo === good.repo && typeof before.ref === "string" && commitSha.test(before.ref) && typeof before.commit === "string" && commitSha.test(before.commit)) {
-    known.add(before.commit.toLowerCase());
+  const recordPin = async (repo: string, commit: string) => {
+    const hash = repoDigest(repo);
+    const sha = commit.toLowerCase();
+    pins.set(hash, [...new Set([...(pins.get(hash) ?? []), sha])]);
+    await git(dir, "update-ref", `refs/hedge/pins/${hash}/${sha}`, sha);
+  };
+  if (before && typeof before.repo === "string" && typeof before.ref === "string" && commitSha.test(before.ref) && typeof before.commit === "string" && commitSha.test(before.commit)) {
+    await recordPin(before.repo, before.commit);
   }
-  if (commitSha.test(good.ref) && commitSha.test(good.commit)) known.add(good.commit.toLowerCase());
-  if (known.size) pins.set(digest, [...known]);
+  if (commitSha.test(good.ref) && commitSha.test(good.commit)) await recordPin(good.repo, good.commit);
   try {
     if (pins.size) await writeAtomic(pinsPath(dir), JSON.stringify({ repos: [...pins].map(([repoHash, commits]) => ({ repoHash, commits })) }) + "\n");
     else await rm(pinsPath(dir), { force: true });
@@ -221,9 +224,11 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string): Pr
 
 async function checkedOutFromCache(dir: string, repo: string, ref: SourceRef, good: Good | undefined) {
   const commit = ref.ref.toLowerCase();
-  if (!commitSha.test(commit) || good?.repo !== repo) return false;
+  if (!commitSha.test(commit)) return false;
   const pins = await readPins(dir);
-  const fetchedHere = (typeof good.commit === "string" && good.commit.toLowerCase() === commit) || Boolean(pins?.get(repoDigest(repo))?.includes(commit));
+  const fetchedHere =
+    (good?.repo === repo && typeof good.commit === "string" && good.commit.toLowerCase() === commit) ||
+    Boolean(pins?.get(repoDigest(repo))?.includes(commit));
   if (!fetchedHere) return false;
   return (await git(dir, "checkout", "-q", "--detach", commit)).ok;
 }

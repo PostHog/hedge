@@ -98,20 +98,22 @@ function encodeUri(text: string) {
 function replaceKnown(text: string, entries: KnownName[], transform?: (value: string) => string, exempt?: Set<string>) {
   let result = text;
   const spellings = entries
-    .filter((entry) => entry.text.length >= 2)
+    .filter((entry) => entry.text.length >= (entry.after ? 1 : 2))
     .flatMap((entry) => {
+      const minLength = entry.after ? 1 : 2;
       const safeAs = applyRules(entry.as, secretRules);
       const variants = [entry.text, applyRules(entry.text, secretRules), encodeUri(entry.text), entry.text.replace(/ /g, "+")];
       if (transform) variants.push(transform(entry.text));
-      return [...new Set(variants.filter((variant) => variant.length >= 2))].map((variant) => ({ text: variant, as: safeAs }));
+      return [...new Set(variants.filter((variant) => variant.length >= minLength && !exempt?.has(variant)))].map((variant) => ({ text: variant, as: safeAs }));
     });
-  const labels = exempt?.size ? `${[...exempt].sort((a, b) => b.length - a.length).map(escape).join("|")}|` : "";
+  const exemptAlt = exempt?.size ? [...exempt].sort((a, b) => b.length - a.length).map(escape).join("|") : "";
   for (const name of spellings.sort((a, b) => b.text.length - a.text.length)) {
     const flags = name.text.length < 4 ? "g" : "gi";
-    if (labels) {
-      result = result.replace(new RegExp(`${labels}(?<![\\w-])${escape(name.text)}(?![\\w-])`, flags), (match) => (exempt!.has(match) ? match : name.as));
+    const pattern = `(?<![\\w-])${escape(name.text)}(?![\\w-])`;
+    if (exemptAlt) {
+      result = result.replace(new RegExp(`${pattern}|${exemptAlt}`, flags), (match) => (exempt!.has(match) ? match : name.as));
     } else {
-      result = result.replace(new RegExp(`(?<![\\w-])${escape(name.text)}(?![\\w-])`, flags), name.as);
+      result = result.replace(new RegExp(pattern, flags), name.as);
     }
   }
   return result;
@@ -119,12 +121,11 @@ function replaceKnown(text: string, entries: KnownName[], transform?: (value: st
 
 export function redact(text: string, home: string, known: KnownName[] = []): string {
   const stripHome = (value: string) => (home.length > 1 ? value.split(home.replace(/\/$/, "")).join("~") : value);
-  let result = applyRules(text, secretRules);
-  result = replaceKnown(result, known.filter((entry) => !entry.after));
-  result = stripHome(result);
-  result = applyRules(result, rules);
+  const primary = known.filter((entry) => !entry.after);
+  const passOne = (value: string) => applyRules(stripHome(replaceKnown(applyRules(value, secretRules), primary)), rules);
+  const result = passOne(text);
   const exempt = new Set([...redactorLabels, ...known.map((entry) => applyRules(entry.as, secretRules))]);
-  return replaceKnown(result, known.filter((entry) => entry.after), (value) => applyRules(stripHome(applyRules(value, secretRules)), rules), exempt);
+  return replaceKnown(result, known.filter((entry) => entry.after), passOne, exempt);
 }
 
 function escape(text: string) {

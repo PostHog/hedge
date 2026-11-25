@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
@@ -307,17 +308,21 @@ describe("fetchSource", () => {
     await fetchSource({ name: "team", repo, ref: commit2 }, cache);
 
     const pinsFile = join(cache, "team", ".git", "hedge-pins.json");
-    const validPins = JSON.parse(readFileSync(pinsFile, "utf8")) as { repos: Array<{ repoHash: string; commits: string[] }> };
-    writeFileSync(pinsFile, JSON.stringify({ repoHash: validPins.repos[0]!.repoHash, commits: "not-an-array" }));
-    const fetchedInvalidShape = await fetchSource({ name: "team", repo, ref: commit1 }, cache);
-    if ("error" in fetchedInvalidShape) throw new Error(fetchedInvalidShape.error);
-    expect([fetchedInvalidShape.packs[0]?.manifest.summary, fetchedInvalidShape.stale]).toEqual(["Team rules v1.", undefined]);
+    const repoHash = createHash("sha256").update(repo).digest("hex");
+    writeFileSync(pinsFile, JSON.stringify({ repoHash, commits: commit1 }));
+    rmSync(repo, { recursive: true, force: true });
+    const offlineInvalidShape = await fetchSource({ name: "team", repo, ref: commit1 }, cache);
+    if ("error" in offlineInvalidShape) throw new Error(offlineInvalidShape.error);
+    expect(offlineInvalidShape.packs[0]?.manifest.summary).toBe("Team rules v2.");
+    expect(offlineInvalidShape.stale).toContain(`could not fetch ${commit1}`);
 
+    const freshRepo = await packRepo("Fresh rules.");
+    const freshCommit = await spawnGit(freshRepo, "rev-parse", "HEAD");
     writeFileSync(join(cache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo: 42 }));
     writeFileSync(pinsFile, "{not valid json");
-    const fetchedCorrupt = await fetchSource({ name: "team", repo, ref: commit2 }, cache);
+    const fetchedCorrupt = await fetchSource({ name: "team", repo: freshRepo, ref: freshCommit }, cache);
     if ("error" in fetchedCorrupt) throw new Error(fetchedCorrupt.error);
-    expect([fetchedCorrupt.packs[0]?.manifest.summary, fetchedCorrupt.stale]).toEqual(["Team rules v2.", undefined]);
+    expect([fetchedCorrupt.packs[0]?.manifest.summary, fetchedCorrupt.stale]).toEqual(["Fresh rules.", undefined]);
   });
 
   test("keeps hedge-source.json and hedge-pins.json private (0600) across atomic updates", async () => {
@@ -331,19 +336,20 @@ describe("fetchSource", () => {
     expect(statSync(pinsFile).mode & 0o777).toBe(0o600);
   });
 
-  test("preserves verified pin history for a repository when switching away to another repository and back", async () => {
+  test("preserves verified pin history across repository switches, pre-upgrade caches, and git gc", async () => {
     const repoA = await packRepo("Repo A v1.");
     const commitA1 = await spawnGit(repoA, "rev-parse", "HEAD");
-    writePack(repoA, "Repo A v2.");
-    await spawnGit(repoA, "commit", "-q", "-am", "v2");
-    const commitA2 = await spawnGit(repoA, "rev-parse", "HEAD");
     const repoB = await packRepo("Repo B v1.");
     const commitB1 = await spawnGit(repoB, "rev-parse", "HEAD");
     const cache = temp.make("cache-");
 
     await fetchSource({ name: "team", repo: repoA, ref: commitA1 }, cache);
+    rmSync(join(cache, "team", ".git", "hedge-pins.json"), { force: true });
     await fetchSource({ name: "team", repo: repoB, ref: commitB1 }, cache);
-    await fetchSource({ name: "team", repo: repoA, ref: commitA2 }, cache);
+
+    const cacheRepo = join(cache, "team");
+    await spawnGit(cacheRepo, "reflog", "expire", "--expire=now", "--all");
+    await spawnGit(cacheRepo, "gc", "--prune=now", "-q");
 
     rmSync(repoA, { recursive: true, force: true });
     const offlineA1 = await fetchSource({ name: "team", repo: repoA, ref: commitA1 }, cache);

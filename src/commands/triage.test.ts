@@ -244,6 +244,9 @@ describe("hedge triage", () => {
               { name: "team-d", repo: "https://nora:topsecret@git.example.com/secret-owner/secret-repo.git", ref: "internal-release" },
               { name: "team-e", repo: "PostHog/hedge", ref: "bad\uD800ref" },
               { name: keyLikeAlias, repo: "acme/key-alias-packs", ref: "feature/customer.internal/private-project" },
+              { name: "team-f", repo: "PostHog/hedge", ref: "feature/noras-mbp/embargoed-release" },
+              { name: "team-g", repo: "PostHog/hedge", ref: "noras-mbp/top-secret" },
+              { name: "team-h", repo: "PostHog/hedge", ref: "refs/heads/q" },
             ],
           },
         },
@@ -258,6 +261,8 @@ describe("hedge triage", () => {
         "read /Users/alice/.ssh/config",
         "fetch https://nora:topsecret@git.example.com/secret-owner/secret-repo.git <internal-release>",
         "fetch acme/key-alias-packs at feature/customer.internal/private-project",
+        "checkout feature/noras-mbp/embargoed-release and noras-mbp/top-secret",
+        "quick remote ref q at refs/heads/q",
       ].join("\n") + "\n",
     );
     const result = await triage(home, ["--send"], []);
@@ -268,7 +273,9 @@ describe("hedge triage", () => {
     expect(issue.input).toContain("read /<branch>/<user>/.ssh/config");
     expect(issue.input).toContain("fetch <team-d source> <<branch>>");
     expect(issue.input).toContain("fetch <<key> source> at <branch>");
-    for (const leaked of ["correct-horse-battery-staple", "super-secret-value", "alice", "topsecret", "secret-owner", "secret-repo", "internal-release", keyLikeAlias, "private-project", "customer.internal"]) expect(issue.input).not.toContain(leaked);
+    expect(issue.input).toContain("checkout <branch> and <branch>");
+    expect(issue.input).toContain("quick remote ref <branch> at <branch>");
+    for (const leaked of ["correct-horse-battery-staple", "super-secret-value", "alice", "topsecret", "secret-owner", "secret-repo", "internal-release", keyLikeAlias, "private-project", "customer.internal", "embargoed-release", "top-secret"]) expect(issue.input).not.toContain(leaked);
   });
 
   test("redacts unpinned source aliases and repos from an inherited HEDGE_PROFILE_DIR without disclosing its alias or engine fork", async () => {
