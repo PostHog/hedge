@@ -1,7 +1,9 @@
 import { closeSync } from "node:fs";
-import { killSession, ownTag, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { enableChildSubreaper, killSession, ownTag, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
 type StartMessage = { argv: string[]; env?: Record<string, string>; lockCount: number; controlFd?: number };
+
+enableChildSubreaper();
 
 const runTag = ownTag(process.env[tagEnvVar]);
 let target: ReturnType<typeof Bun.spawn> | undefined;

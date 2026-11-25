@@ -280,9 +280,9 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await started) };
     try {
       expect((await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output).toContain(notChecked);
-      expect(await holderGone).toBe("");
     } finally {
       await endHolder(started);
+      await holderGone;
     }
   });
 

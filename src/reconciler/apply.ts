@@ -716,9 +716,21 @@ async function runDetached(command: string[], env: Record<string, string | undef
     syncInterruptHandlers();
     handedToExit = true;
     const owned = probe;
+    const statusPromise = readSupervisorResult(
+      child.stdout as ReadableStream<Uint8Array>,
+      (code) => {
+        reportedResult = true;
+        owned.targetExited = true;
+        onResult?.(signal, code);
+      },
+      (pid) => {
+        owned.targetPid = pid;
+      },
+    );
     void child.exited.then(
-      (supCode) => {
+      async (supCode) => {
         reaped = true;
+        await statusPromise.catch(() => {});
         if (!reportedResult && supCode !== 128 && supCode !== 143) {
           void killSession(undefined, "SIGKILL", owned.tag);
         }
@@ -739,17 +751,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
       releaseSlot();
     });
     if (stopSignal || signal.aborted) endGroup(stopSignal ?? "SIGTERM");
-    const status = await readSupervisorResult(
-      child.stdout as ReadableStream<Uint8Array>,
-      (code) => {
-        reportedResult = true;
-        owned.targetExited = true;
-        onResult?.(signal, code);
-      },
-      (pid) => {
-        owned.targetPid = pid;
-      },
-    );
+    const status = await statusPromise;
     if (status.code !== undefined && status.cleanup) {
       child.unref();
       return status.code;

@@ -1,5 +1,5 @@
-import { dlopen, FFIType } from "bun:ffi";
-import { closeSync, existsSync, readdirSync, readFileSync, writeSync } from "node:fs";
+import { dlopen, FFIType, ptr } from "bun:ffi";
+import { closeSync, existsSync, readdirSync, readFileSync, readSync, writeSync } from "node:fs";
 
 export type StopSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT";
 export type Timer = (ms: number, fire: () => void) => () => void;
@@ -59,8 +59,53 @@ function hasEnvTagLinux(pid: number, tag: string): boolean {
   }
 }
 
+let linuxPrctl: ((option: number, arg2: number, arg3: number, arg4: number, arg5: number) => number) | null | undefined;
+
+export function enableChildSubreaper(): void {
+  if (process.platform !== "linux") return;
+  if (linuxPrctl === undefined) {
+    try {
+      const lib = dlopen("libc.so.6", {
+        prctl: { args: [FFIType.i32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64], returns: FFIType.i32 },
+      });
+      linuxPrctl = (option, a2, a3, a4, a5) => lib.symbols.prctl(option, a2, a3, a4, a5);
+    } catch {
+      linuxPrctl = null;
+    }
+  }
+  try {
+    linuxPrctl?.(36, 1, 0, 0, 0);
+  } catch {}
+}
+
+let pollSym: ((fds: ReturnType<typeof ptr>, nfds: number, timeout: number) => number) | null | undefined;
+
+function pollFd(fd: number): number | undefined {
+  if (process.platform !== "linux" && process.platform !== "darwin") return undefined;
+  if (pollSym === undefined) {
+    try {
+      const libName = process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6";
+      const nfdsType = process.platform === "darwin" ? FFIType.u32 : FFIType.u64;
+      const lib = dlopen(libName, { poll: { args: [FFIType.pointer, nfdsType, FFIType.i32], returns: FFIType.i32 } });
+      pollSym = (fds, nfds, timeout) => lib.symbols.poll(fds, nfds, timeout);
+    } catch {
+      pollSym = null;
+    }
+  }
+  if (!pollSym) return undefined;
+  const raw = new Uint8Array(8);
+  const view = new DataView(raw.buffer);
+  view.setInt32(0, fd, true);
+  view.setInt16(4, 0x0001, true);
+  view.setInt16(6, 0, true);
+  const ready = pollSym(ptr(raw), 1, 0);
+  if (ready < 0) return undefined;
+  return ready === 0 ? 0 : view.getInt16(6, true);
+}
+
 export function discoverTargetsLinux(sessionId?: number, tag?: string): ProcTargets {
   const self = process.pid;
+  const includeDetached = Boolean(tag);
   const rows: Array<{ pid: number; ppid: number; pgrp: number; sid: number }> = [];
   const matched = new Set<number>();
   if (sessionId !== undefined) matched.add(sessionId);
@@ -77,6 +122,7 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string): ProcTarg
       const closeParen = stat.lastIndexOf(")");
       if (closeParen === -1) continue;
       const fields = stat.slice(closeParen + 2).split(" ");
+      if (fields[0] === "Z") continue;
       const ppid = Number(fields[1]);
       const pgrp = Number(fields[2]);
       const sid = Number(fields[3]);
@@ -88,13 +134,15 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string): ProcTarg
       }
     }
   } catch {}
-  let grew = true;
-  while (grew) {
-    grew = false;
-    for (const row of rows) {
-      if (!matched.has(row.pid) && matched.has(row.ppid)) {
-        matched.add(row.pid);
-        grew = true;
+  if (includeDetached || sessionId === undefined) {
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const row of rows) {
+        if (!matched.has(row.pid) && matched.has(row.ppid)) {
+          matched.add(row.pid);
+          grew = true;
+        }
       }
     }
   }
@@ -118,20 +166,39 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string): ProcTarg
 const psLookupLimitMs = 200;
 const psBin = existsSync("/bin/ps") ? "/bin/ps" : existsSync("/usr/bin/ps") ? "/usr/bin/ps" : "ps";
 
-let darwinGetsid: ((pid: number) => number) | null | undefined;
+type DarwinLib = {
+  getsid: (pid: number) => number;
+  getpgid: (pid: number) => number;
+  proc_listallpids: (buf: ReturnType<typeof ptr> | null, size: number) => number;
+};
 
-function sessionIdDarwin(pid: number): number | undefined {
-  if (process.platform !== "darwin") return undefined;
-  if (darwinGetsid === undefined) {
+let darwinLib: DarwinLib | null | undefined;
+
+function getDarwinLib(): DarwinLib | null {
+  if (process.platform !== "darwin") return null;
+  if (darwinLib === undefined) {
     try {
-      const lib = dlopen("libSystem.B.dylib", { getsid: { args: [FFIType.i32], returns: FFIType.i32 } });
-      darwinGetsid = (targetPid: number) => lib.symbols.getsid(targetPid);
+      const lib = dlopen("libSystem.B.dylib", {
+        getsid: { args: [FFIType.i32], returns: FFIType.i32 },
+        getpgid: { args: [FFIType.i32], returns: FFIType.i32 },
+        proc_listallpids: { args: [FFIType.pointer, FFIType.i32], returns: FFIType.i32 },
+      });
+      darwinLib = {
+        getsid: (pid) => lib.symbols.getsid(pid),
+        getpgid: (pid) => lib.symbols.getpgid(pid),
+        proc_listallpids: (buf, size) => lib.symbols.proc_listallpids(buf, size),
+      };
     } catch {
-      darwinGetsid = null;
+      darwinLib = null;
     }
   }
-  if (!darwinGetsid) return undefined;
-  const sid = darwinGetsid(pid);
+  return darwinLib;
+}
+
+function sessionIdDarwin(pid: number): number | undefined {
+  const lib = getDarwinLib();
+  if (!lib) return undefined;
+  const sid = lib.getsid(pid);
   return sid > 0 ? sid : undefined;
 }
 
@@ -143,6 +210,7 @@ function buildTargetsFromPs(
   envText: string | undefined,
   excludePids: Set<number>,
 ): ProcTargets {
+  const includeDetached = Boolean(tag);
   const rows: Array<{ pid: number; ppid: number; pgid: number }> = [];
   const matched = new Set<number>();
   if (sessionId !== undefined) matched.add(sessionId);
@@ -185,13 +253,15 @@ function buildTargetsFromPs(
       if (Number.isFinite(pid) && pid !== self && !excludePids.has(pid)) matched.add(pid);
     }
   }
-  let grew = true;
-  while (grew) {
-    grew = false;
-    for (const row of rows) {
-      if (!matched.has(row.pid) && matched.has(row.ppid)) {
-        matched.add(row.pid);
-        grew = true;
+  if (includeDetached || sessionId === undefined) {
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const row of rows) {
+        if (!matched.has(row.pid) && matched.has(row.ppid)) {
+          matched.add(row.pid);
+          grew = true;
+        }
       }
     }
   }
@@ -213,22 +283,36 @@ function buildTargetsFromPs(
   return { pids, groups: [...groups], orphanPids };
 }
 
-function runBoundedPsSync(args: string[]): string | undefined {
-  try {
-    const res = Bun.spawnSync([psBin, ...args], { stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: psLookupLimitMs, killSignal: "SIGKILL" });
-    if (res.exitCode !== 0) return undefined;
-    return res.stdout.toString();
-  } catch {
-    return undefined;
-  }
-}
-
 function discoverTargetsSync(sessionId?: number, tag?: string): ProcTargets | undefined {
   if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag);
-  const treeText = runBoundedPsSync(["-Ao", "pid=,ppid=,pgid="]);
-  const envText = tag ? runBoundedPsSync(["ewwax"]) : undefined;
-  if (treeText === undefined && envText === undefined) return undefined;
-  return buildTargetsFromPs(process.pid, sessionId, tag, treeText, envText, new Set());
+  if (sessionId === undefined) return undefined;
+  const lib = getDarwinLib();
+  if (!lib) return undefined;
+  const count = lib.proc_listallpids(null, 0);
+  if (count <= 0) return undefined;
+  const capacity = Math.max(count + 256, count * 2);
+  const buf = new Int32Array(capacity);
+  const actual = lib.proc_listallpids(ptr(buf), buf.byteLength);
+  if (actual <= 0) return undefined;
+  const self = process.pid;
+  const pids: number[] = [];
+  const groups = new Set<number>();
+  const orphanPids: number[] = [];
+  const limit = Math.min(actual, capacity);
+  for (let i = 0; i < limit; i++) {
+    const pid = buf[i]!;
+    if (pid <= 0 || pid === self || pid === sessionId) continue;
+    const sid = lib.getsid(pid);
+    const pgid = lib.getpgid(pid);
+    if (sid !== sessionId && pgid !== sessionId) continue;
+    pids.push(pid);
+    if (pgid > 0 && pgid !== sessionId && pgid !== self) {
+      groups.add(pgid);
+    } else if (pgid !== sessionId) {
+      orphanPids.push(pid);
+    }
+  }
+  return { pids, groups: [...groups], orphanPids };
 }
 
 async function runBoundedPs(args: string[]): Promise<{ pid: number; text: string } | undefined> {
@@ -434,8 +518,13 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
           arm(sig);
           forwardGroup(sig);
           host.reportCleanup();
+        } else if (sig === "SIGTERM" || sig === "SIGHUP") {
+          armHard();
+          forwardGroup(sig);
         } else {
-          if (sig === "SIGTERM" || sig === "SIGHUP") armHard();
+          cancelHard?.();
+          cancelHard = undefined;
+          arm(sig);
           forwardGroup(sig);
         }
         return;
@@ -522,12 +611,58 @@ if (import.meta.main) {
       else process.exit(128);
     });
   }
+  let controlInitialBuf = "";
+  let controlClosed = false;
+  if (controlFd !== undefined) {
+    const chunk = Buffer.allocUnsafe(256);
+    const decoder = new TextDecoder();
+    for (;;) {
+      const revents = pollFd(controlFd);
+      if (revents === undefined || revents === 0) break;
+      if (revents & 0x0001) {
+        let n = 0;
+        try {
+          n = readSync(controlFd, chunk, 0, chunk.length, null);
+        } catch {
+          controlClosed = true;
+          break;
+        }
+        if (n <= 0) {
+          controlClosed = true;
+          break;
+        }
+        controlInitialBuf += decoder.decode(chunk.subarray(0, n), { stream: true });
+        for (let nl = controlInitialBuf.indexOf("\n"); nl !== -1; nl = controlInitialBuf.indexOf("\n")) {
+          const line = controlInitialBuf.slice(0, nl).trim() as StopSignal;
+          controlInitialBuf = controlInitialBuf.slice(nl + 1);
+          if (stopSet.has(line)) dispatchStop(line);
+        }
+        if (pendingStops.length > 0) break;
+      } else if (revents & (0x0010 | 0x0008 | 0x0020)) {
+        controlClosed = true;
+        break;
+      } else {
+        break;
+      }
+    }
+    if (controlClosed && pendingStops.length === 0) {
+      const rest = controlInitialBuf.trim() as StopSignal;
+      if (stopSet.has(rest)) dispatchStop(rest);
+      else dispatchStop("SIGTERM");
+    }
+  }
+  if (pendingStops.length > 0) {
+    try {
+      writeSync(1, "stopped\n");
+    } catch {}
+    process.exit(128);
+  }
   if (controlFd !== undefined) {
     void (async () => {
       try {
         const reader = Bun.file(controlFd).stream().getReader();
         const decoder = new TextDecoder();
-        let buf = "";
+        let buf = controlInitialBuf;
         for (;;) {
           const { value, done } = await reader.read();
           if (done) break;
@@ -542,6 +677,7 @@ if (import.meta.main) {
       dispatchStop("SIGTERM");
     })();
   }
+  enableChildSubreaper();
   const runTag = ownTag(process.env[tagEnvVar]);
   await supervise(command, {
     spawn: (argv) => Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio: ["ignore", "ignore", "ignore"] }),
