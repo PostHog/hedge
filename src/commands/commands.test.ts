@@ -393,65 +393,13 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     });
   }
 
-  test("stops a human step whose TERM cleanup suspends its process group even after hedge packs exits at the deadline or on SIGTERM", async () => {
-    const { home: deadlineHome } = await machineWithProfile();
-    const trigger = join(deadlineHome, "trigger");
-    expect(Bun.spawnSync(["mkfifo", trigger]).exitCode).toBe(0);
-    const { holderGone: deadlineGone, started: deadlineStarted } = await withBlockedProbe(deadlineHome, '"kill -STOP 0"');
-    const cliScript = `import { main } from ${JSON.stringify(join(engineRoot, "src/cli.ts"))};
-const code = await main(["packs"], {
-  home: ${JSON.stringify(deadlineHome)},
-  engineRoot: ${JSON.stringify(engineRoot)},
-  platform: process.platform,
-  print: (line) => console.log(line),
-  clock: { now: () => 0, sleep: async () => void (await Bun.file(${JSON.stringify(trigger)}).text()) },
-});
-process.exit(code);`;
-    const deadlineCli = Bun.spawn([process.execPath, "-e", cliScript], {
-      env: { ...Bun.env, HOME: deadlineHome, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" },
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "ignore",
-    });
-    const triggerRelay = (async () => {
-      await deadlineStarted;
-      const writer = Bun.spawn(["sh", "-c", 'printf "go\\n" > "$1"', "writer", trigger], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-      await writer.exited;
-    })();
-    try {
-      const [stdout, exitCode] = await Promise.all([new Response(deadlineCli.stdout).text(), deadlineCli.exited, triggerRelay]);
-      expect(exitCode).toBe(0);
-      expect(stdout).toContain(notChecked);
-      expect(await deadlineGone).toBe("");
-    } finally {
-      deadlineCli.kill("SIGKILL");
-      await endHolder(deadlineStarted);
-    }
-
-    const { home: termHome } = await machineWithProfile();
-    const { holderGone: termGone, started: termStarted } = await withBlockedProbe(termHome, '"kill -STOP 0"');
-    const termCli = Bun.spawn([process.execPath, join(engineRoot, "src/cli.ts"), "packs"], {
-      env: { ...Bun.env, HOME: termHome, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" },
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    try {
-      await termStarted;
-      termCli.kill("SIGTERM");
-      expect(await termCli.exited).not.toBe(0);
-      expect(await termGone).toBe("");
-    } finally {
-      termCli.kill("SIGKILL");
-      await endHolder(termStarted);
-    }
-
+  test("stops a human step running in a separate process group at the deadline", async () => {
     const { home: pgidHome } = await machineWithProfile();
     const [pgidReady, pgidGone] = [join(pgidHome, "ready"), join(pgidHome, "gone")];
     expect(Bun.spawnSync(["mkfifo", pgidReady, pgidGone]).exitCode).toBe(0);
     await withTeamPack(pgidHome, {
       workflows: [flow("allowlist")],
-      human: [{ id: "allowlist", say: "Allowlist.", workflow: "allowlist", probe: ["timeout", "10", "sh", "-c", '{ sleep 30 & } 3>"$HOME/gone"; echo $! > "$HOME/ready"; wait'] }],
+      human: [{ id: "allowlist", say: "Allowlist.", workflow: "allowlist", probe: ["timeout", "10", "sh", "-c", 'exec 3>"$HOME/gone"; sleep 30 & echo $! > "$HOME/ready"; wait'] }],
     });
     const [pgidStarted, pgidClosed] = [fifoRead(pgidReady), fifoRead(pgidGone)];
     const timesOutOncePgidStarted = { now: () => 0, sleep: async () => void (await pgidStarted) };

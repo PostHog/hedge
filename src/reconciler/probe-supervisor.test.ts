@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../testing/git.ts";
+import { watchEntries } from "./probe-watchdog.ts";
 
 const temp = tempDirs();
 const activeHelpers: Array<{ kill(signal?: NodeJS.Signals): void }> = [];
@@ -435,6 +436,56 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
       expect(await sup.drain()).not.toBe(0);
     } finally {
       sup.cleanup();
+    }
+  });
+
+  test("watchdog kills a probe whose TERM cleanup suspends its whole process group when the controlled clock reaches the deadline", async () => {
+    const dir = temp.make("sup-watchdog-stop-");
+    const [ready, gone, trapped] = [join(dir, "ready"), join(dir, "gone"), join(dir, "trapped")];
+    mkfifo(ready, gone, trapped);
+    const started = fifoRead(ready);
+    const closed = fifoRead(gone);
+    const sawTrap = fifoRead(trapped);
+    const payload = JSON.stringify({
+      command: ["sh", "-c", 'exec 3>"$1"; trap \'echo trapped > "$3"; kill -STOP 0\' TERM; echo $$ > "$2"; sleep 30 & wait', "probe", gone, ready, trapped],
+      controlFd: 3,
+    });
+    const sup = Bun.spawn([process.execPath, supervisorPath, payload], {
+      stdio: ["ignore", "pipe", "ignore", "pipe"],
+      detached: true,
+    });
+    const aliveFd = sup.stdio[3] as number;
+    let clockNow = 0;
+    let wakeSleep: (() => void) | undefined;
+    let sleepingResolve: (() => void) | undefined;
+    const sleeping = new Promise<void>((resolve) => (sleepingResolve = resolve));
+    const watchDone = watchEntries([{ pid: sup.pid, fd: aliveFd, delayMs: 250 }], {
+      now: () => clockNow,
+      sleep: () => {
+        sleepingResolve?.();
+        return new Promise<void>((resolve) => (wakeSleep = resolve));
+      },
+    });
+    try {
+      const probePid = Number((await started).trim());
+      expect(probePid).toBeGreaterThan(0);
+      await sleeping;
+      writeSync(aliveFd, "SIGTERM\n");
+      expect((await sawTrap).trim()).toBe("trapped");
+      expect(() => process.kill(probePid, 0)).not.toThrow();
+      clockNow = 250;
+      wakeSleep?.();
+      await watchDone;
+      expect(await closed).toBe("");
+      expect(await sup.exited).not.toBe(0);
+    } finally {
+      try {
+        process.kill(-sup.pid, "SIGKILL");
+      } catch {}
+      sup.kill("SIGKILL");
+      try {
+        closeSync(aliveFd);
+      } catch {}
     }
   });
 });

@@ -43,11 +43,12 @@ const realTimer: Timer = (ms, fire) => {
 
 export const orphanGraceSeconds = 10;
 
-function holdingLocks(argv: string[], locks: number[], timeoutMs: number): string[] {
+function holdingLocks(argv: string[], locks: number[], timeoutMs: number, pathEnv = process.env.PATH ?? ""): string[] {
   if (!locks.length) return argv;
   const closed = locks.map((_, index) => `${index + 3}>&-`).join(" ");
   const needsMultiDigit = locks.length + 2 >= 10;
-  const shell = needsMultiDigit ? (Bun.which("bash") ?? Bun.which("zsh") ?? Bun.which("ksh")) : "/bin/sh";
+  const which = (name: string) => Bun.which(name, { PATH: pathEnv });
+  const shell = needsMultiDigit ? (which("bash") ?? which("zsh") ?? which("ksh")) : "/bin/sh";
   if (!shell) {
     throw new Error(`cannot close ${locks.length} box lock descriptors without bash, zsh, or ksh`);
   }
@@ -126,11 +127,11 @@ export function captureWith(timer: Timer): Capture {
         } catch {}
         return;
       }
-      if (!targetExited) killGroups();
+      killGroups();
     };
     const killStalled = () => {
       if (!child) return;
-      if (!supervisorReaped || !targetExited) killGroups();
+      killGroups();
       if (!supervisorReaped) {
         try {
           child.kill("SIGKILL");
@@ -161,6 +162,7 @@ export function captureWith(timer: Timer): Capture {
       resolveStatus(status);
     };
     try {
+      const command = holdingLocks(argv, locks, timeoutMs, env?.PATH ?? process.env.PATH ?? "");
       child = Bun.spawn(bunScript(captureSupervisor), {
         env: env as Record<string, string> | undefined,
         stdio: [input, output, output, ...locks, "pipe"],
@@ -185,13 +187,13 @@ export function captureWith(timer: Timer): Capture {
       void live.exited.then((code) => {
         supervisorReaped = true;
         closeControl();
-        if (!targetExited) killGroups();
+        if (!targetExited || expired) killGroups();
         settle({ code });
       });
       if (stopped) {
         stopChild();
       } else {
-        live.send({ argv: holdingLocks(argv, locks, timeoutMs), lockCount: locks.length, controlFd: 3 + locks.length });
+        live.send({ argv: command, lockCount: locks.length, controlFd: 3 + locks.length });
       }
       let hardKill: ReturnType<typeof setTimeout> | undefined;
       let forceExpired = false;

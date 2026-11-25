@@ -541,3 +541,11 @@ test("returns the command's own exit code when it signals its own process group"
   const result = await capture(["sh", "-c", 'trap "exit 42" TERM; kill -TERM 0'], { timeoutMs: 10_000 });
   expect(result).toEqual({ code: 42, stdout: "", stderr: "" });
 });
+
+test("rejects eight nested box locks cleanly before spawning a supervisor when no multi-digit shell is on PATH", async () => {
+  const lockHome = temp.make("hedge-lock-eight-");
+  const emptyBin = temp.make("hedge-empty-bin-");
+  const nest = <T>(index: number, fn: () => Promise<T>): Promise<T> =>
+    index > 8 ? fn() : withBoxLock(lockHome, `box-${index}`, { waitMs: 0 }, () => nest(index + 1, fn));
+  await expect(nest(1, () => capture(["printf", "%s", "ok"], { env: { PATH: emptyBin }, timeoutMs: 10_000 }))).rejects.toThrow("cannot close 8 box lock descriptors");
+});
