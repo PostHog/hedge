@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { loadPacks } from "./pack/manifest.ts";
-import { cachedSource, fetchSource, sourceCache, withoutUserinfo } from "./pack/sources.ts";
+import { cachedSource, fetchSource, sourceCache, unpinnedSources, withoutUserinfo } from "./pack/sources.ts";
 import { cannotTell } from "./pack/types.ts";
 import type { AvailableSource, CatalogEntry, FetchedSource, Finding, LoadedPack, MachineFile, Plan, Report, SourceRef } from "./pack/types.ts";
 import { loadMachine, loadProfile, pullProfile, saveMachine, thisMachine } from "./profile/profile.ts";
@@ -185,7 +185,7 @@ async function reconcile(command: "apply" | "doctor", args: string[], options: C
   const holds = () => fleetOf(options).holds(options.home, options.platform);
   const held = await holds();
   if (held.length && !preview) return printReport({ ok: false, actions: [], findings: held, humanLeft: [] }, command, options.print, false), 1;
-  const { plan, sources, remember } = await loadPlan(options, flags.profile, { fetch: !preview, inherit: preview }).catch((error: unknown) => {
+  const { plan, sources, refs, remember } = await loadPlan(options, flags.profile, { fetch: !preview, inherit: preview }).catch((error: unknown) => {
     printFindings(held, options.print);
     throw error;
   });
@@ -200,6 +200,7 @@ async function reconcile(command: "apply" | "doctor", args: string[], options: C
     const drifted = await drift(plan, report.humanLeft);
     report.findings.push(...drifted);
     if (drifted.some((finding) => finding.repair)) report.ok = false;
+    report.findings.push(...(await unpinnedSources(refs, plan.machine.profileDir!)));
   }
   if (held.length) report.findings.unshift(...held), (report.ok = false);
   const notice = doctor ? await readNotice(options.home) : undefined;
@@ -538,7 +539,7 @@ function hedgeCopy(home: string, dir: string): string {
 }
 
 /** withPack resolves the plan as if the profile also had that pack on, for the undo of one of its steps. */
-async function loadPlan(options: CliOptions, profileFlag: string | undefined, mode: { fetch: boolean; inherit?: boolean; pull?: boolean; withPack?: string; fetched?: FetchedSource[] }): Promise<{ plan: Plan; sources: FetchedSource[]; remember: () => Promise<void> }> {
+async function loadPlan(options: CliOptions, profileFlag: string | undefined, mode: { fetch: boolean; inherit?: boolean; pull?: boolean; withPack?: string; fetched?: FetchedSource[] }): Promise<{ plan: Plan; sources: FetchedSource[]; refs: SourceRef[]; remember: () => Promise<void> }> {
   const saved = await loadMachine(options.home);
   const inherited = mode.inherit && !profileFlag ? options.env?.HEDGE_PROFILE_DIR : undefined;
   const given = profileFlag ? resolvePath(profileFlag) : inherited ? resolvePath(inherited) : saved?.profileDir;
@@ -557,7 +558,7 @@ async function loadPlan(options: CliOptions, profileFlag: string | undefined, mo
   const remember = async () => {
     if (changed) await saveMachine(options.home, plan.machine);
   };
-  return { plan, sources, remember };
+  return { plan, sources, refs: profile.sources, remember };
 }
 
 function parseFlags(args: string[]) {

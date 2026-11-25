@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { join, relative, resolve, sep } from "node:path";
 import { loadPacks } from "./manifest.ts";
 import { tryLock, waitLock } from "../lock.ts";
-import type { AvailableSource, FetchedSource, LoadedPack, SourceRef } from "./types.ts";
+import type { AvailableSource, FetchedSource, Finding, LoadedPack, SourceRef } from "./types.ts";
 import { bunScript } from "../runner/bun.ts";
 import { withoutRepoEnv } from "../repo-env.ts";
 
@@ -52,7 +52,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
   const edits = await localEdits(dir);
   if (edits.length) return keepEdits(ref, dir, edits, loadLimitMs);
   const good = await lastGood(dir);
-  const fetchError = await checkout(dir, repo, ref.ref);
+  const fetchError = (await checkedOutFromCache(dir, repo, ref, good)) ? undefined : await checkout(dir, repo, ref.ref);
   if (!fetchError) {
     const loaded = await load(dir, loadLimitMs);
     if (!("error" in loaded)) {
@@ -135,6 +135,23 @@ async function lastGood(dir: string): Promise<Good | undefined> {
 
 async function saveGood(dir: string, good: Good) {
   await writeFile(goodPath(dir), JSON.stringify(good) + "\n");
+}
+
+export const pinsCommit = (ref: SourceRef) => /^[0-9a-f]{40}$/i.test(ref.ref);
+
+const repoKey = (repo: string) => repoUrl(repo).replace(/^.*github\.com[:/]/i, "").replace(/\.git$/, "").toLowerCase();
+
+export async function unpinnedSources(refs: SourceRef[], profileDir: string): Promise<Finding[]> {
+  const origin = (await git(profileDir, "config", "--get", "remote.origin.url")).stdout;
+  const ownRepo = (ref: SourceRef) => origin !== "" && repoKey(ref.repo) === repoKey(origin);
+  return refs
+    .filter((ref) => !pinsCommit(ref) && !ownRepo(ref))
+    .map((ref) => ({ id: `source:unpinned:${ref.name}`, pack: "engine", say: `The pack source ${ref.name} follows ${ref.ref} of ${withoutUserinfo(ref.repo)}. Pin its ref in hedge.json to a commit SHA, so each apply loads the same packs, even offline.` }));
+}
+
+async function checkedOutFromCache(dir: string, repo: string, ref: SourceRef, good: Good | undefined) {
+  if (!pinsCommit(ref) || good?.repo !== repo) return false;
+  return (await git(dir, "checkout", "-q", "--detach", ref.ref)).ok;
 }
 
 async function checkout(dir: string, url: string, ref: string): Promise<string | undefined> {

@@ -204,6 +204,56 @@ describe("fetchSource", () => {
     expect(fetched).toMatchObject({ error: expect.stringContaining("the packs exit 3 as they load: the team token file is missing") });
   });
 
+  test("loads a pinned commit it fetched before without reaching the source", async () => {
+    const repo = await packRepo("Team rules v1.");
+    const ref = { name: "team", repo, ref: await spawnGit(repo, "rev-parse", "HEAD") };
+    const cache = temp.make("cache-");
+    await fetchSource(ref, cache);
+    rmSync(repo, { recursive: true, force: true });
+    const fetched = await fetchSource(ref, cache);
+    if ("error" in fetched) throw new Error(fetched.error);
+    expect([fetched.packs[0]?.manifest.summary, fetched.stale]).toEqual(["Team rules v1.", undefined]);
+  });
+
+  test("moves to another pinned commit already in the cache without reaching the source", async () => {
+    const repo = await packRepo("Team rules v1.");
+    const first = await spawnGit(repo, "rev-parse", "HEAD");
+    writePack(repo, "Team rules v2.");
+    await spawnGit(repo, "commit", "-q", "-am", "v2");
+    const second = await spawnGit(repo, "rev-parse", "HEAD");
+    const cache = temp.make("cache-");
+    await fetchSource({ name: "team", repo, ref: first }, cache);
+    await fetchSource({ name: "team", repo, ref: second }, cache);
+    rmSync(repo, { recursive: true, force: true });
+    const ref = { name: "team", repo, ref: first };
+    const fetched = await fetchSource(ref, cache);
+    if ("error" in fetched) throw new Error(fetched.error);
+    expect([fetched.packs[0]?.manifest.summary, fetched.stale]).toEqual(["Team rules v1.", undefined]);
+    const cached = await cachedSource(ref, cache);
+    if ("error" in cached) throw new Error(cached.error);
+    expect(cached.packs[0]?.manifest.summary).toBe("Team rules v1.");
+  });
+
+  test("fetches a moving ref again, even one that names a commit in the cache", async () => {
+    const repo = await packRepo("Team rules v1.");
+    const cache = temp.make("cache-");
+    await fetchSource({ name: "team", repo, ref: "HEAD" }, cache);
+    writePack(repo, "Team rules v2.");
+    await spawnGit(repo, "commit", "-q", "-am", "v2");
+    const fetched = await fetchSource({ name: "team", repo, ref: "HEAD" }, cache);
+    if ("error" in fetched) throw new Error(fetched.error);
+    expect([fetched.packs[0]?.manifest.summary, fetched.stale]).toEqual(["Team rules v2.", undefined]);
+  });
+
+  test("fetches a pinned commit from a new repository even when the cache holds it", async () => {
+    const repo = await packRepo("Team rules v1.");
+    const commit = await spawnGit(repo, "rev-parse", "HEAD");
+    const cache = temp.make("cache-");
+    await fetchSource({ name: "team", repo, ref: commit }, cache);
+    const fetched = await fetchSource({ name: "team", repo: join(temp.make(), "moved"), ref: commit }, cache);
+    expect(fetched).toMatchObject({ error: expect.stringContaining(`could not fetch ${commit}`) });
+  });
+
   test("never falls back to a cache of another repository", async () => {
     const cache = temp.make("cache-");
     await fetchSource({ name: "team", repo: await packRepo("Old repo."), ref: "v1" }, cache);
