@@ -454,22 +454,23 @@ function spawnRunner(home: string, profileDir: string | undefined): Runner {
 
 async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal) {
   let child: { pid: number; exited: Promise<number> } | undefined;
-  let stopped = false;
-  const endGroup = () => {
-    stopped = true;
+  let stopSignal: NodeJS.Signals | undefined;
+  const endGroup = (name: NodeJS.Signals = "SIGTERM") => {
+    stopSignal ??= name;
     if (!child) return;
-    try { process.kill(-child.pid, "SIGTERM"); } catch {}
+    try { process.kill(-child.pid, name); } catch {}
   };
+  const onAbort = () => endGroup("SIGTERM");
   const interrupted = (name: NodeJS.Signals) => {
-    endGroup();
+    endGroup(name);
     release();
     if (!process.listenerCount(name)) process.kill(process.pid, name);
   };
   const release = () => {
-    signal.removeEventListener("abort", endGroup);
+    signal.removeEventListener("abort", onAbort);
     process.off("SIGINT", interrupted).off("SIGTERM", interrupted);
   };
-  signal.addEventListener("abort", endGroup, { once: true });
+  signal.addEventListener("abort", onAbort, { once: true });
   process.on("SIGINT", interrupted).on("SIGTERM", interrupted);
   if (signal.aborted) {
     release();
@@ -477,7 +478,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
   }
   try {
     child = Bun.spawn(command, { stdout: "ignore", stderr: "ignore", env, detached: true });
-    if (stopped || signal.aborted) endGroup();
+    if (stopSignal || signal.aborted) endGroup(stopSignal ?? "SIGTERM");
     return await child.exited;
   } catch {
     return 127;

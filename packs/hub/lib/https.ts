@@ -155,18 +155,24 @@ async function trusted(hub: HttpsHub): Promise<number> {
   const answer = await hub.run(onHub(hub.alias, ["hub-https", "ca"]), { timeoutMs: trustProbeLimitMs });
   const certificate = answer.code === 0 ? answer.stdout.split("\n").filter((line) => !line.startsWith(caHeading)).join("\n").trim() + "\n" : "";
   if (!certificatePattern.test(certificate)) return hub.print(`${hub.alias} gave no public root certificate: ${(answer.stderr || answer.stdout).trim()}`), 1;
-  const folder = await mkdtemp(join(tmpdir(), "hedge-hub-ca-"));
-  const remove = () => rmSync(folder, { recursive: true, force: true });
+  let folder: string | undefined;
+  let stopped: NodeJS.Signals | undefined;
+  const remove = () => {
+    if (folder) rmSync(folder, { recursive: true, force: true });
+  };
   const release = () => {
     process.off("SIGINT", interrupted).off("SIGTERM", interrupted);
   };
   const interrupted = (signal: NodeJS.Signals) => {
+    stopped = signal;
     remove();
     release();
     if (!process.listenerCount(signal)) process.kill(process.pid, signal);
   };
   process.on("SIGINT", interrupted).on("SIGTERM", interrupted);
   try {
+    folder = await mkdtemp(join(tmpdir(), "hedge-hub-ca-"));
+    if (stopped) return 1;
     const path = join(folder, "hub-ca.crt");
     await writePrivateFile(path, certificate);
     return (await hub.run(["security", "verify-cert", "-l", "-L", "-p", "ssl", "-c", path], { timeoutMs: trustProbeLimitMs })).code === 0 ? 0 : 1;
