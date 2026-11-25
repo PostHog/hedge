@@ -618,12 +618,14 @@ describe("hook runner", () => {
     mkdirSync(dir);
     const printsItsInput = `const input = await Bun.stdin.text();\nconsole.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: \`\${process.argv[2]} \${input} \${process.pid}\` } }));\n`;
     writeFileSync(join(dir, "a-standalone.ts"), printsItsInput);
-    const outside = join(temp.make("source-"), "b-outside.ts");
+    writeFileSync(join(dir, "b-commented.ts"), `// export const hook = () => {}; if (import.meta.main) {}\n${printsItsInput}`);
+    writeFileSync(join(dir, "c-aliased.ts"), `const hook = 1; export { hook as describe };\n${printsItsInput}`);
+    const outside = join(temp.make("source-"), "d-outside.ts");
     writeFileSync(outside, printsItsInput);
-    symlinkSync(outside, join(dir, "b-outside.ts"));
+    symlinkSync(outside, join(dir, "d-outside.ts"));
     const { stdout } = await dispatch(dir, "claude", "{}", runInProcessWithin(root));
     const contexts = JSON.parse(stdout).hookSpecificOutput.additionalContext.split("\n\n");
-    expect(contexts.map((context: string) => context.split(" ").slice(0, 2))).toEqual([["claude", "{}"], ["claude", "{}"]]);
+    expect(contexts.map((context: string) => context.split(" ").slice(0, 2))).toEqual([["claude", "{}"], ["claude", "{}"], ["claude", "{}"], ["claude", "{}"]]);
     expect(contexts.map((context: string) => Number(context.split(" ")[2]))).not.toContain(process.pid);
   });
 });

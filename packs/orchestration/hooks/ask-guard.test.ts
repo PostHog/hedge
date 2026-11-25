@@ -528,21 +528,35 @@ describe("the wake guard", () => {
     expect((await routed("claude", async () => JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)), cwd: "/" }), home("Robin"))).stdout).toBe("");
   });
 
-  test("the installed runner exits as soon as ask-guard answers, without waiting out the deadline", async () => {
+  test("the installed runner returns the ask-guard block and exits cleanly without hanging on the deadline timer", async () => {
     const hookHome = home("Robin");
     const stopDir = join(hookHome, ".config/hedge/hooks/Stop");
     mkdirSync(stopDir, { recursive: true });
     symlinkSync(join(import.meta.dir, "ask-guard.ts"), join(stopDir, "ask-guard.ts"));
     symlinkSync(join(import.meta.dir, "../../base/hooks/run.ts"), join(hookHome, ".config/hedge/hooks/run.ts"));
-    const child = Bun.spawn([process.execPath, join(hookHome, ".config/hedge/hooks/run.ts"), "claude", "Stop"], {
+    const bgTurn = transcript(
+      claudePrompt("Go"),
+      { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "sleep 60", run_in_background: true } }] } },
+      { type: "user", isMeta: true, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "running in background with ID: bg1" }] }, toolUseResult: { backgroundTaskId: "bg1" } },
+      claudeSays("Done."),
+    );
+    const blocked = Bun.spawn([process.execPath, join(hookHome, ".config/hedge/hooks/run.ts"), "claude", "Stop"], {
       env: { ...process.env, HOME: hookHome, T3CODE_THREAD_ID: conductor },
-      stdin: new Blob([JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays(waitLine)), cwd: "/" })]),
+      stdin: new Blob([JSON.stringify({ transcript_path: bgTurn, background_tasks: [{ id: "bg1", type: "shell", status: "running" }] })]),
       stdout: "pipe",
       stderr: "pipe",
     });
-    const exited = await Promise.race([child.exited.then(() => "exited"), Bun.sleep(4_000).then(() => "still running")]);
-    child.kill();
-    expect(exited).toBe("exited");
+    expect(await blocked.exited).toBe(0);
+    expect(JSON.parse(await new Response(blocked.stdout).text())).toMatchObject({ decision: "block", reason: expect.stringContaining("bg1") });
+
+    const quiet = Bun.spawn([process.execPath, join(hookHome, ".config/hedge/hooks/run.ts"), "claude", "Stop"], {
+      env: { ...process.env, HOME: hookHome, T3CODE_THREAD_ID: conductor },
+      stdin: new Blob([JSON.stringify({ transcript_path: transcript(claudePrompt("Go"), claudeSays("Done.")), cwd: "/" })]),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(await quiet.exited).toBe(0);
+    expect(await new Response(quiet.stdout).text()).toBe("");
   });
 
   test("reads the final message from a Codex transcript when the event names none", async () => {

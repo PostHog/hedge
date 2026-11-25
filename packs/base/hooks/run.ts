@@ -93,9 +93,15 @@ const isInside = (root: string, path: string) => {
 
 const failure = (error: unknown): HookResult => ({ code: 1, stdout: "", stderr: `${error instanceof Error ? error.message : String(error)}\n` });
 
-const exportsGuardedHook = (source: string) =>
-  /(?:^|\n)\s*export\s+(?:(?:const|let|var|async\s+function|function)\s+hook\b|\{[^}]*\bhook\b)/.test(source)
-  && /\bif\s*\(\s*import\.meta\.main\s*\)/.test(source);
+const hookTranspiler = new Bun.Transpiler({ loader: "ts" });
+
+function exportsGuardedHook(source: string) {
+  try {
+    return hookTranspiler.scan(source).exports.includes("hook") && hookTranspiler.transformSync(source).includes("import.meta.main");
+  } catch {
+    return false;
+  }
+}
 
 export const runInProcessWithin = (root: string): RunHook => async (path, provider, input) => {
   try {
