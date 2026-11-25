@@ -322,17 +322,25 @@ test("a call that hands its output through to the caller still has a time limit 
   expect(await result).toEqual({ code: 124, stdout: "", stderr: "timed out after 30 ms" });
 });
 
-test("returns at the time limit when a command exits while a descendant keeps its output pipe open", async () => {
+test("strips a leading UTF-8 BOM from captured output so JSON callers parse it", async () => {
+  const result = await captureWith(handTimer().timer)(["sh", "-c", 'printf "\\357\\273\\277{\\"ok\\":true}"'], { timeoutMs: 5_000 });
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({ ok: true });
+});
+
+test("stops a descendant holding stdout open and returns at the time limit after the leader exits", async () => {
   const dir = temp.make("hedge-pipe-");
-  const ready = join(dir, "ready");
-  expect(Bun.spawnSync(["mkfifo", ready]).exitCode).toBe(0);
+  const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+  expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
   const started = Bun.file(ready).text();
+  const holderGone = Bun.file(gone).text();
   const clock = handTimer();
-  const result = captureWith(clock.timer)(["sh", "-c", `sleep 30 & echo $! > ${JSON.stringify(ready)}`], { timeoutMs: 30 });
+  const result = captureWith(clock.timer)(["sh", "-c", `{ sleep 30 & } 3>${JSON.stringify(gone)}; echo $! > ${JSON.stringify(ready)}`], { timeoutMs: 30 });
   const childPid = Number((await started).trim());
   try {
     clock.fire();
     expect(await result).toEqual({ code: 124, stdout: "", stderr: "timed out after 30 ms" });
+    expect(await holderGone).toBe("");
   } finally {
     if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
   }

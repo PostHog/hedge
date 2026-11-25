@@ -239,7 +239,8 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
   }
 
   const endHolder = async (started: Promise<string>) => {
-    try { process.kill(Number((await started).trim()), "SIGKILL"); } catch {}
+    const pid = Number((await started).trim());
+    if (pid > 0) try { process.kill(pid, "SIGKILL"); } catch {}
   };
 
   const notChecked = "  ? team  Team rules.\n      Workflows: allowlist not checked\n      Hedge could not check this pack's setup in time. Run hedge doctor.";
@@ -325,7 +326,8 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
       expect(await listing.exited).not.toBe(0);
     } finally {
       listing.kill("SIGKILL");
-      try { process.kill(-Number((await started).trim()), "SIGKILL"); } catch {}
+      const pgid = Number((await started).trim());
+      if (pgid > 0) try { process.kill(-pgid, "SIGKILL"); } catch {}
     }
   });
 

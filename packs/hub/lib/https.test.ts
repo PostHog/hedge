@@ -219,7 +219,8 @@ test("trusted removes its temporary certificate directory and stops security whe
     expect(readdirSync(sandbox.tmp)).toEqual([]);
   } finally {
     child.kill("SIGKILL");
-    try { process.kill(Number((await started).trim()), "SIGKILL"); } catch {}
+    const pid = Number((await started).trim());
+    if (pid > 0) try { process.kill(pid, "SIGKILL"); } catch {}
   }
 });
 

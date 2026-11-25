@@ -60,27 +60,28 @@ async function readStream(stream: ReadableStream<Uint8Array> | number | undefine
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let stop: (() => void) | undefined;
-  const aborted = new Promise<{ done: true; value: undefined }>((resolve) => {
+  const aborted = new Promise<void>((resolve) => {
     stop = () => {
       void reader.cancel().catch(() => {});
-      resolve({ done: true, value: undefined });
+      resolve();
     };
     if (abort.aborted) stop();
     else abort.addEventListener("abort", stop, { once: true });
   });
-  try {
+  const drain = (async () => {
     for (;;) {
-      const next = reader.read().catch(() => ({ done: true as const, value: undefined }));
-      const { done, value } = await Promise.race([next, aborted]);
+      const { done, value } = await reader.read();
       if (done) break;
       if (value) chunks.push(value);
     }
-  } catch {
+  })().catch(() => {});
+  try {
+    await Promise.race([drain, aborted]);
   } finally {
     if (stop) abort.removeEventListener("abort", stop);
     try { reader.releaseLock(); } catch {}
   }
-  return Buffer.concat(chunks).toString("utf8");
+  return new TextDecoder().decode(Buffer.concat(chunks));
 }
 
 export function captureWith(timer: Timer): Capture {
@@ -92,15 +93,19 @@ export function captureWith(timer: Timer): Capture {
     let stopped = false;
     let reaped = false;
     const done = new AbortController();
-    const stopGroup = () => {
+    const stopGroup = (includeReapedGroup: boolean) => {
       stopped = true;
       done.abort();
-      if (!child || reaped) return;
-      kill(-child.pid);
-      kill(child.pid);
+      if (!child) return;
+      if (!reaped) {
+        kill(-child.pid);
+        kill(child.pid);
+      } else if (includeReapedGroup) {
+        kill(-child.pid);
+      }
     };
     const interrupted = (name: NodeJS.Signals) => {
-      stopGroup();
+      stopGroup(false);
       release();
       if (!process.listenerCount(name)) process.kill(process.pid, name);
     };
@@ -114,10 +119,10 @@ export function captureWith(timer: Timer): Capture {
     try {
       child = Bun.spawn(holdingLocks(argv, locks, timeoutMs), { env: env as Record<string, string> | undefined, stdio: [input, output, output, ...locks], detached: true });
       void child.exited.finally(() => { reaped = true; });
-      if (stopped) stopGroup();
+      if (stopped) stopGroup(false);
       cancel = timer(timeoutMs, () => {
         expired = true;
-        stopGroup();
+        stopGroup(true);
       });
       const [stdout, stderr, code] = await Promise.all([readStream(child.stdout, done.signal), readStream(child.stderr, done.signal), child.exited]);
       return expired ? timeoutResult(timeoutMs, stdout) : { code, stdout, stderr };
