@@ -105,12 +105,12 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
   const runs: Record<string, { status: string; conclusion: string | null }> = { pass: { status: "completed", conclusion: "success" }, fail: { status: "completed", conclusion: "failure" }, cancel: { status: "completed", conclusion: "cancelled" }, pending: { status: "in_progress", conclusion: null } };
   const lines = (items: object[]) => items.map((item) => JSON.stringify(item) + "\n").join("");
   const ci = (checks: { name: string; bucket: string; app?: number }[] | "none", commit = "any") => writeFileSync(join(github, `check-runs-${commit}`), checks === "none" ? "" : lines(checks.map(({ name, bucket, app = 1 }, index) => ({ id: index + 1, name, ...runs[bucket], app }))));
-  const required = (branch: string, rules: { context: string; integration_id?: number }[] | { error: string }, { classic, page = 1, others = 0, ruleset }: { classic?: string[]; page?: number; others?: number; ruleset?: { id: number; updatedAt: string } } = {}) => {
+  const required = (branch: string, rules: { context: string; integration_id?: number }[] | { error: string }, { classic, page = 1, others = 0, ruleset }: { classic?: (string | { context: string; app: number })[]; page?: number; others?: number; ruleset?: { id: number; updatedAt: string } } = {}) => {
     rmSync(join(github, `rules-error-${branch}`), { force: true });
     if ("error" in rules) writeFileSync(join(github, `rules-error-${branch}`), rules.error);
     else writeFileSync(join(github, `rules-${branch}-${page}`), JSON.stringify([...Array.from({ length: others }, () => ({ type: "deletion" })), ...(rules.length ? [{ type: "required_status_checks", ...ruleset ? { ruleset_id: ruleset.id } : {}, parameters: { required_status_checks: rules } }] : [])]));
     if (ruleset) writeFileSync(join(github, `ruleset-${ruleset.id}`), JSON.stringify({ id: ruleset.id, updated_at: ruleset.updatedAt }));
-    if (classic) writeFileSync(join(github, `branch-${branch}`), JSON.stringify({ protected: true, protection: { required_status_checks: { enforcement_level: "everyone", contexts: classic, checks: classic.map((context) => ({ context, app_id: null })) } } }));
+    if (classic) writeFileSync(join(github, `branch-${branch}`), JSON.stringify({ protected: true, protection: { required_status_checks: { enforcement_level: "everyone", contexts: classic.map((check) => typeof check === "string" ? check : check.context), checks: classic.map((check) => typeof check === "string" ? { context: check, app_id: null } : { context: check.context, app_id: check.app }) } } }));
   };
   const pullRequestState = ({ draft, base, baseSha, body, number, merged, closed, unreadable }: { draft?: boolean; base?: string; baseSha?: string | number; body?: string; number?: number; merged?: boolean; closed?: boolean; unreadable?: string }) => {
     if (unreadable !== undefined) writeFileSync(join(github, `pull-error-${number ?? 42}`), unreadable);

@@ -454,3 +454,20 @@ test("an open PR waits on a missing required check whatever its ruleset's age", 
   pr.required("main", [{ context: "test" }, { context: "storybook" }], { ruleset: changedAfterMerge });
   expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: storybook");
 });
+
+test("classic protection that pins a check to one app leaves the waiver of the same check pinned to another app by a changed ruleset", async () => {
+  const { pr } = await reviewed();
+  pr.pullRequestState({ merged: true });
+  pr.required("main", [{ context: "storybook", integration_id: 7 }], { ruleset: changedAfterMerge, classic: [{ context: "storybook", app: 9 }] });
+  pr.ci([{ name: "storybook", bucket: "pass", app: 9 }]);
+  expect(ciLine((await pr.hedge("gate", "--landed")).output)).toBe("ci: green, 1 required check(s) pass; not judged, never reported and its ruleset changed after the merge: storybook");
+});
+
+test("the landed gate reads the required checks fresh, so classic protection added since an earlier gate still holds a missing check", async () => {
+  const { pr } = await reviewed();
+  pr.required("main", [{ context: "test" }, { context: "storybook" }], { ruleset: changedAfterMerge });
+  await pr.hedge("gate");
+  pr.required("main", [{ context: "test" }, { context: "storybook" }], { ruleset: changedAfterMerge, classic: ["storybook"] });
+  pr.pullRequestState({ merged: true });
+  expect(ciLine((await pr.hedge("gate", "--landed")).output)).toBe("ci: pending, required not reported yet: storybook");
+});

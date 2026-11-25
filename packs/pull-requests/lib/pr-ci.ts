@@ -87,7 +87,9 @@ function readRequired(repository: string, branch: string, run: Run): RequiredChe
   const classic = (JSON.parse(branchView.stdout) as Branch).protection?.required_status_checks;
   if (classic && classic.enforcement_level !== "off") {
     for (const check of classic.checks ?? []) add(check.context, check.app_id);
+    const pinned = new Set((classic.checks ?? []).map((check) => check.context));
     for (const context of classic.contexts ?? []) {
+      if (pinned.has(context)) continue;
       const named = [...checks.values()].filter((check) => check.context === context);
       if (!named.length) add(context);
       for (const check of named) delete check.rulesets;
@@ -96,9 +98,9 @@ function readRequired(repository: string, branch: string, run: Run): RequiredChe
   return [...checks.values()];
 }
 
-function requiredChecks(home: string, repository: string, branch: string, run: Run, now: Date): RequiredCheck[] {
+function requiredChecks(home: string, repository: string, branch: string, run: Run, now: Date, fresh: boolean): RequiredCheck[] {
   const path = join(home, ".local/state/hedge/required-checks", repository, `${encodeURIComponent(branch)}.json`);
-  try {
+  if (!fresh) try {
     const cached = JSON.parse(readFileSync(path, "utf8")) as { version?: number; fetchedAt: string; checks: RequiredCheck[] };
     const age = now.getTime() - new Date(cached.fetchedAt).getTime();
     if (cached.version === cacheVersion && age >= 0 && age < cacheMs) return cached.checks;
@@ -250,9 +252,10 @@ function postedOnceReady(repository: string, env: Record<string, string | undefi
 export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date, env: Record<string, string | undefined>): CiResult {
   try {
     const pr = readPullRequest(identity, run);
-    let required = requiredChecks(home, identity.repository, pr.base, run, now);
+    const fresh = pr.mergedAt !== undefined;
+    let required = requiredChecks(home, identity.repository, pr.base, run, now, fresh);
     const stacked = !required.length && pr.defaultBranch !== undefined && pr.defaultBranch !== pr.base;
-    if (stacked) required = requiredChecks(home, identity.repository, pr.defaultBranch!, run, now);
+    if (stacked) required = requiredChecks(home, identity.repository, pr.defaultBranch!, run, now, fresh);
     const entries = entriesOf(identity, run);
     if (!required.length) return { ...everyCheck(entries, identity.commit), checks: checksOf(entries) };
     const readyOnly = pr.draft ? postedOnceReady(identity.repository, env) : new Set<string>();

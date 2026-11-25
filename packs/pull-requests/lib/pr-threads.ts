@@ -45,7 +45,7 @@ export const awaitsAnswer = (thread: Thread) => thread.kind === "bot" && !thread
 
 export async function unresolvedThreads(target: PullRequestTarget, gh: Gh): Promise<{ viewer: string; threads: Thread[] }> {
   const { viewer, threads } = await fetchThreads(target, gh);
-  return { viewer, threads: threads.filter((thread) => !thread.isResolved).map((thread) => classify(thread, viewer)) };
+  return { viewer, threads: threads.map((thread) => classify(thread, viewer)) };
 }
 
 export async function openBotFindings(target: PullRequestTarget, gh: Gh): Promise<Thread[]> {
@@ -80,7 +80,7 @@ async function fetchThreads(options: PullRequestTarget, gh: Gh): Promise<{ viewe
     const page: Page<GraphThread> | undefined = response.data?.repository?.pullRequest?.reviewThreads;
     if (!page) throw new Error(`No pull request ${options.repo}#${options.pr}`);
     viewer = response.data.viewer.login;
-    threads.push(...page.nodes);
+    threads.push(...page.nodes.filter((thread) => !thread.isResolved));
     after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
   } while (after);
   for (const thread of threads) thread.comments.nodes.push(...await remainingComments(thread, gh));
