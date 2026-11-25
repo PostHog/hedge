@@ -77,14 +77,14 @@ test("a gate pass with a gap the agent accepted holds the merge, own tooling inc
     writeFileSync(join(other, ".local/state/hedge/decisions.jsonl"), readFileSync(join(pr.home, ".local/state/hedge/decisions.jsonl"), "utf8"));
     return mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home: other, env: { HEDGE_SETTINGS: JSON.stringify({ "pull-requests.autonomy": "end" }) }, github });
   };
-  const mergeWord = async (at: string, choice = "Merge", question = `Merge example/product#42 at ${at}? An agent accepted ${id}.`) => {
+  const mergeWord = async (at: string, choice = "Merge", question = `Merge example/product#42 at ${at}? An agent accepted ${id} for prod-shape.`) => {
     pr.choose(choice, question);
     return pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${at}: merge card`);
   };
   try {
     for (const exempt of ["", "example/*"]) {
       const refusal = (await mergeOn(exempt))?.hookSpecificOutput.permissionDecisionReason;
-      expect(refusal).toMatch(new RegExp(`an agent accepted proof gaps of example/product#42 at ${head.slice(0, 12)} \\(🤖 d-[0-9a-f]+\\) itself`));
+      expect(refusal).toMatch(new RegExp(`an agent accepted proof gaps of example/product#42 at ${head.slice(0, 12)} \\(🤖 d-[0-9a-f]+ for prod-shape\\) itself`));
       expect(refusal).toContain("hedge decision record --mark 👤 --class merge --pr <owner/repo#n>");
     }
     await expect(mergeWord(head, "Keep it open")).rejects.toThrow('The user chose "Keep it open", not "Merge"');
@@ -100,6 +100,32 @@ test("a gate pass with a gap the agent accepted holds the merge, own tooling inc
     await pr.decide("record", "--mark", "🤖", "--class", "proof-gap", "--kind", "live-run", "--pr", "example/product#42", "--question", "Accept the live-run gap? example/product#42: No sandbox", "--answer", "Accept the gap", "--rejected", "Keep the gap open", "--reason", "The hook runs in its own tests");
     expect(await mergeOn("example/*")).toBeDefined();
   } finally { rmSync(other, { recursive: true, force: true }); }
+});
+
+test("a merge word lifts an agent's gap decision only when its card named every proof kind that decision accepts", async () => {
+  const pr: Checkout = await checkout();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.autonomy": "end" });
+  pr.pullRequestState({ body: graded("non-critical", "medium") });
+  await pr.commit("feature.txt", "new\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--kinds", "live-run");
+  await pr.hedge("gap", "--kind", "live-run", "--reason", "No sandbox");
+  const decided = await pr.decide("record", "--mark", "🤖", "--class", "proof-gap", "--kind", "live-run", "--kind", "prod-shape", "--pr", "example/product#42", "--question", "Accept the live-run gap? example/product#42: No sandbox", "--answer", "Accept the gap", "--rejected", "Keep the gap open", "--reason", "The hook runs in its own tests");
+  const id = /\[(d-[0-9a-f]+)\]/.exec(decided.output)?.[1] ?? "";
+  const head = await pr.git("rev-parse", "HEAD");
+  expect((await pr.hedge("gate")).code).toBe(0);
+  const github = { pull: async () => ({ head, base: "main", defaultBranch: "main", open: true }), pullFor: async () => undefined };
+  const merge = async () => (await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home: pr.home, env: { HEDGE_SETTINGS: pr.env.HEDGE_SETTINGS }, github }))?.hookSpecificOutput.permissionDecisionReason;
+  expect(await merge()).toContain(`(🤖 ${id} for live-run/prod-shape) itself`);
+  pr.choose("Merge", `Merge example/product#42 at ${head}? An agent accepted ${id} for live-run.`);
+  expect((await pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${head}: merge card`)).code).toBe(0);
+  await pr.hedge("require", "--kinds", "prod-shape");
+  await pr.hedge("gap", "--kind", "prod-shape", "--reason", "No production read access");
+  expect((await pr.hedge("gate")).output).toContain(`prod-shape: gap from ${head.slice(0, 7)}, accepted by 🤖 decision ${id}`);
+  expect(await merge()).toContain(`(🤖 ${id} for live-run/prod-shape) itself`);
+  pr.choose("Merge", `Merge example/product#42 at ${head}? An agent accepted ${id} for live-run and prod-shape.`);
+  expect((await pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${head}: merge card`)).code).toBe(0);
+  expect(await merge()).toBeUndefined();
 });
 
 test("a gate pass that read a gap the agent accepted, and did not rely on it, merges without the user's word", async () => {

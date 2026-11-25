@@ -370,13 +370,13 @@ describe("the PreToolUse hook", () => {
     const where = (ledger: LedgerEvent[], github = true) => ({ home: homeWith({ "guards.merge-gate-exempt": "own/*" }), env: {}, gate: gate({ ledger, github }), intent: io });
     const merge = (ledger: LedgerEvent[], github = true) => mergeGate(call("gh pr merge 9 --repo own/tooling"), where(ledger, github));
     const pass = (seenGaps?: string[], agentGaps: string[] | undefined = seenGaps && []): LedgerEvent => ({ type: "gate", repository: "own/tooling", pr: 9, commit: head, passed: true, machine: "box-2", at: "2026-11-16T07:30:00Z", ...agentGaps ? { agentGaps } : {}, ...seenGaps ? { seenGaps } : {} });
-    expect((await merge([agentGap("own/tooling")]))?.hookSpecificOutput.permissionDecisionReason).toContain(`an agent accepted proof gaps of own/tooling#9 at ${head.slice(0, 12)} (🤖 d-agent) itself`);
+    expect((await merge([agentGap("own/tooling")]))?.hookSpecificOutput.permissionDecisionReason).toContain(`an agent accepted proof gaps of own/tooling#9 at ${head.slice(0, 12)} (🤖 d-agent for live-run) itself`);
     expect(await merge([agentGap("own/tooling"), pass(["d-agent"])])).toBeUndefined();
     expect(await merge([agentGap("own/tooling"), pass([])])).toBeDefined();
     expect(await merge([agentGap("own/tooling"), pass()])).toBeDefined();
     expect(await merge([agentGap("own/tooling"), pass(["d-agent"], ["d-agent"])])).toBeDefined();
     expect(await merge([agentGap("example/product")], false)).toBeUndefined();
-    const word = (answer: string, gaps = "d-agent"): LedgerEvent => ({
+    const word = (answer: string, gaps = "d-agent for live-run"): LedgerEvent => ({
       type: "decide", decision: {
         id: `w-${answer}-${gaps}`, at: "2026-11-16T09:00:00Z", class: "merge", mark: "👤", question: `Merge own/tooling#9 at ${head}? An agent accepted ${gaps}.`, answer: `2026-11-16 "${answer}"`,
         scope: { prs: ["own/tooling#9"], condition: `${head}: merge card` }, where: { thread: "t", message: `m-${answer}`, machine: "hub" },
@@ -385,11 +385,12 @@ describe("the PreToolUse hook", () => {
     expect(await merge([agentGap("own/tooling"), word("Merge")])).toBeUndefined();
     expect(await merge([agentGap("own/tooling"), word('"Merge"')])).toBeUndefined();
     expect(await merge([agentGap("own/tooling"), word("Keep it open")])).toBeDefined();
-    expect(await merge([agentGap("own/tooling"), word("Merge", "d-other")])).toBeDefined();
+    expect(await merge([agentGap("own/tooling"), word("Merge", "d-other for live-run")])).toBeDefined();
+    expect(await merge([agentGap("own/tooling"), word("Merge", "d-agent")])).toBeDefined();
     const mistyped = word("Merge");
-    if (mistyped.type === "decide") mistyped.decision.question = `Merge own/tooling#9 at ${head}0? An agent accepted d-agent.`;
+    if (mistyped.type === "decide") mistyped.decision.question = `Merge own/tooling#9 at ${head}0? An agent accepted d-agent for live-run.`;
     expect(await merge([agentGap("own/tooling"), mistyped])).toBeDefined();
-    expect(await merge([agentGap("own/tooling"), word("Merge", "d-agent2")])).toBeDefined();
+    expect(await merge([agentGap("own/tooling"), word("Merge", "d-agent2 for live-run")])).toBeDefined();
   });
 
   test("the person's gate override for the head lifts the hold on a gap an agent accepted, though its card names no gap", async () => {

@@ -16,12 +16,13 @@
   not take one of the agent's 3 reads.
 - A gate pass records the gaps that an agent accepted with 🤖 decisions. The
   merge-gate hook refuses an enqueue or merge of that head until the person
-  chooses "Merge" on a merge card that names the PR, its full head sha and
-  the decision id of each held gap:
+  chooses "Merge" on a merge card that names the PR, its full head sha, and
+  each held decision id with every proof kind that decision accepts:
   `hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full head sha>: merge card'`.
   The recorder refuses any other choice, and a question without that head.
-  The answer lifts only the gaps its question named, and a push leaves it
-  behind. A gate override for the head lifts the hold too.
+  The answer lifts only the decisions whose id and kinds its question named,
+  so a gap that a decision accepts later still shows on a card. A push leaves
+  it behind. A gate override for the head lifts the hold too.
 - The hold covers repositories in `guards.merge-gate-exempt` too, which still
   need no gate pass. There, the hook reads the decision ledger on every merge,
   and refuses it when the ledger cannot be read. A 🤖 gap decision of the PR
