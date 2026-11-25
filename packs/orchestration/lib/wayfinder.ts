@@ -151,7 +151,7 @@ type RestIssue = {
 type RestComment = { user: { login: string } | null; body: string; html_url: string; created_at: string; updated_at: string };
 
 async function restGetIssue(owner: string, repo: string, number: number): Promise<RestIssue> {
-  const issue: RestIssue = JSON.parse(await gh(["api", `repos/${owner}/${repo}/issues/${number}`]));
+  const issue: RestIssue = JSON.parse(await gh(["api", "--jq", "tojson", `repos/${owner}/${repo}/issues/${number}`]));
   if (issue.pull_request) throw new Error(`No issue ${owner}/${repo}#${number}`);
   return issue;
 }

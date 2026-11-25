@@ -125,7 +125,11 @@ if [ "$2" != graphql ]; then
     exit 0
   fi
   [ -f "$base.json" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
-  cat "$base.json"
+  case "\${jq:-}" in
+    tojson) cat "$base.json"; echo ;;
+    '') if [ -n "\${GH_FORCE_TTY:-}" ]; then printf '\\033[1;37m'; cat "$base.json"; printf '\\033[m\\n'; else cat "$base.json"; fi ;;
+    *) echo "fake gh: no fake for --jq $jq" >&2; exit 1 ;;
+  esac
   exit 0
 fi
 for arg; do case "$arg" in owner=*) owner=\${arg#owner=} ;; repo=*) repo=\${arg#repo=} ;; number=*) number=\${arg#number=} ;; query=*) printf '%s\\n' "\${arg#query=}" >> "$(dirname "$0")/queries.log"; case "$arg" in *subIssues*) kind=issue ;; esac ;; esac; done
