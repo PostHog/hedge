@@ -113,14 +113,35 @@ function foldCase(text: string): string {
 type CiEntry = { text: string; as: string; owner: KnownName; ambiguous?: boolean; regex?: RegExp };
 
 type CompiledMatcher = {
-  ciRegex?: RegExp;
+  ciRegexes: RegExp[];
   ciMaxLen: number;
   ciMap: Map<string, CiEntry>;
   ciEntries: CiEntry[];
-  csRegex?: RegExp;
+  csRegexes: RegExp[];
   csMaxLen: number;
   csMap: Map<string, { as: string; owner: KnownName }>;
 };
+
+const maxRegexItems = 256;
+const maxRegexChars = 16_384;
+
+function compileRegexChunks(items: Array<{ pattern: string }>, flags: string): RegExp[] {
+  const regexes: RegExp[] = [];
+  let chunk: string[] = [];
+  let chars = 0;
+  for (const item of items) {
+    const added = item.pattern.length + (chunk.length ? 1 : 0);
+    if (chunk.length >= maxRegexItems || (chunk.length > 0 && chars + added > maxRegexChars)) {
+      regexes.push(new RegExp(chunk.join("|"), flags));
+      chunk = [];
+      chars = 0;
+    }
+    chunk.push(item.pattern);
+    chars += item.pattern.length + (chunk.length > 1 ? 1 : 0);
+  }
+  if (chunk.length) regexes.push(new RegExp(chunk.join("|"), flags));
+  return regexes;
+}
 
 function compileSpellings(entries: KnownName[], transform?: (value: string) => string, exempt?: Set<string>, presentExempt?: string[]): CompiledMatcher {
   const raw = entries
@@ -188,37 +209,59 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
   const ciSorted = [...ciItems, ...exemptItems].sort(byLen);
   const csSorted = [...csItems, ...exemptItems].sort(byLen);
   return {
-    ...(ciItems.length ? { ciRegex: new RegExp(ciSorted.map((item) => item.pattern).join("|"), "gi") } : {}),
+    ciRegexes: ciItems.length ? compileRegexChunks(ciSorted, "gi") : [],
     ciMaxLen: ciSorted[0]?.len ?? 0,
     ciMap,
     ciEntries,
-    ...(csItems.length ? { csRegex: new RegExp(csSorted.map((item) => item.pattern).join("|"), "g") } : {}),
+    csRegexes: csItems.length ? compileRegexChunks(csSorted, "g") : [],
     csMaxLen: csSorted[0]?.len ?? 0,
     csMap,
   };
 }
 
-function replaceLongestFirst(text: string, regex: RegExp, maxLen: number, replacer: (match: string) => string): string {
+function replaceLongestFirst(text: string, regexes: RegExp[], maxLen: number, replacer: (match: string) => string): string {
+  const execAt = (slice: string, from: number, cached?: Array<RegExpExecArray | null | undefined>): { index: number; text: string } | undefined => {
+    if (regexes.length === 1) {
+      const regex = regexes[0]!;
+      regex.lastIndex = from;
+      const m = regex.exec(slice);
+      return m ? { index: m.index, text: m[0] } : undefined;
+    }
+    let best: { index: number; text: string } | undefined;
+    for (let i = 0; i < regexes.length; i++) {
+      let m = cached?.[i];
+      if (m !== null && (m === undefined || m.index < from)) {
+        const regex = regexes[i]!;
+        regex.lastIndex = from;
+        m = regex.exec(slice);
+        if (cached) cached[i] = m;
+      }
+      if (!m) continue;
+      if (!best || m.index < best.index || (m.index === best.index && m[0].length > best.text.length)) {
+        best = { index: m.index, text: m[0] };
+      }
+    }
+    return best;
+  };
   const replaceRange = (slice: string): string => {
     let out = "";
     let pos = 0;
+    const cached = regexes.length > 1 ? new Array<RegExpExecArray | null | undefined>(regexes.length) : undefined;
     while (pos < slice.length) {
-      regex.lastIndex = pos;
-      const first = regex.exec(slice);
+      const first = execAt(slice, pos, cached);
       if (!first) break;
       let bestStart = first.index;
-      let bestEnd = bestStart + first[0].length;
-      let bestMatch = first[0];
+      let bestEnd = bestStart + first.text.length;
+      let bestMatch = first.text;
       if (bestMatch.length < maxLen) {
         let probe = bestStart + 1;
         while (probe < bestEnd) {
-          regex.lastIndex = probe;
-          const next = regex.exec(slice);
+          const next = execAt(slice, probe);
           if (!next || next.index >= bestEnd) break;
-          if (next[0].length > bestMatch.length) {
+          if (next.text.length > bestMatch.length) {
             bestStart = next.index;
-            bestEnd = bestStart + next[0].length;
-            bestMatch = next[0];
+            bestEnd = bestStart + next.text.length;
+            bestMatch = next.text;
             if (bestMatch.length >= maxLen) break;
             probe = bestStart + 1;
           } else {
@@ -241,8 +284,8 @@ function replaceLongestFirst(text: string, regex: RegExp, maxLen: number, replac
 
 function applySpellings(text: string, matcher: CompiledMatcher, exempt?: Set<string>, skipOwner?: KnownName, onMatch?: (match: string, as: string) => string) {
   let result = text;
-  if (matcher.ciRegex) {
-    result = replaceLongestFirst(result, matcher.ciRegex, matcher.ciMaxLen, (match) => {
+  if (matcher.ciRegexes.length) {
+    result = replaceLongestFirst(result, matcher.ciRegexes, matcher.ciMaxLen, (match) => {
       if (exempt?.has(match)) return match;
       const fast = matcher.ciMap.get(foldCase(match));
       const hit =
@@ -253,8 +296,8 @@ function applySpellings(text: string, matcher: CompiledMatcher, exempt?: Set<str
       return onMatch ? onMatch(match, hit.as) : hit.as;
     });
   }
-  if (matcher.csRegex) {
-    result = replaceLongestFirst(result, matcher.csRegex, matcher.csMaxLen, (match) => {
+  if (matcher.csRegexes.length) {
+    result = replaceLongestFirst(result, matcher.csRegexes, matcher.csMaxLen, (match) => {
       if (exempt?.has(match)) return match;
       const hit = matcher.csMap.get(match);
       if (!hit || (skipOwner && hit.owner === skipOwner)) return match;
@@ -303,13 +346,20 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     ...valid.map((entry) => entry.as).filter((label) => /^<devbox \d+>$/.test(label)),
   ]);
   const rawAllSpellings = compileSpellings(allEntries, undefined, undefined, [...sanitizeExempt]);
+  const sanitizedLabelCache = new Map<string, string>();
   const sanitizeLabel = (entry: KnownName) => {
+    const canCache = !foldCase(entry.as).includes(foldCase(entry.text));
+    if (canCache) {
+      const cached = sanitizedLabelCache.get(entry.as);
+      if (cached !== undefined) return cached;
+    }
     let value = entry.as;
     for (let pass = 0; pass < 4; pass++) {
       const next = applyRules(stripHome(applySpellings(value, rawAllSpellings, sanitizeExempt, entry)), allRules);
       if (next === value) break;
       value = next;
     }
+    if (canCache) sanitizedLabelCache.set(entry.as, value);
     return value;
   };
 

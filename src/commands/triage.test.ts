@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { main } from "../cli.ts";
+import { redact } from "./triage-redact.ts";
 import { spawnRunner, type CommandRunner } from "../adapters/run.ts";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
 import { engineRoot, fakeMachine, hedgeSetup, scripted } from "../setup/testing.ts";
@@ -859,6 +860,15 @@ describe("hedge triage", () => {
       expect(schemeTitle).not.toContain(leaked);
       expect(schemeBody).not.toContain(leaked);
     }
+
+    const manyKnown = Array.from({ length: 20_000 }, (_, i) => ({
+      text: `The pack source alias-${i}`,
+      as: "The pack source <private source>",
+      after: true,
+    }));
+    expect(redact("Note: The pack source alias-19999 is not pinned.", schemeHome, manyKnown)).toBe(
+      "Note: The pack source <private source> is not pinned.",
+    );
   });
 });
 
