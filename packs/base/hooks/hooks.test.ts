@@ -589,7 +589,7 @@ describe("hook runner", () => {
     expect(await dispatch(dirWith("a.ts"), "codex", "{}", run)).toEqual({ code: 1, stdout: "", stderr: "hedge hook a.ts: exit 1\n" });
   });
 
-  const hookModule = (body: string) => `export const hedgeHook = async (provider, readInput, home) => {\n${body}\n};\nif (import.meta.main) console.log("ran as its own process");\n`;
+  const hookModule = (body: string) => `export const hook = async (provider, readInput, home) => {\n${body}\n};\nexport { hook as hedgeHook };\nif (import.meta.main) console.log("ran as its own process");\n`;
 
   test("loads a hook under the root in its own process, with the provider, input, and home it would get on its own", async () => {
     const root = temp.make("root-");
@@ -628,5 +628,21 @@ describe("hook runner", () => {
     const contexts = JSON.parse(stdout).hookSpecificOutput.additionalContext.split("\n\n");
     expect(contexts.map((context: string) => context.split(" ").slice(0, 2))).toEqual([["claude", "{}"], ["claude", "{}"], ["claude", "{}"], ["claude", "{}"], ["claude", "{}"]]);
     expect(contexts.map((context: string) => Number(context.split(" ")[2]))).not.toContain(process.pid);
+  });
+
+  test("runs shipped hooks in-process without spawning Bun and fails a non-callable hedgeHook export without falling back", async () => {
+    const neverSpawn = async () => { throw new Error("unexpected subprocess"); };
+    const shippedDir = temp.make("shipped-");
+    symlinkSync(join(import.meta.dir, "name-a-model.ts"), join(shippedDir, "name-a-model.ts"));
+    const shipped = await dispatch(shippedDir, "claude", JSON.stringify({ tool_name: "Agent", tool_input: {} }), runInProcessWithin(join(import.meta.dir, "../../.."), neverSpawn));
+    expect(shipped.code).toBe(2);
+    expect(shipped.stderr).toContain("model");
+
+    const root = temp.make("root-");
+    const dir = join(root, "PreToolUse");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "bad-export.ts"), `export const hedgeHook = 1;\n`);
+    const bad = await dispatch(dir, "claude", "{}", runInProcessWithin(root, neverSpawn));
+    expect(bad).toEqual({ code: 1, stdout: "", stderr: "hedge hook bad-export.ts: hedgeHook export is not a function\n" });
   });
 });
