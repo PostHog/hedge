@@ -449,7 +449,7 @@ esac
     expect(legacyTagOffline.stale).toContain(`could not fetch ${legacyTagOid}`);
   });
 
-  test("rejects refspec injection, separates invalid-UTF-8 mirror paths, and falls back offline after a legacy insteadOf broken-ref fetch", async () => {
+  test("rejects refspec injection and falls back offline after a legacy insteadOf broken-ref fetch", async () => {
     const repoA = await packRepo("Trusted repo A.");
     const repoB = await packRepo("Untrusted repo B.");
     const shaA = await spawnGit(repoA, "rev-parse", "HEAD");
@@ -485,7 +485,9 @@ esac
     if ("error" in legacyBrokenOffline) throw new Error(legacyBrokenOffline.error);
     expect(legacyBrokenOffline.packs[0]?.manifest.summary).toBe("Legacy insteadOf good v1.");
     expect(legacyBrokenOffline.stale).toContain("could not fetch main");
+  });
 
+  test("separates invalid-UTF-8 mirror paths and preserves offline legacy fallback", async () => {
     if (process.platform === "linux") {
       const rawParent = temp.make("raw-bytes-");
       const pathA = Buffer.concat([Buffer.from(rawParent + "/repo-"), Buffer.from([0x80])]);
@@ -555,7 +557,9 @@ print(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=d, env=env).deco
       if ("error" in rawLegacySecond) throw new Error(rawLegacySecond.error);
       expect(rawLegacySecond.packs[0]?.manifest.summary).toBe("Raw byte 0x80.");
     }
+  });
 
+  test("tracks blocked cross-repo switches separately and allows offline empty-FETCH_HEAD mirrors", async () => {
     const switchRepoA = await packRepo("Switch repo A.");
     const switchRepoB = await packRepo("Switch repo B.");
     await spawnGit(switchRepoB, "checkout", "-q", "-b", "release");
@@ -589,7 +593,9 @@ print(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=d, env=env).deco
     if ("error" in emptyMirrorOffline) throw new Error(emptyMirrorOffline.error);
     expect(emptyMirrorOffline.packs[0]?.manifest.summary).toBe("Empty FH mirror packs.");
     expect(emptyMirrorOffline.stale).toContain("could not fetch main");
+  });
 
+  test("resumes last-good branch offline after checkout drift and rejects HEAD mutation while loading", async () => {
     const pinResumeRepo = await packRepo("Pin resume v1.");
     const pinV1 = await spawnGit(pinResumeRepo, "rev-parse", "HEAD");
     writePack(pinResumeRepo, "Pin resume v2.");
