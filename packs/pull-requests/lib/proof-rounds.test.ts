@@ -434,33 +434,40 @@ test("--thread reads the user's words from the T3 thread through the local T3 se
   } finally { await t3.stop(); }
 });
 
-test("the user's pick on an Antigravity card accepts the gap its question names, though the card's unused other field holds a stray letter", async () => {
+test("the user's pick on an Antigravity card accepts the gap its question names, though the card's unused other field holds a stray letter, and a condition they typed there does not", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "new\n");
   const at = "2026-11-25T04:03:04Z";
   const question = "Accept the prod-shape gap? example/product#42: No sandbox";
-  const card = {
+  const card = (id: string, other: string) => ({
     item: {
-      id: "card", requestId: "card-request", type: "user_input_request", startedAt: at,
+      id, requestId: `${id}-request`, type: "user_input_request", startedAt: at,
       questions: [
         { id: "q1", header: question, question: "The agent has 1 questions.", options: [{ label: "Accept the gap (Recommended)", description: "", value: "1" }, { label: "Keep the gap open", description: "", value: "2" }], allowCustomAnswer: false },
         { id: "q1_other", header: "Other", question: `Optional free-form answer to: ${question}`, options: [], required: false },
       ],
-      questionAnswer: { questionTextById: { q1: "The agent has 1 questions.", q1_other: `Optional free-form answer to: ${question}` }, answers: { q1: "1", q1_other: "O" } },
+      questionAnswer: { questionTextById: { q1: "The agent has 1 questions.", q1_other: `Optional free-form answer to: ${question}` }, answers: { q1: "1", q1_other: other } },
     },
-  };
+  });
+  const items = [card("conditional", "Only after CI is green")];
   const t3 = await startT3Stub({
     shell: { projects: [], threads: [{ id: "mcp:thread-9", title: "Proof", projectId: "project", status: "idle" }] },
-    turnItems: { "mcp:thread-9": [card] },
-    resolutions: [{ thread: "mcp:thread-9", request: "card-request", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000001" }],
+    turnItems: { "mcp:thread-9": items },
+    resolutions: [
+      { thread: "mcp:thread-9", request: "conditional-request", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000001" },
+      { thread: "mcp:thread-9", request: "card-request", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000002" },
+    ],
   });
   try {
     mkdirSync(join(pr.home, ".t3/userdata"), { recursive: true });
     for (const file of ["server-runtime.json", "statev2.sqlite"]) writeFileSync(join(pr.home, ".t3/userdata", file), readFileSync(join(t3.home, ".t3/userdata", file)));
     pr.reader.words = undefined;
     await pr.hedge("gap", "--kind", "prod-shape", "--reason", "No sandbox");
+    const accept = () => pr.decide("record", "--mark", "👤", "--class", "proof-gap", "--kind", "prod-shape", "--pr", "example/product#42", "--thread", "thread-9");
 
-    expect((await pr.decide("record", "--mark", "👤", "--class", "proof-gap", "--kind", "prod-shape", "--pr", "example/product#42", "--thread", "thread-9")).code).toBe(0);
+    await expect(accept()).rejects.toThrow(`The user chose "Only after CI is green", which does not accept the gap`);
+    items.push(card("card", "O"));
+    expect((await accept()).code).toBe(0);
     expect(ledgerDecisions(pr)).toMatchObject([{ question, answer: `2026-11-25 "Accept the gap (Recommended)"`, where: { thread: "mcp:thread-9", message: "card:0" } }]);
   } finally { await t3.stop(); }
 });

@@ -124,7 +124,7 @@ export async function readThreadWords(client: T3HttpClient, value: string, state
     if (typedByUser(item) && item.text) words.push({ thread: threadId, id: item.messageId ?? item.id ?? "", text: item.text, answered: lastAssistant.slice(0, answeredCap), at: item.updatedAt ?? item.startedAt, source: "typed" });
     const answer = item.type === "user_input_request" && answeredInClient().has(item.requestId ?? "") ? item.questionAnswer : undefined;
     Object.entries(answer?.answers ?? {}).forEach(([question, chosen], index) => {
-      const card = cardAnswer(item.questions ?? [], answer!.questionTextById, question, chosen);
+      const card = cardAnswer(item.questions ?? [], answer!, question, chosen);
       if (card) words.push({ thread: threadId, id: `${item.id}:${index}`, text: card.text, answered: card.answered.slice(0, answeredCap), at: item.updatedAt ?? item.startedAt, source: "question" });
     });
   }
@@ -134,13 +134,18 @@ export async function readThreadWords(client: T3HttpClient, value: string, state
 const otherSuffix = "_other";
 const questionCountPlaceholder = /^The agent has \d+ questions?\.$/u;
 
-function cardAnswer(questions: CardQuestion[], questionTextById: Record<string, string>, id: string, chosen: string | string[]) {
+function cardAnswer(questions: CardQuestion[], { questionTextById, answers }: QuestionAnswer, id: string, chosen: string | string[]) {
   const byId = (wanted: string) => questions.find((question) => question.id === wanted);
   const asked = byId(id);
   const otherOf = id.endsWith(otherSuffix) && asked && !asked.options?.length ? byId(id.slice(0, -otherSuffix.length)) : undefined;
-  if (otherOf) return typedInOtherField(asked!, chosen) ? { text: [chosen].flat().join(", "), answered: promptOf(otherOf, questionTextById[otherOf.id]) } : undefined;
+  if (otherOf) {
+    const note = otherOf.id in answers ? undefined : noteIn(asked!, chosen);
+    return note === undefined ? undefined : { text: note, answered: promptOf(otherOf, questionTextById[otherOf.id]) };
+  }
+  const other = byId(`${id}${otherSuffix}`);
+  const note = other && !other.options?.length ? noteIn(other, answers[other.id] ?? "") : undefined;
   const labels = [chosen].flat().map((value) => onlyLabelOf(asked?.options ?? [], value));
-  return { text: labels.join(", "), answered: asked ? promptOf(asked, questionTextById[id]) : questionTextById[id] ?? id };
+  return { text: note ?? labels.join(", "), answered: asked ? promptOf(asked, questionTextById[id]) : questionTextById[id] ?? id };
 }
 
 function onlyLabelOf(options: NonNullable<CardQuestion["options"]>, value: string) {
@@ -152,9 +157,9 @@ function promptOf(question: CardQuestion, text = question.question ?? question.i
   return questionCountPlaceholder.test(text) && question.header ? question.header : text;
 }
 
-function typedInOtherField(field: CardQuestion, chosen: string | string[]) {
-  const typed = [chosen].flat().join(", ").trim().toLowerCase();
-  return typed !== "" && !(field.header ?? "").toLowerCase().startsWith(typed);
+function noteIn(field: CardQuestion, chosen: string | string[]) {
+  const typed = [chosen].flat().join(", ").trim();
+  return typed !== "" && !(field.header ?? "").toLowerCase().startsWith(typed.toLowerCase()) ? typed : undefined;
 }
 
 export async function readLinkedThreadWords(client: Pick<T3HttpClient, "callTool">, environmentId: string, threadId: string): Promise<ThreadWord[]> {
