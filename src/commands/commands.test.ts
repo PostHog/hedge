@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { main, type CliOptions } from "../cli.ts";
 import type { AvailableSource, PackManifest, ProfileFile } from "../pack/types.ts";
@@ -11,7 +10,19 @@ import { settingsCommand } from "./settings.ts";
 
 isolateGit();
 const temp = tempDirs();
-afterEach(() => temp.cleanup());
+const activeHelpers: Array<{ kill(signal?: NodeJS.Signals): void }> = [];
+afterEach(() => {
+  for (const proc of activeHelpers.splice(0)) {
+    try { proc.kill("SIGKILL"); } catch {}
+  }
+  temp.cleanup();
+});
+
+function fifoRead(path: string): Promise<string> {
+  const proc = Bun.spawn(["cat", path], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+  activeHelpers.push(proc);
+  return new Response(proc.stdout).text();
+}
 
 const engineRoot = join(import.meta.dir, "../..");
 
@@ -235,7 +246,7 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     const [ready, gone] = [join(home, "ready"), join(home, "gone")];
     expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
     await withTeamPack(home, { workflows: [flow("allowlist")], human: [humanStep("allowlist", blockedProbe(trap), "allowlist")] });
-    return { holderGone: readFile(gone, "utf8"), started: readFile(ready, "utf8") };
+    return { holderGone: fifoRead(gone), started: fifoRead(ready) };
   }
 
   const endHolder = async (started: Promise<string>) => {
@@ -250,7 +261,7 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     const trapped = join(home, "trapped");
     expect(Bun.spawnSync(["mkfifo", trapped]).exitCode).toBe(0);
     const { holderGone, started } = await withBlockedProbe(home, '"echo trapped > \\"$HOME/trapped\\"; exit 0"');
-    const sawTrap = readFile(trapped, "utf8");
+    const sawTrap = fifoRead(trapped);
     const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await started) };
     try {
       expect((await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output).toContain(notChecked);
@@ -283,20 +294,22 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     copyFileSync(Bun.which("true")!, execOnly);
     chmodSync(execOnly, 0o111);
     await withTeamPack(home, {
-      workflows: [flow("external"), flow("builtin"), flow("noshebang"), flow("execonly"), flow("dashdash")],
+      workflows: [flow("external"), flow("builtin"), flow("noshebang"), flow("execonly"), flow("dashdash"), flow("largeargs"), flow("nonzero")],
       human: [
         { id: "external", say: "Check external set.", probe: ["set", "--hedge-external-flag"], workflow: "external" },
         { id: "builtin", say: "Check builtin export.", probe: ["export", "HEDGE_BUILTIN=1"], workflow: "builtin" },
         { id: "noshebang", say: "Check plain script.", probe: [noShebang], workflow: "noshebang" },
         { id: "execonly", say: "Check execute-only binary.", probe: [execOnly], workflow: "execonly" },
         { id: "dashdash", say: "Check leading --.", probe: ["--", "true"], workflow: "dashdash" },
+        { id: "largeargs", say: "Check large probe argv.", probe: [Bun.which("true")!, "a".repeat(70_000), "b".repeat(70_000)], workflow: "largeargs" },
+        { id: "nonzero", say: "Check nonzero exit.", probe: ["sh", "-c", "exit 7"], workflow: "nonzero" },
       ],
     });
     const prevPath = process.env.PATH;
     process.env.PATH = `${bin}:${prevPath ?? ""}`;
     try {
       const output = (await hedge(home, ["packs"])).output;
-      expect(output).toContain(`  ~ team  Team rules.\n      Workflows: external on, builtin needs setup, noshebang needs setup, execonly on, dashdash needs setup\n${needsSetup}`);
+      expect(output).toContain(`  ~ team  Team rules.\n      Workflows: external on, builtin needs setup, noshebang needs setup, execonly on, dashdash needs setup, largeargs on, nonzero needs setup\n${needsSetup}`);
     } finally {
       if (prevPath === undefined) delete process.env.PATH;
       else process.env.PATH = prevPath;
@@ -312,7 +325,7 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
       workflows: [flow("allowlist")],
       human: [humanStep("allowlist", 'trap "" TERM; sleep 30 & pid=$!; trap \'kill $pid 2>/dev/null; echo cleaned > "$HOME/cleaned"; exit 130\' INT; exec 3>"$HOME/fg-gone"; ps -o pgid= -p $$ | tr -d " " > "$HOME/ready"; wait', "allowlist")],
     });
-    const [fgClosed, sawClean, started] = [readFile(fgGone, "utf8"), readFile(cleaned, "utf8"), readFile(ready, "utf8")];
+    const [fgClosed, sawClean, started] = [fifoRead(fgGone), fifoRead(cleaned), fifoRead(ready)];
     const listing = Bun.spawn([process.execPath, join(engineRoot, "src/cli.ts"), "packs"], { env: { ...Bun.env, HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
     try {
       await started;
@@ -356,7 +369,7 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
       ],
       steps: [{ id: "sync-step", workflow: "sync", after: "sign-in", run: ["true"] }],
     });
-    const [holderGone, started] = [readFile(gone, "utf8"), readFile(ready, "utf8")];
+    const [holderGone, started] = [fifoRead(gone), fifoRead(ready)];
     const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await started) };
     try {
       const output = (await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output;

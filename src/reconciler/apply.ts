@@ -457,7 +457,7 @@ const probeSupervisor = join(import.meta.dir, "probe-supervisor.ts");
 
 async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal) {
   if (!command.length || (command[0]!.includes("/") && !existsSync(command[0]!))) return 127;
-  let child: { pid: number; exited: Promise<number>; stdout: ReadableStream<Uint8Array>; unref(): void } | undefined;
+  let child: { pid: number; exited: Promise<number> } | undefined;
   let stopSignal: NodeJS.Signals | undefined;
   let reaped = false;
   const endGroup = (name: NodeJS.Signals = "SIGTERM") => {
@@ -486,13 +486,14 @@ async function runDetached(command: string[], env: Record<string, string | undef
     return 124;
   }
   try {
-    child = Bun.spawn(bunScript(probeSupervisor, JSON.stringify(command)), { stdout: "pipe", stderr: "ignore", env, detached: true });
+    child = Bun.spawn(bunScript(probeSupervisor), {
+      stdin: new TextEncoder().encode(JSON.stringify(command)),
+      stdout: "ignore",
+      stderr: "ignore",
+      env,
+      detached: true,
+    });
     if (stopSignal || signal.aborted) endGroup(stopSignal ?? "SIGTERM");
-    const output = (await new Response(child.stdout).text()).trim();
-    if (/^\d+$/.test(output)) {
-      child.unref();
-      return Number(output);
-    }
     return await child.exited;
   } catch {
     return 127;
