@@ -493,30 +493,28 @@ test("a listed context that the base requires from two apps still holds the gate
   expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: red, required failing: Visual Review gate / storybook");
 });
 
-test("a failing check of a listed check's name from another app still prints as not required", async () => {
+test("a listed check still holds the gate while another app runs a check of its name", async () => {
   const pr = await personChecked();
   pr.ci([{ name: "build", bucket: "pass" }, { name: "Visual Review gate / storybook", bucket: "fail", app: 9 }]);
-  pr.statuses([{ context: "Visual Review gate / storybook", state: "failure", by: "product[bot]" }]);
-  const gate = await pr.hedge("gate");
-  expect(ciLine(gate.output)).toBe(`ci: green, 1 required check(s) pass; not required: failing: Visual Review gate / storybook; ${personLine}`);
+  pr.statuses([{ context: "Visual Review gate / storybook", state: "success", by: "product[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: red, required failing: Visual Review gate / storybook");
 });
 
-test("on a draft, another app's failing check of a listed check's name still keeps its workflow's missing check required", async () => {
-  const { pr } = await reviewed();
-  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.personChecks": "example/product=CI / Approval" });
-  pr.pullRequestState({ draft: true });
-  pr.required("main", [{ context: "CI / Approval", integration_id: 9 }, { context: "CI / Test", integration_id: 7 }]);
-  pr.ci([{ name: "CI / Lint", bucket: "pass", app: 7 }, { name: "CI / Approval", bucket: "fail", app: 7 }]);
-  expect(ciLine((await pr.hedge("gate")).output)).toBe(`ci: pending, required not reported yet: CI / Test; not required: failing: CI / Approval; a person passes it on GitHub, so the gate does not wait on it: CI / Approval`);
-});
-
-test("on a draft, a listed check does not decide whether a missing check of its workflow is withheld", async () => {
+test("a listed check still holds the gate when another required check shares its workflow, on a draft too", async () => {
   const { pr } = await reviewed();
   pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.personChecks": "example/product=CI / Approval" });
   pr.pullRequestState({ draft: true });
   pr.required("main", [{ context: "CI / Approval" }, { context: "CI / Test" }]);
-  pr.ci([{ name: "CI / Approval", bucket: "pass" }]);
-  expect(ciLine((await pr.hedge("gate")).output)).toBe("ci: pending, required not reported yet: CI / Test; a person passes it on GitHub, so the gate does not wait on it: CI / Approval");
+  pr.ci([{ name: "CI / Approval", bucket: "fail" }, { name: "CI / Test", bucket: "pass" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: red, required failing: CI / Approval");
+});
+
+test("a stacked PR whose base requires nothing stays held to a listed check the default branch requires", async () => {
+  const pr = await personChecked();
+  pr.pullRequestState({ base: "topic" });
+  pr.ci([{ name: "build", bucket: "pass" }]);
+  pr.statuses([{ context: "Visual Review gate / storybook", state: "failure", by: "product[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: red, required failing: Visual Review gate / storybook");
 });
 
 const changedAfterMerge = { id: 11, updatedAt: "2026-10-25T10:39:53.621+01:00" };

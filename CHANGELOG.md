@@ -9,10 +9,13 @@
   `PostHog/posthog=Visual Review gate / storybook`. No CI produces their
   result: someone accepts the visual change.
 - `hedge proof gate` does not wait on such a check, does not count it red,
-  and does not ask for a ci gap on it, when the base requires its context
-  once. The CI line names it without its
-  result, so a person passing it later leaves the gate as it was. GitHub
-  still holds the merge until the person passes it.
+  and does not ask for a ci gap on it. This holds only when the PR's own
+  base requires the check, requires its context once, requires no other
+  check of its workflow, and no other app runs a check of its name.
+- The CI line names such a check without its result, so a person passing it
+  later leaves the gate as it was. GitHub still holds the merge until the
+  person passes it.
+
 ### The landed gate survives a renamed required check, and the thread query costs less
 
 - `hedge proof gate --landed` no longer waits on a required check that never

@@ -215,11 +215,16 @@ function notRequired(entries: Entry[], { countRunning = true } = {}) {
   return parts.length ? `; not required: ${parts.join("; ")}` : "";
 }
 
-function personPassed(required: RequiredCheck[], listed: Set<string>) {
-  return required.filter((check) => listed.has(check.context) && required.filter((other) => other.context === check.context).length === 1);
-}
-
 const reportOf = (check: RequiredCheck) => (entry: Entry) => entry.name === check.context && (entry.status || check.appId === undefined || entry.appId === check.appId);
+
+function personPassed(required: RequiredCheck[], entries: Entry[], listed: Set<string>) {
+  const alone = (check: RequiredCheck) => {
+    const workflow = workflowOf(check.context);
+    return required.every((other) => other === check || (other.context !== check.context && (workflow === undefined || !other.context.startsWith(workflow))));
+  };
+  const onlyItsOwn = (check: RequiredCheck) => entries.every((entry) => entry.name !== check.context || reportOf(check)(entry));
+  return required.filter((check) => listed.has(check.context) && alone(check) && onlyItsOwn(check));
+}
 
 function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boolean): CiResult {
   const counted = new Set<Entry>();
@@ -262,8 +267,9 @@ export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date,
     let required = requiredChecks(home, identity.repository, pr.base, run, now, fresh);
     const stacked = !required.length && pr.defaultBranch !== undefined && pr.defaultBranch !== pr.base;
     if (stacked) required = requiredChecks(home, identity.repository, pr.defaultBranch!, run, now, fresh);
-    const byPerson = personPassed(required, listedChecks("pull-requests.personChecks", identity.repository, env));
-    const entries = entriesOf(identity, run).filter((entry) => !byPerson.some((check) => reportOf(check)(entry)));
+    const reported = entriesOf(identity, run);
+    const byPerson = stacked ? [] : personPassed(required, reported, listedChecks("pull-requests.personChecks", identity.repository, env));
+    const entries = reported.filter((entry) => !byPerson.some((check) => reportOf(check)(entry)));
     required = required.filter((check) => !byPerson.includes(check));
     if (!required.length && !byPerson.length) return { ...everyCheck(entries, identity.commit), checks: checksOf(entries) };
     const readyOnly = pr.draft ? listedChecks("pull-requests.draftSkippedChecks", identity.repository, env) : new Set<string>();
