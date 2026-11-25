@@ -668,4 +668,51 @@ esac
     expect(pinned.packs[0]?.manifest.summary).toBe("Commit 2.");
   });
 
+  test("fetching a shared tag from a second repository keeps the first repository's refreshed ancestors available offline without exposing them to the second", async () => {
+    const repoA = await packRepo("Repo A c1.");
+    const c1 = await spawnGit(repoA, "rev-parse", "HEAD");
+    const cache = temp.make("cache-cross-repo-shallow-");
+    const refA = { name: "team", repo: repoA, ref: "main" };
+    const initial = await fetchSource(refA, cache);
+    if ("error" in initial) throw new Error(initial.error);
+
+    writePack(repoA, "Repo A c2.");
+    await spawnGit(repoA, "commit", "-q", "-am", "c2");
+    const c2 = await spawnGit(repoA, "rev-parse", "HEAD");
+    writePack(repoA, "Repo A c3.");
+    await spawnGit(repoA, "commit", "-q", "-am", "c3");
+    const c3 = await spawnGit(repoA, "rev-parse", "HEAD");
+    await spawnGit(repoA, "tag", "v3");
+    writePack(repoA, "Repo A c4.");
+    await spawnGit(repoA, "commit", "-q", "-am", "c4");
+
+    const advanced = await advanceSource(refA, cache, c1);
+    expect(advanced.state).toBe("moved");
+
+    const repoB = join(temp.make("repo-b-"), "fork.git");
+    await spawnGit(dirname(repoB), "clone", "-q", repoA, repoB);
+    const fromB = await fetchSource({ name: "team", repo: repoB, ref: "v3" }, cache);
+    if ("error" in fromB) throw new Error(fromB.error);
+    expect(fromB.packs[0]?.manifest.summary).toBe("Repo A c3.");
+
+    rmSync(repoA, { recursive: true, force: true });
+    rmSync(repoB, { recursive: true, force: true });
+
+    const pinA = await fetchSource({ name: "team", repo: repoA, ref: c2 }, cache);
+    if ("error" in pinA) throw new Error(pinA.error);
+    expect(pinA.stale).toBeUndefined();
+    expect(pinA.packs[0]?.manifest.summary).toBe("Repo A c2.");
+
+    const pinBExact = await fetchSource({ name: "team", repo: repoB, ref: c3 }, cache);
+    if ("error" in pinBExact) throw new Error(pinBExact.error);
+    expect(pinBExact.stale).toBeUndefined();
+    expect(pinBExact.packs[0]?.manifest.summary).toBe("Repo A c3.");
+
+    const pinBAncestor = await fetchSource({ name: "team", repo: repoB, ref: c2 }, cache);
+    if (!("error" in pinBAncestor)) {
+      expect(pinBAncestor.stale).toContain("could not fetch");
+      expect(pinBAncestor.packs[0]?.manifest.summary).toBe("Repo A c3.");
+    }
+  });
+
 });

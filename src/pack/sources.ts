@@ -472,6 +472,7 @@ const goodResolvedDigest = (record: { resolved?: string; resolvedDigest?: string
       : undefined;
 
 const pinRef = (repoHash: string, commit: string) => `refs/hedge/pins/${repoHash}/${commit.toLowerCase()}`;
+const historyRef = (repoHash: string, commit: string, from: string) => `refs/hedge/history/${repoHash}/${commit.toLowerCase()}/${from.toLowerCase()}`;
 
 async function writeAtomic(path: string, content: string | Uint8Array, mode = 0o600) {
   const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
@@ -502,8 +503,15 @@ async function pinTarget(dir: string, repoHash: string, oid: string): Promise<st
   const normalized = oid.toLowerCase();
   const type = await git(dir, "cat-file", "-t", normalized);
   if (!type.ok || type.stdout !== "commit") return undefined;
-  const containing = await git(dir, "for-each-ref", "--count=1", "--contains", normalized, "--format=%(objectname)", `refs/hedge/pins/${repoHash}/`);
-  return containing.ok && gitHash.test(containing.stdout) ? normalized : undefined;
+  const containing = await git(dir, "for-each-ref", "--contains", normalized, "--format=%(refname)", `refs/hedge/history/${repoHash}/`);
+  if (!containing.ok || !containing.stdout) return undefined;
+  for (const line of containing.stdout.split("\n")) {
+    const stopOid = line.trim().split("/").at(-1)?.toLowerCase();
+    if (!stopOid || !gitHash.test(stopOid)) continue;
+    if (stopOid === normalized) return normalized;
+    if (!(await git(dir, "merge-base", "--is-ancestor", normalized, stopOid)).ok) return normalized;
+  }
+  return undefined;
 }
 
 async function recordPinRef(dir: string, repoHash: string, oid: string): Promise<string | undefined> {
@@ -512,7 +520,16 @@ async function recordPinRef(dir: string, repoHash: string, oid: string): Promise
   return updated.ok ? undefined : updated.stderr || "could not record pinned commit";
 }
 
-async function saveGood(dir: string, good: Good): Promise<string | undefined> {
+async function recordHistoryRef(dir: string, repoHash: string, commit: string, from: string): Promise<string | undefined> {
+  const ref = historyRef(repoHash, commit, from);
+  const normalized = commit.toLowerCase();
+  const existing = await git(dir, "rev-parse", "--verify", "--quiet", ref);
+  if (existing.ok && existing.stdout.toLowerCase() === normalized) return undefined;
+  const updated = await git(dir, "update-ref", ref, normalized);
+  return updated.ok ? undefined : updated.stderr || "could not record verified commit history";
+}
+
+async function saveGood(dir: string, good: Good, historyFrom?: string): Promise<string | undefined> {
   const before = await lastGood(dir);
   const unchanged =
     before !== undefined &&
@@ -530,6 +547,10 @@ async function saveGood(dir: string, good: Good): Promise<string | undefined> {
   if (currentCommit) {
     const recorded = await recordPinRef(dir, currentCommit.repoHash, currentCommit.commit);
     if (recorded && !unchanged) return recorded;
+    if (historyFrom && gitHash.test(historyFrom)) {
+      const recordedHistory = await recordHistoryRef(dir, currentCommit.repoHash, currentCommit.commit, historyFrom);
+      if (recordedHistory && !unchanged) return recordedHistory;
+    }
     if (good.peeled === true && isCommitPin(good.ref, currentCommit.commit.length) && (await git(dir, "cat-file", "-e", good.ref)).ok) {
       const recordedTag = await recordPinRef(dir, currentCommit.repoHash, good.ref);
       if (recordedTag && !unchanged) return recordedTag;
@@ -681,7 +702,7 @@ async function readShallowSet(dir: string): Promise<Set<string>> {
   );
 }
 
-async function restoreKnownShallow(dir: string, beforeShallow: Set<string>, targetCommit: string, effectiveDigest: string): Promise<void> {
+async function restoreKnownShallow(dir: string, beforeShallow: Set<string>, targetCommit: string): Promise<void> {
   if (beforeShallow.has(targetCommit)) return;
   const shallowPath = join(dir, ".git", "shallow");
   const current = await readShallowSet(dir);
@@ -696,16 +717,22 @@ async function restoreKnownShallow(dir: string, beforeShallow: Set<string>, targ
   }
   if (!parents.length) return;
   const beforeKept = [...beforeShallow].every((sha) => current.has(sha));
-  const alreadyPinnedForRepo = beforeKept && (await pinTarget(dir, effectiveDigest, targetCommit)) !== undefined;
-  if (!alreadyPinnedForRepo) {
-    for (const parent of parents) {
-      if ((await pinTarget(dir, effectiveDigest, parent)) === undefined) return;
+  if (!beforeKept) return;
+  const containing = await git(dir, "for-each-ref", "--contains", targetCommit, "--format=%(refname)", "refs/hedge/history/");
+  if (!containing.ok || !containing.stdout) return;
+  let traversesTarget = false;
+  for (const line of containing.stdout.split("\n")) {
+    const stopOid = line.trim().split("/").at(-1)?.toLowerCase();
+    if (!stopOid || !gitHash.test(stopOid) || stopOid === targetCommit) continue;
+    if (!(await git(dir, "merge-base", "--is-ancestor", targetCommit, stopOid)).ok) {
+      traversesTarget = true;
+      break;
     }
-  } else {
-    for (const parent of parents) {
-      const verified = await git(dir, "rev-parse", "--verify", "--quiet", `${parent}^{commit}`);
-      if (!verified.ok) return;
-    }
+  }
+  if (!traversesTarget) return;
+  for (const parent of parents) {
+    const verified = await git(dir, "rev-parse", "--verify", "--quiet", `${parent}^{commit}`);
+    if (!verified.ok) return;
   }
   current.delete(targetCommit);
   if (current.size === 0) {
@@ -737,7 +764,7 @@ async function checkout(dir: string, repo: string, ref: string, savedFetchHead: 
     return { effectiveRepo, error: peeled.stderr || "could not resolve fetched commit" };
   }
   const targetCommit = peeled.stdout.toLowerCase();
-  await restoreKnownShallow(dir, beforeShallow, targetCommit, repoDigest(effectiveRepo));
+  await restoreKnownShallow(dir, beforeShallow, targetCommit);
   const moved = await git(dir, "checkout", "-q", "--detach", `${targetCommit}^{commit}`);
   if (!moved.ok) return { effectiveRepo, error: moved.stderr };
   const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
@@ -919,7 +946,7 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} changed checkout HEAD while loading` };
   }
   const effectiveDigest = repoDigest(effectiveRepo);
-  const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest });
+  const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest }, from);
   if (saveError) {
     if (before) await restoreCheckout(dir, before);
     else if ((await git(dir, "checkout", "-q", "--detach", `${from}^{commit}`)).ok) clearLoadedModules(dir);

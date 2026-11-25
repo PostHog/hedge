@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { open } from "node:fs/promises";
 import { join } from "node:path";
 import { main } from "../cli.ts";
-import { engineAdapters } from "../adapters/index.ts";
 import { redact } from "./triage-redact.ts";
 import { spawnRunner, type CommandRunner } from "../adapters/run.ts";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
@@ -350,26 +350,33 @@ describe("hedge triage", () => {
     mkdirSync(profileDir, { recursive: true });
     await spawnGit(profileDir, "init", "-q");
     const profilePath = join(profileDir, "hedge.json");
+    const nextProfilePath = join(profileDir, "hedge.next.json");
     const baseProfile = { schema: 1, engine: { repo: "PostHog/hedge", ref: "main", channel: "track" }, sources: [], packs: [], plan: "both", settings: {}, workflows: {} };
-    writeFileSync(profilePath, JSON.stringify(baseProfile));
+    const nextProfile = { ...baseProfile, sources: [{ name: "race-secret", repo: "PostHog/hedge", ref: "main" }] };
+    expect(Bun.spawnSync(["mkfifo", profilePath]).exitCode).toBe(0);
     mkdirSync(join(home, ".config/hedge"), { recursive: true });
     writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "mac", name: "noras-mbp", profileDir }));
     const sent: Sent[] = [];
     const io = scripted([]);
-    let updated = false;
     const runRealGit: CommandRunner = async (command, options = {}) => {
       sent.push({ command, ...(options.input === undefined ? {} : { input: options.input }) });
       if (command[0] === "git") return spawnRunner(command, options);
       return capture([], undefined)(command, options);
     };
-    const raceAdapters = () => {
-      if (!updated) {
-        updated = true;
-        writeFileSync(profilePath, JSON.stringify({ ...baseProfile, sources: [{ name: "race-secret", repo: "PostHog/hedge", ref: "main" }] }));
+    const swapProfile = (async () => {
+      const fh = await open(profilePath, "w");
+      try {
+        await fh.writeFile(JSON.stringify(baseProfile));
+        writeFileSync(nextProfilePath, JSON.stringify(nextProfile));
+        renameSync(nextProfilePath, profilePath);
+      } finally {
+        await fh.close();
       }
-      return engineAdapters();
-    };
-    const code = await main(["triage", "--send"], { home, engineRoot, platform: "darwin", env: {}, print: io.terminal.print, terminal: io.terminal, capture: runRealGit, adapters: raceAdapters, hostname: () => "noras-mbp.local", run: async () => 0 });
+    })();
+    const [code] = await Promise.all([
+      main(["triage", "--send"], { home, engineRoot, platform: "darwin", env: {}, print: io.terminal.print, terminal: io.terminal, capture: runRealGit, hostname: () => "noras-mbp.local", run: async () => 0 }),
+      swapProfile,
+    ]);
     expect(code).toBe(0);
     const issue = sent.find((call) => call.command[1] === "issue")!;
     expect(issue.input).toContain("The pack source <private source> is not pinned to a commit SHA.");
@@ -379,6 +386,17 @@ describe("hedge triage", () => {
   test("home-path redaction does not collide with internal redactor placeholders", () => {
     expect(redact("Saved /home/guest.0.0.~", "/home/guest", [{ text: "acme/secret", as: "<private repo>" }])).toBe("Saved ~.0.0.~");
     expect(redact("acme/secret at /home/guest.0.0.~", "/home/guest", [{ text: "acme/secret", as: "<private repo>" }])).toBe("<private repo> at ~.0.0.~");
+  });
+
+  test("nested replacement labels scan linearly across large transcripts", () => {
+    const known = Array.from({ length: 200 }, (_, i) => ({ text: `private-org/repo-${i}`, as: `<<devbox ${i + 1}> source>`, after: true }));
+    const line = "status ok for private-org/repo-0 while checking <<devbox 1> source> on host\n";
+    const big = line.repeat(2_000);
+    const started = performance.now();
+    const out = redact(big, "/home/guest", known);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(out).not.toContain("private-org/repo-0");
+    expect(out).toContain("<<devbox 1> source>");
   });
 
   test("a long title is cut after redaction, so no part of a secret reaches the issue", async () => {

@@ -469,17 +469,39 @@ function overlapsAny(intervals: Array<{ start: number; end: number }>, start: nu
   return lo < intervals.length && intervals[lo]!.start < end;
 }
 
+const exemptAcCache = new WeakMap<Set<string>, { ac: AcAutomaton | undefined; maxLen: number }>();
+
+function getExemptAc(exempt: Set<string>): { ac: AcAutomaton | undefined; maxLen: number } {
+  const cached = exemptAcCache.get(exempt);
+  if (cached) return cached;
+  let maxLen = 0;
+  const labels: string[] = [];
+  for (const label of exempt) {
+    if (!label.length) continue;
+    if (label.length > maxLen) maxLen = label.length;
+    labels.push(label);
+  }
+  const entry = {
+    ac: labels.length
+      ? buildAc(
+          labels.map((label) => ({ text: label, len: label.length, left: 0 as const, right: 0 as const, as: label })),
+          false,
+        )
+      : undefined,
+    maxLen,
+  };
+  exemptAcCache.set(exempt, entry);
+  return entry;
+}
+
 function findExemptOverlaps(
   exempt: Set<string> | undefined,
   text: string,
   sensitiveSpans: MatchSpan[],
 ): MatchSpan[] {
   if (!exempt?.size || !sensitiveSpans.length || !text.length) return [];
-  let maxExemptLen = 0;
-  for (const label of exempt) {
-    if (label.length > maxExemptLen) maxExemptLen = label.length;
-  }
-  if (maxExemptLen === 0) return [];
+  const { ac: exemptAc, maxLen: maxExemptLen } = getExemptAc(exempt);
+  if (!exemptAc || maxExemptLen === 0) return [];
   const ordered = [...sensitiveSpans].sort((a, b) => a.start - b.start || a.end - b.end);
   const merged: Array<{ start: number; end: number }> = [];
   for (const span of ordered) {
@@ -502,33 +524,6 @@ function findExemptOverlaps(
       windows.push({ start, end });
     }
   }
-  const angleExempt = new Set<string>();
-  const otherExempt: string[] = [];
-  for (const label of exempt) {
-    if (!label.length) continue;
-    if (/^<[^<>\r\n]+>$/.test(label)) angleExempt.add(label);
-    else otherExempt.push(label);
-  }
-  const presentSet = new Set<string>();
-  const angleRe = /<[^<>\r\n]+>/g;
-  for (const win of windows) {
-    const slice = text.slice(win.start, win.end);
-    if (angleExempt.size) {
-      angleRe.lastIndex = 0;
-      for (let m = angleRe.exec(slice); m !== null; m = angleRe.exec(slice)) {
-        if (angleExempt.has(m[0])) presentSet.add(m[0]);
-      }
-    }
-    for (const label of otherExempt) {
-      if (!presentSet.has(label) && slice.includes(label)) presentSet.add(label);
-    }
-  }
-  if (!presentSet.size) return [];
-  const exemptAc = buildAc(
-    [...presentSet].map((label) => ({ text: label, len: label.length, left: 0 as const, right: 0 as const, as: label })),
-    false,
-  );
-  if (!exemptAc) return [];
   const out: MatchSpan[] = [];
   for (const win of windows) {
     let state = 0;
