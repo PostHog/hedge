@@ -261,6 +261,7 @@ describe("hedge refresh", () => {
     const hex40 = "e".repeat(40);
     const box = await machine("main");
     await spawnGit(box.repo, "checkout", "-q", "-b", hex40);
+    const tip1 = await spawnGit(box.repo, "rev-parse", "HEAD");
     box.pin(`refs/heads/${hex40}`);
     expect(await box.hedge("apply", "--profile", box.profile)).toBe(0);
     expect(box.read(guide)).toBe("Rules v1.\n");
@@ -271,13 +272,15 @@ describe("hedge refresh", () => {
     expect(await box.hedge("refresh")).toBe(0);
     expect(box.read(guide)).toBe("Rules v2.\n");
 
-    rmSync(box.repo, { recursive: true, force: true });
-    box.pin(`refs/heads/${hex40}`);
+    box.pin(tip1);
     expect(await box.hedge("apply", "--profile", box.profile)).toBe(0);
-    expect(box.read(guide)).toBe("Rules v2.\n");
+    expect(box.read(guide)).toBe("Rules v1.\n");
 
+    rmSync(box.repo, { recursive: true, force: true });
+    box.lines.length = 0;
     box.pin(tip2);
     expect(await box.hedge("apply", "--profile", box.profile)).toBe(0);
     expect(box.read(guide)).toBe("Rules v2.\n");
+    expect(box.lines.join("\n")).not.toContain("could not fetch");
   });
 });

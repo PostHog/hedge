@@ -219,24 +219,31 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
   let fetchError: string | undefined;
   let fetchedNew = false;
   let savedFetchHead: SavedFetchHead | undefined;
-  if (!(await checkedOutFromCache(dir, repo, effectiveBefore, ref, good))) {
+  let checkedOutCommit = await checkedOutFromCache(dir, repo, effectiveBefore, ref, good);
+  if (!checkedOutCommit) {
     savedFetchHead = await snapshotFetchHead(dir);
     fetchedNew = true;
     const fetched = await checkout(dir, repo, ref.ref, savedFetchHead);
     effectiveRepo = fetched.effectiveRepo;
     fetchError = fetched.error;
+    checkedOutCommit = fetched.commit;
   }
-  if (!fetchError) {
+  if (!fetchError && checkedOutCommit) {
+    const commit = checkedOutCommit;
+    const isBranch = fetchedNew ? await fetchHeadIsBranch(dir, ref.ref) : false;
+    const peeled =
+      fetchedNew && !isBranch && isCommitPin(ref.ref, commit.length) && ref.ref.toLowerCase() !== commit.toLowerCase()
+        ? (await git(dir, "rev-parse", "--verify", "--quiet", `${ref.ref}^{commit}`)).stdout.toLowerCase() === commit.toLowerCase()
+        : !fetchedNew && isCommitPin(ref.ref, commit.length) && ref.ref.toLowerCase() !== commit.toLowerCase()
+          ? true
+          : undefined;
     const loaded = await load(dir, loadLimitMs);
     if (!("error" in loaded)) {
-      const commit = (await git(dir, "rev-parse", "HEAD")).stdout;
-      const isBranch = fetchedNew ? await fetchHeadIsBranch(dir, ref.ref) : false;
-      const peeled =
-        fetchedNew && !isBranch && isCommitPin(ref.ref, commit.length) && ref.ref.toLowerCase() !== commit.toLowerCase()
-          ? (await git(dir, "rev-parse", "--verify", "--quiet", `${ref.ref}^{commit}`)).stdout.toLowerCase() === commit.toLowerCase()
-          : !fetchedNew && isCommitPin(ref.ref, commit.length) && ref.ref.toLowerCase() !== commit.toLowerCase()
-            ? true
-            : undefined;
+      const postLoadHead = (await git(dir, "rev-parse", "--verify", "--quiet", "HEAD")).stdout;
+      if (!postLoadHead || postLoadHead.toLowerCase() !== commit.toLowerCase()) {
+        if (savedFetchHead) await restoreFetchHead(dir, savedFetchHead);
+        return fallBack(ref, dir, repo, effectiveRepo, good, `${ref.ref} from ${ref.repo} changed checkout HEAD while loading`, loadLimitMs, before, preserveBefore, legacyOk && effectiveRepo === effectiveBefore, isBranch);
+      }
       const saveError = await saveGood(dir, {
         repo,
         ref: ref.ref,
@@ -249,12 +256,11 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
       if (savedFetchHead) await restoreFetchHead(dir, savedFetchHead);
       return fallBack(ref, dir, repo, effectiveRepo, good, `could not record ${ref.ref} from ${ref.repo}: ${saveError}`, loadLimitMs, before, preserveBefore, legacyOk && effectiveRepo === effectiveBefore, isBranch);
     }
-    const askedBranch = fetchedNew ? await fetchHeadIsBranch(dir, ref.ref) : false;
     if (savedFetchHead) await restoreFetchHead(dir, savedFetchHead);
-    return fallBack(ref, dir, repo, effectiveRepo, good, `${ref.ref} from ${ref.repo} does not load: ${loaded.error}`, loadLimitMs, before, preserveBefore, legacyOk && effectiveRepo === effectiveBefore, askedBranch);
+    return fallBack(ref, dir, repo, effectiveRepo, good, `${ref.ref} from ${ref.repo} does not load: ${loaded.error}`, loadLimitMs, before, preserveBefore, legacyOk && effectiveRepo === effectiveBefore, isBranch);
   }
   if (savedFetchHead) await restoreFetchHead(dir, savedFetchHead);
-  return fallBack(ref, dir, repo, effectiveRepo, good, `could not fetch ${ref.ref} from ${ref.repo}: ${fetchError}`, loadLimitMs, before, preserveBefore, legacyOk && effectiveRepo === effectiveBefore, undefined);
+  return fallBack(ref, dir, repo, effectiveRepo, good, `could not fetch ${ref.ref} from ${ref.repo}: ${fetchError ?? "unknown commit"}`, loadLimitMs, before, preserveBefore, legacyOk && effectiveRepo === effectiveBefore, undefined);
 }
 
 function cacheDir(ref: SourceRef, cacheRoot: string): string | { error: string } {
@@ -489,11 +495,11 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string, cac
     .map((ref) => ({ id: `source:unpinned:${ref.name}`, pack: "engine", say: `The pack source ${ref.name} is not pinned to a commit SHA. Pin its ref in hedge.json, so each apply loads the same packs, even offline.` }));
 }
 
-async function checkedOutFromCache(dir: string, repo: string, effectiveRepo: string, ref: SourceRef, good: Good | undefined): Promise<boolean> {
-  if (!existsSync(join(dir, ".git"))) return false;
+async function checkedOutFromCache(dir: string, repo: string, effectiveRepo: string, ref: SourceRef, good: Good | undefined): Promise<string | undefined> {
+  if (!existsSync(join(dir, ".git"))) return undefined;
   const oid = ref.ref.toLowerCase();
   const hashLen = await repoHashLength(dir);
-  if (!isCommitPin(oid, hashLen)) return false;
+  if (!isCommitPin(oid, hashLen)) return undefined;
   const goodCommit = verifiedGoodCommit(good);
   const verifiedGoodMatch =
     goodCommit !== undefined &&
@@ -502,8 +508,8 @@ async function checkedOutFromCache(dir: string, repo: string, effectiveRepo: str
     good.resolved === effectiveRepo &&
     (goodCommit.commit === oid || (good.peeled === true && good.ref.toLowerCase() === oid));
   const target = verifiedGoodMatch ? goodCommit.commit : await pinTarget(dir, effectiveRepo, oid);
-  if (!target) return false;
-  return (await git(dir, "checkout", "-q", "--detach", target)).ok;
+  if (!target) return undefined;
+  return (await git(dir, "checkout", "-q", "--detach", target)).ok ? target : undefined;
 }
 
 type SavedFetchHead = { kind: "content"; bytes: Buffer; mode: number } | { kind: "missing" } | { kind: "unreadable" };
@@ -529,7 +535,7 @@ async function restoreFetchHead(dir: string, saved: SavedFetchHead) {
   }
 }
 
-async function checkout(dir: string, repo: string, ref: string, savedFetchHead: SavedFetchHead): Promise<{ effectiveRepo: string; error?: string }> {
+async function checkout(dir: string, repo: string, ref: string, savedFetchHead: SavedFetchHead): Promise<{ effectiveRepo: string; commit?: string; error?: string }> {
   const effectiveBefore = await resolvedRepoUrl(dir, repo);
   if (isInvalidRef(ref)) return { effectiveRepo: effectiveBefore, error: `invalid ref ${JSON.stringify(ref)}` };
   await mkdir(dir, { recursive: true });
@@ -545,7 +551,9 @@ async function checkout(dir: string, repo: string, ref: string, savedFetchHead: 
     return { effectiveRepo, error: "git remote rewrite rule changed during fetch" };
   }
   const moved = await git(dir, "checkout", "-q", "--detach", "FETCH_HEAD");
-  return { effectiveRepo, ...(moved.ok ? {} : { error: moved.stderr }) };
+  if (!moved.ok) return { effectiveRepo, error: moved.stderr };
+  const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
+  return head.ok && gitHash.test(head.stdout) ? { effectiveRepo, commit: head.stdout } : { effectiveRepo, error: head.stderr || "could not resolve checked-out HEAD" };
 }
 
 /** Runs git without any prompt: no terminal, no askpass program, SSH in batch mode, and a time limit. */
@@ -667,6 +675,13 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     else if ((await git(dir, "checkout", "-q", "--detach", from)).ok) clearLoadedModules(dir);
     await restoreFetchHead(dir, savedFetchHead);
     return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} does not load: ${loaded.error}` };
+  }
+  const postLoadHead = (await git(dir, "rev-parse", "--verify", "--quiet", "HEAD")).stdout;
+  if (!postLoadHead || postLoadHead.toLowerCase() !== tip.toLowerCase()) {
+    if (before) await restoreCheckout(dir, before);
+    else if ((await git(dir, "checkout", "-q", "--detach", from)).ok) clearLoadedModules(dir);
+    await restoreFetchHead(dir, savedFetchHead);
+    return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} changed checkout HEAD while loading` };
   }
   const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolved: effectiveRepo });
   if (saveError) {

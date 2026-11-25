@@ -29,8 +29,10 @@ const standardRules: Rule[] = [
 ];
 
 const randomRule: Rule = [/[A-Za-z0-9+/_-]{32,}={0,2}/g, (text) => (looksRandom(text) ? "<secret>" : text)];
+const fixedSecretRules: Rule[] = secretRules.slice(0, 6);
+const contextualSecretRules: Rule[] = secretRules.slice(6);
 const allRules: Rule[] = [...secretRules, ...standardRules, randomRule];
-const preRandomRules: Rule[] = [...secretRules, ...standardRules];
+const preRandomRules: Rule[] = [...contextualSecretRules, ...standardRules];
 
 const tokenLetters = 32;
 const windowLetters = 128;
@@ -359,9 +361,10 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
   };
 
   const passOne = (value: string) => {
+    const preMasked = applyRules(value, fixedSecretRules);
     const matchedOriginals: string[] = [];
     const matchedLabels: string[] = [];
-    const masked = applySpellings(value, maskedSpellings, undefined, undefined, (match, as) => {
+    const masked = applySpellings(preMasked, maskedSpellings, undefined, undefined, (match, as) => {
       const index = matchedOriginals.length;
       matchedOriginals.push(match);
       matchedLabels.push(as);

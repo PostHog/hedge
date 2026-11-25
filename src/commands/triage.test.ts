@@ -667,6 +667,56 @@ describe("hedge triage", () => {
     expect(body).toContain("fetched <<this machine> source> from mirror");
     expect(body).not.toContain("dev-credentials");
   });
+
+  test("still redacts a full JWT when an inherited source repo matches one of its segments", async () => {
+    const home = temp.make("home-");
+    const inherited = temp.make("inherited-jwt-");
+    await spawnGit(inherited, "init", "-q");
+    const payloadSeg = "eyJzdWIiOiJ0ZXN0In0";
+    const sigSeg = "syntheticSigSegment1234";
+    const headerSeg = "eyJhbGciOiJIUzI1NiJ9";
+    writeFileSync(
+      join(inherited, "hedge.json"),
+      JSON.stringify({
+        schema: 1,
+        engine: { repo: "PostHog/hedge", ref: "main", channel: "track" },
+        sources: [{ name: "jwt-seg", repo: sigSeg, ref: "main" }],
+        packs: [],
+        plan: "both",
+        settings: {},
+        workflows: {},
+      }),
+    );
+    const sent: Sent[] = [];
+    const io = scripted([]);
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      sent.push({ command, ...(options.input === undefined ? {} : { input: options.input }) });
+      if (command[0] === "git") return spawnRunner(command, options);
+      return capture([], undefined)(command, options);
+    };
+    const jwt = `${headerSeg}.${payloadSeg}.${sigSeg}`;
+    const code = await main(["triage", "--send", "--note", `auth ${jwt} done`], {
+      home,
+      engineRoot,
+      platform: "darwin",
+      env: { HEDGE_PROFILE_DIR: inherited },
+      print: io.terminal.print,
+      terminal: io.terminal,
+      capture: runRealGit,
+      hostname: () => "noras-mbp.local",
+      run: async () => 0,
+    });
+    expect(code).toBe(0);
+    const issueCall = sent.find((call) => call.command[1] === "issue")!;
+    const title = issueCall.command[issueCall.command.indexOf("--title") + 1]!;
+    const body = issueCall.input!;
+    expect(title).toContain("auth <token> done");
+    expect(body).toContain("auth <token> done");
+    for (const part of [headerSeg, payloadSeg, sigSeg]) {
+      expect(title).not.toContain(part);
+      expect(body).not.toContain(part);
+    }
+  });
 });
 
 describe("hedge setup and triage", () => {

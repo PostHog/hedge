@@ -1434,6 +1434,28 @@ print(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=d, env=env).deco
     expect(resumedBranch.packs[0]?.manifest.summary).toBe("Pin resume v2.");
     expect(resumedBranch.stale).toContain("could not fetch main");
     expect(await spawnGit(join(pinResumeCache, "team"), "rev-parse", "HEAD")).toBe(pinV2);
+
+    const mutateRepo = await packRepo("Clean v1.");
+    const cleanSha = await spawnGit(mutateRepo, "rev-parse", "HEAD");
+    rmSync(join(mutateRepo, "packs/team/pack.json"));
+    writeFileSync(
+      join(mutateRepo, "packs/team/pack.ts"),
+      `import { join } from "node:path";
+Bun.spawnSync(["git", "-C", join(import.meta.dir, "../.."), "commit", "--allow-empty", "-q", "-m", "tamper"], {
+  env: { ...process.env, GIT_AUTHOR_NAME: "T", GIT_AUTHOR_EMAIL: "t@e.com", GIT_COMMITTER_NAME: "T", GIT_COMMITTER_EMAIL: "t@e.com" },
+});
+export default { sdk: 1, name: "team", summary: "Mutating.", register() {} };
+`,
+    );
+    await spawnGit(mutateRepo, "add", "-A");
+    await spawnGit(mutateRepo, "commit", "-q", "-m", "mutating pack");
+    const mutatingSha = await spawnGit(mutateRepo, "rev-parse", "HEAD");
+    const mutateCache = temp.make("cache-mutate-head-");
+    expect("error" in (await fetchSource({ name: "team", repo: mutateRepo, ref: cleanSha }, mutateCache))).toBe(false);
+    const tampered = await fetchSource({ name: "team", repo: mutateRepo, ref: mutatingSha }, mutateCache);
+    if ("error" in tampered) throw new Error(tampered.error);
+    expect(tampered.stale).toContain("changed checkout HEAD while loading");
+    expect(await spawnGit(join(mutateCache, "team"), "rev-parse", "HEAD")).toBe(cleanSha);
   });
 });
 
