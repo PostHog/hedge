@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { main } from "../cli.ts";
 import { engineRoot } from "../setup/testing.ts";
@@ -798,30 +798,55 @@ esac
       expect(offline.packs[0]?.manifest.summary).toBe("Pin refspec.");
     }
 
-    const failRepo = await packRepo("Base v1.");
+    const failRepo = await tsRepo({
+      "packs/team/pack.ts": 'export default { sdk: 1, name: "team", summary: "Base v1.", register() {} };\n',
+    });
     const failCache = temp.make("cache-rollback-history-");
     const failRef = { name: "team", repo: failRepo, ref: "main" };
     const failInit = await fetchSource(failRef, failCache);
     if ("error" in failInit) throw new Error(failInit.error);
     const failBaseSha = await spawnGit(failRepo, "rev-parse", "HEAD");
-    writePack(failRepo, "Mid v2.");
+    const failMetaPath = join(failCache, "team", ".git", "hedge-source.json");
+    const savedFailMeta = readFileSync(failMetaPath, "utf8");
+    writeFileSync(
+      join(failRepo, "packs/team/pack.ts"),
+      'export default { sdk: 1, name: "team", summary: "Mid v2.", register() {} };\n',
+    );
     await spawnGit(failRepo, "commit", "-q", "-am", "mid");
     const failMidSha = await spawnGit(failRepo, "rev-parse", "HEAD");
-    writePack(failRepo, "Tip v3.");
+    writeFileSync(
+      join(failRepo, "packs/team/pack.ts"),
+      [
+        'import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";',
+        'import { join } from "node:path";',
+        'const meta = join(import.meta.dir, "..", "..", ".git", "hedge-source.json");',
+        'if (existsSync(meta) && !statSync(meta).isDirectory()) {',
+        '  rmSync(meta, { force: true });',
+        '  mkdirSync(meta, { recursive: true });',
+        '  writeFileSync(join(meta, "block"), "x");',
+        '}',
+        'export default { sdk: 1, name: "team", summary: "Tip v3.", register() {} };',
+        "",
+      ].join("\n"),
+    );
     await spawnGit(failRepo, "commit", "-q", "-am", "tip");
-    const failGitDir = join(failCache, "team", ".git");
-    chmodSync(failGitDir, 0o555);
+    const failTipSha = await spawnGit(failRepo, "rev-parse", "HEAD");
     try {
       const failedAdvance = await advanceSource(failRef, failCache, failBaseSha);
-      expect(failedAdvance.state).toBe("failed");
+      expect(failedAdvance).toMatchObject({ state: "failed", say: expect.stringContaining("could not record main") });
+      expect(await spawnGit(join(failCache, "team"), "for-each-ref", "refs/hedge/history/")).toBe("");
+      expect(await spawnGit(join(failCache, "team"), "for-each-ref", "--format=%(objectname)", "refs/hedge/pins/")).toBe(failBaseSha);
     } finally {
-      chmodSync(failGitDir, 0o755);
+      rmSync(failMetaPath, { recursive: true, force: true });
+      writeFileSync(failMetaPath, savedFailMeta);
     }
     rmSync(failRepo, { recursive: true, force: true });
-    const offlineAfterFailedRefresh = await fetchSource({ name: "team", repo: failRepo, ref: failMidSha }, failCache);
-    if (!("error" in offlineAfterFailedRefresh)) {
-      expect(offlineAfterFailedRefresh.stale).toContain("could not fetch");
-      expect(offlineAfterFailedRefresh.packs[0]?.manifest.summary).toBe("Base v1.");
+    for (const blockedSha of [failMidSha, failTipSha]) {
+      const offlineAfterFailedRefresh = await fetchSource({ name: "team", repo: failRepo, ref: blockedSha }, failCache);
+      if (!("error" in offlineAfterFailedRefresh)) {
+        expect(offlineAfterFailedRefresh.stale).toContain("could not fetch");
+        expect(offlineAfterFailedRefresh.packs[0]?.manifest.summary).toBe("Base v1.");
+      }
     }
 
     const repo = await packRepo("R0.");
@@ -846,6 +871,58 @@ esac
     if ("error" in pinnedMid) throw new Error(pinnedMid.error);
     expect(pinnedMid.stale).toBeUndefined();
     expect(pinnedMid.packs[0]?.manifest.summary).toBe("R1a.");
+  });
+
+  test("revalidates refresh base commit under the lock and scopes hex-branch cache checks to the requested repository", async () => {
+    const originA = await packRepo("Origin A0.");
+    const a0 = await spawnGit(originA, "rev-parse", "HEAD");
+    writePack(originA, "Origin A1.");
+    await spawnGit(originA, "commit", "-q", "-am", "a1");
+    const a1 = await spawnGit(originA, "rev-parse", "HEAD");
+    writePack(originA, "Origin A2.");
+    await spawnGit(originA, "commit", "-q", "-am", "a2");
+    const a2 = await spawnGit(originA, "rev-parse", "HEAD");
+
+    const shallowB = join(temp.make("shallow-race-b-"), "b.git");
+    await spawnGit(dirname(shallowB), "clone", "-q", "--depth", "1", `file://${originA}`, shallowB);
+    writePack(shallowB, "Shallow B3.");
+    await spawnGit(shallowB, "commit", "-q", "-am", "b3");
+
+    const raceCache = temp.make("cache-stale-from-race-");
+    const fromA0 = await fetchSource({ name: "team", repo: originA, ref: "main" }, raceCache);
+    if ("error" in fromA0) throw new Error(fromA0.error);
+    const fromA0Pin = await fetchSource({ name: "team", repo: originA, ref: a0 }, raceCache);
+    if ("error" in fromA0Pin) throw new Error(fromA0Pin.error);
+    const switchedToB = await fetchSource({ name: "team", repo: shallowB, ref: a2 }, raceCache);
+    if ("error" in switchedToB) throw new Error(switchedToB.error);
+    const switchedToBBranch = await fetchSource({ name: "team", repo: shallowB, ref: "main" }, raceCache);
+    if ("error" in switchedToBBranch) throw new Error(switchedToBBranch.error);
+    writePack(shallowB, "Shallow B4.");
+    await spawnGit(shallowB, "commit", "-q", "-am", "b4");
+
+    const staleRefresh = await advanceSource({ name: "team", repo: shallowB, ref: "main" }, raceCache, a0);
+    expect(staleRefresh).toEqual({ state: "busy" });
+
+    rmSync(shallowB, { recursive: true, force: true });
+    const offlineHidden = await fetchSource({ name: "team", repo: shallowB, ref: a1 }, raceCache);
+    expect("error" in offlineHidden || offlineHidden.stale !== undefined).toBe(true);
+
+    const repoA = await packRepo("Repo A pinned.");
+    const shaA = await spawnGit(repoA, "rev-parse", "HEAD");
+    const repoB = await packRepo("Repo B branch.");
+    await spawnGit(repoB, "checkout", "-q", "-b", shaA);
+    writePack(repoB, "Repo B hex branch.");
+    await spawnGit(repoB, "commit", "-q", "-am", "hex-branch");
+    const hexCache = temp.make("cache-cross-repo-hex-branch-");
+    const loadA = await fetchSource({ name: "team", repo: repoA, ref: shaA }, hexCache);
+    if ("error" in loadA) throw new Error(loadA.error);
+    const loadB = await fetchSource({ name: "team", repo: repoB, ref: `refs/heads/${shaA}` }, hexCache);
+    if ("error" in loadB) throw new Error(loadB.error);
+    expect(loadB.packs[0]?.manifest.summary).toBe("Repo B hex branch.");
+    rmSync(repoA, { recursive: true, force: true });
+    const backToA = await fetchSource({ name: "team", repo: repoA, ref: shaA }, hexCache);
+    if ("error" in backToA) throw new Error(backToA.error);
+    expect([backToA.packs[0]?.manifest.summary, backToA.stale]).toEqual(["Repo A pinned.", undefined]);
   });
 
 });

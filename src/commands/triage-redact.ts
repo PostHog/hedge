@@ -597,6 +597,8 @@ function findCanonAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?:
   const { text: canonText, edits } = canonicalizeWithMap(text);
   const spans: MatchSpan[] = [];
   const memo = !skipOwner ? new Map<number, Map<string, AcRule | null>>() : undefined;
+  let memoChars = 0;
+  const maxMemoChars = 65_536;
   let state = 0;
   for (let i = 0; i < canonText.length; i++) {
     const code = foldCharCode(canonText, i);
@@ -612,17 +614,21 @@ function findCanonAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?:
       const oEnd = mapPosToOrig(edits, cEnd, "end");
       if (oStart < 0 || oEnd <= oStart) continue;
       const slice = text.slice(oStart, oEnd);
-      const foldedSlice = memo ? foldCase(slice) : "";
-      if (memo) {
+      const useMemo = memo !== undefined && allRulesAtU.length > 1;
+      let foldedSlice: string | undefined;
+      if (useMemo) {
         const hitMap = memo.get(u);
-        if (hitMap && hitMap.has(foldedSlice)) {
-          const cached = hitMap.get(foldedSlice);
-          if (cached && isLeftOk(text, oStart, cached.left) && isRightOk(text, oEnd, cached.right)) {
-            gotHit = true;
-            pushStreamingSpan(spans, oStart, oEnd, oEnd - oStart, cached.as, allowPartialMerge);
-            break;
+        if (hitMap) {
+          foldedSlice = foldCase(slice);
+          if (hitMap.has(foldedSlice)) {
+            const cached = hitMap.get(foldedSlice);
+            if (cached && isLeftOk(text, oStart, cached.left) && isRightOk(text, oEnd, cached.right)) {
+              gotHit = true;
+              pushStreamingSpan(spans, oStart, oEnd, oEnd - oStart, cached.as, allowPartialMerge);
+              break;
+            }
+            if (cached === null) continue;
           }
-          if (cached === null) continue;
         }
       }
       let candidates = allRulesAtU;
@@ -657,13 +663,18 @@ function findCanonAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?:
         matchedRule = rule;
         break;
       }
-      if (memo && (matchedRule || !anyBoundaryFail)) {
+      if (useMemo && candidates.length > 1 && (matchedRule || !anyBoundaryFail)) {
+        if (foldedSlice === undefined) foldedSlice = foldCase(slice);
         let hitMap = memo.get(u);
-        if (!hitMap) {
-          hitMap = new Map();
-          memo.set(u, hitMap);
+        const alreadyStored = hitMap?.has(foldedSlice) ?? false;
+        if (alreadyStored || memoChars + foldedSlice.length <= maxMemoChars) {
+          if (!hitMap) {
+            hitMap = new Map();
+            memo.set(u, hitMap);
+          }
+          if (!alreadyStored) memoChars += foldedSlice.length;
+          hitMap.set(foldedSlice, matchedRule);
         }
-        hitMap.set(foldedSlice, matchedRule);
       }
       if (matchedRule) {
         gotHit = true;

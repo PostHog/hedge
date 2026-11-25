@@ -685,9 +685,19 @@ async function checkedOutFromCache(dir: string, repo: string, effectiveRepo: str
   const oid = stripSourceRefspec(ref.ref).toLowerCase();
   const hashLen = await repoHashLength(dir);
   if (!isCommitPin(oid, hashLen)) return undefined;
-  if (good?.branch === true && branchName(good.ref)?.toLowerCase() === oid) return undefined;
   const effectiveDigest = repoDigest(effectiveRepo);
   const goodDigest = goodResolvedDigest(good);
+  const sameGoodRepo =
+    good !== undefined &&
+    good.repo === repo &&
+    (goodDigest !== undefined ? goodDigest === effectiveDigest : hasGoodCommit(good) && (await legacyFallbackMatches(dir, good, effectiveRepo)));
+  if (
+    sameGoodRepo &&
+    ((good.branch === true && branchName(good.ref)?.toLowerCase() === oid) ||
+      (good.askedBranch === true && branchName(good.asked)?.toLowerCase() === oid))
+  ) {
+    return undefined;
+  }
   const goodCommit = verifiedGoodCommit(good);
   const verifiedGoodMatch =
     goodCommit !== undefined &&
@@ -949,13 +959,28 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
   const head = branch ? `refs/heads/${branch}` : "";
   if (!branch || isInvalidRef(head)) return { state: "failed", say: `invalid ref ${JSON.stringify(ref.ref)} for ${ref.repo}` };
   const effectiveRepo = await resolvedRepoUrl(dir, repo);
+  const effectiveDigest = repoDigest(effectiveRepo);
   const listed = await git(dir, "ls-remote", repo, head);
   if (!listed.ok) return { state: "failed", say: `could not reach ${ref.repo}: ${listed.stderr}` };
   const cachedGood = await lastGood(dir);
   const cachedDigest = goodResolvedDigest(cachedGood);
-  if (cachedGood && (cachedGood.repo !== repo || (cachedDigest !== undefined && cachedDigest !== repoDigest(effectiveRepo)))) {
+  const legacyRepoMismatch =
+    cachedGood !== undefined &&
+    cachedDigest === undefined &&
+    hasGoodCommit(cachedGood) &&
+    !(await legacyFallbackMatches(dir, cachedGood, effectiveRepo));
+  if (cachedGood && (cachedGood.repo !== repo || (cachedDigest !== undefined ? cachedDigest !== effectiveDigest : legacyRepoMismatch))) {
     return { state: "refused", say: `${ref.name} now points to ${ref.repo}, not the repository Hedge loaded last. Run hedge apply.` };
   }
+  if (
+    cachedGood &&
+    (!hasGoodCommit(cachedGood) ||
+      cachedGood.commit.toLowerCase() !== from.toLowerCase() ||
+      (cachedGood.branch === false && cachedGood.askedBranch !== true))
+  ) {
+    return { state: "busy" };
+  }
+  const verifiedHistoryFrom = cachedGood !== undefined ? from : undefined;
   const commit = listed.stdout
     .split("\n")
     .map((line) => line.split("\t"))
@@ -1005,8 +1030,7 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     await restoreFetchHead(dir, savedFetchHead);
     return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} changed checkout HEAD while loading` };
   }
-  const effectiveDigest = repoDigest(effectiveRepo);
-  const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest }, from);
+  const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest }, verifiedHistoryFrom);
   if (saveError) {
     if (before) await restoreCheckout(dir, before);
     else if ((await git(dir, "checkout", "-q", "--detach", `${from}^{commit}`)).ok) clearLoadedModules(dir);
