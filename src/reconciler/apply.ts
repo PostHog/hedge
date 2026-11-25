@@ -10,7 +10,7 @@ import { hublessReason, listedPack } from "./resolve.ts";
 import { wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
 import { withLegacyNames } from "../legacy.ts";
 import { bunScript } from "../runner/bun.ts";
-import { appendTag, createPipe, graceMs, interruptGraceMs, killDeadSession, killDeadSessionSync, killSessionSync, probeResultReported, setCloexec, supervisorEnv, tagEnvVar, watchdogEnv } from "./probe-supervisor.ts";
+import { appendTag, createPipe, graceMs, interruptGraceMs, killDeadSession, killDeadSessionSync, killSessionSync, probeResultReported, removeSpareFile, setCloexec, spareEnvVar, spareFilePath, supervisorEnv, tagEnvVar, watchdogEnv } from "./probe-supervisor.ts";
 
 export type AdapterContext = { home: string; dryRun: boolean; adopt: string[]; adoptFrom?: string[] };
 export type AdapterResult = { actions: Action[]; findings: Finding[]; blocked?: boolean; failed?: boolean };
@@ -511,14 +511,14 @@ const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
 let activeSupervisors = 0;
 const supervisorWaiters: Array<() => void> = [];
 
-type LiveProbe = { pid: number; tag: string; targetPid?: number; targetExited?: boolean; aliveFd?: number; resultFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
+type LiveProbe = { pid: number; tag: string; spareFile: string; handedOff?: boolean; targetPid?: number; targetExited?: boolean; aliveFd?: number; resultFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
 type ActiveRunner = { stop: (name: NodeJS.Signals) => void };
 const activeRunners = new Set<ActiveRunner>();
 const allLiveProbes = new Set<LiveProbe>();
 let interruptHandlersAttached = false;
 
 function handOffWatchdog(probes: Iterable<LiveProbe>) {
-  const batch: Array<{ pid: number; tag: string; targetPid?: number; targetExited?: boolean; fd: number; resultFd?: number; delayMs: number }> = [];
+  const batch: Array<{ pid: number; tag: string; spareFile: string; probe: LiveProbe; targetPid?: number; targetExited?: boolean; fd: number; resultFd?: number; delayMs: number }> = [];
   for (const probe of probes) {
     if (probe.aliveFd === undefined) continue;
     let targetExited = Boolean(probe.targetExited);
@@ -530,6 +530,8 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
     batch.push({
       pid: probe.pid,
       tag: probe.tag,
+      spareFile: probe.spareFile,
+      probe,
       ...(probe.targetPid !== undefined ? { targetPid: probe.targetPid } : {}),
       ...(targetExited ? { targetExited: true } : {}),
       fd: probe.aliveFd,
@@ -552,6 +554,7 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
       return {
         pid: entry.pid,
         ...(entry.targetExited ? {} : { tag: entry.tag }),
+        spareFile: entry.spareFile,
         fd,
         ...(resultFd !== undefined ? { resultFd } : {}),
         delayMs: entry.delayMs,
@@ -568,6 +571,7 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
     });
     watchdog.unref();
     handedOff = true;
+    for (const entry of batch) entry.probe.handedOff = true;
   } catch {
   } finally {
     if (!handedOff) {
@@ -579,13 +583,14 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
         } catch {}
         const sweepTag = entry.targetExited ? undefined : entry.tag;
         if (stillAlive) {
-          killSessionSync(entry.pid, "SIGKILL", sweepTag);
+          killSessionSync(entry.pid, "SIGKILL", sweepTag, entry.spareFile);
           try {
             process.kill(entry.pid, "SIGKILL");
           } catch {}
         } else {
-          killDeadSessionSync(entry.pid, sweepTag, false);
+          killDeadSessionSync(entry.pid, sweepTag, false, entry.spareFile);
         }
+        removeSpareFile(entry.spareFile);
       }
     }
     for (const entry of batch) {
@@ -757,14 +762,17 @@ async function runDetached(command: string[], env: Record<string, string | undef
   };
   try {
     const tag = crypto.randomUUID();
+    const spareFile = spareFilePath(tag);
     const fullTag = appendTag(env[tagEnvVar], tag);
     const targetEnv: Record<string, string> = Object.create(null);
     for (const [k, v] of Object.entries(env)) if (v !== undefined) targetEnv[k] = v;
     targetEnv[tagEnvVar] = tag;
+    targetEnv[spareEnvVar] = spareFile;
     const payload = {
       command,
       env: targetEnv,
       controlFd: 3,
+      spareFile,
       ...(resultPipe ? { resultFd: 4 } : {}),
       ...(cleanupGraceMs === undefined ? {} : { graceMs: cleanupGraceMs }),
     };
@@ -779,6 +787,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
     probe = {
       pid: child.pid,
       tag,
+      spareFile,
       aliveFd,
       ...(resultPipe ? { resultFd: resultPipe.readFd } : {}),
       delayMs: (cleanupGraceMs ?? graceMs) + discoverySlackMs + 100,
@@ -806,7 +815,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
         await statusPromise.catch(() => {});
         const sawResult = reportedResult || (owned.resultFd !== undefined && probeResultReported(owned.resultFd) === "reported");
         if (child?.signalCode !== null || (!sawResult && supCode !== 128 && supCode !== 143)) {
-          await killDeadSession(owned.pid, sawResult ? undefined : owned.tag, true);
+          await killDeadSession(owned.pid, sawResult ? undefined : owned.tag, true, owned.spareFile);
         }
       },
       () => {
@@ -825,6 +834,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
         } catch {}
         owned.resultFd = undefined;
       }
+      if (!owned.handedOff) removeSpareFile(owned.spareFile);
       allLiveProbes.delete(owned);
       live?.delete(owned);
       syncInterruptHandlers();

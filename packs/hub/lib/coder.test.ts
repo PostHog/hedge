@@ -681,9 +681,17 @@ test("watchdog kills a real stopped process group when its controlled clock reac
     { stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true },
   );
   let now = 0;
+  let reachedBeforeDeadline!: () => void;
+  const beforeDeadline = new Promise<void>((resolve) => (reachedBeforeDeadline = resolve));
+  let releaseDeadline!: () => void;
+  const deadlineGate = new Promise<void>((resolve) => (releaseDeadline = resolve));
   const clock: WatchClock = {
     now: () => now,
     sleep: async (ms) => {
+      if (now + ms >= 150) {
+        reachedBeforeDeadline();
+        await deadlineGate;
+      }
       now += ms;
     },
   };
@@ -691,8 +699,11 @@ test("watchdog kills a real stopped process group when its controlled clock reac
   try {
     targetPid = Number((await started).trim());
     expect(targetPid).toBeGreaterThan(0);
-    await watchEntries([{ pid: child.pid, fd: pipe!.writeFd, delayMs: 150 }], clock);
-    expect(now).toBe(150);
+    const watching = watchEntries([{ pid: child.pid, fd: pipe!.writeFd, delayMs: 150 }], clock);
+    await beforeDeadline;
+    expect(() => process.kill(targetPid, 0)).not.toThrow();
+    releaseDeadline();
+    await watching;
     expect(await holderGone).toBe("");
   } finally {
     try { closeSync(pipe!.readFd); } catch {}

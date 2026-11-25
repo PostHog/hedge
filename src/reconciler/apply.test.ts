@@ -795,7 +795,7 @@ process.exit(0);`;
     }
   });
 
-  test("marks a timed-out custom probe unchecked even when its abort handler synchronously resolves 0 or rejects with AbortError, and does not abort already-completed probes", async () => {
+  test("marks a timed-out custom probe unchecked even when its abort handler synchronously resolves 0 or rejects with AbortError, and leaves already-completed subprocess probes untouched", async () => {
     const home = temp.make("home-sync-abort-runner-");
     let fireGiveUp!: () => void;
     const step = { id: "sync-abort", pack: "team", say: "Sync abort.", probe: ["true"] };
@@ -814,29 +814,61 @@ process.exit(0);`;
     expect(result.unchecked.map((item) => item.id)).toEqual(["sync-abort"]);
 
     let fireReject!: () => void;
-    let completedAborted = false;
-    const fastStep = { id: "fast-done", pack: "team", say: "Fast.", probe: ["fast"] };
     const rejectStep = { id: "reject-abort", pack: "team", say: "Reject.", probe: ["slow"] };
-    const rejectResult = await humanStepsLeft(plan({ human: [fastStep, rejectStep] }), {
+    const rejectResult = await humanStepsLeft(plan({ human: [rejectStep] }), {
       home,
       giveUp: new Promise<void>((resolve) => {
         fireReject = resolve;
       }),
-      run: (cmd, _env, signal) => {
-        if (cmd[0] === "fast") {
-          signal?.addEventListener("abort", () => {
-            completedAborted = true;
-          });
-          return Promise.resolve(0);
-        }
-        return new Promise<number>((_resolve, reject) => {
+      run: (_cmd, _env, signal) =>
+        new Promise<number>((_resolve, reject) => {
           signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
           queueMicrotask(() => fireReject());
-        });
-      },
+        }),
     });
     expect(rejectResult.failing).toEqual([]);
     expect(rejectResult.unchecked.map((item) => item.id)).toEqual(["reject-abort"]);
-    expect(completedAborted).toBe(false);
+
+    const dir = temp.make("home-completed-probe-");
+    const [fastReady, slowReady, slowGone] = [join(dir, "fast-ready"), join(dir, "slow-ready"), join(dir, "slow-gone")];
+    expect(Bun.spawnSync(["mkfifo", fastReady, slowReady, slowGone]).exitCode).toBe(0);
+    const fastDone = Bun.file(fastReady).text();
+    const slowStarted = Bun.file(slowReady).text();
+    const slowClosed = Bun.file(slowGone).text();
+    const marker = join(dir, "aborted-marker");
+    let fireReal!: () => void;
+    let slowPid = 0;
+    try {
+      const pending = humanStepsLeft(
+        plan({
+          human: [
+            {
+              id: "fast-done",
+              pack: "team",
+              say: "Fast.",
+              probe: ["sh", "-c", 'trap "echo hit > \"$2\"" TERM INT; echo ok > "$1"; exit 0', "fast", fastReady, marker],
+            },
+            {
+              id: "slow-hang",
+              pack: "team",
+              say: "Slow.",
+              probe: ["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "slow", slowGone, slowReady],
+            },
+          ],
+        }),
+        { home: dir, giveUp: new Promise<void>((resolve) => (fireReal = resolve)), graceMs: 0 },
+      );
+      expect((await fastDone).trim()).toBe("ok");
+      slowPid = Number((await slowStarted).trim());
+      expect(slowPid).toBeGreaterThan(0);
+      fireReal();
+      const realResult = await pending;
+      expect(realResult.failing).toEqual([]);
+      expect(realResult.unchecked.map((item) => item.id)).toEqual(["slow-hang"]);
+      expect(await slowClosed).toBe("");
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      if (slowPid > 0) try { process.kill(slowPid, "SIGKILL"); } catch {}
+    }
   });
 });

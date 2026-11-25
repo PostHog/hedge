@@ -1,7 +1,7 @@
 import { closeSync, writeSync } from "node:fs";
-import { discoverTargets, killDeadSession, probeResultReported, signalTargets } from "./probe-supervisor.ts";
+import { discoverTargets, killDeadSession, probeResultReported, removeSpareFile, signalTargets } from "./probe-supervisor.ts";
 
-export type WatchEntry = { pid: number; fd: number; delayMs: number; tag?: string; resultFd?: number };
+export type WatchEntry = { pid: number; fd: number; delayMs: number; tag?: string; resultFd?: number; spareFile?: string };
 export type WatchClock = { now: () => number; sleep: (ms: number) => Promise<void> };
 
 const alive = (fd: number) => {
@@ -55,7 +55,11 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
   };
   const sweepDead = async (entry: WatchEntry, reported: boolean) => {
     const sweepTag = entry.tag && !reported ? entry.tag : undefined;
-    await killDeadSession(entry.pid, sweepTag, false);
+    try {
+      await killDeadSession(entry.pid, sweepTag, false, entry.spareFile);
+    } finally {
+      removeSpareFile(entry.spareFile);
+    }
   };
   while (pending.size > 0) {
     const elapsed = clock.now() - started;
@@ -84,28 +88,36 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
     if (due.length > 0) {
       await Promise.all(
         due.map(async (entry) => {
-          if (alive(entry.fd)) {
-            const initialTag = entry.tag && !resultReported(entry) ? entry.tag : undefined;
-            let targets = await discoverTargets(entry.pid, initialTag);
+          let sweptDead = false;
+          try {
             if (alive(entry.fd)) {
-              if (initialTag && resultReported(entry)) {
-                targets = await discoverTargets(entry.pid, undefined);
-              }
+              const initialTag = entry.tag && !resultReported(entry) ? entry.tag : undefined;
+              let targets = await discoverTargets(entry.pid, initialTag, entry.spareFile);
               if (alive(entry.fd)) {
-                signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.pid);
-                try {
-                  process.kill(entry.pid, "SIGKILL");
-                } catch {}
+                if (initialTag && resultReported(entry)) {
+                  targets = await discoverTargets(entry.pid, undefined, entry.spareFile);
+                }
+                if (alive(entry.fd)) {
+                  signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.pid);
+                  try {
+                    process.kill(entry.pid, "SIGKILL");
+                  } catch {}
+                } else {
+                  sweptDead = true;
+                  await sweepDead(entry, resultReported(entry));
+                }
               } else {
+                sweptDead = true;
                 await sweepDead(entry, resultReported(entry));
               }
             } else {
+              sweptDead = true;
               await sweepDead(entry, resultReported(entry));
             }
-          } else {
-            await sweepDead(entry, resultReported(entry));
+          } finally {
+            closeEntry(entry);
+            if (!sweptDead) removeSpareFile(entry.spareFile);
           }
-          closeEntry(entry);
         }),
       );
       continue;
@@ -126,7 +138,8 @@ if (import.meta.main) {
           typeof (item as WatchEntry).pid === "number" &&
           typeof (item as WatchEntry).fd === "number" &&
           typeof (item as WatchEntry).delayMs === "number" &&
-          ((item as WatchEntry).resultFd === undefined || typeof (item as WatchEntry).resultFd === "number"),
+          ((item as WatchEntry).resultFd === undefined || typeof (item as WatchEntry).resultFd === "number") &&
+          ((item as WatchEntry).spareFile === undefined || typeof (item as WatchEntry).spareFile === "string"),
       );
     }
   } catch {}

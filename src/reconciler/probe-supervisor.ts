@@ -1,5 +1,7 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, writeSync } from "node:fs";
+import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, writeSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
 export type StopSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT";
 export type Timer = (ms: number, fire: () => void) => () => void;
@@ -7,6 +9,71 @@ export type Timer = (ms: number, fire: () => void) => () => void;
 export const graceMs = 150;
 export const interruptGraceMs = 300;
 export const tagEnvVar = "HEDGE_SUPERVISOR_TAG";
+export const spareEnvVar = "HEDGE_SUPERVISOR_SPARE";
+
+export function spareFilePath(tag: string): string {
+  const uid = typeof process.getuid === "function" ? String(process.getuid()) : "u";
+  return join(tmpdir(), `hedge-sup-${uid}`, `${tag}.spare`);
+}
+
+export function recordSparedProcess(filePath: string, pids: number[], sids: number[]): void {
+  if (!pids.length && !sids.length) return;
+  try {
+    const dir = dirname(filePath);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const info = lstatSync(dir);
+    if (!info.isDirectory() || info.isSymbolicLink()) return;
+    if (typeof process.getuid === "function" && info.uid !== process.getuid()) return;
+    const flags = constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0);
+    const fd = openSync(filePath, flags, 0o600);
+    try {
+      const lines: string[] = [];
+      for (const pid of new Set(pids)) if (Number.isInteger(pid) && pid > 0) lines.push(`pid:${pid}`);
+      for (const sid of new Set(sids)) if (Number.isInteger(sid) && sid > 0) lines.push(`sid:${sid}`);
+      if (lines.length) writeSync(fd, lines.join("\n") + "\n");
+    } finally {
+      try {
+        closeSync(fd);
+      } catch {}
+    }
+  } catch {}
+}
+
+function readSpared(filePath: string | undefined): { pids: Set<number>; sids: Set<number> } {
+  const pids = new Set<number>();
+  const sids = new Set<number>();
+  if (!filePath) return { pids, sids };
+  let fd: number | undefined;
+  try {
+    const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+    fd = openSync(filePath, flags);
+    const raw = readFileSync(fd, "utf8");
+    for (const line of raw.split("\n")) {
+      if (line.startsWith("pid:")) {
+        const n = Number(line.slice(4));
+        if (Number.isInteger(n) && n > 0) pids.add(n);
+      } else if (line.startsWith("sid:")) {
+        const n = Number(line.slice(4));
+        if (Number.isInteger(n) && n > 0) sids.add(n);
+      }
+    }
+  } catch {
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {}
+    }
+  }
+  return { pids, sids };
+}
+
+export function removeSpareFile(filePath: string | undefined): void {
+  if (!filePath) return;
+  try {
+    rmSync(filePath, { force: true });
+  } catch {}
+}
 
 export function appendTag(existing: string | undefined, tag: string): string {
   return existing ? `${existing},${tag}` : tag;
@@ -45,7 +112,7 @@ export type SupervisorHost = {
   exit: (code: number) => void;
 };
 
-type ProcTargets = { pids: number[]; groups: number[]; orphanPids: number[]; hasSessionGroup?: boolean; leaderSeenLive?: boolean };
+type ProcTargets = { pids: number[]; groups: number[]; orphanPids: number[]; sids?: number[]; hasSessionGroup?: boolean; leaderSeenLive?: boolean };
 
 function envMatchesTag(value: string, tag: string): boolean {
   return value.split(",").includes(tag);
@@ -255,9 +322,10 @@ export function drainControlFd(fd: number): { lines: string[]; rest: string; clo
   return { lines, rest, closed };
 }
 
-export function discoverTargetsLinux(sessionId?: number, tag?: string, deadLeaderReaped?: boolean): ProcTargets {
+export function discoverTargetsLinux(sessionId?: number, tag?: string, deadLeaderReaped?: boolean, sparePath?: string): ProcTargets {
   const self = process.pid;
   const includeDetached = Boolean(tag);
+  const spared = readSpared(sparePath);
   const rows: Array<{ pid: number; ppid: number; pgrp: number; sid: number; envTag?: string }> = [];
   const matched = new Set<number>();
   const activeTags = new Set<string>(tag ? [tag] : []);
@@ -286,9 +354,10 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string, deadLeade
       const sid = Number(fields[3]);
       const envTag = tag && pid !== self ? readEnvTagLinux(pid) : undefined;
       rows.push({ pid, ppid, pgrp, sid, ...(envTag ? { envTag } : {}) });
+      const isSpared = spared.pids.has(pid) || (sid !== sessionId && sid !== self && spared.sids.has(sid));
       if (sessionId !== undefined && (sid === sessionId || pgrp === sessionId)) {
         matched.add(pid);
-      } else if (tag && envTag && envMatchesTag(envTag, tag)) {
+      } else if (!isSpared && tag && envTag && envMatchesTag(envTag, tag)) {
         matched.add(pid);
       }
     }
@@ -308,11 +377,15 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string, deadLeade
       }
       for (const row of rows) {
         if (matched.has(row.pid)) continue;
+        const isSpared = spared.pids.has(row.pid) || (row.sid !== sessionId && row.sid !== self && spared.sids.has(row.sid));
         if (row.envTag && envMatchesAnyTag(row.envTag, activeTags)) {
           matched.add(row.pid);
           grew = true;
         } else if (matched.has(row.ppid)) {
-          const foreignCompleted = Boolean(tag && row.envTag && row.sid !== sessionId && row.sid !== self && !envMatchesAnyTag(row.envTag, activeTags));
+          const foreignCompleted = Boolean(
+            tag &&
+              (isSpared || (row.envTag && row.sid !== sessionId && row.sid !== self && !envMatchesAnyTag(row.envTag, activeTags))),
+          );
           if (!foreignCompleted) {
             matched.add(row.pid);
             grew = true;
@@ -323,11 +396,13 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string, deadLeade
   }
   const pids: number[] = [];
   const groups = new Set<number>();
+  const sids = new Set<number>();
   const orphanPids: number[] = [];
   let hasSessionGroup = false;
   for (const row of rows) {
     if (!matched.has(row.pid) || row.pid === self || row.pid === sessionId) continue;
     pids.push(row.pid);
+    if (row.sid > 0 && row.sid !== sessionId && row.sid !== self) sids.add(row.sid);
     if (sessionId === undefined) {
       orphanPids.push(row.pid);
     } else if (row.pgrp > 0 && row.pgrp !== sessionId && row.pgrp !== self) {
@@ -338,7 +413,7 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string, deadLeade
       orphanPids.push(row.pid);
     }
   }
-  return { pids, groups: [...groups], orphanPids, hasSessionGroup, leaderSeenLive };
+  return { pids, groups: [...groups], orphanPids, sids: [...sids], hasSessionGroup, leaderSeenLive };
 }
 
 const psLookupLimitMs = 200;
@@ -477,8 +552,10 @@ function buildTargetsFromPs(
   tag: string | undefined,
   treeText: string | undefined,
   excludePids: Set<number>,
+  sparePath?: string,
 ): ProcTargets {
   const includeDetached = Boolean(tag);
+  const spared = readSpared(sparePath);
   const rows: Array<{ pid: number; ppid: number; pgid: number; envTag?: string }> = [];
   const matched = new Set<number>();
   const activeTags = new Set<string>(tag ? [tag] : []);
@@ -494,9 +571,11 @@ function buildTargetsFromPs(
       if (excludePids.has(pid)) continue;
       const envTag = tag && pid !== self ? readEnvTagDarwin(pid) : undefined;
       rows.push({ pid, ppid, pgid, ...(envTag ? { envTag } : {}) });
-      if (sessionId !== undefined && (pgid === sessionId || sessionIdDarwin(pid) === sessionId)) {
+      const sid = sessionIdDarwin(pid);
+      const isSpared = spared.pids.has(pid) || (sid !== undefined && sid > 0 && sid !== sessionId && sid !== self && spared.sids.has(sid));
+      if (sessionId !== undefined && (pgid === sessionId || sid === sessionId)) {
         matched.add(pid);
-      } else if (tag && envTag && envMatchesTag(envTag, tag)) {
+      } else if (!isSpared && tag && envTag && envMatchesTag(envTag, tag)) {
         matched.add(pid);
       }
     }
@@ -521,7 +600,11 @@ function buildTargetsFromPs(
           grew = true;
         } else if (matched.has(row.ppid)) {
           const sid = sessionIdDarwin(row.pid);
-          const foreignCompleted = Boolean(tag && row.envTag && sid !== undefined && sid > 0 && sid !== sessionId && sid !== self && !envMatchesAnyTag(row.envTag, activeTags));
+          const isSpared = spared.pids.has(row.pid) || (sid !== undefined && sid > 0 && sid !== sessionId && sid !== self && spared.sids.has(sid));
+          const foreignCompleted = Boolean(
+            tag &&
+              (isSpared || (row.envTag && sid !== undefined && sid > 0 && sid !== sessionId && sid !== self && !envMatchesAnyTag(row.envTag, activeTags))),
+          );
           if (!foreignCompleted) {
             matched.add(row.pid);
             grew = true;
@@ -532,11 +615,14 @@ function buildTargetsFromPs(
   }
   const pids = [...matched].filter((pid) => pid !== self && pid !== sessionId);
   const groups = new Set<number>();
+  const sids = new Set<number>();
   const pgidByPid = new Map<number, number>();
   for (const row of rows) pgidByPid.set(row.pid, row.pgid);
   const orphanPids: number[] = [];
   let hasSessionGroup = false;
   for (const pid of pids) {
+    const sid = sessionIdDarwin(pid);
+    if (sid !== undefined && sid > 0 && sid !== sessionId && sid !== self) sids.add(sid);
     const pgid = pgidByPid.get(pid);
     if (sessionId === undefined) {
       orphanPids.push(pid);
@@ -548,7 +634,7 @@ function buildTargetsFromPs(
       orphanPids.push(pid);
     }
   }
-  return { pids, groups: [...groups], orphanPids, hasSessionGroup };
+  return { pids, groups: [...groups], orphanPids, sids: [...sids], hasSessionGroup };
 }
 
 function psPidStat(treeText: string, targetPid: number): string | undefined {
@@ -598,8 +684,8 @@ function isDeadLeaderRecycledDarwin(lib: DarwinLib, pid: number, reaped: boolean
   return status !== 5;
 }
 
-function discoverTargetsSync(sessionId?: number, tag?: string, deadLeaderReaped?: boolean): ProcTargets | undefined {
-  if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag, deadLeaderReaped);
+export function discoverTargetsSync(sessionId?: number, tag?: string, deadLeaderReaped?: boolean, sparePath?: string): ProcTargets | undefined {
+  if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag, deadLeaderReaped, sparePath);
   if (sessionId === undefined && !tag) return undefined;
   const lib = getDarwinLib();
   if (!lib) return undefined;
@@ -610,6 +696,7 @@ function discoverTargetsSync(sessionId?: number, tag?: string, deadLeaderReaped?
   const actual = lib.proc_listallpids(ptr(buf), buf.byteLength);
   if (actual <= 0) return undefined;
   const self = process.pid;
+  const spared = readSpared(sparePath);
   const limit = Math.min(actual, capacity);
   let effectiveSessionId = sessionId;
   if (deadLeaderReaped !== undefined && sessionId !== undefined) {
@@ -623,7 +710,7 @@ function discoverTargetsSync(sessionId?: number, tag?: string, deadLeaderReaped?
     if (isDeadLeaderRecycledDarwin(lib, sessionId, deadLeaderReaped, leaderPresent)) {
       effectiveSessionId = undefined;
     }
-    if (effectiveSessionId === undefined && !tag) return { pids: [], groups: [], orphanPids: [], hasSessionGroup: false };
+    if (effectiveSessionId === undefined && !tag) return { pids: [], groups: [], orphanPids: [], sids: [], hasSessionGroup: false };
   }
   const activeTags = new Set<string>(tag ? [tag] : []);
   const rows: Array<{ pid: number; sid: number; pgid: number; envTag?: string }> = [];
@@ -635,8 +722,9 @@ function discoverTargetsSync(sessionId?: number, tag?: string, deadLeaderReaped?
     const pgid = lib.getpgid(pid);
     const envTag = tag ? readEnvTagDarwin(pid) : undefined;
     rows.push({ pid, sid, pgid, ...(envTag ? { envTag } : {}) });
+    const isSpared = spared.pids.has(pid) || (sid > 0 && sid !== effectiveSessionId && sid !== self && spared.sids.has(sid));
     const inSession = effectiveSessionId !== undefined && (sid === effectiveSessionId || pgid === effectiveSessionId);
-    if (inSession || (tag && envTag && envMatchesTag(envTag, tag))) {
+    if (inSession || (!isSpared && tag && envTag && envMatchesTag(envTag, tag))) {
       matched.add(pid);
     }
   }
@@ -662,15 +750,17 @@ function discoverTargetsSync(sessionId?: number, tag?: string, deadLeaderReaped?
     }
   }
   if (deadLeaderReaped !== undefined && effectiveSessionId !== undefined && isDeadLeaderRecycledDarwin(lib, effectiveSessionId, deadLeaderReaped)) {
-    return tag ? discoverTargetsSync(undefined, tag) : { pids: [], groups: [], orphanPids: [], hasSessionGroup: false };
+    return tag ? discoverTargetsSync(undefined, tag, undefined, sparePath) : { pids: [], groups: [], orphanPids: [], sids: [], hasSessionGroup: false };
   }
   const pids: number[] = [];
   const groups = new Set<number>();
+  const sids = new Set<number>();
   const orphanPids: number[] = [];
   let hasSessionGroup = false;
   for (const row of rows) {
     if (!matched.has(row.pid)) continue;
     pids.push(row.pid);
+    if (row.sid > 0 && row.sid !== effectiveSessionId && row.sid !== self) sids.add(row.sid);
     if (effectiveSessionId === undefined) {
       orphanPids.push(row.pid);
     } else if (row.pgid > 0 && row.pgid !== effectiveSessionId && row.pgid !== self) {
@@ -681,7 +771,7 @@ function discoverTargetsSync(sessionId?: number, tag?: string, deadLeaderReaped?
       orphanPids.push(row.pid);
     }
   }
-  return { pids, groups: [...groups], orphanPids, hasSessionGroup };
+  return { pids, groups: [...groups], orphanPids, sids: [...sids], hasSessionGroup };
 }
 
 async function runBoundedPs(args: string[]): Promise<{ pid: number; text: string } | undefined> {
@@ -729,11 +819,11 @@ async function runBoundedPs(args: string[]): Promise<{ pid: number; text: string
   }
 }
 
-export async function discoverTargets(sessionId?: number, tag?: string): Promise<ProcTargets | undefined> {
-  if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag);
+export async function discoverTargets(sessionId?: number, tag?: string, sparePath?: string): Promise<ProcTargets | undefined> {
+  if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag, undefined, sparePath);
   const treeRes = await runBoundedPs(["-Ao", "pid=,ppid=,pgid="]);
-  if (!treeRes) return discoverTargetsSync(sessionId, tag);
-  return buildTargetsFromPs(process.pid, sessionId, tag, treeRes.text, new Set([treeRes.pid]));
+  if (!treeRes) return discoverTargetsSync(sessionId, tag, undefined, sparePath);
+  return buildTargetsFromPs(process.pid, sessionId, tag, treeRes.text, new Set([treeRes.pid]), sparePath);
 }
 
 function signalOneGroup(pgrp: number, signal: NodeJS.Signals): void {
@@ -787,47 +877,47 @@ function signalDeadTargets(targets: ProcTargets, deadSessionId?: number, guard?:
   }
 }
 
-function sweepDeadLinux(deadSessionId: number, tag: string | undefined, reaped: boolean): void {
+function sweepDeadLinux(deadSessionId: number, tag: string | undefined, reaped: boolean, sparePath?: string): void {
   if (isDeadLeaderRecycledLinux(deadSessionId, reaped)) {
-    if (tag) signalDeadTargets(discoverTargetsLinux(undefined, tag), undefined);
+    if (tag) signalDeadTargets(discoverTargetsLinux(undefined, tag, undefined, sparePath), undefined);
     return;
   }
-  const targets = discoverTargetsLinux(deadSessionId, tag, reaped);
+  const targets = discoverTargetsLinux(deadSessionId, tag, reaped, sparePath);
   if (targets.leaderSeenLive || isDeadLeaderRecycledLinux(deadSessionId, reaped)) {
-    if (tag) signalDeadTargets(discoverTargetsLinux(undefined, tag), undefined);
+    if (tag) signalDeadTargets(discoverTargetsLinux(undefined, tag, undefined, sparePath), undefined);
     return;
   }
   signalDeadTargets(targets, deadSessionId, () => !isDeadLeaderRecycledLinux(deadSessionId, reaped));
 }
 
-export function killDeadSessionSync(deadSessionId: number, tag?: string, reaped = false): void {
+export function killDeadSessionSync(deadSessionId: number, tag?: string, reaped = false, sparePath?: string): void {
   if (process.platform === "linux") {
-    sweepDeadLinux(deadSessionId, tag, reaped);
+    sweepDeadLinux(deadSessionId, tag, reaped, sparePath);
     return;
   }
-  const found = discoverTargetsSync(deadSessionId, tag, reaped);
+  const found = discoverTargetsSync(deadSessionId, tag, reaped, sparePath);
   if (!found) return;
   const lib = getDarwinLib();
   if (lib && isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped)) {
-    const tagged = tag ? discoverTargetsSync(undefined, tag) : undefined;
+    const tagged = tag ? discoverTargetsSync(undefined, tag, undefined, sparePath) : undefined;
     if (tagged) signalDeadTargets(tagged, undefined);
     return;
   }
   signalDeadTargets(found, deadSessionId, lib ? () => !isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped) : undefined);
 }
 
-export function killDeadSession(deadSessionId: number, tag?: string, reaped = false): void | Promise<void> {
+export function killDeadSession(deadSessionId: number, tag?: string, reaped = false, sparePath?: string): void | Promise<void> {
   if (process.platform === "linux") {
     if (!reaped && isDeadLeaderRecycledLinux(deadSessionId, false)) {
-      return Bun.sleep(15).then(() => sweepDeadLinux(deadSessionId, tag, reaped));
+      return Bun.sleep(15).then(() => sweepDeadLinux(deadSessionId, tag, reaped, sparePath));
     }
-    sweepDeadLinux(deadSessionId, tag, reaped);
+    sweepDeadLinux(deadSessionId, tag, reaped, sparePath);
     return;
   }
   return (async () => {
     let treeRes = await runBoundedPs(["-Ao", "pid=,ppid=,pgid=,stat="]);
     if (!treeRes) {
-      killDeadSessionSync(deadSessionId, tag, reaped);
+      killDeadSessionSync(deadSessionId, tag, reaped, sparePath);
       return;
     }
     let stat = psPidStat(treeRes.text, deadSessionId);
@@ -835,7 +925,7 @@ export function killDeadSession(deadSessionId: number, tag?: string, reaped = fa
       await Bun.sleep(15);
       treeRes = await runBoundedPs(["-Ao", "pid=,ppid=,pgid=,stat="]);
       if (!treeRes) {
-        killDeadSessionSync(deadSessionId, tag, reaped);
+        killDeadSessionSync(deadSessionId, tag, reaped, sparePath);
         return;
       }
       stat = psPidStat(treeRes.text, deadSessionId);
@@ -844,17 +934,17 @@ export function killDeadSession(deadSessionId: number, tag?: string, reaped = fa
     const recycled = (stat !== undefined && (reaped || !stat.includes("Z"))) || (lib !== null && isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped));
     const sid = recycled ? undefined : deadSessionId;
     if (sid === undefined && !tag) return;
-    const targets = buildTargetsFromPs(process.pid, sid, tag, treeRes.text, new Set([treeRes.pid]));
+    const targets = buildTargetsFromPs(process.pid, sid, tag, treeRes.text, new Set([treeRes.pid]), sparePath);
     if (sid !== undefined && lib && isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped)) {
-      if (tag) signalDeadTargets(buildTargetsFromPs(process.pid, undefined, tag, treeRes.text, new Set([treeRes.pid])), undefined);
+      if (tag) signalDeadTargets(buildTargetsFromPs(process.pid, undefined, tag, treeRes.text, new Set([treeRes.pid]), sparePath), undefined);
       return;
     }
     signalDeadTargets(targets, sid, sid !== undefined && lib ? () => !isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped) : undefined);
   })();
 }
 
-export function killSessionSync(sessionId: number | undefined, signal: NodeJS.Signals, tag?: string): void {
-  signalTargets(discoverTargetsSync(sessionId, tag) ?? { pids: [], groups: [], orphanPids: [] }, signal, sessionId);
+export function killSessionSync(sessionId: number | undefined, signal: NodeJS.Signals, tag?: string, sparePath?: string): void {
+  signalTargets(discoverTargetsSync(sessionId, tag, undefined, sparePath) ?? { pids: [], groups: [], orphanPids: [] }, signal, sessionId);
 }
 
 export function killSession(
@@ -862,12 +952,13 @@ export function killSession(
   signal: NodeJS.Signals,
   tag?: string,
   remembered?: Map<number, number>,
+  sparePath?: string,
 ): void | Promise<void> {
   if (process.platform === "linux") {
-    signalTargets(discoverTargetsLinux(sessionId, tag), signal, sessionId);
+    signalTargets(discoverTargetsLinux(sessionId, tag, undefined, sparePath), signal, sessionId);
     return;
   }
-  return discoverTargets(sessionId, tag).then((found) => {
+  return discoverTargets(sessionId, tag, sparePath).then((found) => {
     const targets: ProcTargets = found
       ? { pids: [...found.pids], groups: [...found.groups], orphanPids: [...found.orphanPids] }
       : { pids: [], groups: [], orphanPids: [] };
@@ -1067,13 +1158,14 @@ if (import.meta.main) {
   let cleanupGraceMs = graceMs;
   let controlFd: number | undefined;
   let resultFd: number | undefined;
+  let spareFile: string | undefined;
   try {
     const raw = Bun.argv[2] ?? (await Bun.stdin.text());
     const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed) && parsed.every((arg) => typeof arg === "string")) {
       command = parsed;
     } else if (parsed && typeof parsed === "object" && Array.isArray((parsed as { command?: unknown }).command)) {
-      const record = parsed as { command: unknown[]; env?: unknown; graceMs?: unknown; controlFd?: unknown; resultFd?: unknown };
+      const record = parsed as { command: unknown[]; env?: unknown; graceMs?: unknown; controlFd?: unknown; resultFd?: unknown; spareFile?: unknown };
       if (record.command.every((arg) => typeof arg === "string")) command = record.command as string[];
       if (record.env && typeof record.env === "object" && !Array.isArray(record.env)) {
         const cleanEnv: Record<string, string> = Object.create(null);
@@ -1085,6 +1177,7 @@ if (import.meta.main) {
       if (typeof record.graceMs === "number" && record.graceMs >= 0) cleanupGraceMs = record.graceMs;
       if (typeof record.controlFd === "number" && Number.isInteger(record.controlFd) && record.controlFd >= 3) controlFd = record.controlFd;
       if (typeof record.resultFd === "number" && Number.isInteger(record.resultFd) && record.resultFd >= 3) resultFd = record.resultFd;
+      if (typeof record.spareFile === "string" && record.spareFile) spareFile = record.spareFile;
     }
   } catch {}
   if (controlFd !== undefined) setCloexec(controlFd, true);
@@ -1150,7 +1243,7 @@ if (import.meta.main) {
   await supervise(command, {
     spawn: (argv) => Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio: ["ignore", "ignore", "ignore"] }),
     killGroup: (signal, includeTagged) =>
-      killSession(process.pid, signal, includeTagged ? runTag : undefined, includeTagged ? rememberedDetached : undefined),
+      killSession(process.pid, signal, includeTagged ? runTag : undefined, includeTagged ? rememberedDetached : undefined, spareFile),
     hasGroupMembers: () => hasOtherGroupMember(),
     timer: realTimer,
     onSignal: (signal, handler) => {
@@ -1182,9 +1275,7 @@ if (import.meta.main) {
       try {
         writeSync(1, "cleanup\n");
       } catch {}
-      try {
-        closeSync(1);
-      } catch {}
+      redirectStdioOutputsToNull();
     },
     exit: (code) => process.exit(code),
   }, cleanupGraceMs);

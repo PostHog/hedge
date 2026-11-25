@@ -1,5 +1,5 @@
 import { closeSync, writeSync } from "node:fs";
-import { drainControlFd, enableChildSubreaper, killSession, ownTag, redirectStdioOutputsToNull, setCloexec, shieldGroupSignals, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { discoverTargetsSync, drainControlFd, enableChildSubreaper, killSession, ownTag, recordSparedProcess, redirectStdioOutputsToNull, setCloexec, shieldGroupSignals, spareEnvVar, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
 type StartConfig = { argv: string[]; env?: Record<string, string>; envEntries?: Array<[string, string]> };
 
@@ -7,11 +7,25 @@ enableChildSubreaper();
 shieldGroupSignals();
 
 const runTag = ownTag(process.env[tagEnvVar]);
+const hasParentTag = (process.env[tagEnvVar] ?? "").includes(",");
+const sparePath = process.env[spareEnvVar];
 let target: ReturnType<typeof Bun.spawn> | undefined;
 let targetReaped = false;
 let targetCode: number | undefined;
 let confirmedDone = false;
 let killing = false;
+let lockCount = 0;
+
+const exitDone = () => {
+  if (sparePath) {
+    const found = discoverTargetsSync(process.pid, runTag);
+    if (found) {
+      const sids = [...(found.sids ?? []), ...(found.hasSessionGroup ? [process.pid] : [])];
+      if (found.pids.length || sids.length) recordSparedProcess(sparePath, found.pids, sids);
+    }
+  }
+  process.exit(targetCode ?? 0);
+};
 
 const killAll = () => {
   if (killing) return;
@@ -72,7 +86,7 @@ const watchControl = (fd: number, initialBuf = "") => {
         }
         if (line === "done") {
           confirmedDone = true;
-          process.exit(targetCode ?? 0);
+          exitDone();
         }
         return false;
       };
@@ -88,7 +102,8 @@ const watchControl = (fd: number, initialBuf = "") => {
       if (handleLine(buf.trim())) return;
     } catch {}
     if (!killing) {
-      if (confirmedDone) process.exit(targetCode ?? 0);
+      if (confirmedDone) exitDone();
+      if (lockCount > 0 && !targetReaped && !hasParentTag) process.exit(0);
       killAll();
     }
   })();
@@ -99,13 +114,14 @@ const parseFd = (raw: string | undefined, min: number) => {
   return Number.isInteger(n) && n >= min ? n : undefined;
 };
 
-const lockCount = parseFd(Bun.argv[2], 0);
+const parsedLockCount = parseFd(Bun.argv[2], 0);
 const controlFd = parseFd(Bun.argv[3], 3);
 const resultFd = parseFd(Bun.argv[4], 3);
 const configFd = parseFd(Bun.argv[5], 3);
-if (lockCount === undefined || controlFd === undefined || resultFd === undefined || configFd === undefined) {
+if (parsedLockCount === undefined || controlFd === undefined || resultFd === undefined || configFd === undefined) {
   process.exit(127);
 }
+lockCount = parsedLockCount;
 
 setCloexec(controlFd, true);
 setCloexec(resultFd, true);

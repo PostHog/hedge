@@ -1077,6 +1077,74 @@ await slow.exited;`;
     }
   });
 
+  test("preserves a detached env -i daemon left by a completed nested capture when the outer probe times out", async () => {
+    const dir = temp.make("sup-nested-capture-envi-");
+    const envBin = Bun.which("env") ?? "/usr/bin/env";
+    const shBin = Bun.which("sh") ?? "/bin/sh";
+    const [daemonReady, daemonGone, probeReady, probeGone] = [
+      join(dir, "daemon-ready"),
+      join(dir, "daemon-gone"),
+      join(dir, "probe-ready"),
+      join(dir, "probe-gone"),
+    ];
+    mkfifo(daemonReady, daemonGone, probeReady, probeGone);
+    const daemonStarted = fifoRead(daemonReady);
+    const daemonClosed = fifoRead(daemonGone);
+    const probeStarted = fifoRead(probeReady);
+    const probeClosed = fifoRead(probeGone);
+    const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
+    const { humanStepsLeft } = await import("./apply.ts");
+    const daemonScript = `const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+d.unref();
+process.exit(0);`;
+    const probeScript = `import { capture } from ${JSON.stringify(coderPath)};
+const res = await capture([process.execPath, "-e", ${JSON.stringify(daemonScript)}], { timeoutMs: 5_000 });
+if (res.code !== 0) process.exit(2);
+const slow = Bun.spawn(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "slow", ${JSON.stringify(probeGone)}, ${JSON.stringify(probeReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await slow.exited;`;
+    let fireDeadline!: () => void;
+    let daemonPid = 0;
+    let probePid = 0;
+    try {
+      const pending = humanStepsLeft(
+        {
+          machine: { schema: 1, role: "linux" },
+          os: process.platform === "darwin" ? "darwin" : "linux",
+          ai: "both",
+          packs: [],
+          workflows: [],
+          files: [],
+          config: [],
+          owners: {},
+          jobs: [],
+          human: [{ id: "cert", pack: "team", say: "Cert.", probe: [process.execPath, "-e", probeScript] }],
+          steps: [],
+          checks: [],
+          commands: {},
+          handlers: {},
+          models: [],
+          settings: {},
+          unanswered: [],
+          ask: [],
+          dropped: [],
+        },
+        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 0 },
+      );
+      [daemonPid, probePid] = (await Promise.all([daemonStarted, probeStarted])).map((s) => Number(s.trim())) as [number, number];
+      expect(daemonPid).toBeGreaterThan(0);
+      expect(probePid).toBeGreaterThan(0);
+      fireDeadline();
+      const res = await pending;
+      expect(res.unchecked.map((step) => step.id)).toEqual(["cert"]);
+      expect(await probeClosed).toBe("");
+      expect(() => process.kill(daemonPid, 0)).not.toThrow();
+    } finally {
+      if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
+      if (probePid > 0) try { process.kill(probePid, "SIGKILL"); } catch {}
+      await daemonClosed.catch(() => {});
+    }
+  });
+
   test("forwards a __proto__ environment variable to supervised probes", async () => {
     const dir = temp.make("sup-proto-env-");
     const applyPath = join(import.meta.dir, "apply.ts");

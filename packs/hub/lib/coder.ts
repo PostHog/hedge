@@ -2,7 +2,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, re
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { boxPrefix } from "../../../src/hub/names.ts";
-import { appendTag, createPipe, killDeadSession, killDeadSessionSync, killSession, killSessionSync, setCloexec, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
+import { appendTag, createPipe, killDeadSession, killDeadSessionSync, killSession, killSessionSync, setCloexec, spareEnvVar, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
 import { bunScript } from "../../../src/runner/bun.ts";
 import { heldLocks } from "./box-lock.ts";
 
@@ -269,10 +269,12 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       const controlFdIndex = 3 + locks.length;
       const resultFdIndex = controlFdIndex + 1;
       const configFdIndex = controlFdIndex + 2;
+      const supEnv = supervisorEnv(fullTag);
+      if (childEnv[spareEnvVar]) supEnv[spareEnvVar] = childEnv[spareEnvVar];
       child = Bun.spawn(
         bunScript(captureSupervisor, String(locks.length), String(controlFdIndex), String(resultFdIndex), String(configFdIndex)),
         {
-          env: supervisorEnv(fullTag),
+          env: supEnv,
           stdio: [input, output, output, ...locks, "pipe", resultPipe.writeFd, configPipe.readFd],
           detached: true,
         },
