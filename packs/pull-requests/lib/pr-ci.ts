@@ -140,7 +140,7 @@ const workflowOf = (context: string) => {
 };
 
 function withPinnedStatuses(entries: Entry[], required: RequiredCheck[], draft: boolean, run: Run): Entry[] {
-  const pins = required.filter((check) => check.appId !== undefined && !check.passedByPerson);
+  const pins = required.filter((check) => check.appId !== undefined);
   const apps = new Map<string, number | undefined>();
   const appOf = (bot: string) => apps.has(bot) ? apps.get(bot) : apps.set(bot, appOfBot(bot, run)).get(bot);
   const spelledTwice = (entry: Entry) => entries.some((other) => other.status && other.name !== entry.name && other.name.toLowerCase() === entry.name.toLowerCase());
@@ -148,13 +148,17 @@ function withPinnedStatuses(entries: Entry[], required: RequiredCheck[], draft: 
     const runs = entries.filter((other) => !other.status && other.appId === check.appId && other.name.startsWith(workflow));
     return draft && !entries.some((other) => other.name === check.context) && runs.length > 0 && runs.every((other) => other.outcome === "pass");
   };
-  const nearPin = (entry: Entry) => pins.some((check) => {
+  const near = (entry: Entry) => pins.filter((check) => {
     const workflow = workflowOf(check.context);
     return check.context === entry.name || (entry.outcome !== "pass" && workflow !== undefined && entry.name.startsWith(workflow) && canWaive(check, workflow));
   });
+  const lookUp = (bot: string, onlyForPeople: boolean) => {
+    try { return appOf(bot); } catch (error) { if (onlyForPeople) return undefined; throw error; }
+  };
   return entries.map((entry) => {
-    if (!entry.status || !entry.botLogin || !nearPin(entry) || spelledTwice(entry)) return entry;
-    const appId = appOf(entry.botLogin);
+    const pinned = near(entry);
+    if (!entry.status || !entry.botLogin || !pinned.length || spelledTwice(entry)) return entry;
+    const appId = lookUp(entry.botLogin, pinned.every((check) => check.passedByPerson));
     return appId === undefined ? entry : { ...entry, appId };
   });
 }
@@ -166,7 +170,8 @@ function listOf(names: string[], limit = 8) {
 
 const reportedBy = (check: RequiredCheck, entry: Entry) => check.appId === undefined || entry.appId === check.appId;
 
-function withheldFromDraft(check: RequiredCheck, entries: Entry[]) {
+function withheldFromDraft(check: RequiredCheck, everyEntry: Entry[], required: RequiredCheck[]) {
+  const entries = everyEntry.filter((entry) => !required.some((other) => other.passedByPerson && other.context === entry.name));
   const workflow = workflowOf(check.context);
   if (!workflow || entries.some((entry) => entry.name === check.context)) return false;
   const siblings = entries.filter((entry) => entry.name.startsWith(workflow) && reportedBy(check, entry));
@@ -195,14 +200,14 @@ function requiredVerdict(entries: Entry[], required: RequiredCheck[], draft: boo
   for (const check of required) {
     const named = entries.filter((entry) => entry.name === check.context);
     const own = named.filter((entry) => reportedBy(check, entry));
-    const matches = own.some((entry) => entry.status) ? [...new Set([...own, ...named.filter((entry) => !entry.status)])] : own;
-    matches.forEach((entry) => counted.add(entry));
     if (check.passedByPerson) {
-      named.forEach((entry) => counted.add(entry));
+      own.forEach((entry) => counted.add(entry));
       byPerson.push(check.context);
       continue;
     }
-    if (!matches.length) { (!draft ? missing : check.postedOnceReady && !entries.some((entry) => entry.name.toLowerCase() === check.context.toLowerCase()) ? listed : withheldFromDraft(check, entries) ? withheld : missing).push(check.context); continue; }
+    const matches = own.some((entry) => entry.status) ? [...new Set([...own, ...named.filter((entry) => !entry.status)])] : own;
+    matches.forEach((entry) => counted.add(entry));
+    if (!matches.length) { (!draft ? missing : check.postedOnceReady && !entries.some((entry) => entry.name.toLowerCase() === check.context.toLowerCase()) ? listed : withheldFromDraft(check, entries, required) ? withheld : missing).push(check.context); continue; }
     const worst = matches.reduce((a, b) => rank[b.outcome] > rank[a.outcome] ? b : a).outcome;
     if (worst === "fail") failing.push(check.context);
     else if (worst === "pending") pending.push(check.context);
@@ -238,10 +243,11 @@ export function ciOf(home: string, identity: ProofIdentity, run: Run, now: Date,
     if (!required.length) return { ...everyCheck(entries, identity.commit), checks: checksOf(entries) };
     const readyOnly = pr.draft ? listedChecks("pull-requests.draftSkippedChecks", identity.repository, env) : new Set<string>();
     const personPassed = listedChecks("pull-requests.personChecks", identity.repository, env);
-    required = required.map((check) => ({ ...check, ...readyOnly.has(check.context) ? { postedOnceReady: true as const } : {}, ...personPassed.has(check.context) ? { passedByPerson: true as const } : {} }));
+    const once = (context: string) => required.filter((check) => check.context === context).length === 1;
+    required = required.map((check) => ({ ...check, ...readyOnly.has(check.context) ? { postedOnceReady: true as const } : {}, ...personPassed.has(check.context) && once(check.context) ? { passedByPerson: true as const } : {} }));
     const counted = withPinnedStatuses(entries, required, pr.draft, run);
     const verdict = requiredVerdict(counted, required, pr.draft);
-    const shown = counted.filter((entry) => !required.some((check) => check.passedByPerson && check.context === entry.name));
+    const shown = counted.filter((entry) => !required.some((check) => check.passedByPerson && check.context === entry.name && reportedBy(check, entry)));
     return { ...stacked ? { ...verdict, detail: `${verdict.detail} (required by ${pr.defaultBranch}; the base ${pr.base} requires none)` } : verdict, checks: checksOf(shown) };
   } catch (error) {
     return { state: "unknown", detail: (error as Error).message };

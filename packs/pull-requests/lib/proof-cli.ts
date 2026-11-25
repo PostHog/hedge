@@ -460,8 +460,8 @@ pinned to an app, those are the app's own checks, with at least one check run. O
 pull-requests.draftSkippedChecks lists for the repository, as owner/name=check pairs, counts as withheld while no
 check of its name reported; once its own app posts it, it counts. A ready PR needs it. A required check that
 pull-requests.personChecks lists for the repository, such as a visual review that a person accepts, never holds the
-gate and needs no ci gap: the CI line names it, without its result, and GitHub holds the merge until the person passes
-it. CI is unknown
+gate and needs no ci gap when the base requires its context once: the CI line names it, without its result, and GitHub
+holds the merge until the person passes it. A check of its name from another app still prints as not required. CI is unknown
 when GitHub does not answer for the rulesets or branch protection. A clean merge of the PR's base carries the review and the evidence of
 its other parent forward. The review needs a finished --lens panel round on the PR, and HEAD read by a panel round or
 by a review that finished after one, such as a final read; single-reviewer rounds alone never count. The first round
