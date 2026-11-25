@@ -29,8 +29,22 @@ test("a passing gate prints the merge card line: grade and door, reads, each gap
   const { pr, id } = await agentAcceptedGap();
   const gate = await pr.hedge("gate");
   expect(gate.code).toBe(0);
-  expect(gate.output.split("\n")).toContain(`merge card: example/product#42: medium, two-way door · 1 round · gaps: prod-shape (🤖 agent ${id}): ${reason} · 2 known issues: major: feature.txt:1 The greeting repeats on reload.; major: feature.txt:2 The farewell is missing. · 120 min opened to ready, 60 min ready to card`);
+  expect(gate.output.split("\n")).toContain(`merge card: example/product#42: medium, two-way door · 1 round · gaps: prod-shape (🤖 agent ${id}): ${reason} · held: ${id} for prod-shape · 2 known issues: major: feature.txt:1 The greeting repeats on reload.; major: feature.txt:2 The farewell is missing. · 120 min opened to ready, 60 min ready to card`);
   expect(gate.output.split("\n").at(-1)).toStartWith("gate: pass");
+});
+
+test("the merge card line names each held decision once, with every kind it accepts", async () => {
+  const { pr, id } = await agentAcceptedGap();
+  await pr.hedge("require", "--kinds", "prod-shape,live-run,cross-version");
+  await pr.hedge("gap", "--kind", "live-run", "--reason", "No sandbox");
+  await pr.hedge("gap", "--kind", "cross-version", "--reason", "No old client");
+  const decided = await pr.decide("record", "--mark", "🤖", "--class", "proof-gap", "--kind", "live-run", "--kind", "cross-version", "--pr", "example/product#42", "--question", "Accept the live-run and cross-version gaps? example/product#42: No sandbox", "--answer", "Accept the gaps", "--rejected", "Keep the gaps open", "--reason", "The hook runs in its own tests");
+  const other = /\[(d-[0-9a-f]+)\]/.exec(decided.output)?.[1];
+  const gate = await pr.hedge("gate");
+  expect(gate.code).toBe(0);
+  expect(/ · held: ([^·]+) · /.exec(gate.output)?.[1]).toBe(`${other} for live-run/cross-version, ${id} for prod-shape`);
+  const json = await pr.hedge("gate", "--json");
+  expect((JSON.parse(json.output.trim().split("\n").at(-1) ?? "{}") as { mergeCard?: string }).mergeCard).toContain(` · held: ${other} for live-run/cross-version, ${id} for prod-shape · `);
 });
 
 test("the merge card takes the door from the grade line, and a draft has no ready time yet", async () => {
@@ -62,6 +76,8 @@ test("the receipt writes the merge card block into the PR body without the minut
   expect(receipt.code).toBe(0);
   expect(pr.githubBody()).toContain(`**Merge card:** medium, two-way door · 1 round · gaps: prod-shape (🤖 agent ${id}) · 2 known issues · 120 min opened to ready\n`);
   expect(receipt.output).toContain("· 120 min opened to ready, 60 min ready to card");
+  expect(receipt.output).not.toContain("held:");
+  expect(pr.githubBody()).not.toContain("held:");
   pr.clock.now = new Date("2026-10-25T13:00:00Z");
   expect((await pr.hedge("receipt")).output.split("\n").at(-1)).toBe("receipt current");
 });
@@ -110,23 +126,26 @@ test("a merge word lifts an agent's gap decision only when its card named every 
   await reviewHead(pr);
   await pr.hedge("require", "--kinds", "live-run");
   await pr.hedge("gap", "--kind", "live-run", "--reason", "No sandbox");
-  const decided = await pr.decide("record", "--mark", "🤖", "--class", "proof-gap", "--kind", "live-run", "--kind", "prod-shape", "--pr", "example/product#42", "--question", "Accept the live-run gap? example/product#42: No sandbox", "--answer", "Accept the gap", "--rejected", "Keep the gap open", "--reason", "The hook runs in its own tests");
+  const decided = await pr.decide("record", "--mark", "🤖", "--class", "proof-gap", "--kind", "prod-shape", "--kind", "live-run", "--pr", "example/product#42", "--question", "Accept the live-run gap? example/product#42: No sandbox", "--answer", "Accept the gap", "--rejected", "Keep the gap open", "--reason", "The hook runs in its own tests");
   const id = /\[(d-[0-9a-f]+)\]/.exec(decided.output)?.[1] ?? "";
   const head = await pr.git("rev-parse", "HEAD");
   expect((await pr.hedge("gate")).code).toBe(0);
   const github = { pull: async () => ({ head, base: "main", defaultBranch: "main", open: true }), pullFor: async () => undefined };
   const merge = async () => (await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home: pr.home, env: { HEDGE_SETTINGS: pr.env.HEDGE_SETTINGS }, github }))?.hookSpecificOutput.permissionDecisionReason;
-  expect(await merge()).toContain(`(🤖 ${id} for live-run/prod-shape) itself`);
+  expect(await merge()).toContain(`(🤖 ${id} for prod-shape/live-run) itself`);
   pr.choose("Merge", `Merge example/product#42 at ${head}? An agent accepted ${id} for live-run.`);
   expect((await pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${head}: merge card`)).code).toBe(0);
   await pr.hedge("require", "--kinds", "prod-shape");
   await pr.hedge("gap", "--kind", "prod-shape", "--reason", "No production read access");
-  expect((await pr.hedge("gate")).output).toContain(`prod-shape: gap from ${head.slice(0, 7)}, accepted by 🤖 decision ${id}`);
-  expect(await merge()).toContain(`(🤖 ${id} for live-run/prod-shape) itself`);
+  const gate = await pr.hedge("gate");
+  expect(gate.output).toContain(`prod-shape: gap from ${head.slice(0, 7)}, accepted by 🤖 decision ${id}`);
+  const held = / · held: ([^·]+) · /.exec(gate.output)?.[1];
+  expect(held).toBe(`${id} for prod-shape/live-run`);
+  expect(await merge()).toContain(`(🤖 ${id} for prod-shape/live-run) itself`);
   pr.choose("Merge", `Merge example/product#42 at ${head}? An agent accepted ${id} for live-run, and d-0000 for prod-shape.`);
   expect((await pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${head}: merge card`)).code).toBe(0);
-  expect(await merge()).toContain(`(🤖 ${id} for live-run/prod-shape) itself`);
-  pr.choose("Merge", `Merge example/product#42 at ${head}? An agent accepted ${id} for live-run/prod-shape.`);
+  expect(await merge()).toContain(`(🤖 ${id} for prod-shape/live-run) itself`);
+  pr.choose("Merge", `Merge example/product#42 at ${head}? An agent accepted ${held}.`);
   expect((await pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${head}: merge card`)).code).toBe(0);
   expect(await merge()).toBeUndefined();
 });
