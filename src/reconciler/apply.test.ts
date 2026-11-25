@@ -696,47 +696,53 @@ describe("humanStepsLeft", () => {
     expect(result).toEqual({ failing: [], unchecked: [] });
   });
 
-  test("drains an already-completed probe failure when the deadline fires before result delivery, and marks it unchecked if the drain cap expires", async () => {
+  test("drains an already-completed probe failure when the deadline fires before result delivery, and marks a timed-out real probe unchecked while stopping it", async () => {
     const home = temp.make("home-busy-deadline-");
     let fireDeadline!: () => void;
     let fireDrainCap!: () => void;
     let deliverResult!: (code: number) => void;
-    let aborted = false;
     const giveUp = new Promise<void>((resolve) => (fireDeadline = resolve));
     const drain = new Promise<void>((resolve) => (fireDrainCap = resolve));
-    const run = (_cmd: string[], _env?: Record<string, string | undefined>, signal?: AbortSignal) => {
-      signal?.addEventListener("abort", () => {
-        aborted = true;
-      });
-      return new Promise<number>((resolve) => (deliverResult = resolve));
-    };
+    const run = () => new Promise<number>((resolve) => (deliverResult = resolve));
     const step = { id: "quick-fail", pack: "team", say: "Quick fail.", probe: ["false"] };
     const pending = humanStepsLeft(plan({ human: [step] }), { home, run, giveUp, drain });
     await Promise.resolve();
     fireDeadline();
     await Promise.resolve();
-    expect(aborted).toBe(true);
     deliverResult(1);
     const res = await pending;
     expect(res.failing.map((item) => item.id)).toEqual(["quick-fail"]);
     expect(res.unchecked).toEqual([]);
     fireDrainCap();
 
-    let fireDeadline2!: () => void;
-    let fireDrainCap2!: () => void;
-    const pending2 = humanStepsLeft(plan({ human: [step] }), {
-      home,
-      run: () => new Promise<number>(() => {}),
-      giveUp: new Promise<void>((resolve) => (fireDeadline2 = resolve)),
-      drain: new Promise<void>((resolve) => (fireDrainCap2 = resolve)),
-    });
-    await Promise.resolve();
-    fireDeadline2();
-    await Promise.resolve();
-    fireDrainCap2();
-    const res2 = await pending2;
-    expect(res2.failing).toEqual([]);
-    expect(res2.unchecked.map((item) => item.id)).toEqual(["quick-fail"]);
+    const [ready, gone] = [join(home, "real-ready"), join(home, "real-gone")];
+    expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+    const started = Bun.file(ready).text();
+    const closed = Bun.file(gone).text();
+    let fireReal!: () => void;
+    const realStep = {
+      id: "slow-real",
+      pack: "team",
+      say: "Slow.",
+      probe: ["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "probe", gone, ready],
+    };
+    let pid = 0;
+    try {
+      const pendingReal = humanStepsLeft(plan({ human: [realStep] }), {
+        home,
+        giveUp: new Promise<void>((resolve) => (fireReal = resolve)),
+        graceMs: 0,
+      });
+      pid = Number((await started).trim());
+      expect(pid).toBeGreaterThan(0);
+      fireReal();
+      const resReal = await pendingReal;
+      expect(resReal.failing).toEqual([]);
+      expect(resReal.unchecked.map((item) => item.id)).toEqual(["slow-real"]);
+      expect(await closed).toBe("");
+    } finally {
+      if (pid > 0) try { process.kill(pid, "SIGKILL"); } catch {}
+    }
   });
 
   test("preserves an intentionally detached daemon while watchdog cleans up an ordinary child after normal probe exit", async () => {

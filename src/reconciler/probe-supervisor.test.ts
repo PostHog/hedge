@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { closeSync, existsSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../testing/git.ts";
-import { tagEnvVar } from "./probe-supervisor.ts";
+import { supervise, tagEnvVar, type StopSignal } from "./probe-supervisor.ts";
 import { watchEntries } from "./probe-watchdog.ts";
 
 const temp = tempDirs();
@@ -557,5 +557,40 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
       } catch {}
       await closed.catch(() => {});
     }
+  });
+
+  test("excludes tagged detached daemons when SIGTERM arrives while checking group members after reporting a normal result", async () => {
+    const signalHandlers = new Map<StopSignal, () => void>();
+    const killCalls: Array<{ signal: NodeJS.Signals; includeTagged?: boolean }> = [];
+    let finishCheck!: (hasMembers: boolean) => void;
+    let fireHard!: () => void;
+    const checking = new Promise<boolean>((resolve) => (finishCheck = resolve));
+    const done = supervise(["probe"], {
+      spawn: () => ({ pid: 42, exited: Promise.resolve(0) }),
+      killGroup: (signal, includeTagged) => {
+        killCalls.push({ signal, includeTagged });
+      },
+      hasGroupMembers: () => checking,
+      timer: (_ms, fire) => {
+        fireHard = fire;
+        return () => {};
+      },
+      onSignal: (signal, handler) => {
+        signalHandlers.set(signal, handler);
+      },
+      reportResult: () => {},
+      reportCleanup: () => {},
+      exit: () => {},
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    signalHandlers.get("SIGTERM")?.();
+    fireHard();
+    finishCheck(false);
+    await done;
+    expect(killCalls).toEqual([
+      { signal: "SIGTERM", includeTagged: false },
+      { signal: "SIGKILL", includeTagged: false },
+    ]);
   });
 });

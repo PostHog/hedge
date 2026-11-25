@@ -314,6 +314,7 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
   let stop: StopSignal | undefined;
   let target: { pid?: number; exited: Promise<number>; kill?: (signal?: NodeJS.Signals) => void } | undefined;
   let leaderDone = false;
+  let resultReported = false;
   let normalCleanupStarted = false;
   let finished = false;
   let cancelInterrupt: (() => void) | undefined;
@@ -339,7 +340,7 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
 
   const finishGroup = () => {
     if (finished) return;
-    const killed = host.killGroup("SIGKILL", Boolean(stop) && !normalCleanupStarted);
+    const killed = host.killGroup("SIGKILL", Boolean(stop) && !resultReported);
     if (killed && typeof (killed as Promise<void>).then === "function") {
       void (killed as Promise<void>).finally(() => exit(143));
       return;
@@ -350,7 +351,7 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
   const forwardGroup = (name: StopSignal) => {
     if (forwarded.has(name)) return;
     forwarded.add(name);
-    host.killGroup(name, Boolean(stop) && !normalCleanupStarted);
+    host.killGroup(name, Boolean(stop) && !resultReported);
   };
 
   const armHard = () => {
@@ -383,7 +384,7 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
         if (!leaderDone) host.reportStop?.();
       }
       if (!target) return exit(128);
-      if (leaderDone && normalCleanupStarted) {
+      if (leaderDone && resultReported) {
         if (sig === "SIGTERM" || sig === "SIGHUP") {
           armHard();
           forwardGroup(sig);
@@ -413,6 +414,7 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
   leaderDone = true;
   if (finished) return settled;
   if (!stop) {
+    resultReported = true;
     host.reportResult(code);
     if (host.hasGroupMembers) {
       const hasMembers = await host.hasGroupMembers(target.pid);

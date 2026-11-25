@@ -99,7 +99,9 @@ export function resolve(profile: Profile, saved: MachineFile, sources: FetchedSo
     return !reason;
   };
 
-  plan.catalog = serviceCatalog(order, profile, activeIds(settledWorkflows(profile, { ...machine, role: "hub" }, order, names, byOldName)), byOldName, machine.role === "hub" ? os : "linux");
+  const resolvedCatalog = serviceCatalog(order, profile, activeIds(settledWorkflows(profile, { ...machine, role: "hub" }, order, names, byOldName)), byOldName, machine.role === "hub" ? os : "linux");
+  plan.catalog = resolvedCatalog.catalog;
+  if (Object.keys(resolvedCatalog.catalogWorkflows).length) plan.catalogWorkflows = resolvedCatalog.catalogWorkflows;
   const packFiles: DesiredFile[] = [];
   const unfit: Plan["config"] = [];
   for (const { manifest, dir } of order) {
@@ -176,16 +178,19 @@ export function resolve(profile: Profile, saved: MachineFile, sources: FetchedSo
 /** Every served service of the profile, judged the same way on every node: plans and workflows from the profile, the os of the hub (Linux off the hub), and no gate, which only the hub can test. Two services that claim one port fail. */
 function serviceCatalog(order: Candidate[], profile: Profile, active: Set<string>, byOldName: ByOldName, hubOs: Os) {
   const ports = new Map<number, string>();
-  return order.flatMap(({ manifest }) =>
+  const catalogWorkflows: Record<number, string> = {};
+  const catalog = order.flatMap(({ manifest }) =>
     (manifest.served ?? []).flatMap(({ id, port, health, after, ...scope }) => {
       if ((scope.on && !scope.on.includes(hubOs)) || (scope.plans && !scope.plans.includes(profile.plan)) || (byOldName.has(manifest.name) && !scope.workflow) || (scope.workflow && !active.has(scope.workflow))) return [];
       const name = `${manifest.name}/${id}`;
       const other = ports.get(port);
       if (other) throw new ResolveError(`port ${port} is claimed by both ${other} and ${name}`);
       ports.set(port, name);
+      if (scope.workflow) catalogWorkflows[port] = scope.workflow;
       return [{ pack: manifest.name, id, port, health, ...(after ? { after } : {}) }];
     }),
   );
+  return { catalog, catalogWorkflows };
 }
 
 /** A node that the profile names, other than the hub, reaches the hub's services through its own forward. The Mac and boxes keep today's forwards. */

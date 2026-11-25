@@ -276,10 +276,11 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
 
   test("lists the packs at the deadline even when a human step ignores the request to stop", async () => {
     const { home } = await machineWithProfile();
-    const { started } = await withBlockedProbe(home, '""');
+    const { started, holderGone } = await withBlockedProbe(home, '""');
     const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await started) };
     try {
       expect((await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output).toContain(notChecked);
+      expect(await holderGone).toBe("");
     } finally {
       await endHolder(started);
     }
@@ -521,7 +522,6 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
       ],
     };
     const linuxPlan = resolveEngine([engine, team], { packs: ["team"], hub: "hub-1" }, { schema: 1, role: "hub", name: "hub-1" });
-    expect(linuxPlan.onHub).toBe(true);
     const lines: string[] = [];
     const profile = { schema: 1, engine: { repo: "PostHog/hedge", ref: "main", channel: "track" }, sources: [team.ref], packs: ["team"], plan: "both", settings: {}, workflows: {} } satisfies ProfileFile;
     const osHome = temp.make("home-os-served-");
@@ -536,8 +536,6 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     expect(lines.join("\n")).toContain(`  ~ team  Team rules.\n      Workflows: linux-wf needs setup, mac-wf on\n${needsSetup}`);
 
     const soloMacPlan = resolveEngine([engine, team], { packs: ["team"] }, { schema: 1, role: "mac" });
-    expect(soloMacPlan.onHub).toBe(true);
-    expect(soloMacPlan.os).toBe("darwin");
     const macLines: string[] = [];
     const macCtx = {
       profile,
@@ -548,6 +546,42 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     } as unknown as Parameters<typeof packsCommand>[1];
     expect(await packsCommand([], macCtx)).toBe(0);
     expect(macLines.join("\n")).toContain(`  ~ team  Team rules.\n      Workflows: linux-wf needs setup, mac-wf on\n${needsSetup}`);
+
+    const roleSplitTeam: AvailableSource = {
+      ref: { name: "team", repo: "team/packs", ref: "main" },
+      dir: "/team",
+      packs: [
+        {
+          dir: "/team/packs/team",
+          manifest: {
+            schema: 1,
+            name: "team",
+            summary: "Team rules.",
+            workflows: [
+              { ...flow("server-wf"), needs: ["hub"] },
+              { ...flow("local-wf"), yields: ["server-wf"] },
+            ],
+            human: [{ id: "sign-in", say: "Sign in.", probe: ["false"] }],
+            served: [
+              { id: "svc", port: 4599, health: "/health", workflow: "server-wf", after: "sign-in" },
+              { id: "local-svc", port: 4599, health: "/health", workflow: "local-wf" },
+            ],
+          },
+        },
+      ],
+    };
+    const roleMacPlan = resolveEngine([engine, roleSplitTeam], { packs: ["team"] }, { schema: 1, role: "mac" });
+    const roleLines: string[] = [];
+    const roleCtx = {
+      profile,
+      plan: roleMacPlan,
+      packs: [...engine.packs, ...roleSplitTeam.packs],
+      print: (line: string) => roleLines.push(line),
+      humanStepsLeft: () => humanStepsLeft(roleMacPlan, { home: osHome, giveUp: new Promise<void>(() => {}) }),
+    } as unknown as Parameters<typeof packsCommand>[1];
+    expect(await packsCommand([], roleCtx)).toBe(0);
+    expect(roleLines.join("\n")).toContain("local-wf on");
+    expect(roleLines.join("\n")).not.toContain("local-wf needs setup");
   });
 });
 

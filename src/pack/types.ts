@@ -258,6 +258,7 @@ export type Plan = {
   checks: Array<Owned<PackCheck>>;
   /** Every served service of the profile, on every node, with its port. */
   catalog?: CatalogEntry[];
+  catalogWorkflows?: Record<number, string>;
   t3ProjectScripts?: Array<Owned<T3ProjectScript>>;
   commands: Record<string, { pack: string; path: string; on?: "hub"; workflow?: string; subcommands?: string[] }>;
   handlers: Partial<Record<HandlerSeam, { pack: string; path: string; subcommands?: string[] }>>;
