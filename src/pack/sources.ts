@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadPacks } from "./manifest.ts";
 import { tryLock, waitLock } from "../lock.ts";
 import type { AvailableSource, FetchedSource, Finding, LoadedPack, SourceRef } from "./types.ts";
@@ -89,7 +90,69 @@ function decodeRepoBytes(bytes: Uint8Array): string {
   }
 }
 
-async function resolvedRepoUrl(dir: string, repo: string) {
+function resolveSymlinkPath(target: string, depth = 0): string {
+  const abs = resolve(target);
+  try {
+    return realpathSync(abs);
+  } catch {}
+  if (depth < 40) {
+    try {
+      const info = lstatSync(abs);
+      if (info.isSymbolicLink()) {
+        const linked = readlinkSync(abs);
+        return resolveSymlinkPath(isAbsolute(linked) ? linked : resolve(dirname(abs), linked), depth + 1);
+      }
+    } catch {}
+  }
+  const missing: string[] = [];
+  let current = abs;
+  for (;;) {
+    const parent = dirname(current);
+    if (parent === current) return abs;
+    missing.unshift(basename(current));
+    current = parent;
+    try {
+      return join(realpathSync(current), ...missing);
+    } catch {}
+  }
+}
+
+function isLocalPath(url: string): boolean {
+  if (!url || url.startsWith("\0raw:")) return false;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) return false;
+  if (process.platform === "win32" && /^[a-z]:[\\/]/i.test(url)) return true;
+  return !/^[^/\\]+:/.test(url);
+}
+
+function canonicalLocalTarget(localPath: string): string {
+  const abs = resolve(localPath);
+  let target = abs;
+  try {
+    lstatSync(abs);
+  } catch {
+    if (!abs.endsWith(".git")) {
+      try {
+        if (lstatSync(`${abs}.git`).isSymbolicLink()) target = `${abs}.git`;
+      } catch {}
+    }
+  }
+  return resolveSymlinkPath(target);
+}
+
+function canonicalLocalRepo(dir: string, effective: string): string {
+  if (effective.startsWith("\0raw:")) return effective;
+  if (/^file:\/\//i.test(effective)) {
+    try {
+      return pathToFileURL(canonicalLocalTarget(fileURLToPath(effective))).href;
+    } catch {
+      return effective;
+    }
+  }
+  if (!isLocalPath(effective)) return effective;
+  return canonicalLocalTarget(isAbsolute(effective) ? effective : resolve(dir, effective));
+}
+
+async function rawResolvedRepoUrl(dir: string, repo: string) {
   if (!existsSync(join(dir, ".git"))) return repo;
   const read = await git(dir, "ls-remote", "--get-url", repo);
   if (!read.ok || read.rawBytes.length === 0) return repo;
@@ -100,6 +163,10 @@ async function resolvedRepoUrl(dir: string, repo: string) {
         : read.rawBytes.length - 1
       : read.rawBytes.length;
   return end > 0 ? decodeRepoBytes(read.rawBytes.subarray(0, end)) : repo;
+}
+
+async function resolvedRepoUrl(dir: string, repo: string) {
+  return canonicalLocalRepo(dir, await rawResolvedRepoUrl(dir, repo));
 }
 
 const gitHash = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
@@ -204,16 +271,16 @@ async function isPeeledTagInRepo(dir: string, ref: unknown, commit: unknown): Pr
   return peeled.ok && peeled.stdout.toLowerCase() === commit.toLowerCase();
 }
 
-async function legacyFallbackMatches(dir: string, good: Good, effectiveRepo: string): Promise<boolean> {
+async function legacyFallbackMatches(dir: string, good: Good, rawEffectiveRepo: string, effectiveRepo: string): Promise<boolean> {
   const entry = await fetchHeadEntry(dir, [good.ref, good.asked]);
   if (entry === undefined) return true;
   const strippedRef = stripSourceRefspec(good.ref);
   const matchesGoodCommit = entry.oid === good.commit.toLowerCase() || (good.peeled === true && entry.oid === strippedRef.toLowerCase());
-  if (matchesGoodCommit) return fetchHeadMatches(entry.url, effectiveRepo);
+  if (matchesGoodCommit) return fetchHeadMatches(entry.url, rawEffectiveRepo) || fetchHeadMatches(entry.url, effectiveRepo);
   if (good.branch !== true && good.peeled !== true && isCommitPin(strippedRef, good.commit.length) && strippedRef.toLowerCase() !== good.commit.toLowerCase()) {
     return false;
   }
-  return fetchHeadMatches(entry.url, effectiveRepo) || effectiveRepo === good.repo;
+  return fetchHeadMatches(entry.url, rawEffectiveRepo) || fetchHeadMatches(entry.url, effectiveRepo) || rawEffectiveRepo === good.repo || effectiveRepo === good.repo;
 }
 
 async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Promise<FetchedSource> {
@@ -239,7 +306,8 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
       (existsSync(join(dir, ".git")) &&
         !(await git(dir, "cat-file", "-e", rawStrippedRef)).ok &&
         (await fetchHeadEntry(dir, [rawGood.ref]))?.oid === rawStrippedRef.toLowerCase()));
-  const effectiveBefore = await resolvedRepoUrl(dir, repo);
+  const rawEffectiveBefore = await rawResolvedRepoUrl(dir, repo);
+  const effectiveBefore = canonicalLocalRepo(dir, rawEffectiveBefore);
   const rawFhEntry =
     !legacyPeeled &&
     rawGood !== undefined &&
@@ -251,7 +319,9 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
   const legacyBranch =
     rawFhEntry !== undefined &&
     (await fetchHeadIsBranch(dir, rawGood!.ref)) === true &&
-    (fetchHeadMatches(rawFhEntry.url, effectiveBefore) || (typeof rawGood!.repo === "string" && fetchHeadMatches(rawFhEntry.url, rawGood!.repo)));
+    (fetchHeadMatches(rawFhEntry.url, rawEffectiveBefore) ||
+      fetchHeadMatches(rawFhEntry.url, effectiveBefore) ||
+      (typeof rawGood!.repo === "string" && fetchHeadMatches(rawFhEntry.url, rawGood!.repo)));
   const good =
     legacyPeeled && rawGood
       ? { ...rawGood, peeled: true }
@@ -266,7 +336,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
     good.repo === repo &&
     goodDigest === undefined &&
     hasGoodCommit(good) &&
-    (await legacyFallbackMatches(dir, good, effectiveBefore));
+    (await legacyFallbackMatches(dir, good, rawEffectiveBefore, effectiveBefore));
   const managedDetached =
     before !== undefined &&
     !before.branch &&
@@ -484,6 +554,7 @@ const goodResolvedDigest = (record: { resolved?: string; resolvedDigest?: string
 
 const pinRef = (repoHash: string, commit: string) => `refs/hedge/pins/${repoHash}/${commit.toLowerCase()}`;
 const historyRef = (repoHash: string, commit: string, from: string) => `refs/hedge/history/${repoHash}/${commit.toLowerCase()}/${from.toLowerCase()}`;
+const historySetRef = (repoHash: string, commit: string, from: string) => `refs/hedge/history-set/${repoHash}/${commit.toLowerCase()}/${from.toLowerCase()}`;
 
 async function writeAtomic(path: string, content: string | Uint8Array, mode = 0o600) {
   const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
@@ -542,15 +613,37 @@ async function pinTarget(dir: string, repoHash: string, oid: string): Promise<st
   const type = await git(dir, "cat-file", "-t", normalized);
   if (!type.ok || type.stdout !== "commit") return undefined;
   const containing = await git(dir, "for-each-ref", "--contains", normalized, "--format=%(refname)", `refs/hedge/history/${repoHash}/`);
-  if (!containing.ok || !containing.stdout) return undefined;
-  const stops = new Set<string>();
-  for (const line of containing.stdout.split("\n")) {
-    const stopOid = line.trim().split("/").at(-1)?.toLowerCase();
-    if (!stopOid || !gitHash.test(stopOid)) continue;
-    if (stopOid === normalized) return normalized;
-    stops.add(stopOid);
+  if (containing.ok && containing.stdout) {
+    const stops = new Set<string>();
+    for (const line of containing.stdout.split("\n")) {
+      const stopOid = line.trim().split("/").at(-1)?.toLowerCase();
+      if (!stopOid || !gitHash.test(stopOid)) continue;
+      if (stopOid === normalized) return normalized;
+      stops.add(stopOid);
+    }
+    if (await outsideAnyStop(dir, normalized, stops, `refs/hedge/pins/${repoHash}/`)) return normalized;
   }
-  return (await outsideAnyStop(dir, normalized, stops, `refs/hedge/pins/${repoHash}/`)) ? normalized : undefined;
+  const sets = await git(dir, "for-each-ref", "--format=%(objectname)", `refs/hedge/history-set/${repoHash}/`);
+  if (sets.ok && sets.stdout) {
+    for (const blobOid of sets.stdout.split("\n").map((line) => line.trim()).filter((line) => gitHash.test(line))) {
+      const blob = await git(dir, "cat-file", "blob", blobOid);
+      if (blob.ok && `\n${blob.rawStdout}`.includes(`\n${normalized}\n`)) return normalized;
+    }
+  }
+  return undefined;
+}
+
+async function writeGitBlob(dir: string, content: string): Promise<string | undefined> {
+  const proc = Bun.spawn(["git", "-C", dir, "hash-object", "-w", "--stdin"], {
+    stdin: new TextEncoder().encode(content),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: gitEnv(),
+    timeout: fetchTimeoutMs,
+  });
+  const [code, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
+  const oid = stdout.trim().toLowerCase();
+  return code === 0 && gitHash.test(oid) ? oid : undefined;
 }
 
 async function recordPinRef(dir: string, repoHash: string, oid: string, created?: string[]): Promise<string | undefined> {
@@ -566,10 +659,27 @@ async function recordHistoryRef(dir: string, repoHash: string, commit: string, f
   const ref = historyRef(repoHash, commit, from);
   const normalized = commit.toLowerCase();
   const existing = await git(dir, "rev-parse", "--verify", "--quiet", ref);
-  if (existing.ok && existing.stdout.toLowerCase() === normalized) return undefined;
-  const updated = await git(dir, "update-ref", ref, normalized);
-  if (!updated.ok) return updated.stderr || "could not record verified commit history";
-  created?.push(ref);
+  if (!existing.ok || existing.stdout.toLowerCase() !== normalized) {
+    const updated = await git(dir, "update-ref", ref, normalized);
+    if (!updated.ok) return updated.stderr || "could not record verified commit history";
+    created?.push(ref);
+  }
+  const setRef = historySetRef(repoHash, commit, from);
+  const existingSet = await git(dir, "rev-parse", "--verify", "--quiet", setRef);
+  if (!existingSet.ok || !gitHash.test(existingSet.stdout)) {
+    const listed = await git(dir, "rev-list", normalized, `^${from.toLowerCase()}`);
+    if (!listed.ok) return listed.stderr || "could not list verified commit history";
+    const body = listed.stdout
+      .split("\n")
+      .map((line) => line.trim().toLowerCase())
+      .filter((line) => gitHash.test(line))
+      .join("\n");
+    const blob = await writeGitBlob(dir, body ? `${body}\n` : "");
+    if (!blob) return "could not record verified commit history";
+    const updatedSet = await git(dir, "update-ref", setRef, blob);
+    if (!updatedSet.ok) return updatedSet.stderr || "could not record verified commit history";
+    created?.push(setRef);
+  }
   return undefined;
 }
 
@@ -895,25 +1005,35 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
   const branch = branchName(ref.ref);
   const repo = repoUrl(ref.repo);
   if (!good || !branch || typeof good.commit !== "string" || !gitHash.test(good.commit)) return false;
+  let isBranch: boolean;
+  if (branchName(good.asked) === branch) {
+    if (good.askedBranch === true) isBranch = true;
+    else if (good.askedBranch === false) return false;
+    else if (branchName(good.ref) === branch && typeof good.branch === "boolean") isBranch = good.branch;
+    else isBranch = (await fetchHeadIsBranch(dir, ref.ref)) === true;
+  } else if (branchName(good.ref) === branch) {
+    if (good.branch === true) isBranch = true;
+    else if (good.branch === false) return false;
+    else isBranch = (await fetchHeadIsBranch(dir, ref.ref)) === true;
+  } else {
+    return false;
+  }
+  if (!isBranch) return false;
+  const hasPlusPrefix = (value: unknown) => typeof value === "string" && value.startsWith("+");
+  const needsRepoCheck =
+    hasPlusPrefix(ref.ref) ||
+    hasPlusPrefix(good.ref) ||
+    hasPlusPrefix(good.asked) ||
+    (Array.isArray(good.blocked) && good.blocked.length > 0);
+  if (!needsRepoCheck) return true;
   const effectiveDigest = repoDigest(await resolvedRepoUrl(dir, repo));
   const goodDigest = goodResolvedDigest(good);
   const sameRepo = good.repo === repo && (goodDigest === undefined || goodDigest === effectiveDigest);
-  const hasPlusPrefix = (value: unknown) => typeof value === "string" && value.startsWith("+");
   if ((hasPlusPrefix(ref.ref) || hasPlusPrefix(good.ref) || hasPlusPrefix(good.asked)) && !sameRepo) return false;
   if (Array.isArray(good.blocked) && good.blocked.length) {
     if (good.blocked.some((entry) => entry && entry.repo === repo && goodResolvedDigest(entry) === effectiveDigest)) return false;
   }
-  if (branchName(good.asked) === branch) {
-    if (good.askedBranch === true) return true;
-    if (good.askedBranch === false) return false;
-  }
-  if (branchName(good.ref) === branch) {
-    if (good.branch === true) return true;
-    if (good.branch === false) return false;
-    return (await fetchHeadIsBranch(dir, ref.ref)) === true;
-  }
-  if (branchName(good.asked) !== branch) return false;
-  return (await fetchHeadIsBranch(dir, ref.ref)) === true;
+  return true;
 }
 
 export async function loadedCommit(ref: SourceRef, cacheRoot: string) {
@@ -953,7 +1073,8 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
   const branch = branchName(ref.ref);
   const head = branch ? `refs/heads/${branch}` : "";
   if (!branch || isInvalidRef(head)) return { state: "failed", say: `invalid ref ${JSON.stringify(ref.ref)} for ${ref.repo}` };
-  const effectiveRepo = await resolvedRepoUrl(dir, repo);
+  const rawEffectiveRepo = await rawResolvedRepoUrl(dir, repo);
+  const effectiveRepo = canonicalLocalRepo(dir, rawEffectiveRepo);
   const effectiveDigest = repoDigest(effectiveRepo);
   const listed = await git(dir, "ls-remote", repo, head);
   if (!listed.ok) return { state: "failed", say: `could not reach ${ref.repo}: ${listed.stderr}` };
@@ -963,7 +1084,7 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     cachedGood !== undefined &&
     cachedDigest === undefined &&
     hasGoodCommit(cachedGood) &&
-    !(await legacyFallbackMatches(dir, cachedGood, effectiveRepo));
+    !(await legacyFallbackMatches(dir, cachedGood, rawEffectiveRepo, effectiveRepo));
   if (cachedGood && (cachedGood.repo !== repo || (cachedDigest !== undefined ? cachedDigest !== effectiveDigest : legacyRepoMismatch))) {
     return { state: "refused", say: `${ref.name} now points to ${ref.repo}, not the repository Hedge loaded last. Run hedge apply.` };
   }

@@ -1056,4 +1056,66 @@ esac
     expect([pinAAgain.packs[0]?.manifest.summary, pinAAgain.stale]).toEqual(["Hex A.", undefined]);
   });
 
+  test("keeps refreshed intermediate commits available offline even after an older shallow fetch rewrites .git/shallow", async () => {
+    const repo = await packRepo("Commit 1.");
+    const c1 = await spawnGit(repo, "rev-parse", "HEAD");
+    writePack(repo, "Commit 2.");
+    await spawnGit(repo, "commit", "-q", "-am", "c2");
+    const c2 = await spawnGit(repo, "rev-parse", "HEAD");
+    writePack(repo, "Commit 3.");
+    await spawnGit(repo, "commit", "-q", "-am", "c3");
+    const c3 = await spawnGit(repo, "rev-parse", "HEAD");
+    writePack(repo, "Commit 4.");
+    await spawnGit(repo, "commit", "-q", "-am", "c4");
+
+    const cache = temp.make("cache-older-shallow-refresh-");
+    const dir = join(cache, "team");
+    await spawnGit(repo, "checkout", "-q", "-B", "track", c1);
+    const initTrack = await fetchSource({ name: "team", repo, ref: "track" }, cache);
+    if ("error" in initTrack) throw new Error(initTrack.error);
+    await spawnGit(repo, "checkout", "-q", "-B", "track", "main");
+    const moved = await advanceSource({ name: "team", repo, ref: "track" }, cache, c1);
+    expect(moved.state).toBe("moved");
+
+    await spawnGit(dir, "fetch", "-q", "--depth", "1", "--no-tags", repo, c3);
+    await spawnGit(dir, "checkout", "-q", "--detach", `${c3}^{commit}`);
+    writeFileSync(join(dir, ".git", "hedge-source.json"), JSON.stringify({ repo, ref: c3, commit: c3 }) + "\n");
+
+    rmSync(repo, { recursive: true, force: true });
+    const offlineC2 = await fetchSource({ name: "team", repo, ref: c2 }, cache);
+    if ("error" in offlineC2) throw new Error(offlineC2.error);
+    expect([offlineC2.packs[0]?.manifest.summary, offlineC2.stale]).toEqual(["Commit 2.", undefined]);
+  });
+
+  test("invalidates cached pin provenance when a local mirror symlink is repointed to another repository", async () => {
+    const repoA = await packRepo("Mirror A.");
+    const shaA = await spawnGit(repoA, "rev-parse", "HEAD");
+    const repoB = await packRepo("Mirror B.");
+    const mirrorDir = temp.make("mirror-link-");
+    const mirror = join(mirrorDir, "mirror");
+    symlinkSync(repoA, mirror);
+    const cache = temp.make("cache-symlink-mirror-");
+
+    const first = await fetchSource({ name: "team", repo: mirror, ref: shaA }, cache);
+    if ("error" in first) throw new Error(first.error);
+    expect([first.packs[0]?.manifest.summary, first.stale]).toEqual(["Mirror A.", undefined]);
+
+    rmSync(mirror);
+    symlinkSync(repoB, mirror);
+    const second = await fetchSource({ name: "team", repo: mirror, ref: shaA }, cache);
+    expect("error" in second).toBe(true);
+
+    const fileCache = temp.make("cache-file-symlink-mirror-");
+    rmSync(mirror);
+    symlinkSync(repoA, mirror);
+    const fileUrl = `file://${mirror}`;
+    const firstFile = await fetchSource({ name: "team", repo: fileUrl, ref: shaA }, fileCache);
+    if ("error" in firstFile) throw new Error(firstFile.error);
+    expect([firstFile.packs[0]?.manifest.summary, firstFile.stale]).toEqual(["Mirror A.", undefined]);
+    rmSync(mirror);
+    symlinkSync(repoB, mirror);
+    const secondFile = await fetchSource({ name: "team", repo: fileUrl, ref: shaA }, fileCache);
+    expect("error" in secondFile).toBe(true);
+  });
+
 });

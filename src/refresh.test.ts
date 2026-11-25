@@ -375,4 +375,22 @@ describe("hedge refresh", () => {
     expect(await forkBox.hedge("refresh")).toBe(0);
     expect(forkBox.read(guide)).toBe("Rules v1.\n");
   });
+
+  test("skips a verified SHA-pinned source during hedge refresh without spawning git when git is absent from PATH", async () => {
+    const box = await machine("main");
+    const pinnedSha = await spawnGit(box.repo, "rev-parse", "HEAD");
+    box.pin(pinnedSha);
+    expect(await box.hedge("apply", "--profile", box.profile)).toBe(0);
+    expect(box.read(guide)).toBe("Rules v1.\n");
+
+    const emptyBin = temp.make("no-git-path-");
+    const savedPath = process.env.PATH;
+    process.env.PATH = emptyBin;
+    try {
+      expect(await box.hedge("refresh")).toBe(0);
+    } finally {
+      process.env.PATH = savedPath;
+    }
+    expect(box.read(guide)).toBe("Rules v1.\n");
+  });
 });
