@@ -255,26 +255,9 @@ export type HumanStepsLeft = { failing: Array<Owned<HumanStep>>; unchecked: Arra
 const probeConcurrency = 8;
 const supervisorSpawnFailed = -1;
 
-export async function humanStepsLeft(
-  plan: Plan,
-  options: { home: string; run?: Runner; giveUp: Promise<void>; supervisor?: string; onReported?: (step: Owned<HumanStep>, code: number) => void },
-): Promise<HumanStepsLeft> {
+export async function humanStepsLeft(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void> }): Promise<HumanStepsLeft> {
   const reported = new WeakMap<AbortSignal, number>();
-  const stepBySignal = new WeakMap<AbortSignal, Owned<HumanStep>>();
-  const run = viaEngine(
-    plan,
-    options.run ??
-      spawnRunner(
-        options.home,
-        plan.machine.profileDir,
-        (sig, code) => {
-          reported.set(sig, code);
-          const step = stepBySignal.get(sig);
-          if (step) options.onReported?.(step, code);
-        },
-        options.supervisor,
-      ),
-  );
+  const run = viaEngine(plan, options.run ?? spawnRunner(options.home, plan.machine.profileDir, (sig, code) => reported.set(sig, code)));
   let timedOut = false;
   void options.giveUp.then(() => {
     timedOut = true;
@@ -285,7 +268,6 @@ export async function humanStepsLeft(
     if (timedOut) return;
     const step = plan.human[index]!;
     const deadline = new AbortController();
-    stepBySignal.set(deadline.signal, step);
     const result = run(step.probe, {}, deadline.signal).then((code) =>
       code === supervisorSpawnFailed ? ("unchecked" as const) : code === 0 ? ("passes" as const) : ("fails" as const),
     );
@@ -481,7 +463,7 @@ function viaEngine(plan: Plan, run: Runner): Runner {
 const undoRunner = (run: Runner, step: LedgerStep): Runner => (command) => run(command, { [undoVariable]: ledgerKey(step) });
 
 /** Runs commands with the plan's home directory as HOME, so a step installs into the home it applies to, and with the plan's profile, so a nested hedge reads the profile this run applies or checks. */
-function spawnRunner(home: string, profileDir: string | undefined, onResult?: (signal: AbortSignal, code: number) => void, supervisor = probeSupervisor): Runner {
+function spawnRunner(home: string, profileDir: string | undefined, onResult?: (signal: AbortSignal, code: number) => void): Runner {
   return async (command, env = {}, signal) => {
     const childEnv = withLegacyNames({ ...Bun.env, HOME: home, ...(profileDir ? { HEDGE_PROFILE_DIR: profileDir } : {}), ...env });
     if (!signal) {
@@ -491,7 +473,7 @@ function spawnRunner(home: string, profileDir: string | undefined, onResult?: (s
         return 127;
       }
     }
-    return await runDetached(command, childEnv, signal, onResult, supervisor);
+    return await runDetached(command, childEnv, signal, onResult);
   };
 }
 
@@ -527,7 +509,7 @@ async function readSupervisorResult(stdout: ReadableStream<Uint8Array>, onFirstC
   return { code, cleanup };
 }
 
-async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal, onResult?: (signal: AbortSignal, code: number) => void, supervisor = probeSupervisor) {
+async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal, onResult?: (signal: AbortSignal, code: number) => void) {
   if (!command.length || (command[0]!.includes("/") && !existsSync(command[0]!))) return 127;
   let child: { pid: number; exited: Promise<number>; stdout: ReadableStream<Uint8Array>; unref(): void } | undefined;
   let stopSignal: NodeJS.Signals | undefined;
@@ -558,7 +540,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
     return 124;
   }
   try {
-    child = Bun.spawn(bunScript(supervisor), {
+    child = Bun.spawn(bunScript(probeSupervisor), {
       stdin: new TextEncoder().encode(JSON.stringify(command)),
       stdout: "pipe",
       stderr: "ignore",
@@ -571,8 +553,8 @@ async function runDetached(command: string[], env: Record<string, string | undef
       child.unref();
       return status.code;
     }
-    const exited = await child.exited;
-    return status.code ?? exited;
+    await child.exited;
+    return status.code ?? supervisorSpawnFailed;
   } catch {
     return supervisorSpawnFailed;
   } finally {

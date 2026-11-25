@@ -40,7 +40,8 @@ export async function hasOtherGroupMembers(pgid = process.pid): Promise<boolean>
         const fields = stat.slice(end + 2).split(" ");
         const state = fields[0];
         const group = Number(fields[2]);
-        if (group === pgid && state !== "Z" && state !== "X") return true;
+        const threads = Number(fields[17]);
+        if (group === pgid && ((state !== "Z" && state !== "X") || threads > 1)) return true;
       }
       return false;
     } catch {}
@@ -78,6 +79,7 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
   let stop: StopSignal | undefined;
   let target: { exited: Promise<number> } | undefined;
   let leaderDone = false;
+  let scanning = false;
   let finished = false;
   let cancelInterrupt: (() => void) | undefined;
   let cancelHard: (() => void) | undefined;
@@ -95,6 +97,7 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
   };
 
   if (!command.length) {
+    host.reportResult(127);
     exit(127);
     return settled;
   }
@@ -139,7 +142,12 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
       if (!stop) stop = sig;
       if (!target) return exit(128);
       if (leaderDone) {
-        if (sig === "SIGTERM" || sig === "SIGHUP") {
+        if (scanning) {
+          cancelHard?.();
+          cancelHard = undefined;
+          arm(sig);
+          forwardGroup(sig);
+        } else if (sig === "SIGTERM" || sig === "SIGHUP") {
           armHard();
           forwardGroup(sig);
         }
@@ -153,6 +161,7 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
   try {
     target = host.spawn(command);
   } catch {
+    host.reportResult(127);
     exit(127);
     return settled;
   }
@@ -167,15 +176,22 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
   if (finished) return settled;
   if (!stop) {
     host.reportResult(code);
+    scanning = true;
     armHard();
     const hasPeers = await host.hasOtherMembers();
+    scanning = false;
     if (finished) return settled;
     if (!hasPeers) {
       exit(code);
       return settled;
     }
     host.reportCleanup();
-    forwardGroup("SIGTERM");
+    if (!stop) {
+      cancelHard?.();
+      cancelHard = undefined;
+      armHard();
+      forwardGroup("SIGTERM");
+    }
   }
   return settled;
 }

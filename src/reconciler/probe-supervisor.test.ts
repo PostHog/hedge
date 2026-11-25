@@ -33,10 +33,11 @@ async function fifoWrite(path: string, content: string): Promise<void> {
   await proc.exited;
 }
 
-function spawnControlledSupervisor(command: string[], options?: { scanGate?: string }) {
+function spawnControlledSupervisor(command: string[], options?: { holdScan?: boolean }) {
   const harness = `
 import { hasOtherGroupMembers, supervise } from ${JSON.stringify(supervisorPath)};
-const scanGate = ${JSON.stringify(options?.scanGate ?? "")};
+let releaseScan;
+const scanHold = ${JSON.stringify(Boolean(options?.holdScan))} ? new Promise((resolve) => { releaseScan = resolve; }) : Promise.resolve();
 const timers = [];
 const write = (line) => process.stdout.write(line + "\\n");
 const reader = Bun.stdin.stream().getReader();
@@ -56,6 +57,8 @@ void (async () => {
           next.cancelled = true;
           next.fire();
         }
+      } else if (cmd === "release-scan") {
+        releaseScan?.();
       }
     }
   }
@@ -66,10 +69,7 @@ await supervise(${JSON.stringify(command)}, {
     try { process.kill(-process.pid, signal); } catch {}
   },
   hasOtherMembers: async () => {
-    if (scanGate) {
-      const gate = Bun.spawn(["cat", scanGate], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-      await gate.exited;
-    }
+    await scanHold;
     return await hasOtherGroupMembers(process.pid);
   },
   timer: (_ms, fire) => {
@@ -149,13 +149,19 @@ await supervise(${JSON.stringify(command)}, {
     const code = await proc.exited;
     return reported ?? code;
   };
+  const releaseScan = () => {
+    try {
+      proc.stdin.write("release-scan\n");
+      proc.stdin.flush();
+    } catch {}
+  };
   const cleanup = () => {
     try {
       process.kill(-proc.pid, "SIGKILL");
     } catch {}
     proc.kill("SIGKILL");
   };
-  return { proc, advance, drain, waitResult, cleanup };
+  return { proc, advance, drain, waitResult, releaseScan, cleanup };
 }
 
 function mkfifo(...paths: string[]) {
@@ -388,29 +394,62 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
     }
   });
 
-  test("publishes the probe exit status while descendant scanning is still blocked, exits cleanly once none remain, and bounds stalled scans via the cleanup timer", async () => {
-    const dir = temp.make("sup-scan-");
-    const scanGate = join(dir, "scan-gate");
-    mkfifo(scanGate);
-    const sup = spawnControlledSupervisor(["sh", "-c", "exit 7"], { scanGate });
+  test("publishes the probe exit status while descendant scanning is still blocked, exits cleanly once none remain, bounds stalled scans, and forwards SIGINT during scan", async () => {
+    const sup = spawnControlledSupervisor(["sh", "-c", "exit 7"], { holdScan: true });
     try {
       expect(await sup.waitResult()).toBe(7);
-      await fifoWrite(scanGate, "go\n");
+      sup.releaseScan();
       expect(await sup.proc.exited).toBe(7);
     } finally {
       sup.cleanup();
     }
 
-    const dir2 = temp.make("sup-stalled-scan-");
-    const stalledGate = join(dir2, "scan-gate");
-    mkfifo(stalledGate);
-    const stalled = spawnControlledSupervisor(["sh", "-c", "exit 7"], { scanGate: stalledGate });
+    const stalled = spawnControlledSupervisor(["sh", "-c", "exit 7"], { holdScan: true });
     try {
       expect(await stalled.waitResult()).toBe(7);
       await stalled.advance();
       expect(await stalled.proc.exited).not.toBe(0);
     } finally {
       stalled.cleanup();
+    }
+
+    const dir3 = temp.make("sup-scan-sigint-");
+    const [ready3, leaderGate3, intSaw3, intGate3, intDone3, gone3] = [
+      join(dir3, "ready"),
+      join(dir3, "leader-gate"),
+      join(dir3, "int-saw"),
+      join(dir3, "int-gate"),
+      join(dir3, "int-done"),
+      join(dir3, "gone"),
+    ];
+    const prematureTerm3 = join(dir3, "premature-term");
+    mkfifo(ready3, leaderGate3, intSaw3, intGate3, intDone3, gone3);
+    const started3 = fifoRead(ready3);
+    const sawInt3 = fifoRead(intSaw3);
+    const sawDone3 = fifoRead(intDone3);
+    const closed3 = fifoRead(gone3);
+    const childScript3 = `trap 'echo term > ${JSON.stringify(prematureTerm3)}' TERM; trap 'echo got-int > ${JSON.stringify(intSaw3)}; cat ${JSON.stringify(intGate3)} >/dev/null; echo int-done > ${JSON.stringify(intDone3)}; exit 0' INT; exec 3>${JSON.stringify(gone3)}; echo $$ > ${JSON.stringify(ready3)}; sleep 30 3>&- & wait`;
+    const leaderScript3 = `import { readFileSync } from "node:fs";
+Bun.spawn(["sh", "-c", ${JSON.stringify(childScript3)}], { stdio: ["ignore", "ignore", "ignore"] });
+readFileSync(${JSON.stringify(leaderGate3)}, "utf8");
+process.exit(0);`;
+    const scanInt = spawnControlledSupervisor([process.execPath, "-e", leaderScript3], { holdScan: true });
+    try {
+      const childPid = Number((await started3).trim());
+      expect(childPid).toBeGreaterThan(0);
+      await fifoWrite(leaderGate3, "go\n");
+      expect(await scanInt.waitResult()).toBe(0);
+      scanInt.proc.kill("SIGINT");
+      expect((await sawInt3).trim()).toBe("got-int");
+      scanInt.releaseScan();
+      expect(existsSync(prematureTerm3)).toBe(false);
+      await fifoWrite(intGate3, "go\n");
+      expect((await sawDone3).trim()).toBe("int-done");
+      expect(await closed3).toBe("");
+      expect(existsSync(prematureTerm3)).toBe(false);
+      await scanInt.drain();
+    } finally {
+      scanInt.cleanup();
     }
   });
 });

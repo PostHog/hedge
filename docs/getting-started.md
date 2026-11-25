@@ -190,8 +190,8 @@ Run these on the hub, or on a node:
   `--remove <pack>` turn one on or off. A pack marked `~` is on, but a step
   that only you can do is not done on this box yet. A workflow that waits for
   that step shows `needs setup`. A pack marked `?` has a step that Hedge could
-  not check in time; any workflow waiting on it shows `not checked`.
-  `hedge doctor` lists the steps.
+  not check in time; a workflow waiting on it shows `not checked` unless
+  another step it waits for already needs setup. `hedge doctor` lists the steps.
 - `hedge settings` lists your settings. `hedge set <pack.key>=<value>` changes
   one.
 - `hedge doctor` checks a box against your profile without changing it.
