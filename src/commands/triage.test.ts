@@ -935,6 +935,37 @@ describe("hedge triage", () => {
     expect(redact("clone https://github.com/abc/private-repo and abc", schemeHome, skKnown)).toBe(
       "clone <private source> and <name>",
     );
+
+    const deepSk = `${"SK-prefix-".repeat(9)}SK-abcdefghijklmnop1234`;
+    const deepSkLowerTail = `${"SK-prefix-".repeat(9)}sk-abcdefghijklmnop1234`;
+    const caseKnown = [
+      { text: "https://SERVER.INTERNAL/demo-owner/demo-pack", as: "<private source>" },
+      { text: "https://GIT.INTERNAL/acme/private-packs", as: "<private source>" },
+      { text: "git@SERVER.INTERNAL:acme/private-ssh", as: "<private source>" },
+      { text: "/USERS/ALICE/private-local", as: "<private source>" },
+      { text: `private-owner/${deepSk}`, as: "<private source>" },
+      { text: "12", as: "<this machine>" },
+      { text: "acme/private-packs", as: "<private source>" },
+    ];
+    expect(redact("clone https://server.internal/demo-owner/demo-pack", "/Users/alice", caseKnown)).toBe(
+      "clone <private source>",
+    );
+    expect(redact("clone https://git.internal/acme/private-packs", "/Users/alice", caseKnown)).toBe(
+      "clone <private source>",
+    );
+    expect(redact("clone GIT@server.internal:acme/private-ssh", "/Users/alice", caseKnown)).toBe(
+      "clone <private source>",
+    );
+    expect(redact("path /Users/alice/private-local", "/Users/alice", caseKnown)).toBe(
+      "path <private source>",
+    );
+    expect(redact(`clone https://github.com/private-owner/${deepSkLowerTail}.git`, "/Users/alice", caseKnown)).toBe(
+      "clone https://github.com/<private source>.git",
+    );
+    const repeated = Array.from({ length: 15 }, () => "acme/private-packs").join(" ");
+    expect(redact(`${repeated} on 12`, "/Users/alice", caseKnown)).toBe(
+      `${Array.from({ length: 15 }, () => "<private source>").join(" ")} on <this machine>`,
+    );
   });
 });
 

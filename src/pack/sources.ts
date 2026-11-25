@@ -114,7 +114,7 @@ const isInvalidRef = (ref: string) => {
   const colon = ref.indexOf(":");
   if (colon !== -1 && colon !== ref.length - 1) return true;
   const src = stripSourceRefspec(ref);
-  return !src || src.startsWith("-") || src.startsWith("^");
+  return src.startsWith("-") || src.startsWith("^");
 };
 
 async function repoHashLength(dir: string): Promise<number> {
@@ -664,19 +664,50 @@ async function fetchExact(dir: string, repo: string, ref: string, shallow: boole
   }
 }
 
-async function checkout(dir: string, repo: string, ref: string, savedFetchHead: SavedFetchHead, good?: Good): Promise<{ effectiveRepo: string; commit?: string; fetchedOid?: string; error?: string }> {
+async function readShallowSet(dir: string): Promise<Set<string>> {
+  const raw = await readFile(join(dir, ".git", "shallow"), "utf8").catch(() => "");
+  return new Set(
+    raw
+      .split(/\r?\n/)
+      .map((line) => line.trim().toLowerCase())
+      .filter((line) => gitHash.test(line)),
+  );
+}
+
+async function restoreKnownShallow(dir: string, beforeShallow: Set<string>, targetCommit: string): Promise<void> {
+  if (beforeShallow.has(targetCommit)) return;
+  const shallowPath = join(dir, ".git", "shallow");
+  const current = await readShallowSet(dir);
+  if (!current.has(targetCommit)) return;
+  const raw = await git(dir, "cat-file", "-p", targetCommit);
+  if (!raw.ok) return;
+  const parents: string[] = [];
+  for (const line of raw.rawStdout.split("\n")) {
+    if (line === "") break;
+    const match = line.match(/^parent ([0-9a-f]{40}|[0-9a-f]{64})$/i);
+    if (match) parents.push(match[1]!.toLowerCase());
+  }
+  if (!parents.length) return;
+  for (const parent of parents) {
+    const verified = await git(dir, "rev-parse", "--verify", "--quiet", `${parent}^{commit}`);
+    if (!verified.ok) return;
+  }
+  current.delete(targetCommit);
+  if (current.size === 0) {
+    await rm(shallowPath, { force: true }).catch(() => {});
+  } else {
+    await writeAtomic(shallowPath, [...current].join("\n") + "\n", 0o644).catch(() => {});
+  }
+}
+
+async function checkout(dir: string, repo: string, ref: string, savedFetchHead: SavedFetchHead, _good?: Good): Promise<{ effectiveRepo: string; commit?: string; fetchedOid?: string; error?: string }> {
   const effectiveBefore = await resolvedRepoUrl(dir, repo);
   if (isInvalidRef(ref)) return { effectiveRepo: effectiveBefore, error: `invalid ref ${JSON.stringify(ref)}` };
   await mkdir(dir, { recursive: true });
   if (!existsSync(join(dir, ".git"))) await git(dir, "init", "-q");
   const effectiveRepo = await resolvedRepoUrl(dir, repo);
-  const sameTrackedBranch =
-    good?.branch === true &&
-    good.repo === repo &&
-    goodResolvedDigest(good) === repoDigest(effectiveRepo) &&
-    Boolean(branchName(good.ref)) &&
-    branchName(good.ref) === branchName(ref);
-  const fetched = await fetchExact(dir, repo, ref, !sameTrackedBranch);
+  const beforeShallow = await readShallowSet(dir);
+  const fetched = await fetchExact(dir, repo, ref, true);
   if (!fetched.ok || !fetched.oid) {
     await restoreFetchHead(dir, savedFetchHead);
     return { effectiveRepo, error: fetched.stderr || "could not fetch commit" };
@@ -691,6 +722,7 @@ async function checkout(dir: string, repo: string, ref: string, savedFetchHead: 
     return { effectiveRepo, error: peeled.stderr || "could not resolve fetched commit" };
   }
   const targetCommit = peeled.stdout.toLowerCase();
+  await restoreKnownShallow(dir, beforeShallow, targetCommit);
   const moved = await git(dir, "checkout", "-q", "--detach", targetCommit);
   if (!moved.ok) return { effectiveRepo, error: moved.stderr };
   const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");

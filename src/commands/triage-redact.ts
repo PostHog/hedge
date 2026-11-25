@@ -34,6 +34,14 @@ const ciFixedSecretRules: Rule[] = fixedSecretRules.map(([pattern, replacement])
   new RegExp(pattern.source, pattern.flags.includes("i") ? pattern.flags : `${pattern.flags}i`),
   replacement,
 ]);
+const ciStandardMaskRules: Rule[] = [
+  [/(?<![\w.+%-])[\w.+%-]+(?:@|%40)[A-Za-z0-9-]+(?:(?:\.|%2E)[A-Za-z0-9-]+)*(?:\.|%2E)[A-Za-z]{2,}\b/gi, "<email>"],
+  [/(?<![\w.-])[\w.-]+\/(?:hedge|fleet)-(profile|memory)(?:-[\w-]+)?\b/gi, "<$1 repo>"],
+  [/(private repos? )[\w.-]+\/[\w.-]+(?: and [\w.-]+\/[\w.-]+)?/gi, "$1<private repo>"],
+  [/(?<![A-Za-z0-9-]|[A-Za-z0-9-]\.)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:internal|local|lan|corp|home\.arpa|coder|ts\.net|tailscale\.net)\b/gi, "<host>"],
+  [/(\/Users|\/home)\/(?:[^/\n"'`:]{1,64}?(?=\/)|[^/\s"'`:]+)/gi, "$1/<user>"],
+];
+const ciFlexRules: Rule[] = [...ciFixedSecretRules, ...ciStandardMaskRules];
 const contextualSecretRules: Rule[] = secretRules.slice(8);
 const allRules: Rule[] = [...secretRules, ...standardRules, randomRule];
 const preRandomRules: Rule[] = [...contextualSecretRules, ...standardRules];
@@ -255,9 +263,13 @@ function findFlexSpans(flexRules: FlexRule[], text: string, skipOwner?: KnownNam
   return spans;
 }
 
-function flexSecretPattern(text: string): string | undefined {
-  const hits: Array<{ start: number; end: number; masked: string }> = [];
-  for (const [regex, replacement] of ciFixedSecretRules) {
+type FlexHit = { start: number; end: number; masked: string };
+
+const flexLiteralLimit = 8;
+
+function expandFlexMask(text: string): { literals: string[]; pattern?: string } | undefined {
+  const hits: FlexHit[] = [];
+  for (const [regex, replacement] of ciFlexRules) {
     regex.lastIndex = 0;
     const single = new RegExp(regex.source, regex.flags.replace("g", ""));
     for (let match = regex.exec(text); match !== null; match = regex.exec(text)) {
@@ -273,41 +285,132 @@ function flexSecretPattern(text: string): string | undefined {
     }
   }
   if (!hits.length) return undefined;
-  const unique = new Map<string, { start: number; end: number; masked: string }>();
+  const unique = new Map<string, FlexHit>();
   for (const hit of hits) {
     const key = `${hit.start}:${hit.end}:${hit.masked}`;
     if (!unique.has(key)) unique.set(key, hit);
   }
   const all = [...unique.values()].sort((a, b) => a.start - b.start || b.end - a.end);
-  const build = (from: number, to: number, minStart: number, depth: number): string => {
-    let out = "";
-    let pos = from;
-    while (pos < to) {
-      const hit = depth < 8 ? all.find((h) => h.start >= Math.max(pos, minStart) && h.end <= to) : undefined;
-      if (!hit) {
-        out += escape(text.slice(pos, to));
-        break;
+
+  const clusters: Array<{ start: number; end: number; hits: FlexHit[] }> = [];
+  let idx = 0;
+  while (idx < all.length) {
+    const start = all[idx]!.start;
+    let end = all[idx]!.end;
+    let next = idx + 1;
+    while (next < all.length && all[next]!.start < end) {
+      if (all[next]!.end > end) end = all[next]!.end;
+      next++;
+    }
+    clusters.push({ start, end, hits: all.slice(idx, next) });
+    idx = next;
+  }
+
+  let product = 1;
+  const clusterLiterals: string[][] = [];
+  let canUseLiterals = true;
+  for (const cluster of clusters) {
+    const lit = text.slice(cluster.start, cluster.end);
+    if (cluster.hits.length === 1) {
+      const msk = cluster.hits[0]!.masked;
+      const alts = msk === lit ? [lit] : [msk, lit];
+      clusterLiterals.push(alts);
+      product *= alts.length;
+    } else if (cluster.hits.every((item) => item.end === cluster.end)) {
+      const alts = new Set<string>([lit]);
+      for (const item of cluster.hits) {
+        alts.add(`${text.slice(cluster.start, item.start)}${item.masked}`);
       }
-      if (hit.start > pos) out += escape(text.slice(pos, hit.start));
-      let clusterEnd = hit.end;
-      let expanded = true;
-      while (expanded) {
-        expanded = false;
-        for (const other of all) {
-          if (other.start >= hit.start && other.start < clusterEnd && other.end > clusterEnd && other.end <= to) {
-            clusterEnd = other.end;
-            expanded = true;
-          }
+      const list = [...alts];
+      clusterLiterals.push(list);
+      product *= list.length;
+    } else {
+      canUseLiterals = false;
+      break;
+    }
+    if (product > flexLiteralLimit) {
+      canUseLiterals = false;
+      break;
+    }
+  }
+
+  if (canUseLiterals) {
+    let variants = [""];
+    let pos = 0;
+    for (let c = 0; c < clusters.length; c++) {
+      const cluster = clusters[c]!;
+      const gap = text.slice(pos, cluster.start);
+      const nextVariants: string[] = [];
+      for (const prefix of variants) {
+        for (const alt of clusterLiterals[c]!) {
+          nextVariants.push(`${prefix}${gap}${alt}`);
         }
       }
-      const withHit = `${escape(hit.masked)}${build(hit.end, clusterEnd, hit.end, depth + 1)}`;
-      const withoutHit = build(hit.start, clusterEnd, hit.start + 1, depth + 1);
-      out += withHit === withoutHit ? withHit : `(?:${withHit}|${withoutHit})`;
-      pos = clusterEnd;
+      variants = nextVariants;
+      pos = cluster.end;
     }
+    const tail = text.slice(pos);
+    return { literals: variants.map((v) => `${v}${tail}`) };
+  }
+
+  const buildRange = (from: number, to: number, list: FlexHit[], branchDepth: number): string => {
+    let out = "";
+    let pos = from;
+    let i = 0;
+    while (i < list.length) {
+      const h = list[i]!;
+      if (h.start < pos || h.end > to) {
+        i++;
+        continue;
+      }
+      if (h.start > pos) out += escape(text.slice(pos, h.start));
+      let cEnd = h.end;
+      let j = i + 1;
+      while (j < list.length && list[j]!.start < cEnd) {
+        if (list[j]!.end <= to && list[j]!.end > cEnd) cEnd = list[j]!.end;
+        j++;
+      }
+      const cluster = list.slice(i, j).filter((item) => item.end <= cEnd);
+      if (cluster.length === 1) {
+        const lit = escape(text.slice(h.start, h.end));
+        const msk = escape(h.masked);
+        out += msk === lit ? lit : `(?:${msk}|${lit})`;
+      } else if (cluster.every((item) => item.end === cEnd)) {
+        const byStart = new Map<number, Set<string>>();
+        for (const item of cluster) {
+          let set = byStart.get(item.start);
+          if (!set) {
+            set = new Set();
+            byStart.set(item.start, set);
+          }
+          set.add(escape(item.masked));
+        }
+        const starts = [...byStart.keys()].sort((a, b) => a - b);
+        let tail = escape(text.slice(starts.at(-1)!, cEnd));
+        for (let s = starts.length - 1; s >= 0; s--) {
+          const st = starts[s]!;
+          const gap = s + 1 < starts.length ? escape(text.slice(st, starts[s + 1]!)) : "";
+          const alts = [...byStart.get(st)!, `${gap}${tail}`];
+          tail = alts.length === 1 ? alts[0]! : `(?:${alts.join("|")})`;
+        }
+        out += tail;
+      } else if (branchDepth < 8) {
+        const first = cluster[0]!;
+        const afterFirst = cluster.filter((item) => item.start >= first.end);
+        const skippingFirst = cluster.slice(1);
+        const withHit = `${escape(first.masked)}${buildRange(first.end, cEnd, afterFirst, branchDepth + (afterFirst.length ? 1 : 0))}`;
+        const withoutHit = buildRange(first.start, cEnd, skippingFirst, branchDepth + (first.end < cEnd ? 1 : 0));
+        out += withHit === withoutHit ? withHit : `(?:${withHit}|${withoutHit})`;
+      } else {
+        out += escape(text.slice(h.start, cEnd));
+      }
+      pos = cEnd;
+      i = j;
+    }
+    if (pos < to) out += escape(text.slice(pos, to));
     return out;
   };
-  return build(0, text.length, 0, 0);
+  return { literals: [], pattern: buildRange(0, text.length, all, 0) };
 }
 
 const unsafeForBatch = /-----BEGIN|["'\0\r\n]|[:=]\s*$/i;
@@ -384,40 +487,55 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
   const csSeen = new Set<string>();
   const flexSeen = new Set<string>();
 
-  for (const name of raw) {
-    const left: 0 | 1 = name.after && /^[~<]/.test(name.text) ? 0 : 1;
+  const addLiteralRule = (text: string, as: string, after: boolean, owner: KnownName) => {
+    const minLength = after ? 1 : 2;
+    if (text.length < minLength || exempt?.has(text)) return;
+    const left: 0 | 1 = after && /^[~<]/.test(text) ? 0 : 1;
     const right: 0 | 1 | 2 =
-      name.after && /[>]$/.test(name.text)
+      after && /[>]$/.test(text)
         ? 0
-        : name.after && name.text.startsWith("The pack source ")
+        : after && text.startsWith("The pack source ")
           ? 2
           : 1;
-    if (name.text.length < 4) {
-      const key = `${left}:${right}:${name.text}`;
+    if (text.length < 4) {
+      const key = `${left}:${right}:${text}`;
       if (!csSeen.has(key)) {
         csSeen.add(key);
-        csRules.push({ text: name.text, len: name.text.length, left, right, as: name.as, owner: name.owner });
+        csRules.push({ text, len: text.length, left, right, as, owner });
       }
-    } else {
-      const flex = name.after ? flexSecretPattern(name.text) : undefined;
-      if (flex) {
-        const leftPat = left === 0 ? "" : "(?<![\\w-])";
-        const rightPat = right === 0 ? "" : right === 2 ? "(?![\\w/:-]|\\.[A-Za-z0-9])" : "(?![\\w-])";
-        const fullPat = `${leftPat}${flex}${rightPat}`;
-        if (!flexSeen.has(fullPat)) {
-          flexSeen.add(fullPat);
-          flexRules.push({ regex: new RegExp(fullPat, "gi"), as: name.as, owner: name.owner });
+      return;
+    }
+    const key = `${left}:${right}:${foldCase(text)}`;
+    const existing = ciSeen.get(key);
+    if (!existing) {
+      const rule: AcRule = { text, len: text.length, left, right, as, owner };
+      ciSeen.set(key, rule);
+      ciRules.push(rule);
+    } else if (!(existing.regex ??= new RegExp(`^${escape(existing.text)}$`, "i")).test(text)) {
+      existing.ambiguous = true;
+      ciRules.push({ text, len: text.length, left, right, as, owner, ambiguous: true });
+    }
+  };
+
+  for (const name of raw) {
+    addLiteralRule(name.text, name.as, name.after, name.owner);
+    if (name.after && name.text.length >= 4) {
+      const expanded = expandFlexMask(name.text);
+      if (expanded) {
+        for (const literal of expanded.literals) {
+          addLiteralRule(literal, name.as, true, name.owner);
         }
-      }
-      const key = `${left}:${right}:${foldCase(name.text)}`;
-      const existing = ciSeen.get(key);
-      if (!existing) {
-        const rule: AcRule = { text: name.text, len: name.text.length, left, right, as: name.as, owner: name.owner };
-        ciSeen.set(key, rule);
-        ciRules.push(rule);
-      } else if (!(existing.regex ??= new RegExp(`^${escape(existing.text)}$`, "i")).test(name.text)) {
-        existing.ambiguous = true;
-        ciRules.push({ text: name.text, len: name.text.length, left, right, as: name.as, owner: name.owner, ambiguous: true });
+        if (expanded.pattern) {
+          const left: 0 | 1 = /^[~<]/.test(name.text) ? 0 : 1;
+          const right: 0 | 1 | 2 = /[>]$/.test(name.text) ? 0 : name.text.startsWith("The pack source ") ? 2 : 1;
+          const leftPat = left === 0 ? "" : "(?<![\\w-])";
+          const rightPat = right === 0 ? "" : right === 2 ? "(?![\\w/:-]|\\.[A-Za-z0-9])" : "(?![\\w-])";
+          const fullPat = `${leftPat}${expanded.pattern}${rightPat}`;
+          if (!flexSeen.has(fullPat)) {
+            flexSeen.add(fullPat);
+            flexRules.push({ regex: new RegExp(fullPat, "gi"), as: name.as, owner: name.owner });
+          }
+        }
       }
     }
   }
@@ -471,16 +589,13 @@ function applySpans(text: string, spans: MatchSpan[], exempt?: Set<string>, onMa
 }
 
 function applySpellings(text: string, matcher: CompiledMatcher, exempt?: Set<string>, skipOwner?: KnownName, onMatch?: (match: string, as: string) => string) {
-  let result = text;
-  if (matcher.ciAc || matcher.flexRules.length) {
-    const ciSpans = [...findAcSpans(matcher.ciAc, result, skipOwner), ...findFlexSpans(matcher.flexRules, result, skipOwner)];
-    result = applySpans(result, ciSpans, exempt, onMatch);
-  }
-  if (matcher.csAc) {
-    const csSpans = findAcSpans(matcher.csAc, result, skipOwner);
-    result = applySpans(result, csSpans, exempt, onMatch);
-  }
-  return result;
+  if (!matcher.ciAc && !matcher.csAc && !matcher.flexRules.length) return text;
+  const spans = [
+    ...findAcSpans(matcher.ciAc, text, skipOwner),
+    ...findFlexSpans(matcher.flexRules, text, skipOwner),
+    ...findAcSpans(matcher.csAc, text, skipOwner),
+  ];
+  return applySpans(text, spans, exempt, onMatch);
 }
 
 const deferToAfter = new RegExp(
@@ -491,7 +606,10 @@ const deferToAfter = new RegExp(
 const builtInLabels = new Set([...redactorLabels, "<this machine>", "<hub>", "<branch>", "<private source>", "<name>"]);
 
 export function redact(text: string, home: string, known: KnownName[] = []): string {
-  const stripHome = (value: string) => (home.length > 1 ? value.split(home.replace(/\/$/, "")).join("~") : value);
+  const trimmedHome = home.replace(/\/$/, "");
+  const stripHome = (value: string) => (home.length > 1 ? value.split(trimmedHome).join("~") : value);
+  const homeCiRegex = home.length > 1 ? new RegExp(escape(trimmedHome), "gi") : undefined;
+  const stripHomeCi = (value: string) => (homeCiRegex ? value.replace(homeCiRegex, "~") : value);
   const valid = known.filter((entry) => typeof entry.text === "string" && typeof entry.as === "string");
   const needsAfter = (entry: KnownName) => Boolean(entry.after) || deferToAfter.test(entry.text) || applyRules(entry.text, secretRules) !== entry.text;
   const primary: KnownName[] = [];
@@ -686,7 +804,11 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
   }
   const presentExempt = [...presentSet].sort((a, b) => b.length - a.length);
   const afterTransform = (value: string) => applyRules(stripHome(value), allRules);
-  const afterSpellings = compileSpellings(sanitizedAfter, afterTransform, exempt, presentExempt);
+  const afterEntries = sanitizedAfter.flatMap((entry) => {
+    const ciHome = stripHomeCi(entry.text);
+    return ciHome !== entry.text && ciHome !== stripHome(entry.text) ? [entry, { ...entry, text: ciHome }] : [entry];
+  });
+  const afterSpellings = compileSpellings(afterEntries, afterTransform, exempt, presentExempt);
   const afterSpans = [
     ...findAcSpans(afterSpellings.ciAc, expanded),
     ...findFlexSpans(afterSpellings.flexRules, expanded),

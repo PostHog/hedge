@@ -853,10 +853,26 @@ throw new Error("broken pack");
     expect(midOffline.stale).toBeUndefined();
 
     const emptyRefRepo = await packRepo("Default HEAD packs.");
-    const emptyRefCache = temp.make("cache-empty-ref-");
-    const emptyRefRes = await fetchSource({ name: "team", repo: emptyRefRepo, ref: "" }, emptyRefCache);
-    if ("error" in emptyRefRes) throw new Error(emptyRefRes.error);
-    expect(emptyRefRes.packs[0]?.manifest.summary).toBe("Default HEAD packs.");
+    for (const emptyRef of ["", ":", "+", "+:"]) {
+      const emptyRefCache = temp.make("cache-empty-ref-");
+      const emptyRefRes = await fetchSource({ name: "team", repo: emptyRefRepo, ref: emptyRef }, emptyRefCache);
+      if ("error" in emptyRefRes) throw new Error(emptyRefRes.error);
+      expect(emptyRefRes.packs[0]?.manifest.summary).toBe("Default HEAD packs.");
+    }
+
+    const forceRepo = await packRepo("Before force.");
+    const forceCache = temp.make("cache-force-depth-");
+    expect("error" in (await fetchSource({ name: "team", repo: forceRepo, ref: "main" }, forceCache))).toBe(false);
+    await spawnGit(forceRepo, "checkout", "-q", "--orphan", "rewritten");
+    for (let i = 1; i <= 5; i++) {
+      writePack(forceRepo, `Rewritten ${i}.`);
+      await spawnGit(forceRepo, "commit", "-q", "-am", `r${i}`);
+    }
+    await spawnGit(forceRepo, "branch", "-M", "rewritten", "main");
+    const forceRes = await fetchSource({ name: "team", repo: forceRepo, ref: "main" }, forceCache);
+    if ("error" in forceRes) throw new Error(forceRes.error);
+    expect(forceRes.packs[0]?.manifest.summary).toBe("Rewritten 5.");
+    expect(await spawnGit(join(forceCache, "team"), "rev-list", "--count", "HEAD")).toBe("1");
   });
 });
 
