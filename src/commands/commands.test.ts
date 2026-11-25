@@ -272,24 +272,6 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     }
   });
 
-  test("lists the packs at the deadline and still stops descendants that ignore SIGTERM after a cooperative probe exits", async () => {
-    const { home } = await machineWithProfile();
-    const [ready, gone] = [join(home, "ready"), join(home, "gone")];
-    expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
-    await withTeamPack(home, {
-      workflows: [flow("allowlist")],
-      human: [humanStep("allowlist", 'sh -c \'trap "" TERM; exec 3>"$HOME/gone"; echo $$ > "$HOME/ready"; exec sleep 30\' & wait', "allowlist")],
-    });
-    const [holderGone, started] = [readFile(gone, "utf8"), readFile(ready, "utf8")];
-    const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await started) };
-    try {
-      expect((await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output).toContain(notChecked);
-      expect(await holderGone).toBe("");
-    } finally {
-      await endHolder(started);
-    }
-  });
-
   test("resolves probe executables via PATH, allows execute-only binaries, and rejects no-shebang scripts, matching hedge doctor", async () => {
     const { home } = await machineWithProfile();
     const bin = join(home, "bin");

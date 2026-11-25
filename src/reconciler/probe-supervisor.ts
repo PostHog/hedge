@@ -106,14 +106,10 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
   leaderDone = true;
   if (finished) return settled;
   if (!stop) {
+    forwardGroup("SIGHUP");
+    forwardGroup("SIGTERM");
     exit(code);
     return settled;
-  }
-  if (!cancelHard) {
-    cancelInterrupt?.();
-    cancelInterrupt = undefined;
-    armHard();
-    forwardGroup("SIGTERM");
   }
   return settled;
 }
