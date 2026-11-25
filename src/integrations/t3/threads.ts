@@ -29,7 +29,7 @@ type CardQuestion = { id: string; header?: string; question?: string; options?: 
 export type TurnItem = {
   item: {
     id?: string; type: string; createdBy?: string; creationSource?: string; messageId?: string; text?: string;
-    startedAt: string; completedAt?: string | null; updatedAt?: string | null; requestId?: string; questions?: CardQuestion[]; questionAnswer?: QuestionAnswer;
+    startedAt: string; completedAt?: string | null; updatedAt?: string | null; requestId?: string; nativeItemRef?: { driver?: string }; questions?: CardQuestion[]; questionAnswer?: QuestionAnswer;
   };
 };
 type BoundedThread = { projection: { visibleTurnItems: TurnItem[] }; historyCursor: string | null; hasMoreHistory: boolean };
@@ -124,8 +124,8 @@ export async function readThreadWords(client: T3HttpClient, value: string, state
     if (typedByUser(item) && item.text) words.push({ thread: threadId, id: item.messageId ?? item.id ?? "", text: item.text, answered: lastAssistant.slice(0, answeredCap), at: item.updatedAt ?? item.startedAt, source: "typed" });
     const answer = item.type === "user_input_request" && answeredInClient().has(item.requestId ?? "") ? item.questionAnswer : undefined;
     Object.entries(answer?.answers ?? {}).forEach(([question, chosen], index) => {
-      const card = cardAnswer(item.questions ?? [], answer!, question, chosen);
-      if (card) words.push({ thread: threadId, id: `${item.id}:${index}`, text: card.text, answered: card.answered.slice(0, answeredCap), at: item.updatedAt ?? item.startedAt, source: "question" });
+      const card = (item.nativeItemRef?.driver === "antigravity" ? antigravityAnswer : cardAnswer)(item.questions ?? [], answer!, question, chosen);
+      if (card) words.push({ thread: threadId, id: `${item.id}:${index}`, text: card.text, answered: card.answered, at: item.updatedAt ?? item.startedAt, source: "question" });
     });
   }
   return words;
@@ -135,14 +135,19 @@ const otherSuffix = "_other";
 const otherPrompt = "Optional free-form answer to: ";
 const questionCountPlaceholder = /^The agent has (?:a question|\d+ questions)\.$/u;
 
-function cardAnswer(questions: CardQuestion[], { questionTextById, answers }: QuestionAnswer, id: string, chosen: string | string[]) {
+function cardAnswer(_questions: CardQuestion[], { questionTextById }: QuestionAnswer, id: string, chosen: string | string[]) {
+  return { text: [chosen].flat().join(", "), answered: (questionTextById[id] ?? id).slice(0, answeredCap) };
+}
+
+function antigravityAnswer(questions: CardQuestion[], answer: QuestionAnswer, id: string, chosen: string | string[]) {
   const byId = (wanted: string) => questions.find((question) => question.id === wanted);
   const asked = byId(id);
   const other = byId(`${id}${otherSuffix}`);
-  if (asked && isOtherField(asked) && byId(id.slice(0, -otherSuffix.length))) return typedInOtherField(chosen) ? { text: [chosen].flat().join(", "), answered: questionTextById[id] ?? id } : undefined;
-  if (other && isOtherField(other) && typedInOtherField(answers[other.id] ?? "")) return undefined;
-  const labels = [chosen].flat().map((value) => onlyLabelOf(asked?.options ?? [], value));
-  return { text: labels.join(", "), answered: asked ? promptOf(asked, questionTextById[id]) : questionTextById[id] ?? id };
+  if (asked && isOtherField(asked) && byId(id.slice(0, -otherSuffix.length))) return typedInOtherField(chosen) ? { text: [chosen].flat().join(", "), answered: (answer.questionTextById[id] ?? id).slice(0, otherPrompt.length + answeredCap) } : undefined;
+  if (other && isOtherField(other) && typedInOtherField(answer.answers[other.id] ?? "")) return undefined;
+  if (!asked) return cardAnswer(questions, answer, id, chosen);
+  const labels = [chosen].flat().map((value) => onlyLabelOf(asked.options ?? [], value));
+  return { text: labels.join(", "), answered: promptOf(asked, answer.questionTextById[id]).slice(0, answeredCap) };
 }
 
 function isOtherField(question: CardQuestion) {
@@ -158,9 +163,10 @@ function promptOf(question: CardQuestion, text = question.question ?? question.i
   return questionCountPlaceholder.test(text) && question.header ? question.header : text;
 }
 
+const acknowledgment = /^(?:o|ok|okay)?$/iu;
+
 function typedInOtherField(chosen: string | string[]) {
-  const typed = [chosen].flat().join(", ").trim().toLowerCase();
-  return typed !== "" && !"other".startsWith(typed);
+  return !acknowledgment.test([chosen].flat().join(", ").trim());
 }
 
 export async function readLinkedThreadWords(client: Pick<T3HttpClient, "callTool">, environmentId: string, threadId: string): Promise<ThreadWord[]> {

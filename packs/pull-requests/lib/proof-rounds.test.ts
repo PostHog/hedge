@@ -434,14 +434,14 @@ test("--thread reads the user's words from the T3 thread through the local T3 se
   } finally { await t3.stop(); }
 });
 
-test("the user's pick on an Antigravity card accepts the gap its question names, though the card's unused other field holds a stray letter, and a condition they typed there does not", async () => {
+test("the user's pick on an Antigravity card accepts the gap its question names, though its other field holds a stray letter or an “Ok”, and a condition they typed there does not", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "new\n");
   const at = "2026-11-25T04:03:04Z";
   const question = "Accept the prod-shape gap? example/product#42: No sandbox";
   const card = (id: string, other: string) => ({
     item: {
-      id, requestId: `${id}-request`, type: "user_input_request", startedAt: at,
+      id, requestId: `${id}-request`, type: "user_input_request", nativeItemRef: { driver: "antigravity" }, startedAt: at,
       questions: [
         { id: "q1", header: question, question: "The agent has a question.", options: [{ label: "Accept the gap (Recommended)", description: "", value: "1" }, { label: "Keep the gap open", description: "", value: "2" }], allowCustomAnswer: false },
         { id: "q1_other", header: "Other", question: `Optional free-form answer to: ${question}`, options: [], required: false },
@@ -467,7 +467,7 @@ test("the user's pick on an Antigravity card accepts the gap its question names,
     const accept = (...quote: string[]) => pr.decide("record", "--mark", "👤", "--class", "proof-gap", "--kind", "prod-shape", "--pr", "example/product#42", "--thread", "thread-9", ...quote);
 
     await expect(accept()).rejects.toThrow(`The user chose "Yes, only after CI is green" to a question that does not ask`);
-    items.push(card("card", "O"));
+    items.push(card("card", "Ok"));
     expect((await accept()).code).toBe(0);
     expect(ledgerDecisions(pr)).toMatchObject([{ question, answer: `2026-11-25 "Accept the gap (Recommended)"`, where: { thread: "mcp:thread-9", message: "card:0" } }]);
   } finally { await t3.stop(); }
