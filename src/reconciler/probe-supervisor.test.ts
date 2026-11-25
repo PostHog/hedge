@@ -1302,88 +1302,65 @@ await capture([process.execPath, "-e", ${JSON.stringify(outerScript)}], { timeou
     }
   });
 
-  test("kills an adopted detached env -i worker when any enclosing Linux probe supervisor layer is SIGKILLed", async () => {
+  test("kills an adopted detached env -i worker when its Linux probe supervisor dies unexpectedly", async () => {
     if (process.platform !== "linux") return;
-    const { readFileSync } = await import("node:fs");
     const envBin = Bun.which("env") ?? "/usr/bin/env";
     const shBin = Bun.which("sh") ?? "/bin/sh";
     const { humanStepsLeft } = await import("./apply.ts");
-    const parentOf = (pid: number) => {
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-      const closeParen = stat.lastIndexOf(")");
-      return Number(stat.slice(closeParen + 2).split(" ")[1]);
-    };
-    const supervisorAncestors = (pid: number) => {
-      const out: number[] = [];
-      let cur = parentOf(pid);
-      while (cur > 1 && cur !== process.pid && out.length < 8) {
-        out.push(cur);
-        cur = parentOf(cur);
-      }
-      return out;
-    };
-    const runAndKillLayer = async (layerIndex: number): Promise<number> => {
-      const dir = temp.make(`sup-sigkill-adopted-${layerIndex}-`);
-      const [workerReady, workerGone, helperDone] = [join(dir, "worker-ready"), join(dir, "worker-gone"), join(dir, "helper-done")];
-      mkfifo(workerReady, workerGone, helperDone);
-      const started = fifoRead(workerReady);
-      const closed = fifoRead(workerGone);
-      const adopted = fifoRead(helperDone);
-      const helperScript = `const w = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "worker", ${JSON.stringify(workerGone)}, ${JSON.stringify(workerReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    const dir = temp.make("sup-sigkill-adopted-");
+    const [workerReady, workerGone, helperDone] = [join(dir, "worker-ready"), join(dir, "worker-gone"), join(dir, "helper-done")];
+    mkfifo(workerReady, workerGone, helperDone);
+    const started = fifoRead(workerReady);
+    const closed = fifoRead(workerGone);
+    const adopted = fifoRead(helperDone);
+    const helperScript = `const w = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "worker", ${JSON.stringify(workerGone)}, ${JSON.stringify(workerReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 w.unref();
 process.exit(0);`;
-      const probeScript = `const h = Bun.spawn([process.execPath, "-e", ${JSON.stringify(helperScript)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    const probeScript = `const h = Bun.spawn([process.execPath, "-e", ${JSON.stringify(helperScript)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 await h.exited;
-await Bun.write(${JSON.stringify(helperDone)}, "done\\n");
+await Bun.write(${JSON.stringify(helperDone)}, String(process.ppid) + "\\n");
 await Bun.sleep(30_000);`;
-      let workerPid = 0;
-      try {
-        const pending = humanStepsLeft(
-          {
-            machine: { schema: 1, role: "linux" },
-            os: "linux",
-            ai: "both",
-            packs: [],
-            workflows: [],
-            files: [],
-            config: [],
-            owners: {},
-            jobs: [],
-            human: [{ id: "adopted", pack: "team", say: "Adopted.", probe: [process.execPath, "-e", probeScript] }],
-            steps: [],
-            checks: [],
-            commands: {},
-            handlers: {},
-            models: [],
-            settings: {},
-            unanswered: [],
-            ask: [],
-            dropped: [],
-          },
-          { home: dir, giveUp: new Promise<void>(() => {}), graceMs: 0 },
-        );
-        const [rawWorker] = await Promise.all([started, adopted]);
-        workerPid = Number(rawWorker.trim());
-        expect(workerPid).toBeGreaterThan(0);
-        const ancestors = supervisorAncestors(workerPid);
-        expect(ancestors.length).toBeGreaterThan(0);
-        const victimPid = ancestors[Math.min(layerIndex, ancestors.length - 1)]!;
-        process.kill(victimPid, "SIGKILL");
-        const res = await pending;
-        expect(res.unchecked.map((step) => step.id)).toEqual(["adopted"]);
-        expect(await closed).toBe("");
-        return ancestors.length;
-      } finally {
-        if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
-      }
-    };
-    const depth = await runAndKillLayer(0);
-    for (let layer = 1; layer < depth; layer++) {
-      await runAndKillLayer(layer);
+    let workerPid = 0;
+    try {
+      const pending = humanStepsLeft(
+        {
+          machine: { schema: 1, role: "linux" },
+          os: "linux",
+          ai: "both",
+          packs: [],
+          workflows: [],
+          files: [],
+          config: [],
+          owners: {},
+          jobs: [],
+          human: [{ id: "adopted", pack: "team", say: "Adopted.", probe: [process.execPath, "-e", probeScript] }],
+          steps: [],
+          checks: [],
+          commands: {},
+          handlers: {},
+          models: [],
+          settings: {},
+          unanswered: [],
+          ask: [],
+          dropped: [],
+        },
+        { home: dir, giveUp: new Promise<void>(() => {}), graceMs: 0 },
+      );
+      const [rawWorker, rawSupervisor] = await Promise.all([started, adopted]);
+      workerPid = Number(rawWorker.trim());
+      const supervisorPid = Number(rawSupervisor.trim());
+      expect(workerPid).toBeGreaterThan(0);
+      expect(supervisorPid).toBeGreaterThan(1);
+      process.kill(supervisorPid, "SIGKILL");
+      const res = await pending;
+      expect(res.unchecked.map((step) => step.id)).toEqual(["adopted"]);
+      expect(await closed).toBe("");
+    } finally {
+      if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
     }
   });
 
-  test("preserves a spared env -i worker during stalled capture fallback and keeps spareFile intact while a holder fd stays open", async () => {
+  test("preserves a spared env -i worker during stalled capture fallback and on SIGINT watchdog handoff through humanStepsLeft", async () => {
     const dir = temp.make("sup-stalled-capture-spare-");
     const envBin = Bun.which("env") ?? "/usr/bin/env";
     const shBin = Bun.which("sh") ?? "/bin/sh";
@@ -1399,8 +1376,7 @@ await Bun.sleep(30_000);`;
     const outerStarted = fifoRead(outerReady);
     const outerClosed = fifoRead(outerGone);
     const { captureWith, timedOut } = await import("../../packs/hub/lib/coder.ts");
-    const { createPipe, spareEnvVar, spareFilePath, removeSpareFile } = await import("./probe-supervisor.ts");
-    const { existsSync, writeFileSync } = await import("node:fs");
+    const { spareEnvVar, spareFilePath, removeSpareFile } = await import("./probe-supervisor.ts");
     const spareFile = spareFilePath(crypto.randomUUID());
     const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
     const daemonScript = `const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
@@ -1438,38 +1414,66 @@ await hold.exited;`;
       await daemonClosed.catch(() => {});
     }
 
-    const holderSpare = join(dir, "holder.spare");
-    writeFileSync(holderSpare, "pid:999999\n");
-    const runnerPipe = createPipe();
-    const holderPipe = createPipe();
-    expect(runnerPipe).toBeDefined();
-    expect(holderPipe).toBeDefined();
-    closeSync(runnerPipe!.readFd);
-    let now = 0;
-    let ticks = 0;
-    let sawStillPresent = false;
+    const intDir = temp.make("sup-sigint-spared-watchdog-");
+    const [sparedReady, sparedGone, holdReady, holdGone] = [
+      join(intDir, "spared-ready"),
+      join(intDir, "spared-gone"),
+      join(intDir, "hold-ready"),
+      join(intDir, "hold-gone"),
+    ];
+    mkfifo(sparedReady, sparedGone, holdReady, holdGone);
+    const sparedStarted = fifoRead(sparedReady);
+    const sparedClosed = fifoRead(sparedGone);
+    const holdStarted = fifoRead(holdReady);
+    const holdClosed = fifoRead(holdGone);
+    const applyPath = join(import.meta.dir, "apply.ts");
+    const intDaemonScript = `const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "spared", ${JSON.stringify(sparedGone)}, ${JSON.stringify(sparedReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+d.unref();
+process.exit(0);`;
+    const intProbeScript = `import { capture } from ${JSON.stringify(coderPath)};
+const res = await capture([process.execPath, "-e", ${JSON.stringify(intDaemonScript)}], { timeoutMs: 5_000 });
+if (res.code !== 0) process.exit(2);
+const hold = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "hold", ${JSON.stringify(holdGone)}, ${JSON.stringify(holdReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await hold.exited;`;
+    const runnerScript = `import { humanStepsLeft } from ${JSON.stringify(applyPath)};
+await humanStepsLeft({
+  machine: { schema: 1, role: "linux" },
+  os: process.platform === "darwin" ? "darwin" : "linux",
+  ai: "both",
+  packs: [],
+  workflows: [],
+  files: [],
+  config: [],
+  owners: {},
+  jobs: [],
+  human: [{ id: "int-spare", pack: "team", say: "Int spare.", probe: [process.execPath, "-e", ${JSON.stringify(intProbeScript)}] }],
+  steps: [],
+  checks: [],
+  commands: {},
+  handlers: {},
+  models: [],
+  settings: {},
+  unanswered: [],
+  ask: [],
+  dropped: [],
+}, { home: ${JSON.stringify(intDir)}, giveUp: new Promise(() => {}), graceMs: 0 });`;
+    const runner = Bun.spawn([process.execPath, "-e", runnerScript], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    let sparedPid = 0;
+    let holdPid = 0;
     try {
-      await watchEntries(
-        [{ pid: 999_999, fd: runnerPipe!.writeFd, holderPid: 999_998, holderFd: holderPipe!.readFd, delayMs: 200, spareFile: holderSpare }],
-        {
-          now: () => now,
-          sleep: async (ms) => {
-            ticks++;
-            if (ticks === 1) {
-              sawStillPresent = existsSync(holderSpare);
-              closeSync(holderPipe!.writeFd);
-            }
-            now += ms;
-          },
-        },
-      );
-      expect(sawStillPresent).toBe(true);
-      expect(existsSync(holderSpare)).toBe(false);
+      [sparedPid, holdPid] = (await Promise.all([sparedStarted, holdStarted])).map((s) => Number(s.trim())) as [number, number];
+      expect(sparedPid).toBeGreaterThan(0);
+      expect(holdPid).toBeGreaterThan(0);
+      runner.kill("SIGINT");
+      await runner.exited;
+      expect(await holdClosed).toBe("");
+      expect(() => process.kill(sparedPid, 0)).not.toThrow();
     } finally {
-      try { closeSync(runnerPipe!.writeFd); } catch {}
-      try { closeSync(holderPipe!.readFd); } catch {}
-      try { closeSync(holderPipe!.writeFd); } catch {}
-      removeSpareFile(holderSpare);
+      if (sparedPid > 0) try { process.kill(sparedPid, "SIGKILL"); } catch {}
+      if (holdPid > 0) try { process.kill(holdPid, "SIGKILL"); } catch {}
+      runner.kill("SIGKILL");
+      await runner.exited.catch(() => {});
+      await sparedClosed.catch(() => {});
     }
   });
 });

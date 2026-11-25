@@ -872,18 +872,21 @@ try {
   const [rawAfter, rawFastDaemon] = await Promise.all([afterStarted, fastDaemonStarted]);
   const afterPid = Number(rawAfter.trim());
   fastDaemonPid = Number(rawFastDaemon.trim());
-  if (!(afterPid > 0) || !(fastDaemonPid > 0)) process.exit(3);
-  fireReal();
-  const realResult = await pending;
-  const closed = await holdsClosed;
-  let fastAlive = false;
-  try {
-    process.kill(fastDaemonPid, 0);
-    fastAlive = true;
-  } catch {}
-  const expected = [...Array.from({ length: 7 }, (_, i) => "hold-" + i), "after-fast"];
-  const ok = realResult.failing.length === 0 && JSON.stringify(realResult.unchecked.map((s) => s.id)) === JSON.stringify(expected) && closed === "" && fastAlive && !existsSync(marker);
-  process.exit(ok ? 0 : 4);
+  if (!(afterPid > 0) || !(fastDaemonPid > 0)) {
+    process.exitCode = 3;
+  } else {
+    fireReal();
+    const realResult = await pending;
+    const closed = await holdsClosed;
+    let fastAlive = false;
+    try {
+      process.kill(fastDaemonPid, 0);
+      fastAlive = true;
+    } catch {}
+    const expected = [...Array.from({ length: 7 }, (_, i) => "hold-" + i), "after-fast"];
+    const ok = realResult.failing.length === 0 && JSON.stringify(realResult.unchecked.map((s) => s.id)) === JSON.stringify(expected) && closed === "" && fastAlive && !existsSync(marker);
+    process.exitCode = ok ? 0 : 4;
+  }
 } finally {
   if (fastDaemonPid > 0) try { process.kill(fastDaemonPid, "SIGKILL"); } catch {}
   await fastDaemonClosed.catch(() => {});
