@@ -12,9 +12,43 @@ export const interruptGraceMs = 300;
 export const tagEnvVar = "HEDGE_SUPERVISOR_TAG";
 export const spareEnvVar = "HEDGE_SUPERVISOR_SPARE";
 
-export function spareFilePath(tag: string): string {
+export function spareFilePath(tag: string, home?: string): string {
   const uid = typeof process.getuid === "function" ? String(process.getuid()) : "u";
-  return join(tmpdir(), `hedge-sup-${uid}`, `${tag}.spare`);
+  const dirName = `hedge-sup-${uid}`;
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+  const add = (dir: string) => {
+    if (!seen.has(dir)) {
+      seen.add(dir);
+      candidates.push(dir);
+    }
+  };
+  add(join(tmpdir(), dirName));
+  if (home) add(join(home, ".local", "state", "hedge", `sup-${uid}`));
+  if (process.env.HOME && process.env.HOME !== home) add(join(process.env.HOME, ".local", "state", "hedge", `sup-${uid}`));
+  add(join("/tmp", dirName));
+  add(join("/var/tmp", dirName));
+  if (process.platform === "linux") add(join("/dev/shm", dirName));
+  const flags = constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
+  for (const dir of candidates) {
+    try {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      if (!isOwnedDirectory(dir)) continue;
+      const candidate = join(dir, `${tag}.spare`);
+      const fd = openSync(candidate, flags, 0o600);
+      try {
+        const stat = fstatSync(fd);
+        if (stat.isFile() && (typeof process.getuid !== "function" || stat.uid === process.getuid())) {
+          return candidate;
+        }
+      } finally {
+        try {
+          closeSync(fd);
+        } catch {}
+      }
+    } catch {}
+  }
+  return join(tmpdir(), dirName, `${tag}.spare`);
 }
 
 function isOwnedDirectory(dir: string): boolean {
@@ -708,6 +742,12 @@ function isDeadLeaderRecycledDarwin(lib: DarwinLib, pid: number, reaped: boolean
   return status !== 5;
 }
 
+function ppidDarwin(lib: DarwinLib, pid: number): number {
+  const buf = new Uint8Array(136);
+  const n = lib.proc_pidinfo(pid, 3, 0n, ptr(buf), 136);
+  return n >= 20 ? new DataView(buf.buffer).getUint32(16, true) : 0;
+}
+
 export function discoverTargetsSync(sessionId?: number, tag?: string, deadLeaderReaped?: boolean, sparePath?: string): ProcTargets | undefined {
   if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag, deadLeaderReaped, sparePath);
   if (sessionId === undefined && !tag) return undefined;
@@ -737,22 +777,24 @@ export function discoverTargetsSync(sessionId?: number, tag?: string, deadLeader
     if (effectiveSessionId === undefined && !tag) return { pids: [], groups: [], orphanPids: [], sids: [], hasSessionGroup: false };
   }
   const activeTags = new Set<string>(tag ? [tag] : []);
-  const rows: Array<{ pid: number; sid: number; pgid: number; envTag?: string }> = [];
+  const rows: Array<{ pid: number; ppid: number; sid: number; pgid: number; envTag?: string }> = [];
   const matched = new Set<number>();
+  if (effectiveSessionId !== undefined) matched.add(effectiveSessionId);
   for (let i = 0; i < limit; i++) {
     const pid = buf[i]!;
     if (pid <= 0 || pid === self || pid === effectiveSessionId) continue;
+    const ppid = tag || effectiveSessionId === undefined ? ppidDarwin(lib, pid) : 0;
     const sid = lib.getsid(pid);
     const pgid = lib.getpgid(pid);
     const envTag = tag ? readEnvTagDarwin(pid) : undefined;
-    rows.push({ pid, sid, pgid, ...(envTag ? { envTag } : {}) });
+    rows.push({ pid, ppid, sid, pgid, ...(envTag ? { envTag } : {}) });
     const isSpared = spared.pids.has(pid) || (sid > 0 && sid !== effectiveSessionId && sid !== self && spared.sids.has(sid));
     const inSession = effectiveSessionId !== undefined && (sid === effectiveSessionId || pgid === effectiveSessionId);
     if (!isSpared && (inSession || (tag && envTag && envMatchesTag(envTag, tag)))) {
       matched.add(pid);
     }
   }
-  if (tag) {
+  if (tag || effectiveSessionId === undefined) {
     let grew = true;
     while (grew) {
       grew = false;
@@ -772,6 +814,14 @@ export function discoverTargetsSync(sessionId?: number, tag?: string, deadLeader
         if (row.envTag && envMatchesAnyTag(row.envTag, activeTags)) {
           matched.add(row.pid);
           grew = true;
+        } else if (row.ppid > 0 && matched.has(row.ppid)) {
+          const foreignCompleted = Boolean(
+            tag && row.envTag && row.sid > 0 && row.sid !== effectiveSessionId && row.sid !== self && !envMatchesAnyTag(row.envTag, activeTags),
+          );
+          if (!foreignCompleted) {
+            matched.add(row.pid);
+            grew = true;
+          }
         }
       }
     }

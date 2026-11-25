@@ -698,28 +698,32 @@ await Bun.sleep(30_000);`;
     }
 
     const marker = join(dir, "ran-marker");
-    const payload = JSON.stringify({
-      command: [shBin, "-c", `echo ran > ${JSON.stringify(marker)}`],
-      controlFd: 3,
-    });
-    const sup = Bun.spawn([process.execPath, supervisorPath], {
-      stdio: ["pipe", "ignore", "ignore", "pipe"],
-      detached: true,
-    });
-    const aliveFd = sup.stdio[3] as number;
-    try {
-      writeSync(aliveFd, "SIGTERM\n");
-      const stdinSink = sup.stdin as { write: (data: string) => void; end: () => void };
-      stdinSink.write(payload);
-      stdinSink.end();
-      expect(await sup.exited).not.toBe(0);
-      expect(await Bun.file(marker).exists()).toBe(false);
-    } finally {
-      sup.kill("SIGKILL");
-      try {
-        closeSync(aliveFd);
-      } catch {}
-    }
+    const preAborted = await humanStepsLeft(
+      {
+        machine: { schema: 1, role: "linux" },
+        os: process.platform === "darwin" ? "darwin" : "linux",
+        ai: "both",
+        packs: [],
+        workflows: [],
+        files: [],
+        config: [],
+        owners: {},
+        jobs: [],
+        human: [{ id: "pre-aborted", pack: "team", say: "Pre-aborted.", probe: [shBin, "-c", `echo ran > ${JSON.stringify(marker)}`] }],
+        steps: [],
+        checks: [],
+        commands: {},
+        handlers: {},
+        models: [],
+        settings: {},
+        unanswered: [],
+        ask: [],
+        dropped: [],
+      },
+      { home: dir, giveUp: Promise.resolve(), graceMs: 0 },
+    );
+    expect(preAborted.unchecked.map((step) => step.id)).toEqual(["pre-aborted"]);
+    expect(await Bun.file(marker).exists()).toBe(false);
 
     const usr1Res = await humanStepsLeft(
       {
@@ -1145,12 +1149,132 @@ await slow.exited;`;
     }
   });
 
-  test("ignores a non-regular FIFO planted at a spareFile path without blocking discovery", async () => {
-    const dir = temp.make("sup-fifo-spare-");
-    const fifoSpare = join(dir, "planted.spare");
-    mkfifo(fifoSpare);
-    const targets = await discoverTargets(process.pid, crypto.randomUUID(), fifoSpare);
-    expect(targets).toBeDefined();
+  test("keeps a completed nested capture's detached env -i worker alive and exits cleanly even when TMPDIR is unusable or contains a FIFO", async () => {
+    const dir = temp.make("sup-unusable-tmpdir-");
+    const envBin = Bun.which("env") ?? "/usr/bin/env";
+    const shBin = Bun.which("sh") ?? "/bin/sh";
+    const badTmp = join(dir, "bad-tmp");
+    const uid = typeof process.getuid === "function" ? String(process.getuid()) : "u";
+    const plantedDirFifo = join(badTmp, `hedge-sup-${uid}`);
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(badTmp, { recursive: true });
+    mkfifo(plantedDirFifo);
+    const [daemonReady, daemonGone, probeReady, probeGone] = [
+      join(dir, "daemon-ready"),
+      join(dir, "daemon-gone"),
+      join(dir, "probe-ready"),
+      join(dir, "probe-gone"),
+    ];
+    mkfifo(daemonReady, daemonGone, probeReady, probeGone);
+    const daemonStarted = fifoRead(daemonReady);
+    const daemonClosed = fifoRead(daemonGone);
+    const probeStarted = fifoRead(probeReady);
+    const probeClosed = fifoRead(probeGone);
+    const applyPath = join(import.meta.dir, "apply.ts");
+    const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
+    const daemonScript = `const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+d.unref();
+process.exit(0);`;
+    const probeScript = `import { capture } from ${JSON.stringify(coderPath)};
+const res = await capture([process.execPath, "-e", ${JSON.stringify(daemonScript)}], { timeoutMs: 5_000 });
+if (res.code !== 0) process.exit(2);
+const slow = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "slow", ${JSON.stringify(probeGone)}, ${JSON.stringify(probeReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await slow.exited;`;
+    const listScript = `import { humanStepsLeft } from ${JSON.stringify(applyPath)};
+let fireDeadline;
+const pending = humanStepsLeft({
+  machine: { schema: 1, role: "linux" },
+  os: process.platform === "darwin" ? "darwin" : "linux",
+  ai: "both",
+  packs: [],
+  workflows: [],
+  files: [],
+  config: [],
+  owners: {},
+  jobs: [],
+  human: [{ id: "bad-tmp-probe", pack: "team", say: "Bad tmp.", probe: [process.execPath, "-e", ${JSON.stringify(probeScript)}] }],
+  steps: [], checks: [], commands: {}, handlers: {}, models: [], settings: {}, unanswered: [], ask: [], dropped: [],
+}, { home: ${JSON.stringify(dir)}, giveUp: new Promise((resolve) => (fireDeadline = resolve)), graceMs: 0 });
+await Bun.file(${JSON.stringify(join(dir, "trigger"))}).text();
+fireDeadline();
+const res = await pending;
+console.log(JSON.stringify(res.unchecked.map((s) => s.id)));`;
+    const triggerFifo = join(dir, "trigger");
+    mkfifo(triggerFifo);
+    const child = Bun.spawn([process.execPath, "-e", listScript], {
+      env: { ...process.env, TMPDIR: badTmp },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    let daemonPid = 0;
+    let probePid = 0;
+    try {
+      [daemonPid, probePid] = (await Promise.all([daemonStarted, probeStarted])).map((s) => Number(s.trim())) as [number, number];
+      expect(daemonPid).toBeGreaterThan(0);
+      expect(probePid).toBeGreaterThan(0);
+      await fifoWrite(triggerFifo, "go\n");
+      const [code, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+      expect(code).toBe(0);
+      expect(JSON.parse(stdout.trim())).toEqual(["bad-tmp-probe"]);
+      expect(await probeClosed).toBe("");
+      expect(() => process.kill(daemonPid, 0)).not.toThrow();
+    } finally {
+      if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
+      if (probePid > 0) try { process.kill(probePid, "SIGKILL"); } catch {}
+      child.kill("SIGKILL");
+      await daemonClosed.catch(() => {});
+    }
+  });
+
+  test("marks real subprocess probes unchecked when they exit 0 or nonzero only after the deadline fires", async () => {
+    const dir = temp.make("sup-post-deadline-exit-");
+    const shBin = Bun.which("sh") ?? "/bin/sh";
+    const { humanStepsLeft } = await import("./apply.ts");
+    const [okReady, okGate, failReady, failGate] = [
+      join(dir, "ok-ready"),
+      join(dir, "ok-gate"),
+      join(dir, "fail-ready"),
+      join(dir, "fail-gate"),
+    ];
+    mkfifo(okReady, okGate, failReady, failGate);
+    const okStarted = fifoRead(okReady);
+    const failStarted = fifoRead(failReady);
+    let fireDeadline!: () => void;
+    const pending = humanStepsLeft(
+      {
+        machine: { schema: 1, role: "linux" },
+        os: process.platform === "darwin" ? "darwin" : "linux",
+        ai: "both",
+        packs: [],
+        workflows: [],
+        files: [],
+        config: [],
+        owners: {},
+        jobs: [],
+        human: [
+          { id: "late-ok", pack: "team", say: "Late ok.", probe: [shBin, "-c", 'trap "exit 0" TERM; echo ready > "$1"; read -r _ < "$2"; exit 0', "ok", okReady, okGate] },
+          { id: "late-fail", pack: "team", say: "Late fail.", probe: [shBin, "-c", 'trap "exit 7" TERM; echo ready > "$1"; read -r _ < "$2"; exit 7', "fail", failReady, failGate] },
+        ],
+        steps: [],
+        checks: [],
+        commands: {},
+        handlers: {},
+        models: [],
+        settings: {},
+        unanswered: [],
+        ask: [],
+        dropped: [],
+      },
+      { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 300 },
+    );
+    await Promise.all([okStarted, failStarted]);
+    fireDeadline();
+    void fifoWrite(okGate, "go\n");
+    void fifoWrite(failGate, "go\n");
+    const res = await pending;
+    expect(res.failing).toEqual([]);
+    expect(res.unchecked.map((step) => step.id)).toEqual(["late-ok", "late-fail"]);
   });
 
   test("forwards a __proto__ environment variable to supervised probes", async () => {

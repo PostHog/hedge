@@ -258,8 +258,12 @@ const supervisorSpawnFailed = -1;
 
 export async function humanStepsLeft(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void>; graceMs?: number }): Promise<HumanStepsLeft> {
   const reported = new WeakMap<AbortSignal, number>();
+  const probeBySignal = new WeakMap<AbortSignal, LiveProbe>();
   const live = new Set<LiveProbe>();
-  const run = viaEngine(plan, options.run ?? spawnRunner(options.home, plan.machine.profileDir, (sig, code) => reported.set(sig, code), options.graceMs, live));
+  const run = viaEngine(
+    plan,
+    options.run ?? spawnRunner(options.home, plan.machine.profileDir, (sig, code) => reported.set(sig, code), options.graceMs, live, probeBySignal),
+  );
   let timedOut = false;
   void options.giveUp.then(() => {
     timedOut = true;
@@ -271,11 +275,12 @@ export async function humanStepsLeft(plan: Plan, options: { home: string; run?: 
     const step = plan.human[index]!;
     const deadline = new AbortController();
     let aborted = false;
+    let reportedAtDeadline = false;
     let settled = false;
     const result = run(step.probe, {}, deadline.signal).then(
       (code) => {
         settled = true;
-        if (aborted && options.run) return "unchecked" as const;
+        if (aborted && !reportedAtDeadline) return "unchecked" as const;
         return code === supervisorSpawnFailed ? ("unchecked" as const) : code === 0 ? ("passes" as const) : ("fails" as const);
       },
       (error) => {
@@ -287,10 +292,21 @@ export async function humanStepsLeft(plan: Plan, options: { home: string; run?: 
     const late = options.giveUp.then(async () => {
       if (settled) return "passes" as const;
       const code = reported.get(deadline.signal);
+      if (code !== undefined) {
+        reportedAtDeadline = true;
+        aborted = true;
+        deadline.abort();
+        return code === 0 ? ("passes" as const) : ("fails" as const);
+      }
+      const active = probeBySignal.get(deadline.signal);
+      const sawPipeResult = active?.resultFd !== undefined && probeResultReported(active.resultFd) === "reported";
+      if (sawPipeResult && active) {
+        active.targetExited = true;
+        reportedAtDeadline = true;
+      }
       aborted = true;
       deadline.abort();
-      if (code !== undefined) return code === 0 ? ("passes" as const) : ("fails" as const);
-      if (options.run) return "unchecked" as const;
+      if (!sawPipeResult) return "unchecked" as const;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const cap = new Promise<"unchecked">((resolve) => {
         timer = setTimeout(() => resolve("unchecked"), 50);
@@ -491,7 +507,7 @@ function viaEngine(plan: Plan, run: Runner): Runner {
 const undoRunner = (run: Runner, step: LedgerStep): Runner => (command) => run(command, { [undoVariable]: ledgerKey(step) });
 
 /** Runs commands with the plan's home directory as HOME, so a step installs into the home it applies to, and with the plan's profile, so a nested hedge reads the profile this run applies or checks. */
-function spawnRunner(home: string, profileDir: string | undefined, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number, live?: Set<LiveProbe>): Runner {
+function spawnRunner(home: string, profileDir: string | undefined, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number, live?: Set<LiveProbe>, probeBySignal?: WeakMap<AbortSignal, LiveProbe>): Runner {
   return async (command, env = {}, signal) => {
     const childEnv = withLegacyNames({ ...Bun.env, HOME: home, ...(profileDir ? { HEDGE_PROFILE_DIR: profileDir } : {}), ...env });
     if (!signal) {
@@ -501,7 +517,7 @@ function spawnRunner(home: string, profileDir: string | undefined, onResult?: (s
         return 127;
       }
     }
-    return await runDetached(command, childEnv, signal, onResult, cleanupGraceMs, live);
+    return await runDetached(command, childEnv, signal, onResult, cleanupGraceMs, live, probeBySignal);
   };
 }
 
@@ -739,7 +755,7 @@ async function readSupervisorResult(
   return { code, cleanup, stopped };
 }
 
-async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number, live?: Set<LiveProbe>) {
+async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number, live?: Set<LiveProbe>, probeBySignal?: WeakMap<AbortSignal, LiveProbe>) {
   if (!command.length) return 127;
   let child: ReturnType<typeof Bun.spawn> | undefined;
   let probe: LiveProbe | undefined;
@@ -816,9 +832,10 @@ async function runDetached(command: string[], env: Record<string, string | undef
       closeSync(holderExitPipe.writeFd);
     } catch {}
   };
+  let spareFile: string | undefined;
   try {
     const tag = crypto.randomUUID();
-    const spareFile = spareFilePath(tag);
+    spareFile = spareFilePath(tag, env.HOME);
     const fullTag = appendTag(env[tagEnvVar], tag);
     const targetEnv: Record<string, string> = Object.create(null);
     for (const [k, v] of Object.entries(env)) if (v !== undefined) targetEnv[k] = v;
@@ -872,6 +889,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
       delayMs: (cleanupGraceMs ?? graceMs) + discoverySlackMs + 100,
       stop: endGroup,
     };
+    probeBySignal?.set(signal, probe);
     allLiveProbes.add(probe);
     live?.add(probe);
     syncInterruptHandlers();
@@ -970,6 +988,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
           closeSync(holderExitPipe.readFd);
         } catch {}
       }
+      removeSpareFile(spareFile);
       releaseSlot();
     }
     return supervisorSpawnFailed;
