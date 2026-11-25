@@ -78,12 +78,19 @@ export function pauseChanges(credentials: Credential[], allowExtraUsage?: Readon
   };
 }
 
-function readStringSet(path: string | undefined): Set<string> {
+function readStringSet(path: string | undefined, onInvalid?: () => void): Set<string> {
   if (!path) return new Set();
   try {
-    const names = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    return new Set(Array.isArray(names) ? names.filter((name): name is string => typeof name === "string") : []);
-  } catch { return new Set(); }
+    const values = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (Array.isArray(values)) {
+      const strings = values.filter((value): value is string => typeof value === "string");
+      if (!onInvalid || strings.length === values.length) return new Set(strings);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Set();
+  }
+  onInvalid?.();
+  return new Set();
 }
 
 export async function balance(options: Balance): Promise<void> {
@@ -109,11 +116,11 @@ export async function balance(options: Balance): Promise<void> {
   }
   const credentials = all.filter((credential) => (!credential.paused || resume.includes(credential)) && !pause.includes(credential));
   if (!options.dryRun && options.pausedPath) {
-    // Turn the proxy's subscription off or on, then record it. A failed record leaves one off,
-    // never on, and the next run drops names that are no longer off.
+    const tracked = new Set([...pausedBefore, ...pause.map((credential) => credential.name)]);
+    if (tracked.size !== pausedBefore.size) writeStateFile(options.pausedPath, [...tracked].sort());
     for (const credential of [...pause, ...resume]) await call("auth-files/status", { method: "PATCH", body: JSON.stringify({ name: credential.name, disabled: pause.includes(credential) }) });
     const paused = all.filter((credential) => !credentials.includes(credential)).map((credential) => credential.name).sort();
-    if (pause.length || resume.length || paused.length !== pausedBefore.size) writeStateFile(options.pausedPath, paused);
+    if (paused.length !== tracked.size) writeStateFile(options.pausedPath, paused);
   }
   const claude = credentials.filter((credential) => credential.provider === "claude");
   if (!credentials.length) options.log("The proxy holds no enabled Claude or Codex subscription.");
@@ -264,7 +271,9 @@ export async function balanceCommand(args: string[], deps: BalanceDeps): Promise
   if (args.some((arg) => arg !== "--dry-run")) throw new Error("Usage: hedge cli-proxy-balance [--dry-run]");
   if (!args.includes("--dry-run")) await refreshCodexCatalog({ path: codexCatalogPath(deps.home), registryPath: modelRegistryPath(deps.home), fetch: deps.fetch, now: deps.now, log: deps.log }).catch((error) => deps.log(`Codex catalog: ${(error as Error).message}`));
   const pausedPath = join(stateDir(deps.home, deps.env ?? process.env), "cli-proxy-paused.json");
-  const allowExtraUsage = readStringSet(join(proxyDir(deps.home), "allow-extra-usage.json"));
+  const allowExtraUsage = readStringSet(join(proxyDir(deps.home), "allow-extra-usage.json"), () => {
+    deps.log("Cannot read allow-extra-usage.json as a JSON array of Auth Index values. Using the default billing guard.");
+  });
   await balance({ fetch: deps.fetch, managementKey, now: deps.now(), dryRun: args.includes("--dry-run"), ledger: deps.ledger, pausedPath, allowExtraUsage, log: deps.log });
   return 0;
 }

@@ -133,8 +133,9 @@ the person's own subscriptions, never for someone else's.
   put their full Auth Index values from the management panel in a JSON array at
   `~/.local/share/hedge-cli-proxy/allow-extra-usage.json` on the hub. The next
   balance run resumes any listed subscription it paused. Full subscriptions
-  still get priority 0. It keeps fill-first routing, and session affinity keeps each session on
-  one subscription. `hedge cli-proxy-balance --dry-run` prints the ranking and
+  still get priority 0. It keeps fill-first routing, and session affinity keeps
+  each session on one subscription. `hedge cli-proxy-balance --dry-run` prints
+  the ranking and
   changes nothing. Unreadable usage does not fail the run. Its log lines name a
   subscription by provider and short id, such as `Claude subscription
   aaaabbbb`, never by its file name, which holds the account's email. The
