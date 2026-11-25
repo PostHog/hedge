@@ -255,19 +255,22 @@ test("only the user's own messages and question answers in T3 count as their wor
 
 test("an Antigravity card answer reads as the chosen option's label to the question its header asks, and a note the user typed in its other field replaces the pick", async () => {
   const option = (label: string, value: string) => ({ label, description: label, value });
-  const card = (id: string, request: string, prompts: string[], answers: Record<string, string | string[]>) => ({
-    item: {
-      id, requestId: request, type: "user_input_request", startedAt: "2026-11-24T21:08:25Z", updatedAt: "2026-11-25T04:03:04Z",
-      questions: prompts.flatMap((prompt, index) => [
-        { id: `q${index + 1}`, header: prompt, question: `The agent has ${prompts.length} questions.`, options: [option("Accept the panel gap (Recommended)", "1"), option("Keep the gap open", "2")], allowCustomAnswer: false },
-        { id: `q${index + 1}_other`, header: "Other", question: `Optional free-form answer to: ${prompt}`, options: [], required: false },
-      ]),
-      questionAnswer: {
-        questionTextById: Object.fromEntries(prompts.flatMap((prompt, index) => [[`q${index + 1}`, `The agent has ${prompts.length} questions.`], [`q${index + 1}_other`, `Optional free-form answer to: ${prompt}`]])),
-        answers,
+  const card = (id: string, request: string, prompts: string[], answers: Record<string, string | string[]>) => {
+    const placeholder = prompts.length === 1 ? "The agent has a question." : `The agent has ${prompts.length} questions.`;
+    return {
+      item: {
+        id, requestId: request, type: "user_input_request", startedAt: "2026-11-24T21:08:25Z", updatedAt: "2026-11-25T04:03:04Z",
+        questions: prompts.flatMap((prompt, index) => [
+          { id: `q${index + 1}`, header: prompt, question: placeholder, options: [option("Accept the panel gap (Recommended)", "1"), option("Keep the gap open", "2")], allowCustomAnswer: false },
+          { id: `q${index + 1}_other`, header: "Other", question: `Optional free-form answer to: ${prompt}`, options: [], required: false },
+        ]),
+        questionAnswer: {
+          questionTextById: Object.fromEntries(prompts.flatMap((prompt, index) => [[`q${index + 1}`, placeholder], [`q${index + 1}_other`, `Optional free-form answer to: ${prompt}`]])),
+          answers,
+        },
       },
-    },
-  });
+    };
+  };
   const items = [
     card("c1", "r1", ["Accept the panel gap of example/product#1?", "Accept the panel gap of example/product#2?"], { q1: "1", q1_other: "O", q2: "2", q2_other: "" }),
     card("c2", "r2", ["Accept the panel gap of example/product#3?"], { q1: "1", q1_other: "Only once CI is green" }),

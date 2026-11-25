@@ -132,7 +132,7 @@ export async function readThreadWords(client: T3HttpClient, value: string, state
 }
 
 const otherSuffix = "_other";
-const questionCountPlaceholder = /^The agent has \d+ questions?\.$/u;
+const questionCountPlaceholder = /^The agent has (?:a question|\d+ questions)\.$/u;
 
 function cardAnswer(questions: CardQuestion[], { questionTextById, answers }: QuestionAnswer, id: string, chosen: string | string[]) {
   const byId = (wanted: string) => questions.find((question) => question.id === wanted);

@@ -443,10 +443,10 @@ test("the user's pick on an Antigravity card accepts the gap its question names,
     item: {
       id, requestId: `${id}-request`, type: "user_input_request", startedAt: at,
       questions: [
-        { id: "q1", header: question, question: "The agent has 1 questions.", options: [{ label: "Accept the gap (Recommended)", description: "", value: "1" }, { label: "Keep the gap open", description: "", value: "2" }], allowCustomAnswer: false },
+        { id: "q1", header: question, question: "The agent has a question.", options: [{ label: "Accept the gap (Recommended)", description: "", value: "1" }, { label: "Keep the gap open", description: "", value: "2" }], allowCustomAnswer: false },
         { id: "q1_other", header: "Other", question: `Optional free-form answer to: ${question}`, options: [], required: false },
       ],
-      questionAnswer: { questionTextById: { q1: "The agent has 1 questions.", q1_other: `Optional free-form answer to: ${question}` }, answers: { q1: "1", q1_other: other } },
+      questionAnswer: { questionTextById: { q1: "The agent has a question.", q1_other: `Optional free-form answer to: ${question}` }, answers: { q1: "1", q1_other: other } },
     },
   });
   const items = [card("conditional", "Only after CI is green")];
