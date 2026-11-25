@@ -174,6 +174,7 @@ type AcRule = {
   ambiguous?: boolean;
   regex?: RegExp;
   verify?: (slice: string) => boolean;
+  canonSlots?: Map<string, string>;
 };
 
 type AcAutomaton = {
@@ -539,10 +540,63 @@ function findExemptOverlaps(
   return out;
 }
 
+type CanonSlotBucket = { byLiteral: Map<string, AcRule[]>; fallback: AcRule[] };
+type CanonStateIndex = { slots: Map<string, CanonSlotBucket> };
+const canonIndexCache = new WeakMap<AcAutomaton, Map<number, CanonStateIndex>>();
+
+function getCanonStateIndex(ac: AcAutomaton, state: number, rules: AcRule[]): CanonStateIndex {
+  let byState = canonIndexCache.get(ac);
+  if (!byState) {
+    byState = new Map();
+    canonIndexCache.set(ac, byState);
+  }
+  const cached = byState.get(state);
+  if (cached) return cached;
+  const slotKeys = new Set<string>();
+  for (const rule of rules) {
+    if (!rule.canonSlots) continue;
+    for (const key of rule.canonSlots.keys()) slotKeys.add(key);
+  }
+  const slots = new Map<string, CanonSlotBucket>();
+  for (const key of slotKeys) {
+    const byLiteral = new Map<string, AcRule[]>();
+    const fallback: AcRule[] = [];
+    for (const rule of rules) {
+      const val = rule.canonSlots?.get(key);
+      if (val === undefined) {
+        fallback.push(rule);
+      } else {
+        let list = byLiteral.get(val);
+        if (!list) {
+          list = [];
+          byLiteral.set(val, list);
+        }
+        list.push(rule);
+      }
+    }
+    slots.set(key, { byLiteral, fallback });
+  }
+  const index = { slots };
+  byState.set(state, index);
+  return index;
+}
+
+function firstEditAt(edits: CanonEdit[], cStart: number): number {
+  let lo = 0;
+  let hi = edits.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (edits[mid]!.cStart < cStart) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 function findCanonAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?: KnownName, allowPartialMerge = true): MatchSpan[] {
   if (!ac || !text.length) return [];
   const { text: canonText, edits } = canonicalizeWithMap(text);
   const spans: MatchSpan[] = [];
+  const memo = !skipOwner ? new Map<number, Map<string, AcRule | null>>() : undefined;
   let state = 0;
   for (let i = 0; i < canonText.length; i++) {
     const code = foldCharCode(canonText, i);
@@ -551,20 +605,71 @@ function findCanonAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?:
     const cEnd = i + 1;
     let gotHit = false;
     for (let u = ac.out[state] ? state : ac.dict[state]!; u !== 0; u = ac.dict[u]!) {
-      for (const rule of ac.out[u]!) {
-        if (gotHit) break;
-        if (skipOwner && rule.owner === skipOwner) continue;
-        const cStart = cEnd - rule.len;
-        const oStart = mapPosToOrig(edits, cStart, "start");
-        const oEnd = mapPosToOrig(edits, cEnd, "end");
-        if (oStart < 0 || oEnd <= oStart) continue;
-        if (!isLeftOk(text, oStart, rule.left) || !isRightOk(text, oEnd, rule.right)) continue;
-        const slice = text.slice(oStart, oEnd);
-        if (rule.verify && !rule.verify(slice)) continue;
-        gotHit = true;
-        pushStreamingSpan(spans, oStart, oEnd, oEnd - oStart, rule.as, allowPartialMerge);
+      const allRulesAtU = ac.out[u]!;
+      const sampleRule = allRulesAtU[0]!;
+      const cStart = cEnd - sampleRule.len;
+      const oStart = mapPosToOrig(edits, cStart, "start");
+      const oEnd = mapPosToOrig(edits, cEnd, "end");
+      if (oStart < 0 || oEnd <= oStart) continue;
+      const slice = text.slice(oStart, oEnd);
+      const foldedSlice = memo ? foldCase(slice) : "";
+      if (memo) {
+        const hitMap = memo.get(u);
+        if (hitMap && hitMap.has(foldedSlice)) {
+          const cached = hitMap.get(foldedSlice);
+          if (cached && isLeftOk(text, oStart, cached.left) && isRightOk(text, oEnd, cached.right)) {
+            gotHit = true;
+            pushStreamingSpan(spans, oStart, oEnd, oEnd - oStart, cached.as, allowPartialMerge);
+            break;
+          }
+          if (cached === null) continue;
+        }
       }
-      if (gotHit) break;
+      let candidates = allRulesAtU;
+      if (candidates.length > 1 && edits.length > 0) {
+        const stateIndex = getCanonStateIndex(ac, u, allRulesAtU);
+        if (stateIndex.slots.size > 0) {
+          for (let ei = firstEditAt(edits, cStart); ei < edits.length && edits[ei]!.cStart < cEnd; ei++) {
+            const edit = edits[ei]!;
+            if (edit.cEnd > cEnd) continue;
+            const slotKey = `${edit.cStart - cStart}:${edit.cEnd - cStart}`;
+            const slot = stateIndex.slots.get(slotKey);
+            if (!slot) continue;
+            const origVal = foldCase(text.slice(edit.oStart, edit.oEnd));
+            const exact = slot.byLiteral.get(origVal);
+            const count = (exact?.length ?? 0) + slot.fallback.length;
+            if (count < candidates.length) {
+              candidates = exact ? (slot.fallback.length ? [...exact, ...slot.fallback] : exact) : slot.fallback;
+              if (!candidates.length) break;
+            }
+          }
+        }
+      }
+      let matchedRule: AcRule | null = null;
+      let anyBoundaryFail = false;
+      for (const rule of candidates) {
+        if (skipOwner && rule.owner === skipOwner) continue;
+        if (!isLeftOk(text, oStart, rule.left) || !isRightOk(text, oEnd, rule.right)) {
+          anyBoundaryFail = true;
+          continue;
+        }
+        if (rule.verify && !rule.verify(slice)) continue;
+        matchedRule = rule;
+        break;
+      }
+      if (memo && (matchedRule || !anyBoundaryFail)) {
+        let hitMap = memo.get(u);
+        if (!hitMap) {
+          hitMap = new Map();
+          memo.set(u, hitMap);
+        }
+        hitMap.set(foldedSlice, matchedRule);
+      }
+      if (matchedRule) {
+        gotHit = true;
+        pushStreamingSpan(spans, oStart, oEnd, oEnd - oStart, matchedRule.as, allowPartialMerge);
+        break;
+      }
     }
   }
   return spans;
@@ -1016,10 +1121,15 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
         if (expanded.verify) {
           const left: 0 | 1 = /^[~<]/.test(name.text) ? 0 : 1;
           const right: 0 | 1 | 2 = /[>]$/.test(name.text) ? 0 : name.text.startsWith("The pack source ") ? 2 : 1;
-          const canonKey = canonicalizeWithMap(name.text).text;
+          const canonicalized = canonicalizeWithMap(name.text);
+          const canonKey = canonicalized.text;
           const dedupKey = `${left}:${right}:${foldCase(canonKey)}:${foldCase(name.text)}`;
           if (canonKey.length >= 4 && !canonSeen.has(dedupKey)) {
             canonSeen.add(dedupKey);
+            const canonSlots = new Map<string, string>();
+            for (const edit of canonicalized.edits) {
+              canonSlots.set(`${edit.cStart}:${edit.cEnd}`, foldCase(name.text.slice(edit.oStart, edit.oEnd)));
+            }
             canonRules.push({
               text: canonKey,
               len: canonKey.length,
@@ -1028,6 +1138,7 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
               as: name.as,
               owner: name.owner,
               verify: expanded.verify,
+              canonSlots,
             });
           }
         }
@@ -1076,11 +1187,8 @@ function applySpans(text: string, spans: MatchSpan[], exempt?: Set<string>, onMa
     while (scan < spans.length && spans[scan]!.start < clusterEnd) {
       const cand = spans[scan]!;
       if (cand.exempt) {
-        if (cand.end <= clusterEnd) {
-          scan++;
-          continue;
-        }
-        break;
+        scan++;
+        continue;
       }
       if (cand.len > best.len) best = cand;
       if (cand.end > clusterEnd) clusterEnd = cand.end;

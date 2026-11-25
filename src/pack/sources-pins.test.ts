@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { main } from "../cli.ts";
+import { engineRoot } from "../setup/testing.ts";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
-import { advanceSource, cachedSource, fetchSource, followsBranch, unpinnedSources } from "./sources.ts";
+import { advanceSource, cachedSource, fetchSource, followsBranch } from "./sources.ts";
 
 isolateGit();
 const temp = tempDirs();
@@ -715,16 +717,112 @@ esac
     }
   });
 
-  test("unpinnedSources preserves trailing spaces in remote.origin.url when comparing local paths and batches multi-refresh history checks", async () => {
+  test("doctor prints unpinned advisory when remote.origin.url differs by a trailing space, supports +SHA and SHA: pins, rolls back history refs on metadata write failure, and batches multi-refresh checks", async () => {
     const root = temp.make("origin-space-");
+    const home = join(root, "home");
     const profileDir = join(root, "profile");
+    mkdirSync(home, { recursive: true });
     mkdirSync(profileDir, { recursive: true });
     await spawnGit(profileDir, "init", "-q");
     const spacedOrigin = join(root, "repo ");
     const plainSource = join(root, "repo");
     await spawnGit(profileDir, "remote", "add", "origin", spacedOrigin);
-    const findings = await unpinnedSources([{ name: "ext", repo: plainSource, ref: "main" }], profileDir);
-    expect(findings.map((f) => f.id)).toEqual(["source:unpinned:ext"]);
+    const baseProfile = {
+      schema: 1,
+      engine: { repo: "PostHog/hedge", ref: "main", channel: "track" },
+      sources: [] as Array<{ name: string; repo: string; ref: string }>,
+      packs: [],
+      plan: "both",
+      settings: {},
+      workflows: {},
+    };
+    writeFileSync(join(profileDir, "hedge.json"), JSON.stringify(baseProfile));
+    expect(
+      await main(["apply", "--profile", profileDir], {
+        home,
+        engineRoot,
+        platform: process.platform,
+        print: () => {},
+        run: async () => 0,
+      }),
+    ).toBe(0);
+    writeFileSync(
+      join(profileDir, "hedge.json"),
+      JSON.stringify({ ...baseProfile, sources: [{ name: "ext", repo: plainSource, ref: "main" }] }),
+    );
+    const doctorLines: string[] = [];
+    const doctorCode = await main(["doctor"], {
+      home,
+      engineRoot,
+      platform: process.platform,
+      print: (line) => doctorLines.push(line),
+      run: async () => 0,
+    });
+    expect(doctorCode).toBe(0);
+    expect(doctorLines.join("\n")).toContain("Note: The pack source ext is not pinned to a commit SHA.");
+
+    const pinRepo = await packRepo("Pin refspec.");
+    const pinSha = await spawnGit(pinRepo, "rev-parse", "HEAD");
+    const pinCache = temp.make("cache-plus-sha-");
+    for (const refSpec of [`+${pinSha}`, `${pinSha}:`]) {
+      const online = await fetchSource({ name: "team", repo: pinRepo, ref: refSpec }, pinCache);
+      if ("error" in online) throw new Error(online.error);
+      expect(online.stale).toBeUndefined();
+    }
+    writeFileSync(
+      join(profileDir, "hedge.json"),
+      JSON.stringify({
+        ...baseProfile,
+        sources: [
+          { name: "plus", repo: pinRepo, ref: `+${pinSha}` },
+          { name: "colon", repo: pinRepo, ref: `${pinSha}:` },
+        ],
+      }),
+    );
+    const pinnedDoctorLines: string[] = [];
+    expect(
+      await main(["doctor"], {
+        home,
+        engineRoot,
+        platform: process.platform,
+        print: (line) => pinnedDoctorLines.push(line),
+        run: async () => 0,
+      }),
+    ).toBe(0);
+    expect(pinnedDoctorLines.join("\n")).not.toContain("not pinned to a commit SHA");
+    rmSync(pinRepo, { recursive: true, force: true });
+    for (const refSpec of [`+${pinSha}`, `${pinSha}:`]) {
+      const offline = await fetchSource({ name: "team", repo: pinRepo, ref: refSpec }, pinCache);
+      if ("error" in offline) throw new Error(offline.error);
+      expect(offline.stale).toBeUndefined();
+      expect(offline.packs[0]?.manifest.summary).toBe("Pin refspec.");
+    }
+
+    const failRepo = await packRepo("Base v1.");
+    const failCache = temp.make("cache-rollback-history-");
+    const failRef = { name: "team", repo: failRepo, ref: "main" };
+    const failInit = await fetchSource(failRef, failCache);
+    if ("error" in failInit) throw new Error(failInit.error);
+    const failBaseSha = await spawnGit(failRepo, "rev-parse", "HEAD");
+    writePack(failRepo, "Mid v2.");
+    await spawnGit(failRepo, "commit", "-q", "-am", "mid");
+    const failMidSha = await spawnGit(failRepo, "rev-parse", "HEAD");
+    writePack(failRepo, "Tip v3.");
+    await spawnGit(failRepo, "commit", "-q", "-am", "tip");
+    const failGitDir = join(failCache, "team", ".git");
+    chmodSync(failGitDir, 0o555);
+    try {
+      const failedAdvance = await advanceSource(failRef, failCache, failBaseSha);
+      expect(failedAdvance.state).toBe("failed");
+    } finally {
+      chmodSync(failGitDir, 0o755);
+    }
+    rmSync(failRepo, { recursive: true, force: true });
+    const offlineAfterFailedRefresh = await fetchSource({ name: "team", repo: failRepo, ref: failMidSha }, failCache);
+    if (!("error" in offlineAfterFailedRefresh)) {
+      expect(offlineAfterFailedRefresh.stale).toContain("could not fetch");
+      expect(offlineAfterFailedRefresh.packs[0]?.manifest.summary).toBe("Base v1.");
+    }
 
     const repo = await packRepo("R0.");
     const cache = temp.make("cache-multi-refresh-");

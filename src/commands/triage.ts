@@ -178,13 +178,16 @@ function knownNames(hostname: string, machine: MachineFile | undefined, profile:
   const publicSourceNames = new Set(defaultSources.map((source) => source.name));
   for (const source of [...(machine?.setup?.draft?.sources ?? []), ...(profile?.sources ?? [])]) {
     if (typeof source.name === "string" && !publicSourceNames.has(source.name)) names.push({ text: `The pack source ${source.name}`, as: "The pack source <private source>", after: true });
-    if (typeof source.ref === "string" && !/^[0-9a-f]{40}$/i.test(source.ref)) {
+    if (typeof source.ref === "string") {
       const trimmedRef = source.ref.endsWith(":") ? source.ref.slice(0, -1) : source.ref;
-      const shortRef = trimmedRef.replace(/^refs\/heads\//, "");
-      const forcedRef = trimmedRef.startsWith("+") ? trimmedRef.slice(1).replace(/^refs\/heads\//, "") : undefined;
-      for (const candidate of new Set([source.ref, trimmedRef, shortRef, ...(forcedRef ? [forcedRef] : [])])) {
-        if (candidate && candidate !== "main" && candidate !== "master" && !/^[0-9a-f]{40}$/i.test(candidate)) {
-          names.push({ text: candidate, as: "<branch>", after: true });
+      const strippedRef = trimmedRef.startsWith("+") ? trimmedRef.slice(1) : trimmedRef;
+      if (!/^[0-9a-f]{40}$/i.test(strippedRef) && !/^[0-9a-f]{64}$/i.test(strippedRef)) {
+        const shortRef = trimmedRef.replace(/^refs\/heads\//, "");
+        const forcedRef = trimmedRef.startsWith("+") ? trimmedRef.slice(1).replace(/^refs\/heads\//, "") : undefined;
+        for (const candidate of new Set([source.ref, trimmedRef, shortRef, ...(forcedRef ? [forcedRef] : [])])) {
+          if (candidate && candidate !== "main" && candidate !== "master" && !/^[0-9a-f]{40}$/i.test(candidate) && !/^[0-9a-f]{64}$/i.test(candidate)) {
+            names.push({ text: candidate, as: "<branch>", after: true });
+          }
         }
       }
     }

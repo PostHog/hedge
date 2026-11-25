@@ -193,21 +193,24 @@ function fetchHeadMatches(fetchedUrl: string, candidate: string) {
 }
 
 async function isPeeledTagInRepo(dir: string, ref: unknown, commit: unknown): Promise<boolean> {
-  if (typeof ref !== "string" || typeof commit !== "string" || !gitHash.test(commit) || !isCommitPin(ref, commit.length) || ref.toLowerCase() === commit.toLowerCase() || !existsSync(join(dir, ".git"))) {
+  if (typeof ref !== "string" || typeof commit !== "string" || !gitHash.test(commit) || !existsSync(join(dir, ".git"))) {
     return false;
   }
-  const type = await git(dir, "cat-file", "-t", ref);
+  const stripped = stripSourceRefspec(ref);
+  if (!isCommitPin(stripped, commit.length) || stripped.toLowerCase() === commit.toLowerCase()) return false;
+  const type = await git(dir, "cat-file", "-t", stripped);
   if (!type.ok || type.stdout !== "tag") return false;
-  const peeled = await git(dir, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`);
+  const peeled = await git(dir, "rev-parse", "--verify", "--quiet", `${stripped}^{commit}`);
   return peeled.ok && peeled.stdout.toLowerCase() === commit.toLowerCase();
 }
 
 async function legacyFallbackMatches(dir: string, good: Good, effectiveRepo: string): Promise<boolean> {
   const entry = await fetchHeadEntry(dir, [good.ref, good.asked]);
   if (entry === undefined) return true;
-  const matchesGoodCommit = entry.oid === good.commit.toLowerCase() || (good.peeled === true && entry.oid === good.ref.toLowerCase());
+  const strippedRef = stripSourceRefspec(good.ref);
+  const matchesGoodCommit = entry.oid === good.commit.toLowerCase() || (good.peeled === true && entry.oid === strippedRef.toLowerCase());
   if (matchesGoodCommit) return fetchHeadMatches(entry.url, effectiveRepo);
-  if (good.branch !== true && good.peeled !== true && isCommitPin(good.ref, good.commit.length) && good.ref.toLowerCase() !== good.commit.toLowerCase()) {
+  if (good.branch !== true && good.peeled !== true && isCommitPin(strippedRef, good.commit.length) && strippedRef.toLowerCase() !== good.commit.toLowerCase()) {
     return false;
   }
   return fetchHeadMatches(entry.url, effectiveRepo) || effectiveRepo === good.repo;
@@ -219,6 +222,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
   if (edits.length) return keepEdits(ref, dir, edits, loadLimitMs);
   const rawGood = await lastGood(dir);
   const rawGoodDigest = goodResolvedDigest(rawGood);
+  const rawStrippedRef = typeof rawGood?.ref === "string" ? stripSourceRefspec(rawGood.ref) : "";
   const legacyPeeledCandidate =
     rawGood !== undefined &&
     rawGoodDigest === undefined &&
@@ -227,14 +231,14 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
     typeof rawGood.ref === "string" &&
     typeof rawGood.commit === "string" &&
     gitHash.test(rawGood.commit) &&
-    isCommitPin(rawGood.ref, rawGood.commit.length) &&
-    rawGood.ref.toLowerCase() !== rawGood.commit.toLowerCase();
+    isCommitPin(rawStrippedRef, rawGood.commit.length) &&
+    rawStrippedRef.toLowerCase() !== rawGood.commit.toLowerCase();
   const legacyPeeled =
     legacyPeeledCandidate &&
     ((await isPeeledTagInRepo(dir, rawGood.ref, rawGood.commit)) ||
       (existsSync(join(dir, ".git")) &&
-        !(await git(dir, "cat-file", "-e", rawGood.ref)).ok &&
-        (await fetchHeadEntry(dir, [rawGood.ref]))?.oid === rawGood.ref.toLowerCase()));
+        !(await git(dir, "cat-file", "-e", rawStrippedRef)).ok &&
+        (await fetchHeadEntry(dir, [rawGood.ref]))?.oid === rawStrippedRef.toLowerCase()));
   const legacyBranch =
     !legacyPeeled &&
     rawGood !== undefined &&
@@ -285,10 +289,11 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
   if (!fetchError && checkedOutCommit) {
     const commit = checkedOutCommit;
     const isBranch = fetchedNew ? await fetchHeadIsBranch(dir, ref.ref, fetchedOid) : false;
+    const strippedRef = stripSourceRefspec(ref.ref);
     const peeled =
-      fetchedNew && isBranch === false && isCommitPin(ref.ref, commit.length) && ref.ref.toLowerCase() !== commit.toLowerCase()
-        ? fetchedOid === ref.ref.toLowerCase() || (await git(dir, "rev-parse", "--verify", "--quiet", `${ref.ref}^{commit}`)).stdout.toLowerCase() === commit.toLowerCase()
-        : !fetchedNew && isCommitPin(ref.ref, commit.length) && ref.ref.toLowerCase() !== commit.toLowerCase()
+      fetchedNew && isBranch === false && isCommitPin(strippedRef, commit.length) && strippedRef.toLowerCase() !== commit.toLowerCase()
+        ? fetchedOid === strippedRef.toLowerCase() || (await git(dir, "rev-parse", "--verify", "--quiet", `${strippedRef}^{commit}`)).stdout.toLowerCase() === commit.toLowerCase()
+        : !fetchedNew && isCommitPin(strippedRef, commit.length) && strippedRef.toLowerCase() !== commit.toLowerCase()
           ? true
           : undefined;
     const loaded = await load(dir, loadLimitMs);
@@ -542,19 +547,30 @@ async function pinTarget(dir: string, repoHash: string, oid: string): Promise<st
   return (await outsideAnyStop(dir, normalized, stops, `refs/hedge/pins/${repoHash}/`)) ? normalized : undefined;
 }
 
-async function recordPinRef(dir: string, repoHash: string, oid: string): Promise<string | undefined> {
+async function recordPinRef(dir: string, repoHash: string, oid: string, created?: string[]): Promise<string | undefined> {
   if ((await exactPinTarget(dir, repoHash, oid)) !== undefined) return undefined;
-  const updated = await git(dir, "update-ref", pinRef(repoHash, oid), oid.toLowerCase());
-  return updated.ok ? undefined : updated.stderr || "could not record pinned commit";
+  const ref = pinRef(repoHash, oid);
+  const updated = await git(dir, "update-ref", ref, oid.toLowerCase());
+  if (!updated.ok) return updated.stderr || "could not record pinned commit";
+  created?.push(ref);
+  return undefined;
 }
 
-async function recordHistoryRef(dir: string, repoHash: string, commit: string, from: string): Promise<string | undefined> {
+async function recordHistoryRef(dir: string, repoHash: string, commit: string, from: string, created?: string[]): Promise<string | undefined> {
   const ref = historyRef(repoHash, commit, from);
   const normalized = commit.toLowerCase();
   const existing = await git(dir, "rev-parse", "--verify", "--quiet", ref);
   if (existing.ok && existing.stdout.toLowerCase() === normalized) return undefined;
   const updated = await git(dir, "update-ref", ref, normalized);
-  return updated.ok ? undefined : updated.stderr || "could not record verified commit history";
+  if (!updated.ok) return updated.stderr || "could not record verified commit history";
+  created?.push(ref);
+  return undefined;
+}
+
+async function rollbackRefs(dir: string, refs: string[]): Promise<void> {
+  for (const ref of refs) {
+    await git(dir, "update-ref", "-d", ref).catch(() => {});
+  }
 }
 
 async function saveGood(dir: string, good: Good, historyFrom?: string): Promise<string | undefined> {
@@ -572,18 +588,32 @@ async function saveGood(dir: string, good: Good, historyFrom?: string): Promise<
     before.resolved === undefined &&
     before.resolvedDigest === good.resolvedDigest;
   const currentCommit = verifiedGoodCommit(good);
+  const createdRefs: string[] = [];
   if (currentCommit) {
-    const recorded = await recordPinRef(dir, currentCommit.repoHash, currentCommit.commit);
-    if (recorded && !unchanged) return recorded;
-    if (historyFrom && gitHash.test(historyFrom)) {
-      const recordedFrom = await recordPinRef(dir, currentCommit.repoHash, historyFrom);
-      if (recordedFrom && !unchanged) return recordedFrom;
-      const recordedHistory = await recordHistoryRef(dir, currentCommit.repoHash, currentCommit.commit, historyFrom);
-      if (recordedHistory && !unchanged) return recordedHistory;
+    const recorded = await recordPinRef(dir, currentCommit.repoHash, currentCommit.commit, createdRefs);
+    if (recorded && !unchanged) {
+      await rollbackRefs(dir, createdRefs);
+      return recorded;
     }
-    if (good.peeled === true && isCommitPin(good.ref, currentCommit.commit.length) && (await git(dir, "cat-file", "-e", good.ref)).ok) {
-      const recordedTag = await recordPinRef(dir, currentCommit.repoHash, good.ref);
-      if (recordedTag && !unchanged) return recordedTag;
+    if (historyFrom && gitHash.test(historyFrom)) {
+      const recordedFrom = await recordPinRef(dir, currentCommit.repoHash, historyFrom, createdRefs);
+      if (recordedFrom && !unchanged) {
+        await rollbackRefs(dir, createdRefs);
+        return recordedFrom;
+      }
+      const recordedHistory = await recordHistoryRef(dir, currentCommit.repoHash, currentCommit.commit, historyFrom, createdRefs);
+      if (recordedHistory && !unchanged) {
+        await rollbackRefs(dir, createdRefs);
+        return recordedHistory;
+      }
+    }
+    const strippedGoodRef = stripSourceRefspec(good.ref);
+    if (good.peeled === true && isCommitPin(strippedGoodRef, currentCommit.commit.length) && (await git(dir, "cat-file", "-e", strippedGoodRef)).ok) {
+      const recordedTag = await recordPinRef(dir, currentCommit.repoHash, strippedGoodRef, createdRefs);
+      if (recordedTag && !unchanged) {
+        await rollbackRefs(dir, createdRefs);
+        return recordedTag;
+      }
     }
   }
   if (unchanged) {
@@ -593,6 +623,7 @@ async function saveGood(dir: string, good: Good, historyFrom?: string): Promise<
   try {
     await writeAtomic(goodPath(dir), JSON.stringify(good) + "\n");
   } catch (error) {
+    await rollbackRefs(dir, createdRefs);
     return error instanceof Error ? error.message : String(error);
   }
   return undefined;
@@ -606,11 +637,9 @@ const hasGoodCommit = (record: Good | undefined) =>
   gitHash.test(record.commit);
 
 const verifiedGoodCommit = (record: Good | undefined) => {
-  if (
-    !record ||
-    !hasGoodCommit(record) ||
-    (record.branch !== true && record.peeled !== true && isCommitPin(record.ref, record.commit.length) && record.ref.toLowerCase() !== record.commit.toLowerCase())
-  ) {
+  if (!record || !hasGoodCommit(record)) return undefined;
+  const strippedRef = stripSourceRefspec(record.ref);
+  if (record.branch !== true && record.peeled !== true && isCommitPin(strippedRef, record.commit.length) && strippedRef.toLowerCase() !== record.commit.toLowerCase()) {
     return undefined;
   }
   const repoHash = goodResolvedDigest(record) ?? repoDigest(record.repo);
@@ -637,11 +666,14 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string, cac
       good?.repo === repo &&
       (goodDigest === undefined || repoDigest(await resolvedRepoUrl(dir, repo)) === goodDigest);
     const hashLen = sameCachedRepo ? await repoHashLength(dir) : 40;
-    const pinned = isCommitPin(ref.ref, hashLen) && !(sameCachedRepo && cacheRoot && (await followsBranch(ref, cacheRoot)));
+    const pinned = isCommitPin(stripSourceRefspec(ref.ref), hashLen) && !(sameCachedRepo && cacheRoot && (await followsBranch(ref, cacheRoot)));
     if (!pinned) unpinned.push(ref);
   }
   if (!unpinned.length) return [];
-  const origin = await git(profileDir, "config", "--get", "remote.origin.url").then((read) => (read.ok ? read.rawStdout.replace(/\r?\n$/, "") : ""), () => "");
+  const origin = await git(profileDir, "config", "--get", "remote.origin.url").then(
+    (read) => (read.ok ? (process.platform === "win32" ? read.rawStdout.replace(/\r?\n$/, "") : read.rawStdout.replace(/\n$/, "")) : ""),
+    () => "",
+  );
   const ownRepo = (ref: SourceRef) => origin !== "" && repoKey(ref.repo) === repoKey(origin);
   return unpinned
     .filter((ref) => !ownRepo(ref))
@@ -650,9 +682,10 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string, cac
 
 async function checkedOutFromCache(dir: string, repo: string, effectiveRepo: string, ref: SourceRef, good: Good | undefined): Promise<string | undefined> {
   if (!existsSync(join(dir, ".git"))) return undefined;
-  const oid = ref.ref.toLowerCase();
+  const oid = stripSourceRefspec(ref.ref).toLowerCase();
   const hashLen = await repoHashLength(dir);
   if (!isCommitPin(oid, hashLen)) return undefined;
+  if (good?.branch === true && branchName(good.ref)?.toLowerCase() === oid) return undefined;
   const effectiveDigest = repoDigest(effectiveRepo);
   const goodDigest = goodResolvedDigest(good);
   const goodCommit = verifiedGoodCommit(good);
@@ -661,7 +694,7 @@ async function checkedOutFromCache(dir: string, repo: string, effectiveRepo: str
     good?.repo === repo &&
     goodDigest !== undefined &&
     goodDigest === effectiveDigest &&
-    (goodCommit.commit === oid || (good.peeled === true && good.ref.toLowerCase() === oid));
+    (goodCommit.commit === oid || (good.peeled === true && stripSourceRefspec(good.ref).toLowerCase() === oid));
   const target = verifiedGoodMatch ? goodCommit.commit : await pinTarget(dir, effectiveDigest, oid);
   if (!target) return undefined;
   return (await git(dir, "checkout", "-q", "--detach", `${target}^{commit}`)).ok ? target : undefined;

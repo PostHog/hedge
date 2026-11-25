@@ -411,6 +411,23 @@ describe("hedge triage", () => {
     ]);
     expect(overlapRedacted).not.toContain("acme/secret-repo");
     expect(overlapRedacted).toContain("<private repo>");
+
+    const splitByExempt = redact("fetch foo <token> confidential", "/home/guest", [
+      { text: "foo <token", as: "<private source>", after: true },
+      { text: "token> confidential", as: "<private source>", after: true },
+    ]);
+    expect(splitByExempt).toBe("fetch <private source>");
+
+    const hostSources = Array.from({ length: 120 }, (_, i) => ({
+      text: `https://APP${i}.INTERNAL/a/B.INTERNAL/c/D.INTERNAL/e/F.INTERNAL/g/H.INTERNAL/repo`,
+      as: "<private source>",
+      after: true,
+    }));
+    const nonMatchingLine = "GET https://OTHER.INTERNAL/a/B.INTERNAL/c/D.INTERNAL/e/F.INTERNAL/g/H.INTERNAL/repo\n";
+    const matchingLine = "GET https://app42.internal/a/B.INTERNAL/c/D.INTERNAL/e/F.INTERNAL/g/H.INTERNAL/repo\n";
+    const canonOut = redact(nonMatchingLine.repeat(200) + matchingLine, "/home/guest", hostSources);
+    expect(canonOut).toContain("GET <private source>");
+    expect(canonOut).not.toContain("app42.internal");
   });
 
   test("a qualified literal plus-prefixed branch ref does not redact the unrelated word release", async () => {
