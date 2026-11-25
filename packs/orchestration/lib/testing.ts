@@ -75,7 +75,7 @@ export function linkedTools(threads: LinkedThreadFixture[]): ToolHandler {
   };
 }
 
-export type GitHubFixture = { issues: IssueNode[]; discussions?: Record<string, Discussion>; graphqlError?: string; pullRequests?: string[]; restPageSize?: number };
+export type GitHubFixture = { issues: IssueNode[]; discussions?: Record<string, Discussion>; graphqlError?: string; pullRequests?: string[]; restPageSize?: number; restWithoutSummaries?: boolean };
 export type CommandResult = { stdout: string; stderr: string; code: number };
 
 export function issueNode(repository: string, number: number, fields: Partial<IssueNode> = {}): IssueNode {
@@ -105,12 +105,22 @@ export async function fakeGitHub(home: string, fixture: GitHubFixture): Promise<
   await writeFile(join(bin, "gh"), `#!/bin/sh
 dir="$(dirname "$0")"
 if [ "$2" != graphql ]; then
-  for arg; do case "$arg" in --paginate) paginate=1 ;; '.[] | tojson') each=1 ;; repos/*) path=$arg ;; esac; done
+  for arg; do
+    if [ -n "\${jq_next:-}" ]; then jq=$arg; jq_next=; continue; fi
+    case "$arg" in --paginate) paginate=1 ;; --jq) jq_next=1 ;; repos/*) path=$arg ;; esac
+  done
   echo "$path" >> "$dir/rest.log"
   base="$dir/rest-$(printf '%s' "$path" | sed 's/[?].*//' | tr / -)"
-  if [ -f "$base.page-001.ndjson" ]; then
-    [ -n "\${each:-}" ] || { echo "fake gh: a list read needs --jq '.[] | tojson'" >&2; exit 1; }
-    if [ -n "\${paginate:-}" ]; then cat "$base".page-*.ndjson; else cat "$base.page-001.ndjson"; fi
+  if [ -f "$base.page-001.json" ]; then
+    case "\${jq:-}" in
+      '') form=json ;;
+      '.[] | tojson') form=ndjson ;;
+      '.[]') form=ndjson; [ -n "\${GH_FORCE_TTY:-}" ] && form=pretty ;;
+      *) echo "fake gh: no fake for --jq $jq" >&2; exit 1 ;;
+    esac
+    pages="$base.page-001"
+    [ -n "\${paginate:-}" ] && pages=$(ls "$base".page-*.json | sed 's/[.]json$//')
+    for page in $pages; do cat "$page.$form"; done
     exit 0
   fi
   [ -f "$base.json" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
@@ -180,17 +190,24 @@ async function writeRestFixture(bin: string, fixture: GitHubFixture): Promise<vo
   const list = async (path: string, items: unknown[]) => {
     const pages = Array.from({ length: Math.max(1, Math.ceil(items.length / size)) }, (_, index) => items.slice(index * size, (index + 1) * size));
     for (const [index, page] of pages.entries()) {
-      await writeFile(join(bin, `rest-${path.replaceAll("/", "-")}.page-${String(index + 1).padStart(3, "0")}.ndjson`), page.map((item) => `${JSON.stringify(item)}\n`).join(""));
+      const stem = join(bin, `rest-${path.replaceAll("/", "-")}.page-${String(index + 1).padStart(3, "0")}`);
+      await writeFile(`${stem}.json`, JSON.stringify(page));
+      await writeFile(`${stem}.ndjson`, page.map((item) => `${JSON.stringify(item)}\n`).join(""));
+      await writeFile(`${stem}.pretty`, page.map((item) => `${JSON.stringify(item, null, 2)}\n`).join(""));
     }
+  };
+  const issue = (...args: Parameters<typeof restIssue>) => {
+    const { sub_issues_summary, issue_dependencies_summary, ...fields } = restIssue(...args);
+    return fixture.restWithoutSummaries ? fields : { ...fields, sub_issues_summary, issue_dependencies_summary };
   };
   const write = async (node: IssueNode) => {
     const path = `repos/${node.repository}/issues/${node.number}`;
     const discussion = fixture.discussions?.[`${node.repository}#${node.number}`];
     const comments = (discussion?.comments ?? []).map((comment) => ({ user: { login: comment.author }, body: comment.body, html_url: comment.url, created_at: comment.createdAt, updated_at: comment.updatedAt }));
-    await writeFile(file(path), JSON.stringify(restIssue(node.repository, node.number, node, discussion?.body ?? null)));
+    await writeFile(file(path), JSON.stringify(issue(node.repository, node.number, node, discussion?.body ?? null)));
     const newestBlockerFirst = [...node.blockedBy].reverse();
-    await list(`${path}/sub_issues`, node.children.map((child) => restIssue(child.repository, child.number, child)));
-    await list(`${path}/dependencies/blocked_by`, newestBlockerFirst.map((blocker) => restIssue(blocker.repository, blocker.number, { state: blocker.state })));
+    await list(`${path}/sub_issues`, node.children.map((child) => issue(child.repository, child.number, child)));
+    await list(`${path}/dependencies/blocked_by`, newestBlockerFirst.map((blocker) => issue(blocker.repository, blocker.number, { state: blocker.state })));
     await list(`${path}/comments`, comments);
   };
   for (const key of fixture.pullRequests ?? []) {

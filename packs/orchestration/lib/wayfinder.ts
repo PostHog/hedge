@@ -168,13 +168,14 @@ function restRepository(issue: RestIssue): string {
 async function restNode(issue: RestIssue, children?: RestIssue[]): Promise<IssueNode> {
   const path = `repos/${restRepository(issue)}/issues/${issue.number}`;
   const blockers = issue.issue_dependencies_summary?.total_blocked_by === 0 ? [] : await restList<RestIssue>(`${path}/dependencies/blocked_by`);
+  const childCount = children?.length ?? issue.sub_issues_summary?.total ?? (await restList<RestIssue>(`${path}/sub_issues`)).length;
   const nodes: IssueNode[] = [];
   for (const child of children ?? []) nodes.push(await restNode(child));
   return {
     number: issue.number, title: issue.title, state: issue.state.toUpperCase(), repository: restRepository(issue),
     assignees: issue.assignees.map((user) => user.login), labels: issue.labels.map((label) => label.name),
     blockedBy: blockers.map((blocker) => ({ number: blocker.number, state: blocker.state.toUpperCase(), repository: restRepository(blocker) })).sort(byIssue),
-    childCount: children?.length ?? issue.sub_issues_summary?.total ?? 0,
+    childCount,
     children: nodes,
   };
 }
