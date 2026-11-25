@@ -253,11 +253,18 @@ export async function check(plan: Plan, options: { home: string; adapters?: Adap
 export type HumanStepsLeft = { failing: Array<Owned<HumanStep>>; unchecked: Array<Owned<HumanStep>> };
 
 export async function humanStepsLeft(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void> }): Promise<HumanStepsLeft> {
-  const run = viaEngine(plan, options.run ?? spawnRunner(options.home, plan.machine.profileDir));
-  const deadline = new AbortController();
-  const late = options.giveUp.then(() => (deadline.abort(), "unchecked" as const));
-  const checked = (code: number) => (code === 0 ? "passes" : "fails");
-  const outcome = (step: Owned<HumanStep>) => Promise.race([run(step.probe, {}, deadline.signal).then(checked), late]);
+  const reported = new WeakSet<AbortSignal>();
+  const run = viaEngine(plan, options.run ?? spawnRunner(options.home, plan.machine.profileDir, (sig) => reported.add(sig)));
+  const outcome = (step: Owned<HumanStep>) => {
+    const deadline = new AbortController();
+    const result = run(step.probe, {}, deadline.signal).then((code) => (code === 0 ? ("passes" as const) : ("fails" as const)));
+    const late = options.giveUp.then(() => {
+      if (reported.has(deadline.signal)) return result;
+      deadline.abort();
+      return "unchecked" as const;
+    });
+    return Promise.race([result, late]);
+  };
   const outcomes = await Promise.all(plan.human.map(outcome));
   return { failing: plan.human.filter((_, index) => outcomes[index] === "fails"), unchecked: plan.human.filter((_, index) => outcomes[index] === "unchecked") };
 }
@@ -439,7 +446,7 @@ function viaEngine(plan: Plan, run: Runner): Runner {
 const undoRunner = (run: Runner, step: LedgerStep): Runner => (command) => run(command, { [undoVariable]: ledgerKey(step) });
 
 /** Runs commands with the plan's home directory as HOME, so a step installs into the home it applies to, and with the plan's profile, so a nested hedge reads the profile this run applies or checks. */
-function spawnRunner(home: string, profileDir: string | undefined): Runner {
+function spawnRunner(home: string, profileDir: string | undefined, onResult?: (signal: AbortSignal) => void): Runner {
   return async (command, env = {}, signal) => {
     const childEnv = withLegacyNames({ ...Bun.env, HOME: home, ...(profileDir ? { HEDGE_PROFILE_DIR: profileDir } : {}), ...env });
     if (!signal) {
@@ -449,13 +456,43 @@ function spawnRunner(home: string, profileDir: string | undefined): Runner {
         return 127;
       }
     }
-    return await runDetached(command, childEnv, signal);
+    return await runDetached(command, childEnv, signal, onResult);
   };
 }
 
 const probeSupervisor = join(import.meta.dir, "probe-supervisor.ts");
 
-async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal) {
+async function readSupervisorResult(stdout: ReadableStream<Uint8Array>, onFirstCode: () => void): Promise<{ code?: number; cleanup: boolean }> {
+  const reader = stdout.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let code: number | undefined;
+  let cleanup = false;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      for (let nl = buf.indexOf("\n"); nl !== -1; nl = buf.indexOf("\n")) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (code === undefined && /^\d+$/.test(line)) {
+          code = Number(line);
+          onFirstCode();
+        } else if (line === "cleanup") {
+          cleanup = true;
+          return { code, cleanup };
+        }
+      }
+    }
+  } catch {
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return { code, cleanup };
+}
+
+async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal, onResult?: (signal: AbortSignal) => void) {
   if (!command.length || (command[0]!.includes("/") && !existsSync(command[0]!))) return 127;
   let child: { pid: number; exited: Promise<number>; stdout: ReadableStream<Uint8Array>; unref(): void } | undefined;
   let stopSignal: NodeJS.Signals | undefined;
@@ -494,12 +531,13 @@ async function runDetached(command: string[], env: Record<string, string | undef
       detached: true,
     });
     if (stopSignal || signal.aborted) endGroup(stopSignal ?? "SIGTERM");
-    const output = (await new Response(child.stdout).text()).trim();
-    if (/^\d+$/.test(output)) {
+    const status = await readSupervisorResult(child.stdout, () => onResult?.(signal));
+    if (status.code !== undefined && status.cleanup) {
       child.unref();
-      return Number(output);
+      return status.code;
     }
-    return await child.exited;
+    const exited = await child.exited;
+    return status.code ?? exited;
   } catch {
     return 127;
   } finally {

@@ -283,19 +283,20 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     }
   });
 
-  test("reports a failing human step that exits nonzero before the deadline even while a stubborn background child is still being cleaned up", async () => {
+  test("reports a failing human step that exits nonzero even when it leaves a stubborn background child behind, and still stops that child", async () => {
     const { home } = await machineWithProfile();
-    const [childReady, ready, leaderGone, gone] = [join(home, "child-ready"), join(home, "ready"), join(home, "leader-gone"), join(home, "gone")];
-    expect(Bun.spawnSync(["mkfifo", childReady, ready, leaderGone, gone]).exitCode).toBe(0);
-    const childScript = `trap "" HUP TERM; exec 3>${JSON.stringify(gone)}; echo $$ > ${JSON.stringify(childReady)}; exec sleep 30`;
+    const [childReady, ready, gone] = [join(home, "child-ready"), join(home, "ready"), join(home, "gone")];
+    expect(Bun.spawnSync(["mkfifo", childReady, ready, gone]).exitCode).toBe(0);
+    const childBin = join(home, "stubborn-child.sh");
+    writeFileSync(childBin, '#!/bin/sh\ntrap "" HUP TERM\nexec 3>"$1"\necho $$ > "$2"\nexec sleep 30\n', { mode: 0o755 });
     await withTeamPack(home, {
       workflows: [flow("allowlist")],
-      human: [humanStep("allowlist", `exec 4>"$HOME/leader-gone"; sh -c ${JSON.stringify(childScript)} 4>&- & pid=$(cat "$HOME/child-ready"); echo "$pid" > "$HOME/ready"; exit 7`, "allowlist")],
+      human: [humanStep("allowlist", `${JSON.stringify(childBin)} "$HOME/gone" "$HOME/child-ready" & pid=$(cat "$HOME/child-ready"); echo "$pid" > "$HOME/ready"; exit 7`, "allowlist")],
     });
-    const [started, leaderClosed, holderGone] = [fifoRead(ready), fifoRead(leaderGone), fifoRead(gone)];
-    const deadlineAfterLeaderExit = { now: () => 0, sleep: async () => { await leaderClosed; await Bun.sleep(40); } };
+    const [started, holderGone] = [fifoRead(ready), fifoRead(gone)];
+    const neverTimesOut = { now: () => 0, sleep: () => new Promise<void>(() => {}) };
     try {
-      const output = (await hedge(home, ["packs"], 0, { clock: deadlineAfterLeaderExit })).output;
+      const output = (await hedge(home, ["packs"], 0, { clock: neverTimesOut })).output;
       expect(output).toContain(`  ~ team  Team rules.\n      Workflows: allowlist needs setup\n${needsSetup}`);
       expect(await holderGone).toBe("");
     } finally {

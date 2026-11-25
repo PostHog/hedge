@@ -13,6 +13,7 @@ export type SupervisorHost = {
   timer: Timer;
   onSignal: (signal: StopSignal, handler: () => void) => void;
   reportResult: (code: number) => void;
+  reportCleanup: () => void;
   exit: (code: number) => void;
 };
 
@@ -152,11 +153,12 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
   leaderDone = true;
   if (finished) return settled;
   if (!stop) {
+    host.reportResult(code);
     if (!host.hasOtherMembers()) {
       exit(code);
       return settled;
     }
-    host.reportResult(code);
+    host.reportCleanup();
     armHard();
     forwardGroup("SIGTERM");
   }
@@ -190,6 +192,11 @@ if (import.meta.main) {
     reportResult: (code) => {
       try {
         writeSync(1, `${code}\n`);
+      } catch {}
+    },
+    reportCleanup: () => {
+      try {
+        writeSync(1, "cleanup\n");
       } catch {}
       try {
         closeSync(1);

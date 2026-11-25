@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../testing/git.ts";
+import { supervise } from "./probe-supervisor.ts";
 
 const temp = tempDirs();
 const activeHelpers: Array<{ kill(signal?: NodeJS.Signals): void }> = [];
@@ -73,6 +74,7 @@ await supervise(${JSON.stringify(command)}, {
   },
   onSignal: (signal, handler) => void process.on(signal, handler),
   reportResult: (code) => write("result:" + code),
+  reportCleanup: () => {},
   exit: (code) => process.exit(code),
 });
 `;
@@ -374,5 +376,43 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
     } finally {
       stubbornSup.cleanup();
     }
+  });
+
+  test("publishes the probe exit status before scanning for descendants, and exits without cleanup timers when none remain", async () => {
+    const cleanEvents: string[] = [];
+    const cleanCode = await supervise(["probe"], {
+      spawn: () => ({ exited: Promise.resolve(7) }),
+      killGroup: (sig) => void cleanEvents.push(`kill:${sig}`),
+      hasOtherMembers: () => (cleanEvents.push("scan"), false),
+      timer: () => (cleanEvents.push("timer"), () => {}),
+      onSignal: () => {},
+      reportResult: (code) => void cleanEvents.push(`result:${code}`),
+      reportCleanup: () => void cleanEvents.push("cleanup"),
+      exit: (code) => void cleanEvents.push(`exit:${code}`),
+    });
+    expect(cleanCode).toBe(7);
+    expect(cleanEvents).toEqual(["result:7", "scan", "exit:7"]);
+
+    const strayEvents: string[] = [];
+    let fireGrace: (() => void) | undefined;
+    const strayDone = supervise(["probe"], {
+      spawn: () => ({ exited: Promise.resolve(7) }),
+      killGroup: (sig) => void strayEvents.push(`kill:${sig}`),
+      hasOtherMembers: () => (strayEvents.push("scan"), true),
+      timer: (_ms, fire) => {
+        strayEvents.push("timer");
+        fireGrace = fire;
+        return () => {};
+      },
+      onSignal: () => {},
+      reportResult: (code) => void strayEvents.push(`result:${code}`),
+      reportCleanup: () => void strayEvents.push("cleanup"),
+      exit: (code) => void strayEvents.push(`exit:${code}`),
+    });
+    await Promise.resolve();
+    expect(strayEvents).toEqual(["result:7", "scan", "cleanup", "timer", "kill:SIGTERM"]);
+    fireGrace!();
+    expect(await strayDone).toBe(143);
+    expect(strayEvents).toEqual(["result:7", "scan", "cleanup", "timer", "kill:SIGTERM", "kill:SIGKILL", "exit:143"]);
   });
 });
