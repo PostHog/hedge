@@ -147,15 +147,16 @@ test("bot-threads --resolve never resolves a thread a person opened, even when o
   expect(box.calls().filter((call) => call.includes("resolveReviewThread"))).toEqual([]);
 });
 
-const thumbs = (url: string, ...logins: (string | null)[]) => ({ ...comment(user("reviewer"), url), reactions: { nodes: logins.map((login) => ({ user: login === null ? null : { login } })) } });
+const reacted = (...mine: string[]) => ({ reactionGroups: ["THUMBS_UP", "THUMBS_DOWN", "HEART"].map((content) => ({ content, viewerHasReacted: mine.includes(content) })) });
+const thumbs = (url: string, ...mine: string[]) => ({ ...comment(user("reviewer"), url), ...reacted(...mine) });
 
 test("a 👍 from the viewer on the latest comment answers a thread, and human threads that still wait on the viewer are counted", () => {
   const box = sandbox();
   box.reply("threads", threads("me", [
-    thread("H1", "src/a.ts", 1, [thumbs("https://example.test/h1", "someone", "me")]),
-    thread("H2", "src/b.ts", 2, [thumbs("https://example.test/h2", "someone", null)]),
-    thread("H3", "src/c.ts", 3, [thumbs("https://example.test/h3", "me"), comment(user("reviewer"), "https://example.test/h3b")]),
-    thread("B1", "src/d.ts", 4, [{ ...comment(bot("coderabbitai"), "https://example.test/b1"), reactions: { nodes: [{ user: { login: "me" } }] } }]),
+    thread("H1", "src/a.ts", 1, [thumbs("https://example.test/h1", "THUMBS_UP", "HEART")]),
+    thread("H2", "src/b.ts", 2, [thumbs("https://example.test/h2", "THUMBS_DOWN", "HEART")]),
+    thread("H3", "src/c.ts", 3, [thumbs("https://example.test/h3", "THUMBS_UP"), comment(user("reviewer"), "https://example.test/h3b")]),
+    thread("B1", "src/d.ts", 4, [{ ...comment(bot("coderabbitai"), "https://example.test/b1"), ...reacted("THUMBS_UP") }]),
   ]));
   box.reply("resolve", { data: {} });
   const result = box.run("bot-threads", "--repo", "acme/widgets", "--pr", "12", "--resolve");
@@ -168,7 +169,7 @@ test("a 👍 from the viewer on the latest comment answers a thread, and human t
     "2 human threads wait on me: react 👍 to a fix, or draft the reply for me to post.",
   ].join("\n"));
   expect(result.code).toBe(0);
-  expect(box.calls()[0]).toContain("reactions(content: THUMBS_UP");
+  expect(box.calls()[0]).toContain("reactionGroups { content viewerHasReacted }");
 });
 
 test("one human thread that waits is named in the singular", () => {

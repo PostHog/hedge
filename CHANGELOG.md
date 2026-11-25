@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### The landed gate survives a renamed required check, and the thread query costs less
+
+- `hedge proof gate --landed` no longer waits on a required check that never
+  reported on a merged pull request when every ruleset that requires it
+  changed after the merge. A renamed or new check in a ruleset opened a gap on
+  every merged pull request before. The CI line names each such check as not
+  judged. A check that reported still counts, and a check that classic branch
+  protection also requires still waits.
+- The review-thread query that `hedge proof gate` and `hedge pr bot-threads`
+  send reads the viewer's 👍 from `reactionGroups` instead of a page of
+  reactions, and asks for smaller pages. It costs 1 GraphQL point instead of
+  about 100 on a pull request with few threads.
+
 ### A Waits guide, and a to-do for repeated guide headings
 
 - The Orchestration pack writes a new guide, `~/.agents/guides/waits.md`. It
