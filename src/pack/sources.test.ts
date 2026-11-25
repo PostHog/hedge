@@ -1400,6 +1400,40 @@ print(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=d, env=env).deco
     expect("error" in (await fetchSource({ name: "team", repo: unreachableRepoB, ref: "main" }, switchCache))).toBe(true);
     expect(await followsBranch({ name: "team", repo: unreachableRepoB, ref: "main" }, switchCache)).toBe(false);
     expect(await followsBranch({ name: "team", repo: switchRepoA, ref: "main" }, switchCache)).toBe(true);
+
+    const emptyMirror = await packRepo("Empty FH mirror packs.");
+    const emptyMirrorSha = await spawnGit(emptyMirror, "rev-parse", "HEAD");
+    const emptyMirrorCfg = "https://example.invalid/empty-fh-mirror.git";
+    const emptyMirrorCache = temp.make("cache-empty-fh-mirror-");
+    const emptyMirrorDir = join(emptyMirrorCache, "team");
+    mkdirSync(emptyMirrorDir, { recursive: true });
+    await spawnGit(emptyMirrorDir, "init", "-q");
+    await spawnGit(emptyMirrorDir, "config", `url.${emptyMirror}.insteadOf`, emptyMirrorCfg);
+    await spawnGit(emptyMirrorDir, "fetch", "-q", "--depth", "1", "--no-tags", emptyMirrorCfg, "main");
+    await spawnGit(emptyMirrorDir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    writeFileSync(join(emptyMirrorDir, ".git", "hedge-source.json"), JSON.stringify({ repo: emptyMirrorCfg, ref: "main", commit: emptyMirrorSha }) + "\n");
+    writeFileSync(join(emptyMirrorDir, ".git", "FETCH_HEAD"), "");
+    rmSync(emptyMirror, { recursive: true, force: true });
+    const emptyMirrorOffline = await fetchSource({ name: "team", repo: emptyMirrorCfg, ref: "main" }, emptyMirrorCache);
+    if ("error" in emptyMirrorOffline) throw new Error(emptyMirrorOffline.error);
+    expect(emptyMirrorOffline.packs[0]?.manifest.summary).toBe("Empty FH mirror packs.");
+    expect(emptyMirrorOffline.stale).toContain("could not fetch main");
+
+    const pinResumeRepo = await packRepo("Pin resume v1.");
+    const pinV1 = await spawnGit(pinResumeRepo, "rev-parse", "HEAD");
+    writePack(pinResumeRepo, "Pin resume v2.");
+    await spawnGit(pinResumeRepo, "commit", "-q", "-am", "v2");
+    const pinV2 = await spawnGit(pinResumeRepo, "rev-parse", "HEAD");
+    const pinResumeCache = temp.make("cache-pin-resume-");
+    expect("error" in (await fetchSource({ name: "team", repo: pinResumeRepo, ref: pinV1 }, pinResumeCache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo: pinResumeRepo, ref: "main" }, pinResumeCache))).toBe(false);
+    await spawnGit(join(pinResumeCache, "team"), "checkout", "-q", "--detach", pinV1);
+    rmSync(pinResumeRepo, { recursive: true, force: true });
+    const resumedBranch = await fetchSource({ name: "team", repo: pinResumeRepo, ref: "main" }, pinResumeCache);
+    if ("error" in resumedBranch) throw new Error(resumedBranch.error);
+    expect(resumedBranch.packs[0]?.manifest.summary).toBe("Pin resume v2.");
+    expect(resumedBranch.stale).toContain("could not fetch main");
+    expect(await spawnGit(join(pinResumeCache, "team"), "rev-parse", "HEAD")).toBe(pinV2);
   });
 });
 

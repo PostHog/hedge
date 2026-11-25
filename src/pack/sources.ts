@@ -169,12 +169,10 @@ async function isPeeledTagInRepo(dir: string, ref: unknown, commit: unknown): Pr
 
 async function legacyFallbackMatches(dir: string, good: Good, effectiveRepo: string): Promise<boolean> {
   const entry = await fetchHeadEntry(dir, [good.ref, good.asked]);
-  if (entry !== undefined) {
-    const matchesGoodCommit = entry.oid === good.commit.toLowerCase() || (good.peeled === true && entry.oid === good.ref.toLowerCase());
-    if (matchesGoodCommit) return fetchHeadMatches(entry.url, effectiveRepo);
-    if (fetchHeadMatches(entry.url, effectiveRepo)) return true;
-  }
-  return effectiveRepo === good.repo;
+  if (entry === undefined) return true;
+  const matchesGoodCommit = entry.oid === good.commit.toLowerCase() || (good.peeled === true && entry.oid === good.ref.toLowerCase());
+  if (matchesGoodCommit) return fetchHeadMatches(entry.url, effectiveRepo);
+  return fetchHeadMatches(entry.url, effectiveRepo) || effectiveRepo === good.repo;
 }
 
 async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Promise<FetchedSource> {
@@ -210,10 +208,13 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
     typeof good.resolved !== "string" &&
     verifiedGoodCommit(good) !== undefined &&
     (await legacyFallbackMatches(dir, good, effectiveBefore));
-  const preserveBefore =
+  const managedDetached =
     before !== undefined &&
-    (!good || before.commit !== good.commit) &&
-    (Boolean(before.branch) || (await fetchHeadRepo(dir, before.commit)) === undefined);
+    !before.branch &&
+    ((await fetchHeadRepo(dir, before.commit)) !== undefined ||
+      (await pinTarget(dir, effectiveBefore, before.commit)) !== undefined ||
+      (typeof good?.resolved === "string" && (await pinTarget(dir, good.resolved, before.commit)) !== undefined));
+  const preserveBefore = before !== undefined && (!good || before.commit !== good.commit) && !managedDetached;
   let effectiveRepo = effectiveBefore;
   let fetchError: string | undefined;
   let fetchedNew = false;
