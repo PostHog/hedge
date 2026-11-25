@@ -1277,6 +1277,93 @@ esac
     expect(legacyTagOffline.packs[0]?.manifest.summary).toBe("Legacy annotated tag v1.");
     expect(legacyTagOffline.stale).toContain(`could not fetch ${legacyTagOid}`);
   });
+
+  test("rejects refspec injection, separates invalid-UTF-8 mirror paths, and falls back offline after a legacy insteadOf broken-ref fetch", async () => {
+    const repoA = await packRepo("Trusted repo A.");
+    const repoB = await packRepo("Untrusted repo B.");
+    const shaA = await spawnGit(repoA, "rev-parse", "HEAD");
+    const shaB = await spawnGit(repoB, "rev-parse", "HEAD");
+    const forgedHash = new Bun.CryptoHasher("sha256").update(repoA).digest("hex");
+    const forgedCache = temp.make("cache-forged-refspec-");
+    expect("error" in (await fetchSource({ name: "team", repo: repoA, ref: shaA }, forgedCache))).toBe(false);
+    const forged = await fetchSource({ name: "team", repo: repoB, ref: `HEAD:refs/hedge/pins/${forgedHash}/${shaB}` }, forgedCache);
+    expect("error" in forged).toBe(true);
+    rmSync(repoA, { recursive: true, force: true });
+    const afterForge = await fetchSource({ name: "team", repo: repoA, ref: shaB }, forgedCache);
+    if ("error" in afterForge) throw new Error(afterForge.error);
+    expect(afterForge.packs[0]?.manifest.summary).toBe("Trusted repo A.");
+    expect(afterForge.stale).toContain(`could not fetch ${shaB}`);
+
+    const legacyMirror = await packRepo("Legacy insteadOf good v1.");
+    const legacyGoodSha = await spawnGit(legacyMirror, "rev-parse", "HEAD");
+    await spawnGit(legacyMirror, "checkout", "-q", "-b", "broken");
+    writeFileSync(join(legacyMirror, "packs/team/pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Broken ref." }));
+    await spawnGit(legacyMirror, "commit", "-q", "-am", "broken");
+    const legacyConfigured = "https://example.invalid/legacy-broken.git";
+    const legacyBrokenCache = temp.make("cache-legacy-broken-");
+    const legacyBrokenDir = join(legacyBrokenCache, "team");
+    mkdirSync(legacyBrokenDir, { recursive: true });
+    await spawnGit(legacyBrokenDir, "init", "-q");
+    await spawnGit(legacyBrokenDir, "config", `url.${legacyMirror}.insteadOf`, legacyConfigured);
+    await spawnGit(legacyBrokenDir, "fetch", "-q", "--depth", "1", "--no-tags", legacyConfigured, "main");
+    await spawnGit(legacyBrokenDir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    writeFileSync(join(legacyBrokenDir, ".git", "hedge-source.json"), JSON.stringify({ repo: legacyConfigured, ref: "main", commit: legacyGoodSha }) + "\n");
+    await spawnGit(legacyBrokenDir, "fetch", "-q", "--depth", "1", "--no-tags", legacyConfigured, "broken");
+    rmSync(legacyMirror, { recursive: true, force: true });
+    const legacyBrokenOffline = await fetchSource({ name: "team", repo: legacyConfigured, ref: "main" }, legacyBrokenCache);
+    if ("error" in legacyBrokenOffline) throw new Error(legacyBrokenOffline.error);
+    expect(legacyBrokenOffline.packs[0]?.manifest.summary).toBe("Legacy insteadOf good v1.");
+    expect(legacyBrokenOffline.stale).toContain("could not fetch main");
+
+    if (process.platform === "linux") {
+      const rawParent = temp.make("raw-bytes-");
+      const pathA = Buffer.concat([Buffer.from(rawParent + "/repo-"), Buffer.from([0x80])]);
+      const pathB = Buffer.concat([Buffer.from(rawParent + "/repo-"), Buffer.from([0x81])]);
+      mkdirSync(pathA, { recursive: true });
+      mkdirSync(pathB, { recursive: true });
+      const initRaw = (dir: Buffer, summary: string) => {
+        const res = Bun.spawnSync(["python3", "-c", `import json, os, subprocess, sys
+d = bytes.fromhex(sys.argv[1])
+os.makedirs(os.path.join(d, b"packs", b"team"), exist_ok=True)
+with open(os.path.join(d, b"packs", b"team", b"pack.json"), "w") as f:
+  json.dump({"schema": 1, "name": "team", "summary": sys.argv[2]}, f)
+env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@example.com", "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@example.com"}
+for cmd in [["git", "init", "-q", "-b", "main"], ["git", "add", "."], ["git", "commit", "-q", "-m", "v1"]]:
+  subprocess.run(cmd, cwd=d, env=env, check=True)
+print(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=d, env=env).decode().strip())`, dir.toString("hex"), summary]);
+        if (res.exitCode !== 0) throw new Error(res.stderr.toString());
+        return res.stdout.toString().trim();
+      };
+      const rawShaA = initRaw(pathA, "Raw byte 0x80.");
+      const rawShaB = initRaw(pathB, "Raw byte 0x81.");
+      const rawConfigured = "https://example.invalid/raw-bytes.git";
+      const rawCache = temp.make("cache-raw-bytes-");
+      const rawDir = join(rawCache, "team");
+      mkdirSync(rawDir, { recursive: true });
+      await spawnGit(rawDir, "init", "-q");
+      const setRawInsteadOf = (target: Buffer) => {
+        const cfg = Buffer.concat([
+          Buffer.from("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n[url \""),
+          target,
+          Buffer.from(`"]\n\tinsteadOf = ${rawConfigured}\n`),
+        ]);
+        writeFileSync(join(rawDir, ".git", "config"), cfg);
+      };
+      setRawInsteadOf(pathA);
+      const fetchedA = await fetchSource({ name: "team", repo: rawConfigured, ref: rawShaA }, rawCache);
+      if ("error" in fetchedA) throw new Error(fetchedA.error);
+      expect(fetchedA.packs[0]?.manifest.summary).toBe("Raw byte 0x80.");
+      setRawInsteadOf(pathB);
+      const fetchedB = await fetchSource({ name: "team", repo: rawConfigured, ref: rawShaB }, rawCache);
+      if ("error" in fetchedB) throw new Error(fetchedB.error);
+      expect(fetchedB.packs[0]?.manifest.summary).toBe("Raw byte 0x81.");
+      rmSync(pathB, { recursive: true, force: true });
+      const crossRaw = await fetchSource({ name: "team", repo: rawConfigured, ref: rawShaA }, rawCache);
+      if ("error" in crossRaw) throw new Error(crossRaw.error);
+      expect(crossRaw.packs[0]?.manifest.summary).toBe("Raw byte 0x81.");
+      expect(crossRaw.stale).toContain(`could not fetch ${rawShaA}`);
+    }
+  });
 });
 
 describe("inside a Git hook of another repository", () => {

@@ -262,12 +262,25 @@ const deferToAfter = new RegExp(
   "i",
 );
 
+const builtInLabels = new Set([...redactorLabels, "<this machine>", "<hub>", "<branch>", "<private source>", "<name>"]);
+
 export function redact(text: string, home: string, known: KnownName[] = []): string {
   const stripHome = (value: string) => (home.length > 1 ? value.split(home.replace(/\/$/, "")).join("~") : value);
   const valid = known.filter((entry) => typeof entry.text === "string" && typeof entry.as === "string");
   const needsAfter = (entry: KnownName) => Boolean(entry.after) || deferToAfter.test(entry.text) || applyRules(entry.text, secretRules) !== entry.text;
-  const primary = valid.filter((entry) => !needsAfter(entry));
-  const after = valid.filter(needsAfter).map((entry) => (entry.after ? entry : { ...entry, after: true }));
+  const primary: KnownName[] = [];
+  const after: KnownName[] = [];
+  const allEntries: KnownName[] = [];
+  for (const entry of valid) {
+    if (needsAfter(entry)) {
+      const deferred = entry.after ? entry : { ...entry, after: true };
+      after.push(deferred);
+      allEntries.push(deferred);
+    } else {
+      primary.push(entry);
+      allEntries.push(entry);
+    }
+  }
 
   const usedNonces = new Set<number>();
   for (const part of [text, home, ...valid.flatMap((entry) => [entry.text, entry.as])]) {
@@ -278,8 +291,20 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
   const prefix = `~.${nonce}.`;
   const suffix = ".~";
 
-  const rawPrimarySpellings = compileSpellings(primary);
-  const sanitizeLabel = (entry: KnownName) => applyRules(stripHome(applySpellings(entry.as, rawPrimarySpellings, undefined, entry)), allRules);
+  const sanitizeExempt = new Set([
+    ...builtInLabels,
+    ...valid.map((entry) => entry.as).filter((label) => /^<devbox \d+>$/.test(label)),
+  ]);
+  const rawAllSpellings = compileSpellings(allEntries, undefined, undefined, [...sanitizeExempt]);
+  const sanitizeLabel = (entry: KnownName) => {
+    let value = entry.as;
+    for (let pass = 0; pass < 4; pass++) {
+      const next = applyRules(stripHome(applySpellings(value, rawAllSpellings, sanitizeExempt, entry)), allRules);
+      if (next === value) break;
+      value = next;
+    }
+    return value;
+  };
 
   const labels: string[] = [];
   const maskedEntries = primary.map((entry) => {

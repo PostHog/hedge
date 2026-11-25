@@ -68,18 +68,31 @@ async function restoreCheckout(dir: string, before: CheckoutState | undefined): 
   return restored.ok;
 }
 
+const fatalUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+function decodeRepoBytes(bytes: Uint8Array): string {
+  try {
+    return fatalUtf8.decode(bytes);
+  } catch {
+    return `\0raw:${Buffer.from(bytes).toString("hex")}`;
+  }
+}
+
 async function resolvedRepoUrl(dir: string, repo: string) {
   if (!existsSync(join(dir, ".git"))) return repo;
   const read = await git(dir, "ls-remote", "--get-url", repo);
-  const url = read.rawStdout.endsWith("\n")
-    ? process.platform === "win32" && read.rawStdout.endsWith("\r\n")
-      ? read.rawStdout.slice(0, -2)
-      : read.rawStdout.slice(0, -1)
-    : read.rawStdout;
-  return read.ok && url ? url : repo;
+  if (!read.ok || read.rawBytes.length === 0) return repo;
+  const end =
+    read.rawBytes.at(-1) === 0x0a
+      ? process.platform === "win32" && read.rawBytes.length >= 2 && read.rawBytes.at(-2) === 0x0d
+        ? read.rawBytes.length - 2
+        : read.rawBytes.length - 1
+      : read.rawBytes.length;
+  return end > 0 ? decodeRepoBytes(read.rawBytes.subarray(0, end)) : repo;
 }
 
 const gitHash = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+const isInvalidRef = (ref: string) => !ref || ref.startsWith("-") || ref.startsWith("+") || ref.startsWith("^") || ref.includes(":") || /[\0\r\n]/.test(ref);
 
 async function repoHashLength(dir: string): Promise<number> {
   if (!existsSync(join(dir, ".git"))) return 40;
@@ -89,11 +102,16 @@ async function repoHashLength(dir: string): Promise<number> {
 
 const isCommitPin = (ref: string, hashLen: number) => ref.length === hashLen && gitHash.test(ref);
 
-const canonicalFetchHeadUrl = (url: string) =>
-  withoutUserinfo(url)
+function canonicalFetchHeadUrl(url: string) {
+  if (url.startsWith("\0raw:")) {
+    const raw = Buffer.from(url.slice(5), "hex").toString("latin1").replace(/\/+$/, "").replace(/\.git$/i, "");
+    return `\0raw:${Buffer.from(raw, "latin1").toString("hex")}`;
+  }
+  return withoutUserinfo(url)
     .replace(/^[^/@:\s]+@/, "")
     .replace(/\/+$/, "")
     .replace(/\.git$/i, "");
+}
 
 function firstFetchHeadEntry(raw: string): string {
   const trimmed = process.platform === "win32" && raw.endsWith("\r\n") ? raw.slice(0, -2) : raw.endsWith("\n") ? raw.slice(0, -1) : raw;
@@ -101,21 +119,34 @@ function firstFetchHeadEntry(raw: string): string {
   return next === -1 ? trimmed : trimmed.slice(0, next);
 }
 
-async function fetchHeadRepo(dir: string, commit: unknown, ref?: string): Promise<string | undefined> {
-  if (typeof commit !== "string" || !gitHash.test(commit)) return undefined;
-  const raw = await readFile(join(dir, ".git", "FETCH_HEAD"), "utf8").catch(() => "");
-  const first = firstFetchHeadEntry(raw);
+async function fetchHeadEntry(dir: string, refs?: Array<string | undefined>): Promise<{ oid: string; url: string } | undefined> {
+  const raw = await readFile(join(dir, ".git", "FETCH_HEAD")).catch(() => undefined);
+  if (!raw || raw.length === 0) return undefined;
+  const first = firstFetchHeadEntry(raw.toString("latin1"));
   const line = first.match(/^([0-9a-f]{40}|[0-9a-f]{64})\t[^\t]*\t([\s\S]+)$/i);
-  if (!line || line[1]!.toLowerCase() !== commit.toLowerCase()) return undefined;
+  if (!line) return undefined;
+  const oid = line[1]!.toLowerCase();
   const desc = line[2]!;
-  if (ref) {
+  const descOffset = first.length - desc.length;
+  for (const ref of refs ?? []) {
+    if (!ref) continue;
     const short = ref.replace(/^refs\/(?:heads|tags)\//, "");
     for (const prefix of [`branch '${short}' of `, `tag '${short}' of `, `'${short}' of `, `'${ref}' of `]) {
-      if (desc.startsWith(prefix)) return desc.slice(prefix.length);
+      const latinPrefix = Buffer.from(prefix, "utf8").toString("latin1");
+      if (desc.startsWith(latinPrefix)) {
+        return { oid, url: decodeRepoBytes(raw.subarray(descOffset + latinPrefix.length, first.length)) };
+      }
     }
   }
-  const named = desc.match(/^(?:branch '.+?'|tag '.+?'|'.+?'|[0-9a-f]{40}|[0-9a-f]{64}) of ([\s\S]+)$/i);
-  return named ? named[1]! : desc;
+  const named = desc.match(/^(?:branch '.+?'|tag '.+?'|'.+?'|[0-9a-f]{40}|[0-9a-f]{64}) of /i);
+  const urlOffset = descOffset + (named ? named[0].length : 0);
+  return { oid, url: decodeRepoBytes(raw.subarray(urlOffset, first.length)) };
+}
+
+async function fetchHeadRepo(dir: string, commit: unknown, ref?: string): Promise<string | undefined> {
+  if (typeof commit !== "string" || !gitHash.test(commit)) return undefined;
+  const entry = await fetchHeadEntry(dir, [ref]);
+  return entry && entry.oid === commit.toLowerCase() ? entry.url : undefined;
 }
 
 function fetchHeadMatches(fetchedUrl: string, candidate: string) {
@@ -136,8 +167,12 @@ async function isPeeledTagInRepo(dir: string, ref: unknown, commit: unknown): Pr
 }
 
 async function legacyFallbackMatches(dir: string, good: Good, effectiveRepo: string): Promise<boolean> {
-  const fetched = (await fetchHeadRepo(dir, good.commit, good.ref)) ?? (good.peeled ? await fetchHeadRepo(dir, good.ref, good.ref) : undefined);
-  if (fetched !== undefined) return fetchHeadMatches(fetched, effectiveRepo);
+  const entry = await fetchHeadEntry(dir, [good.ref, good.asked]);
+  if (entry !== undefined) {
+    const matchesGoodCommit = entry.oid === good.commit.toLowerCase() || (good.peeled === true && entry.oid === good.ref.toLowerCase());
+    if (matchesGoodCommit) return fetchHeadMatches(entry.url, effectiveRepo);
+    if (fetchHeadMatches(entry.url, effectiveRepo)) return true;
+  }
   return effectiveRepo === good.repo;
 }
 
@@ -514,6 +549,8 @@ async function restoreFetchHead(dir: string, saved: SavedFetchHead) {
 }
 
 async function checkout(dir: string, repo: string, ref: string, savedFetchHead: SavedFetchHead): Promise<{ effectiveRepo: string; error?: string }> {
+  const effectiveBefore = await resolvedRepoUrl(dir, repo);
+  if (isInvalidRef(ref)) return { effectiveRepo: effectiveBefore, error: `invalid ref ${JSON.stringify(ref)}` };
   await mkdir(dir, { recursive: true });
   if (!existsSync(join(dir, ".git"))) await git(dir, "init", "-q");
   const effectiveRepo = await resolvedRepoUrl(dir, repo);
@@ -535,9 +572,10 @@ async function git(dir: string, ...args: string[]) {
   const env = { ...withoutRepoEnv(), GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "true", SSH_ASKPASS: "true", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" };
   const process = Bun.spawn(["git", "-C", dir, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env, timeout: fetchTimeoutMs });
   const [code, rawBytes, stderr] = await Promise.all([process.exited, new Response(process.stdout).arrayBuffer(), new Response(process.stderr).text()]);
-  const rawStdout = new TextDecoder("utf-8", { ignoreBOM: true }).decode(rawBytes);
+  const bytes = new Uint8Array(rawBytes);
+  const rawStdout = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes);
   const message = process.signalCode ? `git timed out after ${fetchTimeoutMs / 1000} seconds` : (stderr.trim().split("\n").at(-1) ?? "");
-  return { ok: code === 0, stdout: rawStdout.trim(), rawStdout, stderr: message };
+  return { ok: code === 0, stdout: rawStdout.trim(), rawStdout, rawBytes: bytes, stderr: message };
 }
 
 export function sourceCache(home: string) {
@@ -607,6 +645,7 @@ export async function advanceSource(ref: SourceRef, cacheRoot: string, from: str
 }
 
 async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimitMs: number): Promise<Advance> {
+  if (isInvalidRef(ref.ref)) return { state: "failed", say: `invalid ref ${JSON.stringify(ref.ref)} for ${ref.repo}` };
   const repo = repoUrl(ref.repo);
   const branch = ref.ref.replace(/^refs\/heads\//, "");
   const head = `refs/heads/${branch}`;

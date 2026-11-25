@@ -624,6 +624,49 @@ describe("hedge triage", () => {
     expect(body).toContain("from <private source> and <private source>");
     expect(body).toContain("Note: The pack source <private source> is not pinned to a commit SHA.");
   });
+
+  test("redacts a credential-suffixed machine hostname inside a source label", async () => {
+    const home = temp.make("home-");
+    const profileDir = join(home, "profile");
+    mkdirSync(profileDir, { recursive: true });
+    await spawnGit(profileDir, "init", "-q");
+    writeFileSync(
+      join(profileDir, "hedge.json"),
+      JSON.stringify({
+        schema: 1,
+        engine: { repo: "PostHog/hedge", ref: "main", channel: "track" },
+        sources: [{ name: "dev-credentials", repo: "acme/private-packs", ref: "main" }],
+        packs: [],
+        plan: "both",
+        settings: {},
+        workflows: {},
+      }),
+    );
+    mkdirSync(join(home, ".config/hedge"), { recursive: true });
+    writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "mac", name: "dev-credentials", profileDir }));
+    const sent: Sent[] = [];
+    const io = scripted([]);
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      sent.push({ command, ...(options.input === undefined ? {} : { input: options.input }) });
+      if (command[0] === "git") return spawnRunner(command, options);
+      return capture([], undefined)(command, options);
+    };
+    const code = await main(["triage", "--send", "--note", "fetched acme/private-packs from mirror"], {
+      home,
+      engineRoot,
+      platform: "darwin",
+      env: {},
+      print: io.terminal.print,
+      terminal: io.terminal,
+      capture: runRealGit,
+      hostname: () => "dev-credentials.local",
+      run: async () => 0,
+    });
+    expect(code).toBe(0);
+    const body = sent.find((call) => call.command[1] === "issue")!.input!;
+    expect(body).toContain("fetched <<this machine> source> from mirror");
+    expect(body).not.toContain("dev-credentials");
+  });
 });
 
 describe("hedge setup and triage", () => {
