@@ -139,5 +139,69 @@ async function queryIssue<T>(query: string, owner: string, repo: string, number:
   return issue;
 }
 
-export const fetchIssueFromGitHub: FetchIssue = async (owner, repo, number) => issueNode(await queryIssue<GraphIssue>(issueQuery, owner, repo, number));
-export const fetchDiscussionFromGitHub: FetchDiscussion = async (owner, repo, number) => discussion(await discussionPages(owner, repo, number));
+type RestIssue = {
+  number: number; title: string; state: string; body: string | null; repository_url: string;
+  assignees: { login: string }[]; labels: { name: string }[];
+  sub_issues_summary?: { total: number }; issue_dependencies_summary?: { total_blocked_by: number };
+};
+type RestComment = { user: { login: string } | null; body: string; html_url: string; created_at: string; updated_at: string };
+
+async function restGet<T>(path: string): Promise<T> {
+  return JSON.parse(await gh(["api", path]));
+}
+
+async function restList<T>(path: string): Promise<T[]> {
+  return (JSON.parse(await gh(["api", "--paginate", "--slurp", `${path}?per_page=100`])) as T[][]).flat();
+}
+
+function restRepository(issue: RestIssue): string {
+  return issue.repository_url.split("/").slice(-2).join("/");
+}
+
+async function restNode(issue: RestIssue, children?: RestIssue[]): Promise<IssueNode> {
+  const path = `repos/${restRepository(issue)}/issues/${issue.number}`;
+  const blockers = issue.issue_dependencies_summary?.total_blocked_by === 0 ? [] : await restList<RestIssue>(`${path}/dependencies/blocked_by`);
+  const nodes: IssueNode[] = [];
+  for (const child of children ?? []) nodes.push(await restNode(child));
+  return {
+    number: issue.number, title: issue.title, state: issue.state.toUpperCase(), repository: restRepository(issue),
+    assignees: issue.assignees.map((user) => user.login), labels: issue.labels.map((label) => label.name),
+    blockedBy: blockers.map((blocker) => ({ number: blocker.number, state: blocker.state.toUpperCase(), repository: restRepository(blocker) })),
+    childCount: children?.length ?? issue.sub_issues_summary?.total ?? 0,
+    children: nodes,
+  };
+}
+
+async function restIssue(owner: string, repo: string, number: number): Promise<IssueNode> {
+  const path = `repos/${owner}/${repo}/issues/${number}`;
+  return restNode(await restGet<RestIssue>(path), await restList<RestIssue>(`${path}/sub_issues`));
+}
+
+async function restDiscussion(owner: string, repo: string, number: number): Promise<Discussion> {
+  const path = `repos/${owner}/${repo}/issues/${number}`;
+  const issue = await restGet<RestIssue>(path);
+  const comments = await restList<RestComment>(`${path}/comments`);
+  return {
+    body: issue.body ?? "",
+    comments: comments.map((comment) => ({ author: comment.user?.login ?? "", body: comment.body, url: comment.html_url, createdAt: comment.created_at, updatedAt: comment.updated_at })),
+  };
+}
+
+let graphQuotaSpent = false;
+
+async function graphOrRest<T>(graph: () => Promise<T>, rest: () => Promise<T>): Promise<T> {
+  if (graphQuotaSpent) return rest();
+  try {
+    return await graph();
+  } catch (error) {
+    if (!/rate limit/i.test(String(error))) throw error;
+    graphQuotaSpent = true;
+    console.error("hedge: GitHub's GraphQL rate limit is spent, so this command reads issues over REST.");
+    return rest();
+  }
+}
+
+export const fetchIssueFromGitHub: FetchIssue = (owner, repo, number) =>
+  graphOrRest(async () => issueNode(await queryIssue<GraphIssue>(issueQuery, owner, repo, number)), () => restIssue(owner, repo, number));
+export const fetchDiscussionFromGitHub: FetchDiscussion = (owner, repo, number) =>
+  graphOrRest(async () => discussion(await discussionPages(owner, repo, number)), () => restDiscussion(owner, repo, number));

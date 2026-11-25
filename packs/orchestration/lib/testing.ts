@@ -75,7 +75,7 @@ export function linkedTools(threads: LinkedThreadFixture[]): ToolHandler {
   };
 }
 
-export type GitHubFixture = { issues: IssueNode[]; discussions?: Record<string, Discussion> };
+export type GitHubFixture = { issues: IssueNode[]; discussions?: Record<string, Discussion>; graphqlError?: string };
 export type CommandResult = { stdout: string; stderr: string; code: number };
 
 export function issueNode(repository: string, number: number, fields: Partial<IssueNode> = {}): IssueNode {
@@ -100,9 +100,21 @@ export async function fakeGitHub(home: string, fixture: GitHubFixture): Promise<
     const [repository, number] = key.split("#") as [string, string];
     await writeFile(join(bin, `discussion-${name(repository, Number(number))}`), graph(graphDiscussion(value)));
   }
+  await writeRestFixture(bin, fixture);
+  if (fixture.graphqlError) await writeFile(join(bin, "graphql-error"), fixture.graphqlError);
   await writeFile(join(bin, "gh"), `#!/bin/sh
+dir="$(dirname "$0")"
+if [ "$2" != graphql ]; then
+  for arg; do path=$arg; done
+  echo "$path" >> "$dir/rest.log"
+  file="$dir/rest-$(printf '%s' "$path" | sed 's/[?].*//' | tr / -).json"
+  [ -f "$file" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+  cat "$file"
+  exit 0
+fi
 for arg; do case "$arg" in owner=*) owner=\${arg#owner=} ;; repo=*) repo=\${arg#repo=} ;; number=*) number=\${arg#number=} ;; query=*) printf '%s\\n' "\${arg#query=}" >> "$(dirname "$0")/queries.log"; case "$arg" in *subIssues*) kind=issue ;; esac ;; esac; done
 echo "$owner/$repo#$number" >> "$(dirname "$0")/calls.log"
+[ -f "$dir/graphql-error" ] && { echo '{"errors":[{"type":"RATE_LIMITED"}]}'; echo "gh: $(cat "$dir/graphql-error")" >&2; exit 1; }
 file="$(dirname "$0")/\${kind:-discussion}-$owner-$repo-$number.json"
 [ -f "$file" ] || { [ "\${kind:-}" = issue ] && { echo "no issue $owner/$repo#$number" >&2; exit 1; }; echo '{"data":{"repository":{"issue":{"body":"","comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}'; exit 0; }
 cat "$file"
@@ -145,6 +157,32 @@ function graphIssue(node: IssueNode): Record<string, unknown> {
     blockedBy: { nodes: node.blockedBy.map(({ repository, ...blocker }) => ({ ...blocker, repository: { nameWithOwner: repository } })) },
     subIssuesSummary: { total: node.childCount }, subIssues: { nodes: node.children.map(graphIssue) },
   };
+}
+
+function restIssue(repository: string, number: number, fields: Partial<IssueNode> = {}, body: string | null = null): Record<string, unknown> {
+  const node = issueNode(repository, number, { title: "", labels: [], ...fields });
+  return {
+    number, title: node.title, state: node.state.toLowerCase(), body, repository_url: `https://api.github.com/repos/${repository}`,
+    assignees: node.assignees.map((login) => ({ login })), labels: node.labels.map((name) => ({ name })),
+    sub_issues_summary: { total: node.childCount, completed: 0, percent_completed: 0 },
+    issue_dependencies_summary: { blocked_by: node.blockedBy.filter((blocker) => blocker.state === "OPEN").length, total_blocked_by: node.blockedBy.length, blocking: 0, total_blocking: 0 },
+  };
+}
+
+async function writeRestFixture(bin: string, fixture: GitHubFixture): Promise<void> {
+  const file = (path: string) => join(bin, `rest-${path.replaceAll("/", "-")}.json`);
+  const write = async (node: IssueNode) => {
+    const path = `repos/${node.repository}/issues/${node.number}`;
+    const discussion = fixture.discussions?.[`${node.repository}#${node.number}`];
+    const comments = (discussion?.comments ?? []).map((comment) => ({ user: { login: comment.author }, body: comment.body, html_url: comment.url, created_at: comment.createdAt, updated_at: comment.updatedAt }));
+    await writeFile(file(path), JSON.stringify(restIssue(node.repository, node.number, node, discussion?.body ?? null)));
+    await writeFile(file(`${path}/sub_issues`), JSON.stringify([node.children.map((child) => restIssue(child.repository, child.number, child))]));
+    await writeFile(file(`${path}/dependencies/blocked_by`), JSON.stringify([node.blockedBy.map((blocker) => restIssue(blocker.repository, blocker.number, { state: blocker.state }))]));
+    await writeFile(file(`${path}/comments`), JSON.stringify([comments]));
+  };
+  const nested = (node: IssueNode): IssueNode[] => node.children.flatMap((child) => [child, ...nested(child)]);
+  for (const node of fixture.issues.flatMap(nested)) await write(node);
+  for (const node of fixture.issues) await write(node);
 }
 
 function graphDiscussion(value: Discussion): Record<string, unknown> {
