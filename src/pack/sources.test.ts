@@ -215,6 +215,17 @@ describe("fetchSource", () => {
     expect([fetched.packs[0]?.manifest.summary, fetched.stale]).toEqual(["Team rules v1.", undefined]);
   });
 
+  test("loads the pinned commit of a cache that an older Hedge wrote without reaching the source", async () => {
+    const cache = temp.make("cache-");
+    const checkout = join(cache, "team");
+    mkdirSync(checkout);
+    await spawnGit(checkout, "init", "-q");
+    await spawnGit(checkout, "commit", "-q", "--allow-empty", "-m", "cached");
+    const ref = { name: "team", repo: join(temp.make(), "gone"), ref: await spawnGit(checkout, "rev-parse", "HEAD") };
+    writeFileSync(join(checkout, ".git", "hedge-source.json"), JSON.stringify({ repo: ref.repo, ref: ref.ref, commit: ref.ref }));
+    expect(await fetchSource(ref, cache)).toEqual({ ref, dir: checkout, packs: [] });
+  });
+
   test("moves to another pinned commit already in the cache without reaching the source", async () => {
     const repo = await packRepo("Team rules v1.");
     const first = await spawnGit(repo, "rev-parse", "HEAD");
@@ -252,6 +263,19 @@ describe("fetchSource", () => {
     await fetchSource({ name: "team", repo, ref: commit }, cache);
     const fetched = await fetchSource({ name: "team", repo: join(temp.make(), "moved"), ref: commit }, cache);
     expect(fetched).toMatchObject({ error: expect.stringContaining(`could not fetch ${commit}`) });
+  });
+
+  test("fetches a pinned commit that the cache holds only from the repository it used before", async () => {
+    const before = await packRepo("Old repo.");
+    const oldCommit = await spawnGit(before, "rev-parse", "HEAD");
+    const now = await packRepo("New repo.");
+    const cache = temp.make("cache-");
+    await fetchSource({ name: "team", repo: before, ref: oldCommit }, cache);
+    await fetchSource({ name: "team", repo: now, ref: await spawnGit(now, "rev-parse", "HEAD") }, cache);
+    const fetched = await fetchSource({ name: "team", repo: now, ref: oldCommit }, cache);
+    if ("error" in fetched) throw new Error(fetched.error);
+    expect(fetched.packs[0]?.manifest.summary).toBe("New repo.");
+    expect(fetched.stale).toContain(`could not fetch ${oldCommit}`);
   });
 
   test("never falls back to a cache of another repository", async () => {

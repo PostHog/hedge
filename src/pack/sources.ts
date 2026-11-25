@@ -16,7 +16,7 @@ export type Clock = { sleep(ms: number): Promise<void> };
 
 const realClock: Clock = { sleep: (ms) => Bun.sleep(ms) };
 
-type Good = { repo: string; ref: string; commit: string; asked?: string };
+type Good = { repo: string; ref: string; commit: string; asked?: string; pinned?: string[] };
 
 export const withoutUserinfo = (text: string) => text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi, "$1");
 
@@ -134,10 +134,13 @@ async function lastGood(dir: string): Promise<Good | undefined> {
 }
 
 async function saveGood(dir: string, good: Good) {
-  await writeFile(goodPath(dir), JSON.stringify(good) + "\n");
+  const before = await lastGood(dir);
+  const kept = before?.repo === good.repo ? (before.pinned ?? []) : [];
+  const pinned = commitSha.test(good.ref) && !kept.includes(good.commit) ? [...kept, good.commit] : kept;
+  await writeFile(goodPath(dir), JSON.stringify({ ...good, ...(pinned.length ? { pinned } : {}) }) + "\n");
 }
 
-export const pinsCommit = (ref: SourceRef) => /^[0-9a-f]{40}$/i.test(ref.ref);
+const commitSha = /^[0-9a-f]{40}$/i;
 
 const repoKey = (repo: string) => repoUrl(repo).replace(/^.*github\.com[:/]/i, "").replace(/\.git$/, "").toLowerCase();
 
@@ -145,12 +148,13 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string): Pr
   const origin = (await git(profileDir, "config", "--get", "remote.origin.url")).stdout;
   const ownRepo = (ref: SourceRef) => origin !== "" && repoKey(ref.repo) === repoKey(origin);
   return refs
-    .filter((ref) => !pinsCommit(ref) && !ownRepo(ref))
+    .filter((ref) => !commitSha.test(ref.ref) && !ownRepo(ref))
     .map((ref) => ({ id: `source:unpinned:${ref.name}`, pack: "engine", say: `The pack source ${ref.name} follows ${ref.ref} of ${withoutUserinfo(ref.repo)}. Pin its ref in hedge.json to a commit SHA, so each apply loads the same packs, even offline.` }));
 }
 
 async function checkedOutFromCache(dir: string, repo: string, ref: SourceRef, good: Good | undefined) {
-  if (!pinsCommit(ref) || good?.repo !== repo) return false;
+  const fetchedHere = good?.repo === repo && (good.commit === ref.ref || good.pinned?.includes(ref.ref));
+  if (!commitSha.test(ref.ref) || !fetchedHere) return false;
   return (await git(dir, "checkout", "-q", "--detach", ref.ref)).ok;
 }
 
