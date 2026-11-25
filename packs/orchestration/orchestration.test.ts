@@ -37,10 +37,10 @@ describe("the Orchestration pack", () => {
     expect(links).toEqual(expect.arrayContaining(["wayfinder", "grilling", "research", "prototype", "domain-modeling", "setup-matt-pocock-skills", "codebase-design"]));
   });
 
-  test("keeps maps and side threads on, the loops of the Quality gates pack off, and asks nothing by default", () => {
+  test("keeps maps, side threads, the question guard and the loop pause on, the loops of the Quality gates pack off, and asks nothing by default", () => {
     const result = withPack({}, devbox);
     const orchestration = result.workflows.filter((workflow) => workflow.pack === "orchestration");
-    expect(orchestration.filter((workflow) => workflow.active).map((workflow) => workflow.id)).toEqual(["maps", "side-threads", "question-guard"]);
+    expect(orchestration.filter((workflow) => workflow.active).map((workflow) => workflow.id)).toEqual(["maps", "side-threads", "question-guard", "loop-pause"]);
     expect(result.workflows.filter((workflow) => loops.includes(workflow.id)).map((workflow) => [workflow.pack, workflow.reason])).toEqual(loops.map(() => ["pull-requests", "turned off"]));
     expect(result.jobs.filter((job) => job.pack === "orchestration")).toEqual([]);
     expect(result.unanswered).toEqual([]);

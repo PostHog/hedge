@@ -15,7 +15,7 @@ export function asksForDecision(message: string): boolean {
 
 export const fallbackPerson = "the person";
 
-function readSettings(home: string): Record<string, unknown> {
+export function readSettings(home: string): Record<string, unknown> {
   const file = join(home, ".local/state/hedge/settings.json");
   if (!existsSync(file)) return {};
   try {
