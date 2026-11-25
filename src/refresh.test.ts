@@ -351,5 +351,18 @@ describe("hedge refresh", () => {
     await commit(literalPlus.repo, "plain-v2", { "packs/team/rules.md": "Plain release v2.\n", "packs/team/AGENTS.md": "Plain v2.\n", "packs/team/skills/review/SKILL.md": "# review\n" });
     expect(await literalPlus.hedge("refresh")).toBe(0);
     expect(literalPlus.read(guide)).toBe("Plus release v2.\n");
+
+    const forkBox = await machine("+main");
+    expect(await forkBox.hedge("apply", "--profile", forkBox.profile)).toBe(0);
+    expect(forkBox.read(guide)).toBe("Rules v1.\n");
+    const forkRepo = join(temp.make("fork-"), "fork.git");
+    await spawnGit(dirname(forkRepo), "clone", "-q", forkBox.repo, forkRepo);
+    await commit(forkRepo, "fork-v2", { "packs/team/rules.md": "Fork rules v2.\n", "packs/team/AGENTS.md": "Fork v2.\n", "packs/team/skills/review/SKILL.md": "# review\n" });
+    writeFileSync(
+      join(forkBox.profile, "hedge.json"),
+      JSON.stringify({ schema: 1, engine: { repo: "PostHog/hedge", ref: "main", channel: "track" }, sources: [{ name: "team", repo: forkRepo, ref: "+main" }], packs: ["team"], plan: "both", settings: {}, workflows: {} }),
+    );
+    expect(await forkBox.hedge("refresh")).toBe(0);
+    expect(forkBox.read(guide)).toBe("Rules v1.\n");
   });
 });

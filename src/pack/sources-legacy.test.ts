@@ -886,6 +886,26 @@ throw new Error("broken pack");
     if ("error" in shaBranchRes) throw new Error(shaBranchRes.error);
     expect(shaBranchRes.packs[0]?.manifest.summary).toBe("SHA branch c2.");
     expect(shaBranchRes.stale).toBeUndefined();
+
+    const hexBranchRepo = await packRepo("Legacy hex branch v1.");
+    const hexBranchName = await spawnGit(hexBranchRepo, "rev-parse", "HEAD");
+    await spawnGit(hexBranchRepo, "checkout", "-q", "-b", hexBranchName);
+    writePack(hexBranchRepo, "Legacy hex branch v2.");
+    await spawnGit(hexBranchRepo, "commit", "-q", "-am", "v2");
+    const hexBranchTip = await spawnGit(hexBranchRepo, "rev-parse", "HEAD");
+    const hexLegacyCache = temp.make("cache-legacy-hex-branch-");
+    const hexLegacyDir = join(hexLegacyCache, "team");
+    mkdirSync(hexLegacyDir, { recursive: true });
+    await spawnGit(hexLegacyDir, "init", "-q");
+    await spawnGit(hexLegacyDir, "fetch", "-q", "--depth", "1", "--no-tags", hexBranchRepo, `refs/heads/${hexBranchName}`);
+    await spawnGit(hexLegacyDir, "checkout", "-q", "--detach", `${hexBranchTip}^{commit}`);
+    writeFileSync(join(hexLegacyDir, ".git", "FETCH_HEAD"), "");
+    writeFileSync(join(hexLegacyDir, ".git", "hedge-source.json"), JSON.stringify({ repo: hexBranchRepo, ref: hexBranchName, commit: hexBranchTip }) + "\n");
+    rmSync(hexBranchRepo, { recursive: true, force: true });
+    const hexLegacyOffline = await fetchSource({ name: "team", repo: hexBranchRepo, ref: hexBranchName }, hexLegacyCache);
+    if ("error" in hexLegacyOffline) throw new Error(hexLegacyOffline.error);
+    expect(hexLegacyOffline.packs[0]?.manifest.summary).toBe("Legacy hex branch v2.");
+    expect(hexLegacyOffline.stale).toContain(`could not fetch ${hexBranchName}`);
   });
 });
 

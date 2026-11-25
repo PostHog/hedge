@@ -50,7 +50,8 @@ const canonMaskRules: Rule[] = [
   [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/gi, "<key>"],
   [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/gi, "<token>"],
   [/((?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi, "$1<credentials>@"],
-  ...ciStandardMaskRules,
+  ...ciStandardMaskRules.slice(0, 4),
+  [/(\/Users|\/home)\/(?:(?:Users|home)\/)*(?:<user>|[^/\n"'`:]{1,64}?(?=\/)|[^/\s"'`:]+)/gi, "<user-path>"],
 ];
 const contextualSecretRules: Rule[] = secretRules.slice(8);
 const preRandomAllRules: Rule[] = [...secretRules, ...standardRules];
@@ -179,6 +180,13 @@ type AcAutomaton = {
   next: Array<Map<number, number>>;
   fail: Int32Array;
   dict: Int32Array;
+  depth: Int32Array;
+  dictRightZero: Int32Array;
+  dictLeftZero: Int32Array;
+  stateHasRightZero: Uint8Array;
+  stateHasLeftZero: Uint8Array;
+  hasRightZero: boolean;
+  hasLeftZero: boolean;
   out: Array<AcRule[] | undefined>;
 };
 
@@ -310,6 +318,7 @@ function buildAc(rules: AcRule[], ci: boolean): AcAutomaton | undefined {
   if (!rules.length) return undefined;
   const next: Array<Map<number, number>> = [new Map()];
   const out: Array<AcRule[] | undefined> = [undefined];
+  const depthList: number[] = [0];
   for (const rule of rules) {
     const key = ci ? foldCase(rule.text) : rule.text;
     let state = 0;
@@ -321,6 +330,7 @@ function buildAc(rules: AcRule[], ci: boolean): AcAutomaton | undefined {
         next[state]!.set(code, child);
         next.push(new Map());
         out.push(undefined);
+        depthList.push(i + 1);
       }
       state = child;
     }
@@ -328,8 +338,30 @@ function buildAc(rules: AcRule[], ci: boolean): AcAutomaton | undefined {
     if (list) list.push(rule);
     else out[state] = [rule];
   }
-  const fail = new Int32Array(next.length);
-  const dict = new Int32Array(next.length);
+  const n = next.length;
+  const fail = new Int32Array(n);
+  const dict = new Int32Array(n);
+  const depth = Int32Array.from(depthList);
+  const dictRightZero = new Int32Array(n);
+  const dictLeftZero = new Int32Array(n);
+  const stateHasRightZero = new Uint8Array(n);
+  const stateHasLeftZero = new Uint8Array(n);
+  let hasRightZero = false;
+  let hasLeftZero = false;
+  for (let s = 1; s < n; s++) {
+    const list = out[s];
+    if (!list) continue;
+    for (const rule of list) {
+      if (rule.right === 0) {
+        stateHasRightZero[s] = 1;
+        hasRightZero = true;
+      }
+      if (rule.left === 0) {
+        stateHasLeftZero[s] = 1;
+        hasLeftZero = true;
+      }
+    }
+  }
   const queue: number[] = [];
   for (const child of next[0]!.values()) queue.push(child);
   for (let head = 0; head < queue.length; head++) {
@@ -340,10 +372,12 @@ function buildAc(rules: AcRule[], ci: boolean): AcAutomaton | undefined {
       const target = next[f]!.get(code) ?? 0;
       fail[v] = target;
       dict[v] = out[target] ? target : dict[target]!;
+      dictRightZero[v] = stateHasRightZero[target] ? target : dictRightZero[target]!;
+      dictLeftZero[v] = stateHasLeftZero[target] ? target : dictLeftZero[target]!;
       queue.push(v);
     }
   }
-  return { ci, next, fail, dict, out };
+  return { ci, next, fail, dict, depth, dictRightZero, dictLeftZero, stateHasRightZero, stateHasLeftZero, hasRightZero, hasLeftZero, out };
 }
 
 function pushStreamingSpan(spans: MatchSpan[], start: number, end: number, len: number, as: string, allowPartialMerge: boolean) {
@@ -364,15 +398,52 @@ function findAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?: Know
   if (!ac || !text.length) return [];
   const spans: MatchSpan[] = [];
   let state = 0;
+  let runStart = 0;
   for (let i = 0; i < text.length; i++) {
-    const code = ac.ci ? foldCharCode(text, i) : text.charCodeAt(i);
+    const rawCode = text.charCodeAt(i);
+    if (!isWordOrDash(rawCode)) runStart = i + 1;
+    const code = ac.ci ? foldCharCode(text, i) : rawCode;
     while (state !== 0 && !ac.next[state]!.has(code)) state = ac.fail[state]!;
     state = ac.next[state]!.get(code) ?? 0;
     const end = i + 1;
+    const rightWord = end < text.length && isWordOrDash(text.charCodeAt(end));
+    if (rightWord) {
+      if (!ac.hasRightZero) continue;
+      let gotHit = false;
+      const minLeftLen = end - runStart;
+      for (let u = ac.stateHasRightZero[state] ? state : ac.dictRightZero[state]!; u !== 0; u = ac.dictRightZero[u]!) {
+        const leftBlocked = ac.depth[u]! < minLeftLen;
+        if (leftBlocked && !ac.stateHasLeftZero[u]) continue;
+        for (const rule of ac.out[u]!) {
+          if (gotHit) break;
+          if (rule.right !== 0) continue;
+          if (leftBlocked && rule.left !== 0) continue;
+          if (skipOwner && rule.owner === skipOwner) continue;
+          const start = end - rule.len;
+          if (!isLeftOk(text, start, rule.left)) continue;
+          if (rule.ambiguous && !(rule.regex ??= new RegExp(`^${escape(rule.text)}$`, "i")).test(text.slice(start, end))) continue;
+          gotHit = true;
+          pushStreamingSpan(spans, start, end, rule.len, rule.as, allowPartialMerge);
+        }
+        if (gotHit) break;
+      }
+      continue;
+    }
     let gotHit = false;
-    for (let u = ac.out[state] ? state : ac.dict[state]!; u !== 0; u = ac.dict[u]!) {
+    const minLeftLen = end - runStart;
+    let leftZeroOnly = false;
+    for (let u = ac.out[state] ? state : ac.dict[state]!; u !== 0; ) {
+      if (!leftZeroOnly && ac.depth[u]! < minLeftLen) {
+        if (!ac.hasLeftZero) break;
+        leftZeroOnly = true;
+        if (!ac.stateHasLeftZero[u]) {
+          u = ac.dictLeftZero[u]!;
+          continue;
+        }
+      }
       for (const rule of ac.out[u]!) {
         if (gotHit) break;
+        if (leftZeroOnly && rule.left !== 0) continue;
         if (skipOwner && rule.owner === skipOwner) continue;
         const start = end - rule.len;
         if (!isLeftOk(text, start, rule.left) || !isRightOk(text, end, rule.right)) continue;
@@ -381,6 +452,7 @@ function findAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?: Know
         pushStreamingSpan(spans, start, end, rule.len, rule.as, allowPartialMerge);
       }
       if (gotHit) break;
+      u = leftZeroOnly ? ac.dictLeftZero[u]! : ac.dict[u]!;
     }
   }
   return spans;
@@ -512,7 +584,32 @@ function findCanonAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?:
 
 type FlexHit = { start: number; end: number; masked: string };
 
-const flexLiteralLimit = 8;
+const flexLiteralLimit = 16;
+
+function enumerateClusterVariants(
+  text: string,
+  cluster: { start: number; end: number; hits: FlexHit[] },
+  limit: number,
+): string[] | undefined {
+  const results = new Set<string>();
+  const stack: Array<[number, string]> = [[cluster.start, ""]];
+  while (stack.length > 0) {
+    const [pos, prefix] = stack.pop()!;
+    results.add(`${prefix}${text.slice(pos, cluster.end)}`);
+    if (results.size > limit) return undefined;
+    for (const hit of cluster.hits) {
+      if (hit.start < pos) continue;
+      const nextPrefix = `${prefix}${text.slice(pos, hit.start)}${hit.masked}`;
+      if (hit.end === cluster.end) {
+        results.add(nextPrefix);
+        if (results.size > limit) return undefined;
+      } else {
+        stack.push([hit.end, nextPrefix]);
+      }
+    }
+  }
+  return [...results];
+}
 
 function eqCi(a: string, aStart: number, b: string, bStart: number, len: number): boolean {
   if (aStart + len > a.length || bStart + len > b.length) return false;
@@ -750,8 +847,14 @@ function expandFlexMask(text: string): { literals: string[]; verify?: (slice: st
       clusterLiterals.push(list);
       product *= list.length;
     } else {
-      canUseLiterals = false;
-      break;
+      const maxForCluster = Math.floor(flexLiteralLimit / product);
+      const list = maxForCluster >= 2 ? enumerateClusterVariants(text, cluster, maxForCluster) : undefined;
+      if (!list) {
+        canUseLiterals = false;
+        break;
+      }
+      clusterLiterals.push(list);
+      product *= list.length;
     }
     if (product > flexLiteralLimit) {
       canUseLiterals = false;
@@ -824,6 +927,8 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
         inputs.push(variant);
         if (!variant.startsWith("/")) inputs.push(`/${variant}`);
         if (/^[\w.-]+\/[\w.-]+/.test(variant)) inputs.push(`private repo ${variant}`);
+        if (/[\s"']/.test(variant)) inputs.push(`TOKEN=${variant}`);
+        if (/[\s"'&#]/.test(variant)) inputs.push(`?token=${variant}`);
       }
     }
     transformed = batchTransform(inputs, transform);
@@ -841,6 +946,14 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
           if (/^[\w.-]+\/[\w.-]+/.test(variant)) {
             const prefixed = transformed?.get(`private repo ${variant}`) ?? transform(`private repo ${variant}`);
             if (prefixed.startsWith("private repo ")) variants.push(prefixed.slice("private repo ".length));
+          }
+          if (/[\s"']/.test(variant)) {
+            const prefixed = transformed?.get(`TOKEN=${variant}`) ?? transform(`TOKEN=${variant}`);
+            if (prefixed.startsWith("TOKEN=")) variants.push(prefixed.slice("TOKEN=".length));
+          }
+          if (/[\s"'&#]/.test(variant)) {
+            const prefixed = transformed?.get(`?token=${variant}`) ?? transform(`?token=${variant}`);
+            if (prefixed.startsWith("?token=")) variants.push(prefixed.slice("?token=".length));
           }
         }
       }

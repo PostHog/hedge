@@ -207,6 +207,9 @@ async function legacyFallbackMatches(dir: string, good: Good, effectiveRepo: str
   if (entry === undefined) return true;
   const matchesGoodCommit = entry.oid === good.commit.toLowerCase() || (good.peeled === true && entry.oid === good.ref.toLowerCase());
   if (matchesGoodCommit) return fetchHeadMatches(entry.url, effectiveRepo);
+  if (good.branch !== true && good.peeled !== true && isCommitPin(good.ref, good.commit.length) && good.ref.toLowerCase() !== good.commit.toLowerCase()) {
+    return false;
+  }
   return fetchHeadMatches(entry.url, effectiveRepo) || effectiveRepo === good.repo;
 }
 
@@ -254,7 +257,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
     good !== undefined &&
     good.repo === repo &&
     goodDigest === undefined &&
-    verifiedGoodCommit(good) !== undefined &&
+    hasGoodCommit(good) &&
     (await legacyFallbackMatches(dir, good, effectiveBefore));
   const managedDetached =
     before !== undefined &&
@@ -358,7 +361,7 @@ async function fallBack(ref: SourceRef, dir: string, repo: string, effectiveRepo
   const goodDigest = goodResolvedDigest(good);
   const effectiveMatch =
     good !== undefined &&
-    verifiedGoodCommit(good) !== undefined &&
+    (goodDigest !== undefined ? verifiedGoodCommit(good) !== undefined : hasGoodCommit(good)) &&
     good.repo === repo &&
     (goodDigest !== undefined ? goodDigest === effectiveDigest : legacyFallback);
   const normalizedBlocked = (entries: BlockedSwitch[] | undefined) =>
@@ -544,13 +547,17 @@ async function saveGood(dir: string, good: Good): Promise<string | undefined> {
   return undefined;
 }
 
+const hasGoodCommit = (record: Good | undefined) =>
+  record !== undefined &&
+  typeof record.repo === "string" &&
+  typeof record.ref === "string" &&
+  typeof record.commit === "string" &&
+  gitHash.test(record.commit);
+
 const verifiedGoodCommit = (record: Good | undefined) => {
   if (
     !record ||
-    typeof record.repo !== "string" ||
-    typeof record.ref !== "string" ||
-    typeof record.commit !== "string" ||
-    !gitHash.test(record.commit) ||
+    !hasGoodCommit(record) ||
     (record.branch !== true && record.peeled !== true && isCommitPin(record.ref, record.commit.length) && record.ref.toLowerCase() !== record.commit.toLowerCase())
   ) {
     return undefined;
@@ -801,8 +808,10 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
   const forced = forcedBranchName(ref.ref);
   const repo = repoUrl(ref.repo);
   if (!good || !branch || typeof good.commit !== "string" || !gitHash.test(good.commit)) return false;
+  const effectiveDigest = repoDigest(await resolvedRepoUrl(dir, repo));
+  const goodDigest = goodResolvedDigest(good);
+  if (good.repo !== repo || (goodDigest !== undefined && goodDigest !== effectiveDigest)) return false;
   if (Array.isArray(good.blocked) && good.blocked.length) {
-    const effectiveDigest = repoDigest(await resolvedRepoUrl(dir, repo));
     if (good.blocked.some((entry) => entry && entry.repo === repo && goodResolvedDigest(entry) === effectiveDigest)) return false;
   }
   if (branchName(good.asked) === branch) {

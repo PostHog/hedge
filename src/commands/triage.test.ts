@@ -268,6 +268,8 @@ describe("hedge triage", () => {
               { name: "bad-numeric", repo: 12345, ref: "main" },
               { name: "team-m", repo: "session", ref: "main" },
               { name: "team-n", repo: "acme/team/secret:nested", ref: "main" },
+              { name: "team-o", repo: "file:///work/private project.git", ref: "+feature/private-rollout" },
+              { name: "team-p", repo: "PostHog/hedge", ref: "work/Users/home/team/private-release" },
             ],
           },
         },
@@ -288,11 +290,13 @@ describe("hedge triage", () => {
         "browse https://github.com/org/repo/tree/home/demo/private-release",
         `browse https://github.com/org/repo/tree${home}/secret-home-branch`,
         "TOKEN=/work/private project.git",
+        "TOKEN=file:///work/private project.git",
         "TOKEN=prefix/work/repo/super-secret-suffix",
         "GET https://example.com/cb?token=prefix/work/repo/query-secret-suffix",
         "fetched acme/host-alias-packs from mirror",
         "unlabeled AbCdEfGhIj1234+/work/repo/KlMnOpQrSt5678 end",
         "Created the private repo acme/team/secret:nested",
+        "feature/private-rollout moved, and work/users/home/team/private-release moved",
       ].join("\n") + "\n",
     );
     const result = await triageWithRealGit(home, ["--send"]);
@@ -308,12 +312,13 @@ describe("hedge triage", () => {
     expect(issue.input).toContain("quick remote ref <branch> at <branch>");
     expect(issue.input).toContain("browse https://github.com/org/repo/tree/<branch>");
     expect(issue.input).toContain("browse https://github.com/org/repo/tree<branch>");
-    expect(issue.input).toContain("TOKEN=<redacted>");
+    expect(issue.input).toContain("TOKEN=<redacted>\nTOKEN=<redacted>");
     expect(issue.input).toContain("https://example.com/cb?token=<redacted>");
     expect(issue.input).toContain("fetched <<this machine> source> from mirror");
     expect(issue.input).toContain("unlabeled <secret> end");
     expect(issue.input).toContain("Created the private repo <team-n source>");
-    for (const leaked of ["correct-horse-battery-staple", "live-session-secret-value", "super-secret-value", "alice", "topsecret", "secret-owner", "secret-repo", "internal-release", keyLikeAlias, "private-project", "customer.internal", "embargoed-release", "top-secret", "private-release", "secret-home-branch", "project.git", "/work/private", "super-secret-suffix", "query-secret-suffix", "noras-mbp", "AbCdEfGhIj1234", "KlMnOpQrSt5678", "secret:nested"]) expect(issue.input).not.toContain(leaked);
+    expect(issue.input).toContain("<branch> moved, and <branch> moved");
+    for (const leaked of ["correct-horse-battery-staple", "live-session-secret-value", "super-secret-value", "alice", "topsecret", "secret-owner", "secret-repo", "internal-release", keyLikeAlias, "private-project", "customer.internal", "embargoed-release", "top-secret", "private-release", "secret-home-branch", "project.git", "/work/private", "super-secret-suffix", "query-secret-suffix", "noras-mbp", "AbCdEfGhIj1234", "KlMnOpQrSt5678", "secret:nested", "private-rollout"]) expect(issue.input).not.toContain(leaked);
   });
 
   test("redacts unpinned source aliases and repos from an inherited HEDGE_PROFILE_DIR without disclosing its alias or engine fork", async () => {

@@ -313,10 +313,17 @@ describe("fetchSource", () => {
 
   test("keeps hedge-source.json private (0600) across atomic updates", async () => {
     const repo = await packRepo("Private creds repo.");
-    const commit = await spawnGit(repo, "rev-parse", "HEAD");
+    const commit1 = await spawnGit(repo, "rev-parse", "HEAD");
     const cache = temp.make("cache-");
-    await fetchSource({ name: "team", repo, ref: commit }, cache);
+    await fetchSource({ name: "team", repo, ref: commit1 }, cache);
     const sourceFile = join(cache, "team", ".git", "hedge-source.json");
+    expect(statSync(sourceFile).mode & 0o777).toBe(0o600);
+    writePack(repo, "Private creds repo v2.");
+    await spawnGit(repo, "commit", "-q", "-am", "v2");
+    const commit2 = await spawnGit(repo, "rev-parse", "HEAD");
+    const updated = await fetchSource({ name: "team", repo, ref: commit2 }, cache);
+    if ("error" in updated) throw new Error(updated.error);
+    expect(updated.packs[0]?.manifest.summary).toBe("Private creds repo v2.");
     expect(statSync(sourceFile).mode & 0o777).toBe(0o600);
   });
 
