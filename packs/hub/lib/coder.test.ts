@@ -536,3 +536,8 @@ test("preserves command arguments and stdin under seven nested box locks without
     if (bgPid > 0) try { process.kill(bgPid, "SIGKILL"); } catch {}
   }
 });
+
+test("returns the command's own exit code when it signals its own process group", async () => {
+  const result = await capture(["sh", "-c", 'trap "exit 42" TERM; kill -TERM 0'], { timeoutMs: 10_000 });
+  expect(result).toEqual({ code: 42, stdout: "", stderr: "" });
+});

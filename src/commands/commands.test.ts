@@ -324,7 +324,7 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     copyFileSync(Bun.which("true")!, execOnly);
     chmodSync(execOnly, 0o111);
     await withTeamPack(home, {
-      workflows: [flow("external"), flow("builtin"), flow("noshebang"), flow("execonly"), flow("dashdash"), flow("largeargs"), flow("nonzero")],
+      workflows: [flow("external"), flow("builtin"), flow("noshebang"), flow("execonly"), flow("dashdash"), flow("largeargs"), flow("nonzero"), flow("selfterm")],
       human: [
         { id: "external", say: "Check external set.", probe: ["set", "--hedge-external-flag"], workflow: "external" },
         { id: "builtin", say: "Check builtin export.", probe: ["export", "HEDGE_BUILTIN=1"], workflow: "builtin" },
@@ -333,13 +333,14 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
         { id: "dashdash", say: "Check leading --.", probe: ["--", "true"], workflow: "dashdash" },
         { id: "largeargs", say: "Check large probe argv.", probe: [Bun.which("true")!, "a".repeat(70_000), "b".repeat(70_000)], workflow: "largeargs" },
         { id: "nonzero", say: "Check nonzero exit.", probe: ["sh", "-c", "exit 7"], workflow: "nonzero" },
+        { id: "selfterm", say: "Check self-group SIGTERM.", probe: ["sh", "-c", 'trap "exit 42" TERM; kill -TERM 0'], workflow: "selfterm" },
       ],
     });
     const prevPath = process.env.PATH;
     process.env.PATH = `${bin}:${prevPath ?? ""}`;
     try {
       const output = (await hedge(home, ["packs"])).output;
-      expect(output).toContain(`  ~ team  Team rules.\n      Workflows: external on, builtin needs setup, noshebang needs setup, execonly on, dashdash needs setup, largeargs on, nonzero needs setup\n${needsSetup}`);
+      expect(output).toContain(`  ~ team  Team rules.\n      Workflows: external on, builtin needs setup, noshebang needs setup, execonly on, dashdash needs setup, largeargs on, nonzero needs setup, selfterm needs setup\n${needsSetup}`);
     } finally {
       if (prevPath === undefined) delete process.env.PATH;
       else process.env.PATH = prevPath;

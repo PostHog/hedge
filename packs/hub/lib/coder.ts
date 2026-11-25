@@ -1,7 +1,8 @@
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { boxPrefix } from "../../../src/hub/names.ts";
+import { killSessionSync } from "../../../src/reconciler/probe-supervisor.ts";
 import { bunScript } from "../../../src/runner/bun.ts";
 import { heldLocks } from "./box-lock.ts";
 
@@ -90,18 +91,25 @@ export function captureWith(timer: Timer): Capture {
     const locks = heldLocks();
     const input = stdin === undefined ? "ignore" : new TextEncoder().encode(stdin);
     let child: ReturnType<typeof Bun.spawn> | undefined;
+    let controlFd: number | undefined;
     let targetPgid: number | undefined;
     let stopped = false;
     let supervisorReaped = false;
     let targetExited = false;
-    let pgidActive = false;
     const stopStream = new AbortController();
+    const closeControl = () => {
+      if (controlFd === undefined) return;
+      const fd = controlFd;
+      controlFd = undefined;
+      try {
+        closeSync(fd);
+      } catch {}
+    };
     const killGroups = () => {
       if (!child) return;
-      if (targetPgid !== undefined) {
-        try {
-          process.kill(-targetPgid, "SIGKILL");
-        } catch {}
+      if (!supervisorReaped) {
+        killSessionSync(child.pid, "SIGKILL", !targetExited ? targetPgid : undefined);
+        return;
       }
       try {
         process.kill(-child.pid, "SIGKILL");
@@ -111,19 +119,21 @@ export function captureWith(timer: Timer): Capture {
       stopped = true;
       if (!child) return;
       if (!supervisorReaped) {
+        if (controlFd !== undefined) {
+          try {
+            writeSync(controlFd, "kill\n");
+          } catch {}
+        }
         try {
           process.kill(-child.pid, "SIGCONT");
         } catch {}
-        try {
-          child.kill("SIGTERM");
-        } catch {}
         return;
       }
-      if (!targetExited || pgidActive) killGroups();
+      if (!targetExited) killGroups();
     };
     const killStalled = () => {
       if (!child) return;
-      if (!supervisorReaped || !targetExited || pgidActive) killGroups();
+      if (!supervisorReaped || !targetExited) killGroups();
       if (!supervisorReaped) {
         try {
           child.kill("SIGKILL");
@@ -156,11 +166,11 @@ export function captureWith(timer: Timer): Capture {
     try {
       child = Bun.spawn(bunScript(captureSupervisor), {
         env: env as Record<string, string> | undefined,
-        stdio: [input, output, output, ...locks],
+        stdio: [input, output, output, ...locks, "pipe"],
         detached: true,
         ipc(message) {
           if (!message || typeof message !== "object") return;
-          const record = message as { code?: unknown; error?: unknown; pgid?: unknown; pgidActive?: unknown };
+          const record = message as { code?: unknown; error?: unknown; pgid?: unknown };
           if (typeof record.pgid === "number") {
             targetPgid = record.pgid;
           } else if (typeof record.error === "string") {
@@ -168,21 +178,23 @@ export function captureWith(timer: Timer): Capture {
             settle({ error: record.error, ...(typeof record.code === "string" ? { errCode: record.code } : {}) });
           } else if (typeof record.code === "number") {
             targetExited = true;
-            pgidActive = Boolean(record.pgidActive);
             settle({ code: record.code });
           }
         },
       });
       const live = child;
+      const fd = live.stdio[3 + locks.length];
+      if (typeof fd === "number") controlFd = fd;
       void live.exited.then((code) => {
         supervisorReaped = true;
+        closeControl();
         if (!targetExited) killGroups();
         settle({ code });
       });
       if (stopped) {
         stopChild();
       } else {
-        live.send({ argv: holdingLocks(argv, locks, timeoutMs), lockCount: locks.length });
+        live.send({ argv: holdingLocks(argv, locks, timeoutMs), lockCount: locks.length, controlFd: 3 + locks.length });
       }
       let hardKill: ReturnType<typeof setTimeout> | undefined;
       let forceExpired = false;
@@ -225,6 +237,7 @@ export function captureWith(timer: Timer): Capture {
       return { code: status.code ?? 1, stdout, stderr };
     } finally {
       cancel();
+      closeControl();
       release();
     }
   };

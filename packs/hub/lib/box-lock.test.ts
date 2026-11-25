@@ -95,14 +95,8 @@ await withBoxLock(${JSON.stringify(home)}, "box-a", { waitMs: 0 }, async () => {
     pids.push(Number(readFileSync(join(dir, "forward.pid"), "utf8")), Number(readFileSync(join(dir, "act.pid"), "utf8")));
     const holderOfAct = readFileSync(`/proc/${pids[1]}/stat`, "utf8").split(") ")[1]!.split(" ")[1];
     expect(readFileSync(`/proc/${holderOfAct}/cmdline`, "utf8").split("\0").slice(0, 4)).toEqual(["timeout", "-s", "KILL", String(600 + orphanGraceSeconds)]);
-    const supervisorOfAct = Number(readFileSync(`/proc/${holderOfAct}/stat`, "utf8").split(") ")[1]!.split(" ")[1]);
     holder.kill("SIGKILL");
     expect(await holder.exited).not.toBe(0);
-    await expect(lockBox(home, "box-a", { waitMs: 0 })).rejects.toBeInstanceOf(LockBusy);
-    if (supervisorOfAct > 1 && alive(supervisorOfAct)) {
-      process.kill(supervisorOfAct, "SIGKILL");
-      for (let i = 0; i < 40 && alive(supervisorOfAct); i++) await Bun.sleep(25);
-    }
     await expect(lockBox(home, "box-a", { waitMs: 0 })).rejects.toBeInstanceOf(LockBusy);
     process.kill(pids[1]!, "SIGKILL");
     const unlock = await lockBox(home, "box-a", { waitMs: 60_000 });

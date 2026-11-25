@@ -1,4 +1,4 @@
-import { closeSync, existsSync, readdirSync } from "node:fs";
+import { closeSync, existsSync, readdirSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { install, plan as planFiles } from "../files/install.ts";
 import { packName } from "../pack/manifest.ts";
@@ -489,24 +489,29 @@ const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
 let activeSupervisors = 0;
 const supervisorWaiters: Array<() => void> = [];
 
-type LiveProbe = { pid: number; targetPid?: number; aliveFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
+type LiveProbe = { pid: number; targetPid?: number; targetExited?: boolean; aliveFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
 type ActiveRunner = { stop: (name: NodeJS.Signals) => void };
 const activeRunners = new Set<ActiveRunner>();
 const allLiveProbes = new Set<LiveProbe>();
 let interruptHandlersAttached = false;
 
 function handOffWatchdog(probes: Iterable<LiveProbe>) {
-  const batch: Array<{ pid: number; targetPid?: number; fd: number; delayMs: number }> = [];
+  const batch: Array<{ pid: number; targetPid?: number; targetExited?: boolean; fd: number; delayMs: number }> = [];
   for (const probe of probes) {
     if (probe.aliveFd === undefined) continue;
-    batch.push({ pid: probe.pid, ...(probe.targetPid !== undefined ? { targetPid: probe.targetPid } : {}), fd: probe.aliveFd, delayMs: probe.delayMs });
+    batch.push({
+      pid: probe.pid,
+      ...(probe.targetPid !== undefined ? { targetPid: probe.targetPid } : {}),
+      ...(probe.targetExited ? { targetExited: true } : {}),
+      fd: probe.aliveFd,
+      delayMs: probe.delayMs,
+    });
     probe.aliveFd = undefined;
   }
   if (!batch.length) return;
   const payload = JSON.stringify(
     batch.map((entry, index) => ({
       pid: entry.pid,
-      ...(entry.targetPid !== undefined ? { targetPid: entry.targetPid } : {}),
       fd: index + 3,
       delayMs: entry.delayMs,
     })),
@@ -523,7 +528,7 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
   } finally {
     if (!handedOff) {
       for (const entry of batch) {
-        killSessionSync(entry.pid, "SIGKILL");
+        killSessionSync(entry.pid, "SIGKILL", entry.targetExited ? undefined : entry.targetPid);
         try {
           process.kill(entry.pid, "SIGKILL");
         } catch {}
@@ -645,9 +650,13 @@ async function runDetached(command: string[], env: Record<string, string | undef
     if (!child || reaped || lastSignal === name) return;
     lastSignal = name;
     if (probe) probe.delayMs = Math.max(probe.delayMs, delayFor(name));
-    killSessionSync(child.pid, "SIGCONT");
+    if (probe?.aliveFd !== undefined) {
+      try {
+        writeSync(probe.aliveFd, `${name}\n`);
+      } catch {}
+    }
     try {
-      child.kill(name);
+      process.kill(-child.pid, "SIGCONT");
     } catch {}
     if (!live && probe) handOffWatchdog([probe]);
   };
@@ -673,7 +682,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
   }
   let handedToExit = false;
   try {
-    const payload = cleanupGraceMs === undefined ? command : { command, graceMs: cleanupGraceMs };
+    const payload = { command, controlFd: 3, ...(cleanupGraceMs === undefined ? {} : { graceMs: cleanupGraceMs }) };
     const encoded = JSON.stringify(payload);
     const overStdin = Buffer.byteLength(encoded) > 65_536;
     child = Bun.spawn(overStdin ? bunScript(probeSupervisor) : bunScript(probeSupervisor, encoded), {
@@ -692,7 +701,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
       (supCode) => {
         reaped = true;
         if (!reportedResult && supCode !== 128 && supCode !== 143) {
-          killSessionSync(owned.pid, "SIGKILL");
+          killSessionSync(owned.pid, "SIGKILL", owned.targetExited ? undefined : owned.targetPid);
         }
       },
       () => {
@@ -715,6 +724,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
       child.stdout as ReadableStream<Uint8Array>,
       (code) => {
         reportedResult = true;
+        owned.targetExited = true;
         onResult?.(signal, code);
       },
       (pid) => {
