@@ -125,8 +125,18 @@ function fetchHeadMatches(fetchedUrl: string, candidate: string) {
   return fetchedUrl === candidate || fetchedUrl === canonical || fetchedUrl === escaped || fetchedUrl === escapedCanonical;
 }
 
+async function isPeeledTagInRepo(dir: string, ref: unknown, commit: unknown): Promise<boolean> {
+  if (typeof ref !== "string" || typeof commit !== "string" || !gitHash.test(commit) || !isCommitPin(ref, commit.length) || ref.toLowerCase() === commit.toLowerCase() || !existsSync(join(dir, ".git"))) {
+    return false;
+  }
+  const type = await git(dir, "cat-file", "-t", ref);
+  if (!type.ok || type.stdout !== "tag") return false;
+  const peeled = await git(dir, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`);
+  return peeled.ok && peeled.stdout.toLowerCase() === commit.toLowerCase();
+}
+
 async function legacyFallbackMatches(dir: string, good: Good, effectiveRepo: string): Promise<boolean> {
-  const fetched = await fetchHeadRepo(dir, good.commit, good.ref);
+  const fetched = (await fetchHeadRepo(dir, good.commit, good.ref)) ?? (good.peeled ? await fetchHeadRepo(dir, good.ref, good.ref) : undefined);
   if (fetched !== undefined) return fetchHeadMatches(fetched, effectiveRepo);
   return effectiveRepo === good.repo;
 }
@@ -135,7 +145,14 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
   const repo = repoUrl(ref.repo);
   const edits = await localEdits(dir);
   if (edits.length) return keepEdits(ref, dir, edits, loadLimitMs);
-  const good = await lastGood(dir);
+  const rawGood = await lastGood(dir);
+  const legacyPeeled =
+    rawGood !== undefined &&
+    typeof rawGood.resolved !== "string" &&
+    rawGood.peeled !== true &&
+    rawGood.branch !== true &&
+    (await isPeeledTagInRepo(dir, rawGood.ref, rawGood.commit));
+  const good = legacyPeeled && rawGood ? { ...rawGood, peeled: true } : rawGood;
   const before = await currentCheckout(dir);
   const effectiveBefore = await resolvedRepoUrl(dir, repo);
   const legacyOk =
@@ -485,7 +502,9 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
   const dir = join(cacheRoot, ref.name);
   const good = await lastGood(dir);
   const branch = branchName(ref.ref);
-  if (!good || !branch) return false;
+  const repo = repoUrl(ref.repo);
+  if (!good || !branch || good.repo !== repo) return false;
+  if (typeof good.resolved === "string" && (await resolvedRepoUrl(dir, repo)) !== good.resolved) return false;
   if (branchName(good.asked) === branch) {
     if (good.askedBranch === true) return true;
     if (good.askedBranch === false) return false;

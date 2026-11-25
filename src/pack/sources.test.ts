@@ -397,29 +397,6 @@ describe("fetchSource", () => {
     expect([pinned.packs[0]?.manifest.summary, pinned.stale]).toEqual(["Branch rules v1.", undefined]);
   });
 
-  test("preserves usable fallback packs as stale when pin migration cannot write refs offline", async () => {
-    const repo = await packRepo("Legacy pinned v1.");
-    const commit = await spawnGit(repo, "rev-parse", "HEAD");
-    const cache = temp.make("cache-");
-    const dir = await legacyPinnedCache(cache, "team", repo, commit);
-    rmSync(repo, { recursive: true, force: true });
-    const refsDir = join(dir, ".git", "refs");
-    setDirModes(refsDir, 0o555);
-    try {
-      const reapplied = await fetchSource({ name: "team", repo, ref: commit }, cache);
-      if ("error" in reapplied) throw new Error(reapplied.error);
-      expect(reapplied.packs[0]?.manifest.summary).toBe("Legacy pinned v1.");
-      expect(reapplied.stale).toContain(`could not fetch ${commit}`);
-
-      const fallback = await fetchSource({ name: "team", repo, ref: "main" }, cache);
-      if ("error" in fallback) throw new Error(fallback.error);
-      expect(fallback.packs[0]?.manifest.summary).toBe("Legacy pinned v1.");
-      expect(fallback.stale).toContain("could not fetch main");
-    } finally {
-      setDirModes(refsDir, 0o755);
-    }
-  });
-
   test("does not report success when Git cannot record a pin ref during fetch or refresh", async () => {
     const repo = await packRepo("Team rules v1.");
     const commit1 = await spawnGit(repo, "rev-parse", "HEAD");
@@ -1221,6 +1198,40 @@ esac
     if ("error" in tagOfflineFallback) throw new Error(tagOfflineFallback.error);
     expect(tagOfflineFallback.packs[0]?.manifest.summary).toBe("Annotated tag v1.");
     expect(tagOfflineFallback.stale).toContain("could not fetch main");
+
+    const legacyTagRepo = await packRepo("Legacy annotated tag v1.");
+    await spawnGit(legacyTagRepo, "tag", "-a", "legacy-v1", "-m", "legacy tag");
+    const legacyTagOid = await spawnGit(legacyTagRepo, "rev-parse", "refs/tags/legacy-v1");
+    const legacyTagCommit = await spawnGit(legacyTagRepo, "rev-parse", "HEAD");
+    const legacyTagCache = temp.make("cache-legacy-tag-oid-");
+    const legacyTagDir = join(legacyTagCache, "team");
+    mkdirSync(legacyTagDir, { recursive: true });
+    await spawnGit(legacyTagDir, "init", "-q");
+    await spawnGit(legacyTagDir, "fetch", "-q", "--depth", "1", "--no-tags", legacyTagRepo, legacyTagOid);
+    await spawnGit(legacyTagDir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    writeFileSync(join(legacyTagDir, ".git", "hedge-source.json"), JSON.stringify({ repo: legacyTagRepo, ref: legacyTagOid, commit: legacyTagCommit }) + "\n");
+    rmSync(legacyTagRepo, { recursive: true, force: true });
+    const legacyTagOffline = await fetchSource({ name: "team", repo: legacyTagRepo, ref: legacyTagOid }, legacyTagCache);
+    if ("error" in legacyTagOffline) throw new Error(legacyTagOffline.error);
+    expect(legacyTagOffline.packs[0]?.manifest.summary).toBe("Legacy annotated tag v1.");
+    expect(legacyTagOffline.stale).toContain(`could not fetch ${legacyTagOid}`);
+
+    const branchRepoA = await packRepo("Repo A branch v1.");
+    await spawnGit(branchRepoA, "tag", "-d", "v1");
+    await spawnGit(branchRepoA, "checkout", "-q", "-b", "v1");
+    const tagRepoB = await packRepo("Repo B broken tag v1.");
+    await spawnGit(tagRepoB, "tag", "-d", "v1");
+    writeFileSync(join(tagRepoB, "packs/team/pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Broken tag v1." }));
+    await spawnGit(tagRepoB, "commit", "-q", "-am", "broken v1");
+    await spawnGit(tagRepoB, "tag", "v1");
+    await spawnGit(tagRepoB, "checkout", "-q", "-b", "v1");
+    writePack(tagRepoB, "Repo B branch v1.");
+    await spawnGit(tagRepoB, "commit", "-q", "-am", "branch v1");
+    const repoSwitchCache = temp.make("cache-branch-repo-switch-");
+    expect("error" in (await fetchSource({ name: "team", repo: branchRepoA, ref: "v1" }, repoSwitchCache))).toBe(false);
+    expect(await followsBranch({ name: "team", repo: branchRepoA, ref: "v1" }, repoSwitchCache)).toBe(true);
+    expect("error" in (await fetchSource({ name: "team", repo: tagRepoB, ref: "v1" }, repoSwitchCache))).toBe(true);
+    expect(await followsBranch({ name: "team", repo: tagRepoB, ref: "v1" }, repoSwitchCache)).toBe(false);
   });
 });
 

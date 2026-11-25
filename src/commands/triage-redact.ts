@@ -254,16 +254,17 @@ function applySpellings(text: string, matcher: CompiledMatcher, exempt?: Set<str
   return result;
 }
 
-const reservedTail = new RegExp(
-  String.raw`(?:^|[^\w])(?:${secretKey}|[A-Za-z_]*(?:token|key|secret|password|auth|code|sig)[A-Za-z_]*|bearer|basic|users|home)$|^[a-z][a-z0-9+.-]*:\/\/[^\s/:@]*$`,
+const deferToAfter = new RegExp(
+  String.raw`[:?&#="']|-----BEGIN|PRIVATE KEY|\beyJ[A-Za-z0-9_-]{8,}|(?:^|[^\w])(?:${secretKey}|[A-Za-z_]*(?:token|key|secret|password|auth|code|sig)[A-Za-z_]*|bearer|basic|users|home|private repos?)\s*$`,
   "i",
 );
 
 export function redact(text: string, home: string, known: KnownName[] = []): string {
   const stripHome = (value: string) => (home.length > 1 ? value.split(home.replace(/\/$/, "")).join("~") : value);
   const valid = known.filter((entry) => typeof entry.text === "string" && typeof entry.as === "string");
-  const primary = valid.filter((entry) => !entry.after && !reservedTail.test(entry.text));
-  const after = valid.filter((entry) => entry.after || reservedTail.test(entry.text)).map((entry) => (entry.after ? entry : { ...entry, after: true }));
+  const needsAfter = (entry: KnownName) => Boolean(entry.after) || deferToAfter.test(entry.text) || applyRules(entry.text, secretRules) !== entry.text;
+  const primary = valid.filter((entry) => !needsAfter(entry));
+  const after = valid.filter(needsAfter).map((entry) => (entry.after ? entry : { ...entry, after: true }));
 
   const usedNonces = new Set<number>();
   for (const part of [text, home, ...valid.flatMap((entry) => [entry.text, entry.as])]) {
