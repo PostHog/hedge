@@ -143,19 +143,60 @@ function compileRegexChunks(items: Array<{ pattern: string }>, flags: string): R
   return regexes;
 }
 
+const unsafeForBatch = /-----BEGIN|["'\0\r\n]|[:=]\s*$/i;
+const batchSeparator = "\n!\0!\n";
+
+function batchTransform(inputs: string[], transform: (value: string) => string): Map<string, string> {
+  const out = new Map<string, string>();
+  const batchable: string[] = [];
+  const single: string[] = [];
+  for (const input of inputs) {
+    if (out.has(input)) continue;
+    out.set(input, "");
+    if (unsafeForBatch.test(input)) single.push(input);
+    else batchable.push(input);
+  }
+  if (batchable.length > 1) {
+    const parts = transform(batchable.join(batchSeparator)).split(batchSeparator);
+    if (parts.length === batchable.length) {
+      for (let i = 0; i < batchable.length; i++) out.set(batchable[i]!, parts[i]!);
+    } else {
+      for (const input of batchable) out.set(input, transform(input));
+    }
+  } else if (batchable.length === 1) {
+    out.set(batchable[0]!, transform(batchable[0]!));
+  }
+  for (const input of single) out.set(input, transform(input));
+  return out;
+}
+
 function compileSpellings(entries: KnownName[], transform?: (value: string) => string, exempt?: Set<string>, presentExempt?: string[]): CompiledMatcher {
-  const raw = entries
-    .filter((entry) => typeof entry.text === "string" && typeof entry.as === "string" && entry.text.length >= (entry.after ? 1 : 2))
-    .flatMap((entry) => {
-      const minLength = entry.after ? 1 : 2;
-      const safeAs = applyRules(entry.as, secretRules);
-      const baseVariants = [entry.text, applyRules(entry.text, secretRules), encodeUri(entry.text), entry.text.replace(/ /g, "+")];
+  const validEntries = entries.filter((entry) => typeof entry.text === "string" && typeof entry.as === "string" && entry.text.length >= (entry.after ? 1 : 2));
+  const entryBases = validEntries.map((entry) => {
+    const minLength = entry.after ? 1 : 2;
+    const safeAs = applyRules(entry.as, secretRules);
+    const baseVariants = [entry.text, applyRules(entry.text, secretRules), encodeUri(entry.text), entry.text.replace(/ /g, "+")];
+    return { entry, minLength, safeAs, baseVariants };
+  });
+  let transformed: Map<string, string> | undefined;
+  if (transform) {
+    const inputs: string[] = [];
+    for (const item of entryBases) {
+      for (const variant of item.baseVariants) {
+        inputs.push(variant);
+        if (!variant.startsWith("/")) inputs.push(`/${variant}`);
+      }
+    }
+    transformed = batchTransform(inputs, transform);
+  }
+  const raw = entryBases
+    .flatMap(({ entry, minLength, safeAs, baseVariants }) => {
       const variants = [...baseVariants];
       if (transform) {
         for (const variant of new Set(baseVariants)) {
-          variants.push(transform(variant));
+          variants.push(transformed?.get(variant) ?? transform(variant));
           if (!variant.startsWith("/")) {
-            const prefixed = transform(`/${variant}`);
+            const prefixed = transformed?.get(`/${variant}`) ?? transform(`/${variant}`);
             variants.push(prefixed.startsWith("/") ? prefixed.slice(1) : prefixed);
           }
         }
@@ -346,19 +387,27 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     ...valid.map((entry) => entry.as).filter((label) => /^<devbox \d+>$/.test(label)),
   ]);
   const rawAllSpellings = compileSpellings(allEntries, undefined, undefined, [...sanitizeExempt]);
-  const sanitizedLabelCache = new Map<string, string>();
+  const sanitizeOne = (value: string, skipOwner?: KnownName) => {
+    let current = value;
+    for (let pass = 0; pass < 4; pass++) {
+      const next = applyRules(stripHome(applySpellings(current, rawAllSpellings, sanitizeExempt, skipOwner)), allRules);
+      if (next === current) break;
+      current = next;
+    }
+    return current;
+  };
+  const cacheableLabels: string[] = [];
+  for (const entry of allEntries) {
+    if (!foldCase(entry.as).includes(foldCase(entry.text))) cacheableLabels.push(entry.as);
+  }
+  const sanitizedLabelCache = batchTransform(cacheableLabels, (value) => sanitizeOne(value));
   const sanitizeLabel = (entry: KnownName) => {
     const canCache = !foldCase(entry.as).includes(foldCase(entry.text));
     if (canCache) {
       const cached = sanitizedLabelCache.get(entry.as);
       if (cached !== undefined) return cached;
     }
-    let value = entry.as;
-    for (let pass = 0; pass < 4; pass++) {
-      const next = applyRules(stripHome(applySpellings(value, rawAllSpellings, sanitizeExempt, entry)), allRules);
-      if (next === value) break;
-      value = next;
-    }
+    const value = sanitizeOne(entry.as, entry);
     if (canCache) sanitizedLabelCache.set(entry.as, value);
     return value;
   };

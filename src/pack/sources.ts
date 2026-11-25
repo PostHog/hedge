@@ -215,7 +215,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
     rawGoodDigest === undefined &&
     rawGood.branch === undefined &&
     typeof rawGood.ref === "string" &&
-    (await fetchHeadIsBranch(dir, rawGood.ref)) &&
+    (await fetchHeadIsBranch(dir, rawGood.ref)) === true &&
     (await fetchHeadRepo(dir, rawGood.commit, rawGood.ref)) !== undefined;
   const good =
     legacyPeeled && rawGood
@@ -260,7 +260,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
     const commit = checkedOutCommit;
     const isBranch = fetchedNew ? await fetchHeadIsBranch(dir, ref.ref, fetchedOid) : false;
     const peeled =
-      fetchedNew && !isBranch && isCommitPin(ref.ref, commit.length) && ref.ref.toLowerCase() !== commit.toLowerCase()
+      fetchedNew && isBranch === false && isCommitPin(ref.ref, commit.length) && ref.ref.toLowerCase() !== commit.toLowerCase()
         ? fetchedOid === ref.ref.toLowerCase() || (await git(dir, "rev-parse", "--verify", "--quiet", `${ref.ref}^{commit}`)).stdout.toLowerCase() === commit.toLowerCase()
         : !fetchedNew && isCommitPin(ref.ref, commit.length) && ref.ref.toLowerCase() !== commit.toLowerCase()
           ? true
@@ -276,7 +276,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
         repo,
         ref: ref.ref,
         commit,
-        branch: isBranch,
+        ...(isBranch === undefined ? {} : { branch: isBranch }),
         ...(peeled ? { peeled: true } : {}),
         resolvedDigest: effectiveDigest,
       });
@@ -285,7 +285,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
       return fallBack(ref, dir, repo, effectiveRepo, good, `could not record ${ref.ref} from ${ref.repo}: ${saveError}`, loadLimitMs, before, preserveBefore, legacyOk && effectiveRepo === effectiveBefore, isBranch);
     }
     const keepBranchFetchHead =
-      isBranch &&
+      isBranch === true &&
       good !== undefined &&
       good.repo === repo &&
       good.ref !== ref.ref &&
@@ -716,10 +716,15 @@ export function sourceCache(home: string) {
 
 const branchName = (ref: unknown) => (typeof ref === "string" ? ref.replace(/^refs\/heads\//, "") : undefined);
 
-async function fetchHeadIsBranch(dir: string, ref: string, expectedOid?: string): Promise<boolean> {
+async function fetchHeadIsBranch(dir: string, ref: string, expectedOid?: string): Promise<boolean | undefined> {
   const branch = branchName(ref);
   if (!branch) return false;
-  const fetched = await readFile(join(dir, ".git", "FETCH_HEAD"), "utf8").catch(() => "");
+  let fetched: string;
+  try {
+    fetched = await readFile(join(dir, ".git", "FETCH_HEAD"), "utf8");
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "ENOENT" ? false : undefined;
+  }
   const first = firstFetchHeadEntry(fetched);
   if (expectedOid) {
     const oid = first.match(/^([0-9a-f]{40}|[0-9a-f]{64})\t/i)?.[1]?.toLowerCase();
@@ -745,10 +750,10 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
   if (branchName(good.ref) === branch) {
     if (good.branch === true) return true;
     if (good.branch === false) return false;
-    return fetchHeadIsBranch(dir, ref.ref);
+    return (await fetchHeadIsBranch(dir, ref.ref)) === true;
   }
   if (branchName(good.asked) !== branch) return false;
-  return fetchHeadIsBranch(dir, ref.ref);
+  return (await fetchHeadIsBranch(dir, ref.ref)) === true;
 }
 
 export async function loadedCommit(ref: SourceRef, cacheRoot: string) {

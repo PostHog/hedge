@@ -785,6 +785,24 @@ throw new Error("broken pack");
     if ("error" in mirrorOffline) throw new Error(mirrorOffline.error);
     expect(mirrorOffline.packs[0]?.manifest.summary).toBe("Rewritten mirror packs.");
     expect(mirrorOffline.stale).toBeUndefined();
+
+    const woRepo = await packRepo("Write-only FH packs.");
+    const woCache = temp.make("cache-wo-fh-");
+    const woDir = join(woCache, "team");
+    mkdirSync(woDir, { recursive: true });
+    await spawnGit(woDir, "init", "-q");
+    const woFh = join(woDir, ".git", "FETCH_HEAD");
+    writeFileSync(woFh, "", { mode: 0o200 });
+    chmodSync(woFh, 0o200);
+    try {
+      const woRes = await fetchSource({ name: "team", repo: woRepo, ref: "main" }, woCache);
+      if ("error" in woRes) throw new Error(woRes.error);
+      expect(woRes.packs[0]?.manifest.summary).toBe("Write-only FH packs.");
+      expect(await followsBranch({ name: "team", repo: woRepo, ref: "main" }, woCache)).toBe(false);
+    } finally {
+      chmodSync(woFh, 0o600);
+    }
+    expect(await followsBranch({ name: "team", repo: woRepo, ref: "main" }, woCache)).toBe(true);
   });
 });
 
