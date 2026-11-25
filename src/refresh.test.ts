@@ -49,7 +49,12 @@ async function machine(ref = "main") {
   lines.length = 0;
   const read = (target: string) => readFileSync(join(home, target), "utf8");
   const cache = join(home, ".local/share/hedge/sources");
-  return { repo, home, cache, clock, hedge, steps, lines, read };
+  const pin = (ref: string) => {
+    const file = join(profile, "hedge.json");
+    const json = JSON.parse(readFileSync(file, "utf8"));
+    writeFileSync(file, JSON.stringify({ ...json, sources: [{ ...json.sources[0], ref }] }));
+  };
+  return { repo, home, cache, clock, hedge, steps, lines, read, pin, profile };
 }
 
 const skill = ".agents/skills/review/SKILL.md";
@@ -91,6 +96,18 @@ describe("hedge refresh", () => {
     expect(await box.hedge("refresh")).toBe(0);
 
     expect(existsSync(join(box.home, guide))).toBe(false);
+  });
+
+  test("leaves a source alone that the profile moved back to its branch from a cached commit, until hedge apply runs", async () => {
+    const box = await machine();
+    box.pin(await spawnGit(box.repo, "rev-parse", "main"));
+    expect(await box.hedge("apply", "--profile", box.profile)).toBe(0);
+    box.pin("main");
+    await v2(box.repo);
+
+    expect(await box.hedge("refresh")).toBe(0);
+
+    expect(box.read(guide)).toBe("Rules v1.\n");
   });
 
   test("leaves a source pinned to a tag alone, even when the tag moves", async () => {

@@ -5,8 +5,8 @@ import { hostname } from "node:os";
 import { join, relative } from "node:path";
 import { main } from "./cli.ts";
 import { cliFixtures, repoRoot } from "./testing/cli.ts";
-import { cachedCheckout, spawnGit, tempDirs } from "./testing/git.ts";
-import { sourceCache } from "./pack/sources.ts";
+import { spawnGit, tempDirs } from "./testing/git.ts";
+import { repoUrl } from "./pack/sources.ts";
 import type { SourceRef } from "./pack/types.ts";
 
 const temp = tempDirs();
@@ -351,34 +351,55 @@ describe("hedge doctor", () => {
   });
 });
 
-describe("hedge doctor on a profile with pack sources", () => {
-  const pinned = "0123456789abcdef0123456789abcdef01234567";
+describe("hedge doctor and pack sources", () => {
+  const redirected = ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "PATH"] as const;
+  const saved = Object.fromEntries(redirected.map((name) => [name, process.env[name]]));
+  afterEach(() => {
+    for (const name of redirected) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+  });
 
-  async function doctorWith(source: SourceRef, origin?: string) {
+  async function applied(source: (commit: string) => SourceRef, origin?: string) {
+    const repo = temp.make("source-");
+    await spawnGit(repo, "init", "-q", "-b", "main");
+    await spawnGit(repo, "commit", "-q", "--allow-empty", "-m", "Start");
+    const ref = source(await spawnGit(repo, "rev-parse", "HEAD"));
+    Object.assign(process.env, { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: `url.${repo}.insteadOf`, GIT_CONFIG_VALUE_0: repoUrl(ref.repo) });
     const home = temp.make("home-");
     const profile = profileDir();
-    expect((await hedge(["apply", "--profile", profile], home)).code).toBe(0);
     const file = join(profile, "hedge.json");
-    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), sources: [source] }));
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), sources: [ref] }));
     if (origin) await spawnGit(profile, "init", "-q"), await spawnGit(profile, "remote", "add", "origin", origin);
-    await cachedCheckout(join(sourceCache(home), source.name), source);
-    return hedge(["doctor"], home);
+    expect(await hedge(["apply", "--profile", profile], home)).toMatchObject({ code: 0 });
+    return home;
   }
 
   test("notes a source that follows a branch, and still passes", async () => {
-    expect(await doctorWith({ name: "team", repo: "someone/team", ref: "main" })).toEqual({
+    const home = await applied(() => ({ name: "team", repo: "someone/team", ref: "main" }));
+    expect(await hedge(["doctor"], home)).toEqual({
       code: 0,
-      output: "Note: The pack source team follows main of someone/team. Pin its ref in hedge.json to a commit SHA, so each apply loads the same packs, even offline.\nEverything matches your profile.",
+      output: "Note: The pack source team follows main. Pin its ref in hedge.json to a commit SHA, so each apply loads the same packs, even offline.\nEverything matches your profile.",
     });
   });
 
   test("says nothing of a source pinned to a commit", async () => {
-    expect(await doctorWith({ name: "team", repo: "someone/team", ref: pinned })).toEqual({ code: 0, output: "Everything matches your profile." });
+    const home = await applied((commit) => ({ name: "team", repo: "someone/team", ref: commit }));
+    expect(await hedge(["doctor"], home)).toEqual({ code: 0, output: "Everything matches your profile." });
+  });
+
+  test("passes without git on a profile with no sources", async () => {
+    const home = temp.make("home-");
+    expect(await hedge(["apply", "--profile", profileDir()], home)).toMatchObject({ code: 0 });
+    process.env.PATH = temp.make("no-git-");
+    expect(await hedge(["doctor"], home)).toEqual({ code: 0, output: "Everything matches your profile." });
   });
 
   for (const origin of ["git@github.com:Someone/profile.git", "https://github.com/someone/Profile"]) {
     test(`says nothing of a source in the profile's own repository at ${origin}, which cannot pin its own commit`, async () => {
-      expect(await doctorWith({ name: "own", repo: "someone/profile", ref: "main" }, origin)).toEqual({ code: 0, output: "Everything matches your profile." });
+      const home = await applied(() => ({ name: "own", repo: "someone/profile", ref: "main" }), origin);
+      expect(await hedge(["doctor"], home)).toEqual({ code: 0, output: "Everything matches your profile." });
     });
   }
 });

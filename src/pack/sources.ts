@@ -145,11 +145,13 @@ const commitSha = /^[0-9a-f]{40}$/i;
 const repoKey = (repo: string) => repoUrl(repo).replace(/^.*github\.com[:/]/i, "").replace(/\.git$/, "").toLowerCase();
 
 export async function unpinnedSources(refs: SourceRef[], profileDir: string): Promise<Finding[]> {
+  const unpinned = refs.filter((ref) => !commitSha.test(ref.ref));
+  if (!unpinned.length) return [];
   const origin = (await git(profileDir, "config", "--get", "remote.origin.url")).stdout;
   const ownRepo = (ref: SourceRef) => origin !== "" && repoKey(ref.repo) === repoKey(origin);
-  return refs
-    .filter((ref) => !commitSha.test(ref.ref) && !ownRepo(ref))
-    .map((ref) => ({ id: `source:unpinned:${ref.name}`, pack: "engine", say: `The pack source ${ref.name} follows ${ref.ref} of ${withoutUserinfo(ref.repo)}. Pin its ref in hedge.json to a commit SHA, so each apply loads the same packs, even offline.` }));
+  return unpinned
+    .filter((ref) => !ownRepo(ref))
+    .map((ref) => ({ id: `source:unpinned:${ref.name}`, pack: "engine", say: `The pack source ${ref.name} follows ${ref.ref}. Pin its ref in hedge.json to a commit SHA, so each apply loads the same packs, even offline.` }));
 }
 
 async function checkedOutFromCache(dir: string, repo: string, ref: SourceRef, good: Good | undefined) {
@@ -181,6 +183,7 @@ export function sourceCache(home: string) {
 }
 
 export async function followsBranch(ref: SourceRef, cacheRoot: string) {
+  if ((await lastGood(join(cacheRoot, ref.name)))?.ref !== ref.ref) return false;
   const fetched = await readFile(join(cacheRoot, ref.name, ".git", "FETCH_HEAD"), "utf8").catch(() => "");
   const branch = ref.ref.replace(/^refs\/heads\//, "");
   return fetched.split("\n")[0]?.includes(`\tbranch '${branch}' of `) ?? false;
