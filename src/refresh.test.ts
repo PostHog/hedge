@@ -309,5 +309,13 @@ describe("hedge refresh", () => {
     expect(await box.hedge("apply", "--profile", box.profile)).toBe(0);
     expect(box.read(guide)).toBe("Rules mid.\n");
     expect(box.lines.join("\n")).not.toContain("could not fetch");
+
+    const plusMain = await machine("+main");
+    expect(await plusMain.hedge("apply", "--profile", plusMain.profile)).toBe(0);
+    expect(plusMain.read(guide)).toBe("Rules v1.\n");
+    plusMain.pin("main");
+    await v2(plusMain.repo);
+    expect(await plusMain.hedge("refresh")).toBe(0);
+    expect(plusMain.read(guide)).toBe("Rules v2.\n");
   });
 });

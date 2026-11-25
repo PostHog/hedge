@@ -566,7 +566,8 @@ describe("hedge triage", () => {
       else process.env.GIT_CONFIG_GLOBAL = prevGitConfig;
     }
     const body = sent.find((call) => call.command[1] === "issue")!.input!;
-    expect(body).toContain("Checked out Demo <private source>");
+    expect(body).toContain("Checked out <private source>");
+    expect(body).not.toContain("Demo");
     expect(body).not.toContain("confidential-releases");
   });
 
@@ -975,7 +976,13 @@ describe("hedge triage", () => {
         { text: "/home/alice/project", as: "<private source>" },
         { text: "project/confidential-release", as: "<branch>", after: true },
       ]),
-    ).toBe("checkout ~/<branch>");
+    ).toBe("checkout <branch>");
+    expect(
+      redact("private-owner/private-packs/release-candidate", "/Users/alice", [
+        { text: "private-owner/private-packs", as: "<private source>" },
+        { text: "private-packs/release-candidate", as: "<branch>", after: true },
+      ]),
+    ).toBe("<branch>");
   });
 });
 

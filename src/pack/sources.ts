@@ -760,10 +760,18 @@ export function sourceCache(home: string) {
 }
 
 const branchName = (ref: unknown) => (typeof ref === "string" ? stripTrailingColon(ref).replace(/^refs\/heads\//, "") : undefined);
+const forcedBranchName = (ref: unknown) => {
+  if (typeof ref !== "string") return undefined;
+  const trimmed = stripTrailingColon(ref);
+  if (!trimmed.startsWith("+")) return undefined;
+  const stripped = trimmed.slice(1).replace(/^refs\/heads\//, "");
+  return stripped || undefined;
+};
 
 async function fetchHeadIsBranch(dir: string, ref: string, expectedOid?: string): Promise<boolean | undefined> {
   const branch = branchName(ref);
-  if (!branch) return false;
+  const forced = forcedBranchName(ref);
+  if (!branch && !forced) return false;
   let fetched: string;
   try {
     fetched = await readFile(join(dir, ".git", "FETCH_HEAD"), "utf8");
@@ -775,13 +783,14 @@ async function fetchHeadIsBranch(dir: string, ref: string, expectedOid?: string)
     const oid = first.match(/^([0-9a-f]{40}|[0-9a-f]{64})\t/i)?.[1]?.toLowerCase();
     if (oid !== expectedOid.toLowerCase()) return false;
   }
-  return first.includes(`\tbranch '${branch}' of `);
+  return (Boolean(branch) && first.includes(`\tbranch '${branch}' of `)) || (Boolean(forced) && first.includes(`\tbranch '${forced}' of `));
 }
 
 export async function followsBranch(ref: SourceRef, cacheRoot: string) {
   const dir = join(cacheRoot, ref.name);
   const good = await lastGood(dir);
   const branch = branchName(ref.ref);
+  const forced = forcedBranchName(ref.ref);
   const repo = repoUrl(ref.repo);
   if (!good || !branch || typeof good.commit !== "string" || !gitHash.test(good.commit)) return false;
   if (Array.isArray(good.blocked) && good.blocked.length) {
@@ -795,10 +804,14 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
   if (branchName(good.ref) === branch) {
     if (good.branch === true) return true;
     if (good.branch === false) return false;
-    return (await fetchHeadIsBranch(dir, ref.ref)) === true;
+    return (await fetchHeadIsBranch(dir, ref.ref, good.commit)) === true;
   }
-  if (branchName(good.asked) !== branch) return false;
-  return (await fetchHeadIsBranch(dir, ref.ref)) === true;
+  const aliasMatch =
+    (forced !== undefined && (branchName(good.ref) === forced || branchName(good.asked) === forced)) ||
+    forcedBranchName(good.ref) === branch ||
+    forcedBranchName(good.asked) === branch;
+  if (!aliasMatch && branchName(good.asked) !== branch) return false;
+  return (await fetchHeadIsBranch(dir, ref.ref, good.commit)) === true;
 }
 
 export async function loadedCommit(ref: SourceRef, cacheRoot: string) {
@@ -835,13 +848,24 @@ export async function advanceSource(ref: SourceRef, cacheRoot: string, from: str
 
 async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimitMs: number): Promise<Advance> {
   const repo = repoUrl(ref.repo);
-  const branch = stripTrailingColon(ref.ref).replace(/^refs\/heads\//, "");
-  const head = `refs/heads/${branch}`;
+  let branch = stripTrailingColon(ref.ref).replace(/^refs\/heads\//, "");
+  const forced = forcedBranchName(ref.ref);
+  let head = `refs/heads/${branch}`;
   if (!branch || isInvalidRef(head)) return { state: "failed", say: `invalid ref ${JSON.stringify(ref.ref)} for ${ref.repo}` };
   const effectiveRepo = await resolvedRepoUrl(dir, repo);
-  const listed = await git(dir, "ls-remote", repo, head);
+  const heads = forced && forced !== branch && !isInvalidRef(`refs/heads/${forced}`) ? [head, `refs/heads/${forced}`] : [head];
+  const listed = await git(dir, "ls-remote", repo, ...heads);
   if (!listed.ok) return { state: "failed", say: `could not reach ${ref.repo}: ${listed.stderr}` };
-  const commit = listed.stdout.split("\n").map((line) => line.split("\t")).find(([, name]) => name === head)?.[0];
+  const rows = listed.stdout.split("\n").map((line) => line.split("\t"));
+  let commit = rows.find(([, name]) => name === head)?.[0];
+  if (!commit && forced && forced !== branch) {
+    const forcedHead = `refs/heads/${forced}`;
+    commit = rows.find(([, name]) => name === forcedHead)?.[0];
+    if (commit) {
+      branch = forced;
+      head = forcedHead;
+    }
+  }
   if (!commit) return { state: "failed", say: `${ref.repo} has no branch ${branch}` };
   if (commit === from) return { state: "same", commit };
   const rewritten = (tip: string) => ({ state: "refused" as const, say: `${branch} of ${ref.repo} moved to ${tip.slice(0, 12)}, which does not build on ${from.slice(0, 12)}, the commit Hedge loaded last. Hedge refresh runs no pack code from a rewritten branch. Run hedge update to take it.` });

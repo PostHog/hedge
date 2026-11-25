@@ -225,21 +225,55 @@ function buildAc(rules: AcRule[], ci: boolean): AcAutomaton | undefined {
 function findAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?: KnownName): MatchSpan[] {
   if (!ac || !text.length) return [];
   const hay = ac.ci ? foldCase(text) : text;
-  const spans: MatchSpan[] = [];
+  let bestEnd: Int32Array | undefined;
+  let bestAs: Array<string | undefined> | undefined;
+  let exemptEnd: Int32Array | undefined;
+  let exemptAs: Array<string | undefined> | undefined;
   let state = 0;
   for (let i = 0; i < hay.length; i++) {
     const code = hay.charCodeAt(i);
     while (state !== 0 && !ac.next[state]!.has(code)) state = ac.fail[state]!;
     state = ac.next[state]!.get(code) ?? 0;
+    const end = i + 1;
     for (let u = ac.out[state] ? state : ac.dict[state]!; u !== 0; u = ac.dict[u]!) {
       for (const rule of ac.out[u]!) {
         if (skipOwner && rule.owner === skipOwner) continue;
-        const end = i + 1;
         const start = end - rule.len;
+        if (rule.exempt) {
+          if (exemptEnd && exemptEnd[start]! >= end) continue;
+          if (!isLeftOk(text, start, rule.left) || !isRightOk(text, end, rule.right)) continue;
+          if (rule.ambiguous && !(rule.regex ??= new RegExp(`^${escape(rule.text)}$`, "i")).test(text.slice(start, end))) continue;
+          exemptEnd ??= new Int32Array(text.length);
+          exemptAs ??= new Array<string | undefined>(text.length);
+          exemptEnd[start] = end;
+          exemptAs[start] = rule.as;
+          continue;
+        }
+        if (bestEnd && bestEnd[start]! >= end) continue;
         if (!isLeftOk(text, start, rule.left) || !isRightOk(text, end, rule.right)) continue;
         if (rule.ambiguous && !(rule.regex ??= new RegExp(`^${escape(rule.text)}$`, "i")).test(text.slice(start, end))) continue;
-        spans.push({ start, end, len: rule.len, as: rule.as, exempt: rule.exempt });
+        bestEnd ??= new Int32Array(text.length);
+        bestAs ??= new Array<string | undefined>(text.length);
+        bestEnd[start] = end;
+        bestAs[start] = rule.as;
       }
+    }
+  }
+  const spans: MatchSpan[] = [];
+  if (bestEnd && bestAs) {
+    let maxEnd = -1;
+    for (let start = 0; start < text.length; start++) {
+      const end = bestEnd[start]!;
+      if (end > maxEnd) {
+        maxEnd = end;
+        spans.push({ start, end, len: end - start, as: bestAs[start]! });
+      }
+    }
+  }
+  if (exemptEnd && exemptAs) {
+    for (let start = 0; start < text.length; start++) {
+      const end = exemptEnd[start]!;
+      if (end > 0) spans.push({ start, end, len: end - start, as: exemptAs[start]!, exempt: true });
     }
   }
   return spans;
@@ -247,7 +281,8 @@ function findAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?: Know
 
 function findFlexSpans(flexRules: FlexRule[], text: string, skipOwner?: KnownName): MatchSpan[] {
   if (!flexRules.length || !text.length) return [];
-  const spans: MatchSpan[] = [];
+  let bestEnd: Int32Array | undefined;
+  let bestAs: Array<string | undefined> | undefined;
   for (const rule of flexRules) {
     if (skipOwner && rule.owner === skipOwner) continue;
     rule.regex.lastIndex = 0;
@@ -256,8 +291,25 @@ function findFlexSpans(flexRules: FlexRule[], text: string, skipOwner?: KnownNam
         rule.regex.lastIndex++;
         continue;
       }
-      spans.push({ start: match.index, end: match.index + match[0].length, len: match[0].length, as: rule.as });
-      rule.regex.lastIndex = match.index + 1;
+      const start = match.index;
+      const end = start + match[0].length;
+      if (!bestEnd || end > bestEnd[start]!) {
+        bestEnd ??= new Int32Array(text.length);
+        bestAs ??= new Array<string | undefined>(text.length);
+        bestEnd[start] = end;
+        bestAs[start] = rule.as;
+      }
+      rule.regex.lastIndex = start + 1;
+    }
+  }
+  if (!bestEnd || !bestAs) return [];
+  const spans: MatchSpan[] = [];
+  let maxEnd = -1;
+  for (let start = 0; start < text.length; start++) {
+    const end = bestEnd[start]!;
+    if (end > maxEnd) {
+      maxEnd = end;
+      spans.push({ start, end, len: end - start, as: bestAs[start]! });
     }
   }
   return spans;
@@ -555,37 +607,51 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
 function applySpans(text: string, spans: MatchSpan[], exempt?: Set<string>, onMatch?: (match: string, as: string) => string): string {
   if (!spans.length) return text;
   spans.sort((a, b) => a.start - b.start || b.len - a.len || Number(Boolean(b.exempt)) - Number(Boolean(a.exempt)));
-  const resolveRange = (rangeStart: number, rangeEnd: number, cands: MatchSpan[]): string => {
-    let out = "";
-    let pos = rangeStart;
-    let idx = 0;
-    while (idx < cands.length) {
-      while (idx < cands.length && (cands[idx]!.start < pos || cands[idx]!.end > rangeEnd)) idx++;
-      if (idx >= cands.length) break;
-      const first = cands[idx]!;
-      let best = first;
-      let scan = idx + 1;
-      while (scan < cands.length && cands[scan]!.start < best.end) {
-        const cand = cands[scan]!;
-        if (cand.end <= rangeEnd && (cand.len > best.len || (cand.len === best.len && cand.exempt && !best.exempt && cand.start === best.start))) {
-          best = cand;
-        }
-        scan++;
-      }
-      if (best.start > first.start) {
-        const sub = cands.slice(idx, scan).filter((s) => s.start >= first.start && s.end <= best.start);
-        out += text.slice(pos, first.start) + resolveRange(first.start, best.start, sub);
-      } else {
-        out += text.slice(pos, best.start);
-      }
-      const matched = text.slice(best.start, best.end);
-      out += best.exempt || exempt?.has(matched) ? matched : onMatch ? onMatch(matched, best.as) : best.as;
-      pos = best.end;
+  let out = "";
+  let pos = 0;
+  let idx = 0;
+  while (idx < spans.length) {
+    while (idx < spans.length && spans[idx]!.start < pos) idx++;
+    if (idx >= spans.length) break;
+    const first = spans[idx]!;
+    if (first.exempt) {
+      out += text.slice(pos, first.end);
+      pos = first.end;
       idx++;
+      continue;
     }
-    return pos === rangeStart ? text.slice(rangeStart, rangeEnd) : out + text.slice(pos, rangeEnd);
-  };
-  return resolveRange(0, text.length, spans);
+    let clusterEnd = first.end;
+    let best = first;
+    let scan = idx + 1;
+    let blockedByExempt = false;
+    while (scan < spans.length && spans[scan]!.start < clusterEnd) {
+      const cand = spans[scan]!;
+      if (cand.exempt) {
+        if (cand.end <= clusterEnd) {
+          scan++;
+          continue;
+        }
+        if (cand.len >= best.len) {
+          blockedByExempt = true;
+          break;
+        }
+        break;
+      }
+      if (cand.len > best.len) best = cand;
+      if (cand.end > clusterEnd) clusterEnd = cand.end;
+      scan++;
+    }
+    if (blockedByExempt) {
+      idx++;
+      continue;
+    }
+    out += text.slice(pos, first.start);
+    const matched = text.slice(first.start, clusterEnd);
+    out += exempt?.has(matched) ? matched : onMatch ? onMatch(matched, best.as) : best.as;
+    pos = clusterEnd;
+    idx = scan;
+  }
+  return pos === 0 ? text : out + text.slice(pos);
 }
 
 function applySpellings(text: string, matcher: CompiledMatcher, exempt?: Set<string>, skipOwner?: KnownName, onMatch?: (match: string, as: string) => string) {
