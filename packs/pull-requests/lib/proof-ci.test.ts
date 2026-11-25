@@ -504,8 +504,8 @@ test("a listed check still holds the gate when another required check shares its
   const { pr } = await reviewed();
   pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.personChecks": "example/product=CI / Approval" });
   pr.pullRequestState({ draft: true });
-  pr.required("main", [{ context: "CI / Approval" }, { context: "CI / Test" }]);
-  pr.ci([{ name: "CI / Approval", bucket: "fail" }, { name: "CI / Test", bucket: "pass" }]);
+  pr.required("main", [{ context: "CI / Approval", integration_id: 9 }, { context: "CI / Test" }]);
+  pr.ci([{ name: "CI / Approval", bucket: "fail", app: 9 }, { name: "CI / Test", bucket: "pass" }]);
   expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: red, required failing: CI / Approval");
 });
 
