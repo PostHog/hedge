@@ -253,7 +253,7 @@ test("only the user's own messages and question answers in T3 count as their wor
   expect(new Set(words.map((word) => word.at))).toEqual(new Set(["2026-10-25T07:02:00Z"]));
 });
 
-test("an Antigravity card answer reads as the chosen option's label to the question its header asks, a note beyond “Ok” typed in its other field replaces the pick and reads as on main, no prompt is cut, a field whose prompt is not the other prompt of its question reads raw, and other cards read as on main", async () => {
+test("an Antigravity card answer reads as the chosen option's label to the question its header asks, a note beyond “Ok” typed in its other field replaces the pick and reads as on main, no prompt is cut, a question whose other field's prompt is not its other prompt or that has options reads raw, a multi-select pick reads raw, and other cards read as on main", async () => {
   const option = (label: string, value: string) => ({ label, description: label, value });
   const filler = "word ".repeat(190);
   const fitsCap = `${filler}a example/product#9?`;
@@ -286,6 +286,8 @@ test("an Antigravity card answer reads as the chosen option's label to the quest
     card("c11", "r11", [pastCap], { q1: "1", q1_other: "Not yet" }),
     card("c18", "r18", [pastCap], { q1: "1", q1_other: "O" }),
     card("c19", "r19", ["Accept the panel gap of example/product#17?"], { q1: "1", q1_other: "O" }),
+    card("c24", "r24", ["Accept the panel gap of example/product#21?"], { q1: ["1", "2"], q1_other: "" }),
+    card("c25", "r25", ["Accept the panel gap of example/product#22?"], { q1: "1", q1_other: "ok" }),
     card("c23", "r23", ["Accept the panel gap of example/product#20?"], { q1: "1", q1_other: "", extra: "Later" }),
     card("c21", "r21", ["Accept the panel gap of example/product#19?"], { q1: "2" }),
     card("c20", "r20", ["Accept the panel gap of example/product#18?"], { q1: "1", q1_other: "Only after CI is green" }),
@@ -311,6 +313,7 @@ test("an Antigravity card answer reads as the chosen option's label to the quest
     },
   ];
   items.find(({ item }) => item.id === "c21")!.item.questions.pop();
+  items.find(({ item }) => item.id === "c25")!.item.questions[1]!.options = [option("Keep the gap open", "ok")];
   for (const id of ["c19", "c20"]) {
     const { item } = items.find((entry) => entry.item.id === id)!;
     item.questions[1]!.question = "Optional free-form answer to: Ship it?";
@@ -341,6 +344,8 @@ test("an Antigravity card answer reads as the chosen option's label to the quest
     { thread: "mcp:thread-1", request: "r21", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000021" },
     { thread: "mcp:thread-1", request: "r22", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000022" },
     { thread: "mcp:thread-1", request: "r23", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000023" },
+    { thread: "mcp:thread-1", request: "r24", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000024" },
+    { thread: "mcp:thread-1", request: "r25", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000025" },
   ],
   });
 
@@ -359,6 +364,9 @@ test("an Antigravity card answer reads as the chosen option's label to the quest
     ["c18:0", "Accept the panel gap (Recommended)", pastCap],
     ["c19:0", "1", "Accept the panel gap of example/product#17?"],
     ["c19:1", "O", "Optional free-form answer to: Ship it?"],
+    ["c24:0", "1, 2", "Accept the panel gap of example/product#21?"],
+    ["c25:0", "1", "Accept the panel gap of example/product#22?"],
+    ["c25:1", "Keep the gap open", "Optional free-form answer to: Accept the panel gap of example/product#22?"],
     ["c23:0", "Accept the panel gap (Recommended)", "Accept the panel gap of example/product#20?"],
     ["c23:2", "Later", "extra"],
     ["c21:0", "Keep the gap open", "Accept the panel gap of example/product#19?"],

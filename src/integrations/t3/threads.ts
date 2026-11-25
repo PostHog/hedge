@@ -142,7 +142,7 @@ function cardAnswer(_questions: CardQuestion[], { questionTextById }: QuestionAn
 function antigravityAnswer(questions: CardQuestion[], answer: QuestionAnswer, id: string, chosen: string | string[]) {
   const byId = (wanted: string) => questions.find((question) => question.id === wanted);
   const shown = (question: CardQuestion) => promptOf(question, answer.questionTextById[question.id]);
-  const pairs = (pick: CardQuestion | undefined, other: CardQuestion | undefined): pick is CardQuestion => !!pick && !!other && shown(other) === `${otherPrompt}${shown(pick)}`;
+  const pairs = (pick: CardQuestion | undefined, other: CardQuestion | undefined): pick is CardQuestion => !!pick && !!other && !other.options?.length && shown(other) === `${otherPrompt}${shown(pick)}`;
   const asked = byId(id);
   if (!asked) return { text: [chosen].flat().join(", "), answered: answer.questionTextById[id] ?? id };
   const raw = { text: [chosen].flat().join(", "), answered: shown(asked) };
@@ -155,7 +155,8 @@ function antigravityAnswer(questions: CardQuestion[], answer: QuestionAnswer, id
 }
 
 function label(asked: CardQuestion, chosen: string | string[], answered: string) {
-  return { text: [chosen].flat().map((value) => onlyLabelOf(asked.options ?? [], value)).join(", "), answered };
+  const values = [chosen].flat();
+  return { text: values.length === 1 ? onlyLabelOf(asked.options ?? [], values[0]!) : values.join(", "), answered };
 }
 
 function onlyLabelOf(options: NonNullable<CardQuestion["options"]>, value: string) {
