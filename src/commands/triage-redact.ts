@@ -95,13 +95,16 @@ function encodeUri(text: string) {
   }
 }
 
-function replaceKnown(text: string, entries: KnownName[], exempt?: Set<string>) {
+function replaceKnown(text: string, entries: KnownName[], transform?: (value: string) => string, exempt?: Set<string>) {
   let result = text;
   const spellings = entries
     .filter((entry) => entry.text.length >= 2)
-    .flatMap((entry) =>
-      [...new Set([entry.text, applyRules(entry.text, secretRules), encodeUri(entry.text), entry.text.replace(/ /g, "+")])].map((variant) => ({ text: variant, as: entry.as })),
-    );
+    .flatMap((entry) => {
+      const safeAs = applyRules(entry.as, secretRules);
+      const variants = [entry.text, applyRules(entry.text, secretRules), encodeUri(entry.text), entry.text.replace(/ /g, "+")];
+      if (transform) variants.push(transform(entry.text));
+      return [...new Set(variants.filter((variant) => variant.length >= 2))].map((variant) => ({ text: variant, as: safeAs }));
+    });
   const labels = exempt?.size ? `${[...exempt].sort((a, b) => b.length - a.length).map(escape).join("|")}|` : "";
   for (const name of spellings.sort((a, b) => b.text.length - a.text.length)) {
     const flags = name.text.length < 4 ? "g" : "gi";
@@ -115,12 +118,13 @@ function replaceKnown(text: string, entries: KnownName[], exempt?: Set<string>) 
 }
 
 export function redact(text: string, home: string, known: KnownName[] = []): string {
+  const stripHome = (value: string) => (home.length > 1 ? value.split(home.replace(/\/$/, "")).join("~") : value);
   let result = applyRules(text, secretRules);
   result = replaceKnown(result, known.filter((entry) => !entry.after));
-  if (home.length > 1) result = result.split(home.replace(/\/$/, "")).join("~");
+  result = stripHome(result);
   result = applyRules(result, rules);
-  const exempt = new Set([...redactorLabels, ...known.map((entry) => entry.as)]);
-  return replaceKnown(result, known.filter((entry) => entry.after), exempt);
+  const exempt = new Set([...redactorLabels, ...known.map((entry) => applyRules(entry.as, secretRules))]);
+  return replaceKnown(result, known.filter((entry) => entry.after), (value) => applyRules(stripHome(applyRules(value, secretRules)), rules), exempt);
 }
 
 function escape(text: string) {

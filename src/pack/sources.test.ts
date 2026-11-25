@@ -303,7 +303,7 @@ describe("fetchSource", () => {
     const ref = { name: "team", repo, ref: commit };
     await fetchSource(ref, cache);
     writeFileSync(join(cache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo, ref: "main", commit: "0".repeat(40) }));
-    writeFileSync(join(cache, "team", ".git", "hedge-pins.json"), JSON.stringify({ [repo]: "bad" }));
+    writeFileSync(join(cache, "team", ".git", "hedge-pins.json"), JSON.stringify({ repo, commits: "bad" }));
     const fetched = await fetchSource(ref, cache);
     if ("error" in fetched) throw new Error(fetched.error);
     expect([fetched.packs[0]?.manifest.summary, fetched.stale]).toEqual(["Team rules v1.", undefined]);

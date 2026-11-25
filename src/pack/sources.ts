@@ -133,6 +133,8 @@ async function lastGood(dir: string): Promise<Good | undefined> {
   }
 }
 
+type Pins = { repo: string; commits: string[] };
+
 function pinsPath(dir: string) {
   return join(dir, ".git", "hedge-pins.json");
 }
@@ -143,31 +145,26 @@ async function writeAtomic(path: string, content: string) {
   await rename(temp, path);
 }
 
-async function readPins(dir: string): Promise<Map<string, string[]>> {
-  const out = new Map<string, string[]>();
+async function readPins(dir: string): Promise<Pins | undefined> {
   try {
-    const raw = JSON.parse(await readFile(pinsPath(dir), "utf8")) as unknown;
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
-    for (const [repo, list] of Object.entries(raw)) {
-      if (Array.isArray(list)) out.set(repo, list.filter((commit): commit is string => typeof commit === "string" && commitSha.test(commit)).map((commit) => commit.toLowerCase()));
-    }
-    return out;
+    const raw = JSON.parse(await readFile(pinsPath(dir), "utf8")) as { repo?: unknown; commits?: unknown } | null;
+    if (!raw || typeof raw !== "object" || typeof raw.repo !== "string" || !Array.isArray(raw.commits)) return undefined;
+    const commits = raw.commits.filter((commit): commit is string => typeof commit === "string" && commitSha.test(commit)).map((commit) => commit.toLowerCase());
+    return { repo: withoutUserinfo(raw.repo), commits };
   } catch {
-    return out;
+    return undefined;
   }
 }
 
 async function saveGood(dir: string, good: Good) {
   const before = await lastGood(dir);
   const pins = await readPins(dir);
-  const known = new Set(pins.get(good.repo) ?? []);
-  if (before?.repo === good.repo && typeof before.commit === "string" && commitSha.test(before.commit)) known.add(before.commit.toLowerCase());
+  const repo = withoutUserinfo(good.repo);
+  const known = new Set(pins?.repo === repo ? pins.commits : []);
+  if (before && withoutUserinfo(before.repo) === repo && typeof before.commit === "string" && commitSha.test(before.commit)) known.add(before.commit.toLowerCase());
   if (commitSha.test(good.commit)) known.add(good.commit.toLowerCase());
+  if (known.size) await writeAtomic(pinsPath(dir), JSON.stringify({ repo, commits: [...known] }) + "\n");
   await writeAtomic(goodPath(dir), JSON.stringify(good) + "\n");
-  if (known.size) {
-    pins.set(good.repo, [...known]);
-    await writeAtomic(pinsPath(dir), JSON.stringify(Object.fromEntries(pins)) + "\n");
-  }
 }
 
 const commitSha = /^[0-9a-f]{40}$/i;
@@ -191,7 +188,8 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string): Pr
 async function checkedOutFromCache(dir: string, repo: string, ref: SourceRef, good: Good | undefined) {
   const commit = ref.ref.toLowerCase();
   if (!commitSha.test(commit) || good?.repo !== repo) return false;
-  const fetchedHere = (typeof good.commit === "string" && good.commit.toLowerCase() === commit) || (await readPins(dir)).get(repo)?.includes(commit) === true;
+  const pins = await readPins(dir);
+  const fetchedHere = (typeof good.commit === "string" && good.commit.toLowerCase() === commit) || (pins?.repo === withoutUserinfo(repo) && pins.commits.includes(commit));
   if (!fetchedHere) return false;
   return (await git(dir, "checkout", "-q", "--detach", commit)).ok;
 }

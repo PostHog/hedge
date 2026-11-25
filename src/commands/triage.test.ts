@@ -224,8 +224,9 @@ describe("hedge triage", () => {
     for (const leaked of ["secret-team", "incomplete-team", "internal-release", "private-packs"]) expect(issue.input).not.toContain(leaked);
   });
 
-  test("still redacts secrets, query credentials, credential-bearing source URLs, bracketed branches, unpaired surrogates, and user paths", async () => {
+  test("still redacts secrets, query credentials, credential-bearing source URLs, bracketed branches, key-like aliases, hostname branches, unpaired surrogates, and user paths", async () => {
     const home = temp.make("home-");
+    const keyLikeAlias = ["sk", "-live-", spell(lowers, 16, 5)].join("");
     mkdirSync(join(home, ".config/hedge"), { recursive: true });
     writeFileSync(
       join(home, ".config/hedge/machine.json"),
@@ -242,6 +243,7 @@ describe("hedge triage", () => {
               { name: "team-c", repo: "PostHog/hedge", ref: "users" },
               { name: "team-d", repo: "https://nora:topsecret@git.example.com/secret-owner/secret-repo.git", ref: "internal-release" },
               { name: "team-e", repo: "PostHog/hedge", ref: "bad\uD800ref" },
+              { name: keyLikeAlias, repo: "acme/key-alias-packs", ref: "feature/customer.internal/private-project" },
             ],
           },
         },
@@ -255,6 +257,7 @@ describe("hedge triage", () => {
         "GET https://example.com/cb?auth=super-secret-value",
         "read /Users/alice/.ssh/config",
         "fetch https://nora:topsecret@git.example.com/secret-owner/secret-repo.git <internal-release>",
+        "fetch acme/key-alias-packs at feature/customer.internal/private-project",
       ].join("\n") + "\n",
     );
     const result = await triage(home, ["--send"], []);
@@ -264,7 +267,8 @@ describe("hedge triage", () => {
     expect(issue.input).toContain("https://example.com/cb?<branch>=<redacted>");
     expect(issue.input).toContain("read /<branch>/<user>/.ssh/config");
     expect(issue.input).toContain("fetch <team-d source> <<branch>>");
-    for (const leaked of ["correct-horse-battery-staple", "super-secret-value", "alice", "topsecret", "secret-owner", "secret-repo", "internal-release"]) expect(issue.input).not.toContain(leaked);
+    expect(issue.input).toContain("fetch <<key> source> at <branch>");
+    for (const leaked of ["correct-horse-battery-staple", "super-secret-value", "alice", "topsecret", "secret-owner", "secret-repo", "internal-release", keyLikeAlias, "private-project", "customer.internal"]) expect(issue.input).not.toContain(leaked);
   });
 
   test("a long title is cut after redaction, so no part of a secret reaches the issue", async () => {
