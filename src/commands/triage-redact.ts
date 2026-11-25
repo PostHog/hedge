@@ -1,11 +1,11 @@
 /** A text that names this machine or its owner, and the label that replaces it. */
-export type KnownName = { text: string; as: string };
+export type KnownName = { text: string; as: string; after?: boolean };
 
 type Rule = [RegExp, string | ((match: string, ...groups: Array<string | number | undefined>) => string)];
 
 const secretKey = String.raw`[A-Za-z_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIALS?|SESSION)[A-Za-z_]*`;
 
-const rules: Rule[] = [
+const secretRules: Rule[] = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, "<private key>"],
   [/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g, "<token>"],
   [/\bsk-[A-Za-z0-9_-]{16,}/g, "<key>"],
@@ -16,6 +16,9 @@ const rules: Rule[] = [
   [/((?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi, "$1<credentials>@"],
   [/([?&#][A-Za-z_]*(?:token|key|secret|password|auth|code|sig)[A-Za-z_]*=)[^\s&#"']+/gi, "$1<redacted>"],
   [new RegExp(String.raw`\b(${secretKey})(["']?\s*[:=]\s*)(?:(")(?:[^"\\]|\\.){0,4096}"|(')[^']{0,4096}'|[^\s"']+)`, "gi"), (_match, key, separator, double, single) => `${key}${separator}${double ?? single ?? ""}<redacted>${double ?? single ?? ""}`],
+];
+
+const rules: Rule[] = [
   [/(?<![\w.+%-])[\w.+%-]+(?:@|%40)[A-Za-z0-9-]+(?:(?:\.|%2E)[A-Za-z0-9-]+)*(?:\.|%2E)[A-Za-z]{2,}\b/gi, (email, offset, text) => (email.startsWith("git@") && String(text)[Number(offset) + email.length] === ":" ? email : "<email>")],
   [/(?<![\w.-])[\w.-]+\/(?:hedge|fleet)-(profile|memory)(?:-[\w-]+)?\b/g, "<$1 repo>"],
   [/(private repos? )[\w.-]+\/[\w.-]+(?: and [\w.-]+\/[\w.-]+)?/g, "$1<private repo>"],
@@ -62,15 +65,29 @@ function evenCases({ letters, upper }: Tally) {
  * the home path, and the names the caller knows, such as this machine's
  * hostname and its devboxes.
  */
+function replaceKnown(text: string, entries: KnownName[], skipTags = false) {
+  let result = text;
+  const spellings = entries
+    .filter((entry) => entry.text.length >= 2)
+    .flatMap((entry) => [...new Set([entry.text, encodeURIComponent(entry.text), entry.text.replace(/ /g, "+")])].map((text) => ({ text, as: entry.as })));
+  for (const name of spellings.sort((a, b) => b.text.length - a.text.length)) {
+    const flags = name.text.length < 4 ? "g" : "gi";
+    if (skipTags) {
+      result = result.replace(new RegExp(`<[a-z][a-z0-9 -]*>|(?<![\\w-])${escape(name.text)}(?![\\w-])`, flags), (match) => (match.startsWith("<") ? match : name.as));
+    } else {
+      result = result.replace(new RegExp(`(?<![\\w-])${escape(name.text)}(?![\\w-])`, flags), name.as);
+    }
+  }
+  return result;
+}
+
 export function redact(text: string, home: string, known: KnownName[] = []): string {
   let result = text;
-  const spellings = known.filter((entry) => entry.text.length >= 2).flatMap((entry) => [...new Set([entry.text, encodeURIComponent(entry.text), entry.text.replace(/ /g, "+")])].map((text) => ({ text, as: entry.as })));
-  for (const name of spellings.sort((a, b) => b.text.length - a.text.length)) {
-    result = result.replace(new RegExp(`(?<![\\w-])${escape(name.text)}(?![\\w-])`, name.text.length < 4 ? "g" : "gi"), name.as);
-  }
+  for (const [pattern, replacement] of secretRules) result = result.replace(pattern, replacement as string);
+  result = replaceKnown(result, known.filter((entry) => !entry.after));
   if (home.length > 1) result = result.split(home.replace(/\/$/, "")).join("~");
   for (const [pattern, replacement] of rules) result = result.replace(pattern, replacement as string);
-  return result;
+  return replaceKnown(result, known.filter((entry) => entry.after), true);
 }
 
 function escape(text: string) {

@@ -417,6 +417,13 @@ describe("hedge doctor and pack sources", () => {
       expect(await hedge(["doctor"], home)).toEqual({ code: 0, output: "Everything matches your profile." });
     });
   }
+
+  for (const repo of ["https://evil-github.com:443/someone/Profile.git", "git@notgithub.com:someone/Profile.git"]) {
+    test(`still notes an external host ${repo} that only ends in github.com`, async () => {
+      const home = await applied(() => ({ name: "external", repo, ref: "main" }), "git@github.com:someone/profile.git");
+      expect((await hedge(["doctor"], home)).output).toContain("Note: The pack source external is not pinned to a commit SHA.");
+    });
+  }
 });
 
 describe("a profile source that would run code it does not ship", () => {

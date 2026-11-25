@@ -16,7 +16,7 @@ export type Clock = { sleep(ms: number): Promise<void> };
 
 const realClock: Clock = { sleep: (ms) => Bun.sleep(ms) };
 
-type Good = { repo: string; ref: string; commit: string; asked?: string; pinned?: string[] };
+type Good = { repo: string; ref: string; commit: string; asked?: string };
 
 export const withoutUserinfo = (text: string) => text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi, "$1");
 
@@ -133,21 +133,41 @@ async function lastGood(dir: string): Promise<Good | undefined> {
   }
 }
 
-const pinnedCommits = (good: Good | undefined) => (Array.isArray(good?.pinned) ? good.pinned.filter((commit): commit is string => typeof commit === "string") : []);
+function pinsPath(dir: string) {
+  return join(dir, ".git", "hedge-pins.json");
+}
+
+async function readPins(dir: string): Promise<Record<string, string[]>> {
+  try {
+    const raw = JSON.parse(await readFile(pinsPath(dir), "utf8")) as unknown;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    const out: Record<string, string[]> = {};
+    for (const [repo, list] of Object.entries(raw)) {
+      if (Array.isArray(list)) out[repo] = list.filter((commit): commit is string => typeof commit === "string" && commitSha.test(commit)).map((commit) => commit.toLowerCase());
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
 
 async function saveGood(dir: string, good: Good) {
   const before = await lastGood(dir);
-  const prior = before?.repo === good.repo
-    ? [...pinnedCommits(before), ...(typeof before.ref === "string" && commitSha.test(before.ref) && typeof before.commit === "string" ? [before.commit] : [])]
-    : [];
-  const kept = [...new Set(prior)];
-  const pinned = commitSha.test(good.ref) && !kept.includes(good.commit) ? [...kept, good.commit] : kept;
-  await writeFile(goodPath(dir), JSON.stringify({ ...good, ...(pinned.length ? { pinned } : {}) }) + "\n");
+  const pins = await readPins(dir);
+  const known = new Set(pins[good.repo] ?? []);
+  if (before?.repo === good.repo && typeof before.commit === "string" && commitSha.test(before.commit)) known.add(before.commit.toLowerCase());
+  if (commitSha.test(good.commit)) known.add(good.commit.toLowerCase());
+  await writeFile(goodPath(dir), JSON.stringify(good) + "\n");
+  if (known.size) await writeFile(pinsPath(dir), JSON.stringify({ ...pins, [good.repo]: [...known] }) + "\n");
 }
 
 const commitSha = /^[0-9a-f]{40}$/i;
 
-const repoKey = (repo: string) => repoUrl(repo).replace(/^(?:[a-z][a-z0-9+.-]*:\/\/[^/]*github\.com(?::\d+)?\/|[^/]*github\.com:)/i, "").replace(/\.git$/, "").toLowerCase();
+const repoKey = (repo: string) =>
+  repoUrl(repo)
+    .replace(/^(?:[a-z][a-z0-9+.-]*:\/\/(?:[^/@\s]+@)?(?:(?:ssh|www)\.)?github\.com(?::\d+)?\/|(?:[^/@:\s]+@)?(?:(?:ssh|www)\.)?github\.com:)/i, "")
+    .replace(/\.git$/, "")
+    .toLowerCase();
 
 export async function unpinnedSources(refs: SourceRef[], profileDir: string): Promise<Finding[]> {
   const unpinned = refs.filter((ref) => !commitSha.test(ref.ref));
@@ -161,8 +181,9 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string): Pr
 
 async function checkedOutFromCache(dir: string, repo: string, ref: SourceRef, good: Good | undefined) {
   const commit = ref.ref.toLowerCase();
-  const fetchedHere = good?.repo === repo && (good.commit === commit || pinnedCommits(good).includes(commit));
-  if (!commitSha.test(commit) || !fetchedHere) return false;
+  if (!commitSha.test(commit) || good?.repo !== repo) return false;
+  const fetchedHere = (typeof good.commit === "string" && good.commit.toLowerCase() === commit) || ((await readPins(dir))[repo] ?? []).includes(commit);
+  if (!fetchedHere) return false;
   return (await git(dir, "checkout", "-q", "--detach", commit)).ok;
 }
 
