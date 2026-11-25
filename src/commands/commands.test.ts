@@ -272,24 +272,26 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     }
   });
 
-  test("resolves probe executables via PATH rather than shell builtins, matching hedge doctor", async () => {
+  test("resolves probe executables via PATH and rejects no-shebang scripts, matching hedge doctor", async () => {
     const { home } = await machineWithProfile();
     const bin = join(home, "bin");
     mkdirSync(bin, { recursive: true });
-    const fakeSet = join(bin, "set");
-    writeFileSync(fakeSet, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    writeFileSync(join(bin, "set"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const noShebang = join(bin, "plain-script");
+    writeFileSync(noShebang, "exit 0\n", { mode: 0o755 });
     await withTeamPack(home, {
-      workflows: [flow("external"), flow("builtin")],
+      workflows: [flow("external"), flow("builtin"), flow("noshebang")],
       human: [
         { id: "external", say: "Check external set.", probe: ["set", "--hedge-external-flag"], workflow: "external" },
         { id: "builtin", say: "Check builtin export.", probe: ["export", "HEDGE_BUILTIN=1"], workflow: "builtin" },
+        { id: "noshebang", say: "Check plain script.", probe: [noShebang], workflow: "noshebang" },
       ],
     });
     const prevPath = process.env.PATH;
     process.env.PATH = `${bin}:${prevPath ?? ""}`;
     try {
       const output = (await hedge(home, ["packs"])).output;
-      expect(output).toContain(`  ~ team  Team rules.\n      Workflows: external on, builtin needs setup\n${needsSetup}`);
+      expect(output).toContain(`  ~ team  Team rules.\n      Workflows: external on, builtin needs setup, noshebang needs setup\n${needsSetup}`);
     } finally {
       if (prevPath === undefined) delete process.env.PATH;
       else process.env.PATH = prevPath;

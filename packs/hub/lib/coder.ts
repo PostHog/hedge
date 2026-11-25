@@ -65,7 +65,8 @@ function supervisedCommand(argv: string[], locks: number[], timeoutMs: number): 
   const closeLocks = locks.map((_, index) => `${index + 4}>&-`).join(" ");
   const inner = holdingLocks(argv, locks, timeoutMs, 4, true);
   const closeAfter = closeLocks ? ` ${closeLocks}` : "";
-  const script = `exec 9<&3 3<&-; "$@" 9<&-; code=$?; exec 1>&- 2>&-${closeAfter}; read _ <&9; exit "$code"`;
+  const orphanKill = locks.length ? 'if [ "$code" = 124 ] || [ "$code" = 137 ]; then exec 1>&- 2>&-; kill -KILL 0; fi; ' : "";
+  const script = `trap ":" PIPE; exec 9<&3 3<&-; "$@" 9<&-; code=$?; ${orphanKill}exec 1>&- 2>&-${closeAfter}; read _ <&9; exit "$code"`;
   return ["/bin/sh", "-c", script, "hedge-capture", ...inner];
 }
 

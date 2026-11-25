@@ -454,9 +454,21 @@ function spawnRunner(home: string, profileDir: string | undefined): Runner {
 
 const probeSupervisor = 'interrupted=0; trap "interrupted=1" INT QUIT; "$@"; code=$?; if [ "$interrupted" = 1 ]; then trap "" TERM; kill -TERM 0 2>/dev/null || true; fi; exit "$code"';
 
+async function isKernelExecutable(path: string) {
+  try {
+    const bytes = new Uint8Array(await Bun.file(path).slice(0, 4).arrayBuffer());
+    if (bytes.length >= 2 && bytes[0] === 0x23 && bytes[1] === 0x21) return true;
+    if (bytes.length < 4) return false;
+    const magic = ((bytes[0]! << 24) | (bytes[1]! << 16) | (bytes[2]! << 8) | bytes[3]!) >>> 0;
+    return magic === 0x7f454c46 || magic === 0xfeedface || magic === 0xfeedfacf || magic === 0xcefaedfe || magic === 0xcffaedfe || magic === 0xcafebabe || magic === 0xbebafeca || magic === 0xcafebabf || magic === 0xbfbafeca;
+  } catch {
+    return false;
+  }
+}
+
 async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal) {
   const executable = command[0] ? (command[0].includes("/") ? command[0] : Bun.which(command[0], { PATH: env.PATH })) : null;
-  if (!executable || !existsSync(executable)) return 127;
+  if (!executable || !existsSync(executable) || !(await isKernelExecutable(executable))) return 127;
   const resolved = [executable, ...command.slice(1)];
   let child: { pid: number; exited: Promise<number> } | undefined;
   let stopSignal: NodeJS.Signals | undefined;
