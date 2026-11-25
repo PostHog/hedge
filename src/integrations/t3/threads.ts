@@ -125,27 +125,28 @@ export async function readThreadWords(client: T3HttpClient, value: string, state
     const answer = item.type === "user_input_request" && answeredInClient().has(item.requestId ?? "") ? item.questionAnswer : undefined;
     Object.entries(answer?.answers ?? {}).forEach(([question, chosen], index) => {
       const card = cardAnswer(item.questions ?? [], answer!, question, chosen);
-      if (card) words.push({ thread: threadId, id: `${item.id}:${index}`, text: card.text, answered: card.answered.slice(0, answeredCap), at: item.updatedAt ?? item.startedAt, source: card.source });
+      if (card) words.push({ thread: threadId, id: `${item.id}:${index}`, text: card.text, answered: card.answered.slice(0, answeredCap), at: item.updatedAt ?? item.startedAt, source: "question" });
     });
   }
   return words;
 }
 
 const otherSuffix = "_other";
+const otherPrompt = "Optional free-form answer to: ";
 const questionCountPlaceholder = /^The agent has (?:a question|\d+ questions)\.$/u;
 
-function cardAnswer(questions: CardQuestion[], { questionTextById, answers }: QuestionAnswer, id: string, chosen: string | string[]): Pick<ThreadWord, "text" | "answered" | "source"> | undefined {
+function cardAnswer(questions: CardQuestion[], { questionTextById, answers }: QuestionAnswer, id: string, chosen: string | string[]) {
   const byId = (wanted: string) => questions.find((question) => question.id === wanted);
   const asked = byId(id);
-  const otherOf = id.endsWith(otherSuffix) && asked && !asked.options?.length ? byId(id.slice(0, -otherSuffix.length)) : undefined;
-  if (otherOf) {
-    const note = noteIn(asked!, chosen);
-    return note === undefined ? undefined : { text: note, answered: promptOf(otherOf, questionTextById[otherOf.id]), source: "typed" };
-  }
   const other = byId(`${id}${otherSuffix}`);
-  if (other && !other.options?.length && noteIn(other, answers[other.id] ?? "") !== undefined) return undefined;
+  if (asked && isOtherField(asked) && byId(id.slice(0, -otherSuffix.length))) return typedInOtherField(chosen) ? { text: [chosen].flat().join(", "), answered: questionTextById[id] ?? id } : undefined;
+  if (other && isOtherField(other) && typedInOtherField(answers[other.id] ?? "")) return undefined;
   const labels = [chosen].flat().map((value) => onlyLabelOf(asked?.options ?? [], value));
-  return { text: labels.join(", "), answered: asked ? promptOf(asked, questionTextById[id]) : questionTextById[id] ?? id, source: "question" };
+  return { text: labels.join(", "), answered: asked ? promptOf(asked, questionTextById[id]) : questionTextById[id] ?? id };
+}
+
+function isOtherField(question: CardQuestion) {
+  return question.id.endsWith(otherSuffix) && question.header === "Other" && (question.question ?? "").startsWith(otherPrompt) && !question.options?.length;
 }
 
 function onlyLabelOf(options: NonNullable<CardQuestion["options"]>, value: string) {
@@ -157,9 +158,9 @@ function promptOf(question: CardQuestion, text = question.question ?? question.i
   return questionCountPlaceholder.test(text) && question.header ? question.header : text;
 }
 
-function noteIn(field: CardQuestion, chosen: string | string[]) {
-  const typed = [chosen].flat().join(", ").trim();
-  return typed !== "" && !(field.header ?? "").toLowerCase().startsWith(typed.toLowerCase()) ? typed : undefined;
+function typedInOtherField(chosen: string | string[]) {
+  const typed = [chosen].flat().join(", ").trim().toLowerCase();
+  return typed !== "" && !"other".startsWith(typed);
 }
 
 export async function readLinkedThreadWords(client: Pick<T3HttpClient, "callTool">, environmentId: string, threadId: string): Promise<ThreadWord[]> {

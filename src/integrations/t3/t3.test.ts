@@ -253,7 +253,7 @@ test("only the user's own messages and question answers in T3 count as their wor
   expect(new Set(words.map((word) => word.at))).toEqual(new Set(["2026-10-25T07:02:00Z"]));
 });
 
-test("an Antigravity card answer reads as the chosen option's label to the question its header asks, and a note the user typed in its other field replaces the pick as typed words that answer no card", async () => {
+test("an Antigravity card answer reads as the chosen option's label to the question its header asks, and a note the user typed in its other field replaces the pick and reads as on main", async () => {
   const option = (label: string, value: string) => ({ label, description: label, value });
   const card = (id: string, request: string, prompts: string[], answers: Record<string, string | string[]>) => {
     const placeholder = prompts.length === 1 ? "The agent has a question." : `The agent has ${prompts.length} questions.`;
@@ -278,6 +278,16 @@ test("an Antigravity card answer reads as the chosen option's label to the quest
     card("c4", "r4", ["Accept the panel gap of example/product#5?"], { q1: "1", q1_other: "" }),
     card("c5", "r5", ["Accept the panel gap of example/product#6?"], { q1: "3", q1_other: "" }),
     card("c6", "r6", ["Accept the panel gap of example/product#7?"], { q1_other: "Accept once CI is green" }),
+    {
+      item: {
+        id: "c7", requestId: "r7", type: "user_input_request", startedAt: "2026-11-24T21:08:25Z", updatedAt: "2026-11-25T04:03:04Z",
+        questions: [
+          { id: "deployment", header: "Deployment", question: "Which deployment?", options: [option("Blue", "1"), option("Green", "2")] },
+          { id: "deployment_other", header: "Notes", question: "Anything else?", options: [] },
+        ],
+        questionAnswer: { questionTextById: { deployment: "Which deployment?", deployment_other: "Anything else?" }, answers: { deployment: "2", deployment_other: "Ship it on Friday" } },
+      },
+    },
   ];
   items.find(({ item }) => item.id === "c5")!.item.questions[0]!.options = [option("Keep the gap open", "3"), option("Accept the panel gap", "3")];
   const events = t3EventStore([
@@ -287,6 +297,7 @@ test("an Antigravity card answer reads as the chosen option's label to the quest
     { thread: "mcp:thread-1", request: "r4", command: "mcp:5e8e5034-6aa6-412d-96d9-ccdff6d979e5" },
     { thread: "mcp:thread-1", request: "r5", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000005" },
     { thread: "mcp:thread-1", request: "r6", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000006" },
+    { thread: "mcp:thread-1", request: "r7", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000007" },
   ]);
   const client = {
     getShell: async () => ({ projects: [], threads: [{ id: "mcp:thread-1" }] }),
@@ -296,13 +307,15 @@ test("an Antigravity card answer reads as the chosen option's label to the quest
 
   const words = await readThreadWords(client as never, "thread-1", events);
 
-  expect(words.map((word) => [word.id, word.text, word.answered, word.source])).toEqual([
-    ["c1:0", "Accept the panel gap (Recommended)", "Accept the panel gap of example/product#1?", "question"],
-    ["c1:2", "Keep the gap open", "Accept the panel gap of example/product#2?", "question"],
-    ["c2:1", "Only once CI is green", "Accept the panel gap of example/product#3?", "typed"],
-    ["c3:0", "Keep the gap open", "Accept the panel gap of example/product#4?", "question"],
-    ["c5:0", "3", "Accept the panel gap of example/product#6?", "question"],
-    ["c6:0", "Accept once CI is green", "Accept the panel gap of example/product#7?", "typed"],
+  expect(words.map((word) => [word.id, word.text, word.answered])).toEqual([
+    ["c1:0", "Accept the panel gap (Recommended)", "Accept the panel gap of example/product#1?"],
+    ["c1:2", "Keep the gap open", "Accept the panel gap of example/product#2?"],
+    ["c2:1", "Only once CI is green", "Optional free-form answer to: Accept the panel gap of example/product#3?"],
+    ["c3:0", "Keep the gap open", "Accept the panel gap of example/product#4?"],
+    ["c5:0", "3", "Accept the panel gap of example/product#6?"],
+    ["c6:0", "Accept once CI is green", "Optional free-form answer to: Accept the panel gap of example/product#7?"],
+    ["c7:0", "Green", "Which deployment?"],
+    ["c7:1", "Ship it on Friday", "Anything else?"],
   ]);
 });
 

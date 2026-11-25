@@ -449,11 +449,12 @@ test("the user's pick on an Antigravity card accepts the gap its question names,
       questionAnswer: { questionTextById: { q1: "The agent has a question.", q1_other: `Optional free-form answer to: ${question}` }, answers: { q1: "1", q1_other: other } },
     },
   });
-  const items = [card("conditional", "Yes, only after CI is green")];
+  const items = [card("earlier", "O"), card("conditional", "Yes, only after CI is green")];
   const t3 = await startT3Stub({
     shell: { projects: [], threads: [{ id: "mcp:thread-9", title: "Proof", projectId: "project", status: "idle" }] },
     turnItems: { "mcp:thread-9": items },
     resolutions: [
+      { thread: "mcp:thread-9", request: "earlier-request", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000003" },
       { thread: "mcp:thread-9", request: "conditional-request", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000001" },
       { thread: "mcp:thread-9", request: "card-request", command: "0f38263e-3c0c-45c0-9c6c-1a73d6000002" },
     ],
@@ -465,9 +466,7 @@ test("the user's pick on an Antigravity card accepts the gap its question names,
     await pr.hedge("gap", "--kind", "prod-shape", "--reason", "No sandbox");
     const accept = (...quote: string[]) => pr.decide("record", "--mark", "👤", "--class", "proof-gap", "--kind", "prod-shape", "--pr", "example/product#42", "--thread", "thread-9", ...quote);
 
-    await expect(accept()).rejects.toThrow("No answer of the user's to a question tool in thread thread-9 names example/product#42");
-    await expect(accept("--words", `2026-11-25 "Yes, only after CI is green"`)).rejects.toThrow(`"Yes, only after CI is green" is a message the user typed`);
-    await expect(accept("--words", `2026-11-25 "Accept the gap (Recommended)"`)).rejects.toThrow("is not in a message of the user's in thread thread-9");
+    await expect(accept()).rejects.toThrow(`The user chose "Yes, only after CI is green" to a question that does not ask`);
     items.push(card("card", "O"));
     expect((await accept()).code).toBe(0);
     expect(ledgerDecisions(pr)).toMatchObject([{ question, answer: `2026-11-25 "Accept the gap (Recommended)"`, where: { thread: "mcp:thread-9", message: "card:0" } }]);
