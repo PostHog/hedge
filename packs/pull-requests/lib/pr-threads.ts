@@ -6,22 +6,22 @@ export type ThreadReport = { output: string; exitCode: 0 | 1 };
 
 type Author = { __typename: string; login: string } | null;
 type Page<T> = { nodes: T[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
-type Comment = { author: Author; url: string; reactions?: { nodes: { user: { login: string } | null }[] } };
+type Comment = { author: Author; url: string; reactionGroups?: { content: string; viewerHasReacted: boolean }[] };
 type GraphThread = { id: string; isResolved: boolean; path: string; line: number | null; originalLine: number | null; comments: Page<Comment> };
 export type Thread = { id: string; kind: "bot" | "human"; answered: boolean; location: string; url: string };
 
 const usage = "Usage: hedge pr bot-threads|blockers --repo <owner/repo> --pr <number> [--resolve] [--fixed <thread URL>]... | [--record]";
 const knownBots = new Set(["coderabbitai", "greptile-apps", "posthog", "posthog-bot", "posthog-security-review-bot", "parameterai", "veria-ai", "github-advanced-security", "stamphog", "trunk-io", "github-actions", "dependabot", "renovate", "vercel", "codecov"]);
 
-const commentFields = "pageInfo { hasNextPage endCursor } nodes { url author { __typename login } reactions(content: THUMBS_UP, first: 20) { nodes { user { login } } } }";
+const commentFields = "pageInfo { hasNextPage endCursor } nodes { url author { __typename login } reactionGroups { content viewerHasReacted } }";
 const threadsQuery = `query($owner: String!, $repo: String!, $number: Int!, $after: String) {
   viewer { login }
-  repository(owner: $owner, name: $repo) { pullRequest(number: $number) { reviewThreads(first: 100, after: $after) {
+  repository(owner: $owner, name: $repo) { pullRequest(number: $number) { reviewThreads(first: 50, after: $after) {
     pageInfo { hasNextPage endCursor }
-    nodes { id isResolved path line originalLine comments(first: 100) { ${commentFields} } }
+    nodes { id isResolved path line originalLine comments(first: 20) { ${commentFields} } }
   } } }
 }`;
-const commentsQuery = `query($id: ID!, $after: String) { node(id: $id) { ... on PullRequestReviewThread { comments(first: 100, after: $after) { ${commentFields} } } } }`;
+const commentsQuery = `query($id: ID!, $after: String) { node(id: $id) { ... on PullRequestReviewThread { comments(first: 50, after: $after) { ${commentFields} } } } }`;
 const resolveMutation = "mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { id } } }";
 
 export function parsePrArgs(args: string[]): BotThreadOptions {
@@ -45,7 +45,7 @@ export const awaitsAnswer = (thread: Thread) => thread.kind === "bot" && !thread
 
 export async function unresolvedThreads(target: PullRequestTarget, gh: Gh): Promise<{ viewer: string; threads: Thread[] }> {
   const { viewer, threads } = await fetchThreads(target, gh);
-  return { viewer, threads: threads.filter((thread) => !thread.isResolved).map((thread) => classify(thread, viewer)) };
+  return { viewer, threads: threads.map((thread) => classify(thread, viewer)) };
 }
 
 export async function openBotFindings(target: PullRequestTarget, gh: Gh): Promise<Thread[]> {
@@ -80,7 +80,7 @@ async function fetchThreads(options: PullRequestTarget, gh: Gh): Promise<{ viewe
     const page: Page<GraphThread> | undefined = response.data?.repository?.pullRequest?.reviewThreads;
     if (!page) throw new Error(`No pull request ${options.repo}#${options.pr}`);
     viewer = response.data.viewer.login;
-    threads.push(...page.nodes);
+    threads.push(...page.nodes.filter((thread) => !thread.isResolved));
     after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
   } while (after);
   for (const thread of threads) thread.comments.nodes.push(...await remainingComments(thread, gh));
@@ -109,7 +109,7 @@ function classify(thread: GraphThread, viewer: string): Thread {
   return {
     id: thread.id,
     kind: isBot(comments[0]?.author ?? null) && others.every((comment) => isBot(comment.author)) ? "bot" : "human",
-    answered: comments.at(-1)?.author?.login === viewer || (comments.at(-1)?.reactions?.nodes ?? []).some((reaction) => reaction.user?.login === viewer),
+    answered: comments.at(-1)?.author?.login === viewer || (comments.at(-1)?.reactionGroups ?? []).some((group) => group.content === "THUMBS_UP" && group.viewerHasReacted),
     location: line === null ? thread.path : `${thread.path}:${line}`,
     url: comments[0]?.url ?? "",
   };
