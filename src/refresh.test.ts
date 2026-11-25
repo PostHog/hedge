@@ -219,4 +219,39 @@ describe("hedge refresh", () => {
     expect(await box.hedge("refresh")).toBe(1);
     expect(box.lines.join("\n")).toContain("could not reach");
   });
+
+  test("refreshes a branch across refs/heads/ respellings and branch fallbacks, never a tag fallback or malformed record", async () => {
+    const box = await machine("main");
+    box.pin("refs/heads/main");
+    await v2(box.repo);
+    expect(await box.hedge("refresh")).toBe(0);
+    expect(box.read(guide)).toBe("Rules v2.\n");
+
+    await spawnGit(box.repo, "checkout", "-q", "-b", "release");
+    writeFileSync(join(box.repo, "packs/team/pack.json"), "{broken");
+    await spawnGit(box.repo, "commit", "-q", "-am", "broken");
+    box.pin("release");
+    expect(await box.hedge("apply", "--profile", box.profile)).toBe(0);
+    expect(box.read(guide)).toBe("Rules v2.\n");
+    await spawnGit(box.repo, "reset", "-q", "--hard", "HEAD~1");
+    await commit(box.repo, "v3", { "packs/team/rules.md": "Rules v3.\n", "packs/team/AGENTS.md": "Team v3.\n", "packs/team/skills/review/SKILL.md": "# review\n" });
+    expect(await box.hedge("refresh")).toBe(0);
+    expect(box.read(guide)).toBe("Rules v3.\n");
+
+    await spawnGit(box.repo, "checkout", "-q", "-b", "v2");
+    writeFileSync(join(box.repo, "packs/team/pack.json"), "{broken");
+    await spawnGit(box.repo, "commit", "-q", "-am", "broken tag");
+    await spawnGit(box.repo, "tag", "-f", "v2");
+    await spawnGit(box.repo, "reset", "-q", "--hard", "HEAD~1");
+    await commit(box.repo, "branch-v2", { "packs/team/rules.md": "Branch v2.\n", "packs/team/AGENTS.md": "Team v2.\n", "packs/team/skills/review/SKILL.md": "# review\n" });
+    box.pin("v2");
+    expect(await box.hedge("apply", "--profile", box.profile)).toBe(0);
+    expect(await box.hedge("refresh")).toBe(0);
+    expect(box.read(guide)).toBe("Rules v3.\n");
+
+    writeFileSync(join(box.cache, "team/.git/hedge-source.json"), "{}");
+    box.pin("release");
+    expect(await box.hedge("refresh")).toBe(0);
+    expect(box.read(guide)).toBe("Rules v3.\n");
+  });
 });

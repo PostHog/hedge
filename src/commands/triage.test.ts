@@ -224,18 +224,47 @@ describe("hedge triage", () => {
     for (const leaked of ["secret-team", "incomplete-team", "internal-release", "private-packs"]) expect(issue.input).not.toContain(leaked);
   });
 
-  test("still redacts secrets, query credentials, and user paths when a source branch shares their keyword", async () => {
+  test("still redacts secrets, query credentials, credential-bearing source URLs, bracketed branches, unpaired surrogates, and user paths", async () => {
     const home = temp.make("home-");
     mkdirSync(join(home, ".config/hedge"), { recursive: true });
-    writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "mac", name: "ssh-silver-fox", setup: { done: ["bootstrap"], draft: { sources: [{ name: "team-a", repo: "PostHog/hedge", ref: "password" }, { name: "team-b", repo: "PostHog/hedge", ref: "auth" }, { name: "team-c", repo: "PostHog/hedge", ref: "users" }] } } }));
+    writeFileSync(
+      join(home, ".config/hedge/machine.json"),
+      JSON.stringify({
+        schema: 1,
+        role: "mac",
+        name: "ssh-silver-fox",
+        setup: {
+          done: ["bootstrap"],
+          draft: {
+            sources: [
+              { name: "team-a", repo: "PostHog/hedge", ref: "password" },
+              { name: "team-b", repo: "PostHog/hedge", ref: "auth" },
+              { name: "team-c", repo: "PostHog/hedge", ref: "users" },
+              { name: "team-d", repo: "https://nora:topsecret@git.example.com/secret-owner/secret-repo.git", ref: "internal-release" },
+              { name: "team-e", repo: "PostHog/hedge", ref: "bad\uD800ref" },
+            ],
+          },
+        },
+      }),
+    );
     mkdirSync(join(home, ".local/state/hedge/logs"), { recursive: true });
-    writeFileSync(join(home, ".local/state/hedge/logs/setup.log"), "PASSWORD=correct-horse-battery-staple\nGET https://example.com/cb?auth=super-secret-value\nread /Users/alice/.ssh/config\n");
+    writeFileSync(
+      join(home, ".local/state/hedge/logs/setup.log"),
+      [
+        "PASSWORD=correct-horse-battery-staple",
+        "GET https://example.com/cb?auth=super-secret-value",
+        "read /Users/alice/.ssh/config",
+        "fetch https://nora:topsecret@git.example.com/secret-owner/secret-repo.git <internal-release>",
+      ].join("\n") + "\n",
+    );
     const result = await triage(home, ["--send"], []);
+    expect(result.code).toBe(0);
     const issue = result.sent.find((call) => call.command[1] === "issue")!;
     expect(issue.input).toContain("<branch>=<redacted>");
     expect(issue.input).toContain("https://example.com/cb?<branch>=<redacted>");
     expect(issue.input).toContain("read /<branch>/<user>/.ssh/config");
-    for (const leaked of ["correct-horse-battery-staple", "super-secret-value", "alice"]) expect(issue.input).not.toContain(leaked);
+    expect(issue.input).toContain("fetch <team-d source> <<branch>>");
+    for (const leaked of ["correct-horse-battery-staple", "super-secret-value", "alice", "topsecret", "secret-owner", "secret-repo", "internal-release"]) expect(issue.input).not.toContain(leaked);
   });
 
   test("a long title is cut after redaction, so no part of a secret reaches the issue", async () => {

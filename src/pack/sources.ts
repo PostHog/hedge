@@ -1,5 +1,5 @@
 import { existsSync, realpathSync } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, relative, resolve, sep } from "node:path";
 import { loadPacks } from "./manifest.ts";
@@ -137,28 +137,37 @@ function pinsPath(dir: string) {
   return join(dir, ".git", "hedge-pins.json");
 }
 
-async function readPins(dir: string): Promise<Record<string, string[]>> {
+async function writeAtomic(path: string, content: string) {
+  const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temp, content);
+  await rename(temp, path);
+}
+
+async function readPins(dir: string): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
   try {
     const raw = JSON.parse(await readFile(pinsPath(dir), "utf8")) as unknown;
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-    const out: Record<string, string[]> = {};
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
     for (const [repo, list] of Object.entries(raw)) {
-      if (Array.isArray(list)) out[repo] = list.filter((commit): commit is string => typeof commit === "string" && commitSha.test(commit)).map((commit) => commit.toLowerCase());
+      if (Array.isArray(list)) out.set(repo, list.filter((commit): commit is string => typeof commit === "string" && commitSha.test(commit)).map((commit) => commit.toLowerCase()));
     }
     return out;
   } catch {
-    return {};
+    return out;
   }
 }
 
 async function saveGood(dir: string, good: Good) {
   const before = await lastGood(dir);
   const pins = await readPins(dir);
-  const known = new Set(pins[good.repo] ?? []);
+  const known = new Set(pins.get(good.repo) ?? []);
   if (before?.repo === good.repo && typeof before.commit === "string" && commitSha.test(before.commit)) known.add(before.commit.toLowerCase());
   if (commitSha.test(good.commit)) known.add(good.commit.toLowerCase());
-  await writeFile(goodPath(dir), JSON.stringify(good) + "\n");
-  if (known.size) await writeFile(pinsPath(dir), JSON.stringify({ ...pins, [good.repo]: [...known] }) + "\n");
+  await writeAtomic(goodPath(dir), JSON.stringify(good) + "\n");
+  if (known.size) {
+    pins.set(good.repo, [...known]);
+    await writeAtomic(pinsPath(dir), JSON.stringify(Object.fromEntries(pins)) + "\n");
+  }
 }
 
 const commitSha = /^[0-9a-f]{40}$/i;
@@ -182,7 +191,7 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string): Pr
 async function checkedOutFromCache(dir: string, repo: string, ref: SourceRef, good: Good | undefined) {
   const commit = ref.ref.toLowerCase();
   if (!commitSha.test(commit) || good?.repo !== repo) return false;
-  const fetchedHere = (typeof good.commit === "string" && good.commit.toLowerCase() === commit) || ((await readPins(dir))[repo] ?? []).includes(commit);
+  const fetchedHere = (typeof good.commit === "string" && good.commit.toLowerCase() === commit) || (await readPins(dir)).get(repo)?.includes(commit) === true;
   if (!fetchedHere) return false;
   return (await git(dir, "checkout", "-q", "--detach", commit)).ok;
 }

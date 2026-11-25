@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
-import { cachedSource, fetchSource, followsBranch } from "./sources.ts";
+import { cachedSource, fetchSource } from "./sources.ts";
 
 isolateGit();
 const temp = tempDirs();
@@ -309,25 +309,22 @@ describe("fetchSource", () => {
     expect([fetched.packs[0]?.manifest.summary, fetched.stale]).toEqual(["Team rules v1.", undefined]);
   });
 
-  test("follows a branch across refs/heads/ respellings and branch fallbacks, never a tag fallback or malformed record", async () => {
-    const repo = await packRepo("Team rules v1.");
-    await spawnGit(repo, "tag", "v2");
+  test("records pinned history even for a relative repository path named after an Object property", async () => {
     const cache = temp.make("cache-");
-    const main = { name: "team", repo, ref: "main" };
-    await fetchSource(main, cache);
-    expect(await followsBranch({ ...main, ref: "refs/heads/main" }, cache)).toBe(true);
-
-    writeFileSync(join(repo, "packs/team/pack.json"), "{broken");
-    await spawnGit(repo, "commit", "-q", "-am", "broken");
-    await spawnGit(repo, "tag", "-f", "v2");
-    expect(await fetchSource({ ...main, ref: "v2" }, cache)).toMatchObject({ stale: expect.stringContaining("does not load") });
-    expect(await followsBranch({ ...main, ref: "v2" }, cache)).toBe(false);
-
-    expect(await fetchSource({ ...main, ref: "refs/heads/main" }, cache)).toMatchObject({ stale: expect.stringContaining("does not load") });
-    expect(await followsBranch(main, cache)).toBe(true);
-
-    writeFileSync(join(cache, "team", ".git", "hedge-source.json"), "{}");
-    expect(await followsBranch(main, cache)).toBe(false);
+    const repo = join(cache, "team", "constructor");
+    mkdirSync(repo, { recursive: true });
+    await spawnGit(repo, "init", "-q", "-b", "main");
+    writePack(repo, "Proto rules.");
+    await spawnGit(repo, "add", ".");
+    await spawnGit(repo, "commit", "-q", "-m", "v1");
+    const commit = await spawnGit(repo, "rev-parse", "HEAD");
+    const first = await fetchSource({ name: "team", repo: "constructor", ref: commit }, cache);
+    if ("error" in first) throw new Error(first.error);
+    expect(first.packs[0]?.manifest.summary).toBe("Proto rules.");
+    rmSync(repo, { recursive: true, force: true });
+    const offline = await fetchSource({ name: "team", repo: "constructor", ref: commit }, cache);
+    if ("error" in offline) throw new Error(offline.error);
+    expect([offline.packs[0]?.manifest.summary, offline.stale]).toEqual(["Proto rules.", undefined]);
   });
 
   test("preserves a pre-upgrade pinned commit after applying a second pin, and keeps pin history across an older binary write", async () => {
