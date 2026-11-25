@@ -446,7 +446,7 @@ line, starts "merge card:": the merge-risk grade and door, the review rounds and
 review budget, each gap with who accepted it and why, each item under Known issues, and the minutes from opened to
 ready and from ready to now; --json carries it as mergeCard. A pass records the gaps that 🤖 decisions accepted, here
 and in the ledger, and the merge-gate hook then holds that head until the user chooses "Merge" on a merge card that
-names the PR, its full head sha, and each held decision id with every proof kind it accepts, recorded with
+names the PR, its full head sha, and each held decision as the hook names it, such as d-1a2b3c4d for live-run/prod-shape, recorded with
 hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full head sha>: merge card'. Own tooling
 and repositories that skip the gate are held too. --wait
 <minutes>, at most 120, waits up to that long for running CI to finish, reading CI every 30 seconds, and stops early

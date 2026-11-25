@@ -123,7 +123,10 @@ test("a merge word lifts an agent's gap decision only when its card named every 
   await pr.hedge("gap", "--kind", "prod-shape", "--reason", "No production read access");
   expect((await pr.hedge("gate")).output).toContain(`prod-shape: gap from ${head.slice(0, 7)}, accepted by 🤖 decision ${id}`);
   expect(await merge()).toContain(`(🤖 ${id} for live-run/prod-shape) itself`);
-  pr.choose("Merge", `Merge example/product#42 at ${head}? An agent accepted ${id} for live-run and prod-shape.`);
+  pr.choose("Merge", `Merge example/product#42 at ${head}? An agent accepted ${id} for live-run, and d-0000 for prod-shape.`);
+  expect((await pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${head}: merge card`)).code).toBe(0);
+  expect(await merge()).toContain(`(🤖 ${id} for live-run/prod-shape) itself`);
+  pr.choose("Merge", `Merge example/product#42 at ${head}? An agent accepted ${id} for live-run/prod-shape.`);
   expect((await pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${head}: merge card`)).code).toBe(0);
   expect(await merge()).toBeUndefined();
 });

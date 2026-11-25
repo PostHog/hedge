@@ -17,10 +17,11 @@
 - A gate pass records the gaps that an agent accepted with 🤖 decisions. The
   merge-gate hook refuses an enqueue or merge of that head until the person
   chooses "Merge" on a merge card that names the PR, its full head sha, and
-  each held decision id with every proof kind that decision accepts:
+  each held decision as the refusal names it, its id with every proof kind
+  it accepts, such as `d-1a2b3c4d for live-run/prod-shape`:
   `hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full head sha>: merge card'`.
   The recorder refuses any other choice, and a question without that head.
-  The answer lifts only the decisions whose id and kinds its question named,
+  The answer lifts only the decisions its question named that way,
   so a gap that a decision accepts later still shows on a card. A push leaves
   it behind. A gate override for the head lifts the hold too.
 - The hold covers repositories in `guards.merge-gate-exempt` too, which still

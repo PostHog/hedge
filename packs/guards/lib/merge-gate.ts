@@ -372,7 +372,7 @@ function agentGapsAt(results: GateResult[], decisions: DecisionState[], layer: L
 
 const kindsOf = (decisions: DecisionState[], id: string) => decisions.find((decision) => decision.id === id)?.scope.kinds ?? [];
 const heldName = (decisions: DecisionState[], id: string) => kindsOf(decisions, id).length ? `${id} for ${kindsOf(decisions, id).join("/")}` : id;
-const cardNames = (decisions: DecisionState[], id: string, question: string) => [id, ...kindsOf(decisions, id)].every((name) => namesId(question, name));
+const cardNames = (decisions: DecisionState[], id: string, question: string) => namesId(question, heldName(decisions, id));
 
 const heldLayer = (results: GateResult[], decisions: DecisionState[], layer: Layer) => {
   if (decisions.some((decision) => overrideAt(decision, layer))) return [];
@@ -385,7 +385,7 @@ const overrideHint = (person: string) => `For an incident fix that cannot wait f
   + `with \`hedge decision record --mark 👤 --class merge --kind ${gateOverride} --pr <owner/repo#n> --condition '<full head sha>: <incident and why>'\`.`;
 
 const heldReason = (held: string[], person: string) => `Hedge blocked this merge: an agent accepted proof gaps of ${held.join("; ")} itself, so it merges only on ${person}'s word for that head, whatever else lets it merge: own tooling, a standing merge grant, or full send. `
-  + `Show it on a merge card: ask ${person} with the question tool, naming the PR, its full head sha, and each held decision id with every proof kind it accepts, with the options "${mergeCardChoice}" and "Keep it open". When they choose "${mergeCardChoice}", record the answer with \`hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full 40-character head sha>: merge card'\`, then merge again. The answer lifts only the decisions whose id and kinds its question named, and a push leaves it behind; a gate pass at the new head that saw no such gap lifts the hold.`;
+  + `Show it on a merge card: ask ${person} with the question tool, naming the PR, its full head sha, and each held decision as this message names it, such as \`d-1a2b3c4d for live-run/prod-shape\`, with the options "${mergeCardChoice}" and "Keep it open". When they choose "${mergeCardChoice}", record the answer with \`hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full 40-character head sha>: merge card'\`, then merge again. The answer lifts only the decisions its question named that way, and a push leaves it behind; a gate pass at the new head that saw no such gap lifts the hold.`;
 
 const unreadReason = (repositories: string[]) => `Hedge blocked this merge: the decision ledger could not be read, so the merge gate cannot tell whether an agent accepted a proof gap in ${repositories.join(", ")} itself, and such a gap holds a merge until the person's word. Try again when the hub answers.`;
 
