@@ -467,7 +467,12 @@ requires any, every check counts. On a draft, a required check named "<workflow>
 as withheld from drafts when its workflow reported other checks on the commit and all of them passed. For a check
 pinned to an app, those are the app's own checks, with at least one check run. On a draft, a required check that
 pull-requests.draftSkippedChecks lists for the repository, as owner/name=check pairs, counts as withheld while no
-check of its name reported; once its own app posts it, it counts. A ready PR needs it. CI is unknown
+check of its name reported; once its own app posts it, it counts. A ready PR needs it. A required check that
+pull-requests.personChecks lists for the repository, such as a visual review that a person accepts, never holds the
+gate and needs no ci gap: the CI line names it, without its result, and GitHub holds the merge until the person passes
+it. This holds only when the PR's own base requires the check pinned to an app, requires its context once, requires no
+other check of its workflow, and no other app runs a check of its name; otherwise the check counts as any required
+check. CI is unknown
 when GitHub does not answer for the rulesets or branch protection. A clean merge of the PR's base carries the review and the evidence of
 its other parent forward. The review needs a finished --lens panel round on the PR, and HEAD read by a panel round or
 by a review that finished after one, such as a final read; single-reviewer rounds alone never count. The first round
