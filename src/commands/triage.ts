@@ -181,7 +181,7 @@ function knownNames(hostname: string, machine: MachineFile | undefined, profile:
     if (typeof source.ref === "string" && !/^[0-9a-f]{40}$/i.test(source.ref)) {
       const trimmedRef = source.ref.endsWith(":") ? source.ref.slice(0, -1) : source.ref;
       const shortRef = trimmedRef.replace(/^refs\/heads\//, "");
-      const forcedRef = shortRef.startsWith("+") ? shortRef.slice(1).replace(/^refs\/heads\//, "") : undefined;
+      const forcedRef = trimmedRef.startsWith("+") ? trimmedRef.slice(1).replace(/^refs\/heads\//, "") : undefined;
       for (const candidate of new Set([source.ref, trimmedRef, shortRef, ...(forcedRef ? [forcedRef] : [])])) {
         if (candidate && candidate !== "main" && candidate !== "master" && !/^[0-9a-f]{40}$/i.test(candidate)) {
           names.push({ text: candidate, as: "<branch>", after: true });

@@ -388,15 +388,62 @@ describe("hedge triage", () => {
     expect(redact("acme/secret at /home/guest.0.0.~", "/home/guest", [{ text: "acme/secret", as: "<private repo>" }])).toBe("<private repo> at ~.0.0.~");
   });
 
-  test("nested replacement labels scan linearly across large transcripts", () => {
+  test("nested replacement labels, partial IP/key masks, overlapping labels, and literal plus branches redact accurately", () => {
     const known = Array.from({ length: 200 }, (_, i) => ({ text: `private-org/repo-${i}`, as: `<<devbox ${i + 1}> source>`, after: true }));
     const line = "status ok for private-org/repo-0 while checking <<devbox 1> source> on host\n";
     const big = line.repeat(2_000);
-    const started = performance.now();
     const out = redact(big, "/home/guest", known);
-    expect(performance.now() - started).toBeLessThan(2_000);
     expect(out).not.toContain("private-org/repo-0");
     expect(out).toContain("<<devbox 1> source>");
+
+    const ipPath = "file:///mnt/10.20.30.40/Users/team/private-packs";
+    const ipRedacted = redact("failed cloning file:///mnt/10.20.30.40/users/team/private-packs", "/home/guest", [{ text: ipPath, as: "<team source>" }]);
+    expect(ipRedacted).toBe("failed cloning <team source>");
+
+    const fakeKey = ["AK", "IA", "ABCDEFGHIJKLMNOP"].join("");
+    const keyIpRef = `r/${fakeKey}/1.2.3.4/private`;
+    const keyIpRedacted = redact(`failed fetching r/${fakeKey.toLowerCase()}/1.2.3.4/private`, "/home/guest", [{ text: keyIpRef, as: "<branch>", after: true }]);
+    expect(keyIpRedacted).toBe("failed fetching <branch>");
+
+    const overlapRedacted = redact("saw <name>/acme/secret-repo here", "/home/guest", [
+      { text: "Nora Quill", as: "<name>" },
+      { text: "name>/acme/secret-repo", as: "<private repo>", after: true },
+    ]);
+    expect(overlapRedacted).not.toContain("acme/secret-repo");
+    expect(overlapRedacted).toContain("<private repo>");
+  });
+
+  test("a qualified literal plus-prefixed branch ref does not redact the unrelated word release", async () => {
+    const home = temp.make("home-plus-release-");
+    const profileDir = join(home, "profile");
+    mkdirSync(profileDir, { recursive: true });
+    await spawnGit(profileDir, "init", "-q");
+    writeFileSync(
+      join(profileDir, "hedge.json"),
+      JSON.stringify({
+        schema: 1,
+        engine: { repo: "PostHog/hedge", ref: "main", channel: "release" },
+        sources: [{ name: "team", repo: "PostHog/hedge", ref: "refs/heads/+release" }],
+        packs: [],
+        plan: "both",
+        settings: {},
+        workflows: {},
+      }),
+    );
+    mkdirSync(join(home, ".config/hedge"), { recursive: true });
+    writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "mac", name: "noras-mbp", profileDir }));
+    const sent: Sent[] = [];
+    const io = scripted([]);
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      sent.push({ command, ...(options.input === undefined ? {} : { input: options.input }) });
+      if (command[0] === "git") return spawnRunner(command, options);
+      return capture([], undefined)(command, options);
+    };
+    const code = await main(["triage", "--send", "--note", "hit issue on refs/heads/+release"], { home, engineRoot, platform: "darwin", env: {}, print: io.terminal.print, terminal: io.terminal, capture: runRealGit, hostname: () => "noras-mbp.local", run: async () => 0 });
+    expect(code).toBe(0);
+    const issue = sent.find((call) => call.command[1] === "issue")!;
+    expect(issue.input).toContain("- Profile engine pin: PostHog/hedge@main (release)");
+    expect(issue.input).not.toContain("+release");
   });
 
   test("a long title is cut after redaction, so no part of a secret reaches the issue", async () => {

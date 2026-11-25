@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
-import { advanceSource, cachedSource, fetchSource, followsBranch } from "./sources.ts";
+import { advanceSource, cachedSource, fetchSource, followsBranch, unpinnedSources } from "./sources.ts";
 
 isolateGit();
 const temp = tempDirs();
@@ -713,6 +713,41 @@ esac
       expect(pinBAncestor.stale).toContain("could not fetch");
       expect(pinBAncestor.packs[0]?.manifest.summary).toBe("Repo A c3.");
     }
+  });
+
+  test("unpinnedSources preserves trailing spaces in remote.origin.url when comparing local paths and batches multi-refresh history checks", async () => {
+    const root = temp.make("origin-space-");
+    const profileDir = join(root, "profile");
+    mkdirSync(profileDir, { recursive: true });
+    await spawnGit(profileDir, "init", "-q");
+    const spacedOrigin = join(root, "repo ");
+    const plainSource = join(root, "repo");
+    await spawnGit(profileDir, "remote", "add", "origin", spacedOrigin);
+    const findings = await unpinnedSources([{ name: "ext", repo: plainSource, ref: "main" }], profileDir);
+    expect(findings.map((f) => f.id)).toEqual(["source:unpinned:ext"]);
+
+    const repo = await packRepo("R0.");
+    const cache = temp.make("cache-multi-refresh-");
+    const ref = { name: "team", repo, ref: "main" };
+    let prev = await spawnGit(repo, "rev-parse", "HEAD");
+    const init = await fetchSource(ref, cache);
+    if ("error" in init) throw new Error(init.error);
+    let midCommit = "";
+    for (let i = 1; i <= 4; i++) {
+      writePack(repo, `R${i}a.`);
+      await spawnGit(repo, "commit", "-q", "-am", `r${i}a`);
+      if (i === 1) midCommit = await spawnGit(repo, "rev-parse", "HEAD");
+      writePack(repo, `R${i}b.`);
+      await spawnGit(repo, "commit", "-q", "-am", `r${i}b`);
+      const moved = await advanceSource(ref, cache, prev);
+      expect(moved.state).toBe("moved");
+      prev = await spawnGit(repo, "rev-parse", "HEAD");
+    }
+    rmSync(repo, { recursive: true, force: true });
+    const pinnedMid = await fetchSource({ name: "team", repo, ref: midCommit }, cache);
+    if ("error" in pinnedMid) throw new Error(pinnedMid.error);
+    expect(pinnedMid.stale).toBeUndefined();
+    expect(pinnedMid.packs[0]?.manifest.summary).toBe("R1a.");
   });
 
 });

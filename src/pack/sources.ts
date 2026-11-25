@@ -496,6 +496,33 @@ async function exactPinTarget(dir: string, repoHash: string, oid: string): Promi
   return commit.ok && gitHash.test(commit.stdout) ? commit.stdout.toLowerCase() : undefined;
 }
 
+async function isNotAncestorOf(dir: string, oid: string, stopOid: string): Promise<boolean> {
+  const checked = await git(dir, "merge-base", "--is-ancestor", oid, stopOid);
+  return checked.code === 1;
+}
+
+async function outsideAnyStop(dir: string, oid: string, stops: Set<string>, pinPrefix: string): Promise<boolean> {
+  if (!stops.size) return false;
+  if (stops.size === 1) {
+    return isNotAncestorOf(dir, oid, [...stops][0]!);
+  }
+  const [allPinsRes, descPinsRes] = await Promise.all([
+    git(dir, "for-each-ref", "--format=%(objectname)", pinPrefix),
+    git(dir, "for-each-ref", "--contains", oid, "--format=%(objectname)", pinPrefix),
+  ]);
+  if (!allPinsRes.ok || !descPinsRes.ok) return false;
+  const allPins = new Set(allPinsRes.stdout.split("\n").map((s) => s.trim().toLowerCase()).filter((s) => gitHash.test(s)));
+  const descPins = new Set(descPinsRes.stdout.split("\n").map((s) => s.trim().toLowerCase()).filter((s) => gitHash.test(s)));
+  for (const stopOid of stops) {
+    if (allPins.has(stopOid)) {
+      if (!descPins.has(stopOid)) return true;
+      continue;
+    }
+    if (await isNotAncestorOf(dir, oid, stopOid)) return true;
+  }
+  return false;
+}
+
 async function pinTarget(dir: string, repoHash: string, oid: string): Promise<string | undefined> {
   const exact = await exactPinTarget(dir, repoHash, oid);
   if (exact) return exact;
@@ -505,13 +532,14 @@ async function pinTarget(dir: string, repoHash: string, oid: string): Promise<st
   if (!type.ok || type.stdout !== "commit") return undefined;
   const containing = await git(dir, "for-each-ref", "--contains", normalized, "--format=%(refname)", `refs/hedge/history/${repoHash}/`);
   if (!containing.ok || !containing.stdout) return undefined;
+  const stops = new Set<string>();
   for (const line of containing.stdout.split("\n")) {
     const stopOid = line.trim().split("/").at(-1)?.toLowerCase();
     if (!stopOid || !gitHash.test(stopOid)) continue;
     if (stopOid === normalized) return normalized;
-    if (!(await git(dir, "merge-base", "--is-ancestor", normalized, stopOid)).ok) return normalized;
+    stops.add(stopOid);
   }
-  return undefined;
+  return (await outsideAnyStop(dir, normalized, stops, `refs/hedge/pins/${repoHash}/`)) ? normalized : undefined;
 }
 
 async function recordPinRef(dir: string, repoHash: string, oid: string): Promise<string | undefined> {
@@ -548,6 +576,8 @@ async function saveGood(dir: string, good: Good, historyFrom?: string): Promise<
     const recorded = await recordPinRef(dir, currentCommit.repoHash, currentCommit.commit);
     if (recorded && !unchanged) return recorded;
     if (historyFrom && gitHash.test(historyFrom)) {
+      const recordedFrom = await recordPinRef(dir, currentCommit.repoHash, historyFrom);
+      if (recordedFrom && !unchanged) return recordedFrom;
       const recordedHistory = await recordHistoryRef(dir, currentCommit.repoHash, currentCommit.commit, historyFrom);
       if (recordedHistory && !unchanged) return recordedHistory;
     }
@@ -611,7 +641,7 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string, cac
     if (!pinned) unpinned.push(ref);
   }
   if (!unpinned.length) return [];
-  const origin = await git(profileDir, "config", "--get", "remote.origin.url").then((read) => read.stdout, () => "");
+  const origin = await git(profileDir, "config", "--get", "remote.origin.url").then((read) => (read.ok ? read.rawStdout.replace(/\r?\n$/, "") : ""), () => "");
   const ownRepo = (ref: SourceRef) => origin !== "" && repoKey(ref.repo) === repoKey(origin);
   return unpinned
     .filter((ref) => !ownRepo(ref))
@@ -720,16 +750,13 @@ async function restoreKnownShallow(dir: string, beforeShallow: Set<string>, targ
   if (!beforeKept) return;
   const containing = await git(dir, "for-each-ref", "--contains", targetCommit, "--format=%(refname)", "refs/hedge/history/");
   if (!containing.ok || !containing.stdout) return;
-  let traversesTarget = false;
+  const stops = new Set<string>();
   for (const line of containing.stdout.split("\n")) {
     const stopOid = line.trim().split("/").at(-1)?.toLowerCase();
     if (!stopOid || !gitHash.test(stopOid) || stopOid === targetCommit) continue;
-    if (!(await git(dir, "merge-base", "--is-ancestor", targetCommit, stopOid)).ok) {
-      traversesTarget = true;
-      break;
-    }
+    stops.add(stopOid);
   }
-  if (!traversesTarget) return;
+  if (!(await outsideAnyStop(dir, targetCommit, stops, "refs/hedge/pins/"))) return;
   for (const parent of parents) {
     const verified = await git(dir, "rev-parse", "--verify", "--quiet", `${parent}^{commit}`);
     if (!verified.ok) return;

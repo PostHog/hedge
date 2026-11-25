@@ -38,6 +38,7 @@ const ciStandardMaskRules: Rule[] = [
   [/(?<![\w.+%-])[\w.+%-]+(?:@|%40)[A-Za-z0-9-]+(?:(?:\.|%2E)[A-Za-z0-9-]+)*(?:\.|%2E)[A-Za-z]{2,}\b/gi, "<email>"],
   [/(?<![\w.-])[\w.-]+\/(?:hedge|fleet)-(profile|memory)(?:-[\w-]+)?\b/gi, "<$1 repo>"],
   [/(private repos? )[\w.-]+\/[\w.-]+(?: and [\w.-]+\/[\w.-]+)?/gi, "$1<private repo>"],
+  standardRules[3]!,
   [/(?<![A-Za-z0-9-]|[A-Za-z0-9-]\.)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:internal|local|lan|corp|home\.arpa|coder|ts\.net|tailscale\.net)\b/gi, "<host>"],
   [/(\/Users|\/home)\/(?:[^/\n"'`:]{1,64}?(?=\/)|[^/\s"'`:]+)/gi, "$1/<user>"],
 ];
@@ -50,7 +51,7 @@ const canonMaskRules: Rule[] = [
   [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/gi, "<key>"],
   [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/gi, "<token>"],
   [/((?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi, "$1<credentials>@"],
-  ...ciStandardMaskRules.slice(0, 4),
+  ...ciStandardMaskRules.slice(0, -1),
   [/(\/Users|\/home)\/(?:(?:Users|home)\/)*(?:<user>|[^/\n"'`:]{1,64}?(?=\/)|[^/\s"'`:]+)/gi, "<user-path>"],
 ];
 const contextualSecretRules: Rule[] = secretRules.slice(8);
@@ -458,17 +459,6 @@ function findAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?: Know
   return spans;
 }
 
-function overlapsAny(intervals: Array<{ start: number; end: number }>, start: number, end: number): boolean {
-  let lo = 0;
-  let hi = intervals.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (intervals[mid]!.end <= start) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo < intervals.length && intervals[lo]!.start < end;
-}
-
 const exemptAcCache = new WeakMap<Set<string>, { ac: AcAutomaton | undefined; maxLen: number }>();
 
 function getExemptAc(exempt: Set<string>): { ac: AcAutomaton | undefined; maxLen: number } {
@@ -525,18 +515,21 @@ function findExemptOverlaps(
     }
   }
   const out: MatchSpan[] = [];
+  let k = -1;
   for (const win of windows) {
     let state = 0;
     for (let i = win.start; i < win.end; i++) {
+      const end = i + 1;
+      while (k + 1 < merged.length && merged[k + 1]!.start < end) k++;
       const code = text.charCodeAt(i);
       while (state !== 0 && !exemptAc.next[state]!.has(code)) state = exemptAc.fail[state]!;
       state = exemptAc.next[state]!.get(code) ?? 0;
-      const end = i + 1;
+      if (k < 0) continue;
+      const lastEnd = merged[k]!.end;
       for (let u = exemptAc.out[state] ? state : exemptAc.dict[state]!; u !== 0; u = exemptAc.dict[u]!) {
         for (const rule of exemptAc.out[u]!) {
           const start = end - rule.len;
-          if (start < win.start) continue;
-          if (overlapsAny(merged, start, end)) {
+          if (start >= win.start && lastEnd > start) {
             out.push({ start, end, len: rule.len, as: rule.as, exempt: true });
           }
         }
@@ -795,7 +788,7 @@ function expandFlexMask(text: string): { literals: string[]; verify?: (slice: st
         hits.push({ start: mStart, end: mEnd, masked });
         collectInnerFlexHits(r, text, mStart, mEnd, hits);
       }
-      if (r === 11) {
+      if (r === ciFlexRules.length - 1) {
         const innerSlash = text.indexOf("/", mStart + 1);
         if (innerSlash !== -1 && innerSlash < mEnd) regex.lastIndex = innerSlash;
       }
@@ -1015,6 +1008,10 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
       if (expanded) {
         for (const literal of expanded.literals) {
           addLiteralRule(literal, name.as, true, name.owner);
+          if (transform) {
+            const transformedLiteral = transform(literal);
+            if (transformedLiteral !== literal) addLiteralRule(transformedLiteral, name.as, true, name.owner);
+          }
         }
         if (expanded.verify) {
           const left: 0 | 1 = /^[~<]/.test(name.text) ? 0 : 1;
@@ -1056,6 +1053,18 @@ function applySpans(text: string, spans: MatchSpan[], exempt?: Set<string>, onMa
     if (idx >= spans.length) break;
     const first = spans[idx]!;
     if (first.exempt) {
+      let overrun = false;
+      for (let scan = idx + 1; scan < spans.length && spans[scan]!.start < first.end; scan++) {
+        const cand = spans[scan]!;
+        if (!cand.exempt && cand.end > first.end) {
+          overrun = true;
+          break;
+        }
+      }
+      if (overrun) {
+        idx++;
+        continue;
+      }
       out += text.slice(pos, first.end);
       pos = first.end;
       idx++;
@@ -1064,7 +1073,6 @@ function applySpans(text: string, spans: MatchSpan[], exempt?: Set<string>, onMa
     let clusterEnd = first.end;
     let best = first;
     let scan = idx + 1;
-    let blockedByExempt = false;
     while (scan < spans.length && spans[scan]!.start < clusterEnd) {
       const cand = spans[scan]!;
       if (cand.exempt) {
@@ -1072,19 +1080,11 @@ function applySpans(text: string, spans: MatchSpan[], exempt?: Set<string>, onMa
           scan++;
           continue;
         }
-        if (cand.len >= best.len) {
-          blockedByExempt = true;
-          break;
-        }
         break;
       }
       if (cand.len > best.len) best = cand;
       if (cand.end > clusterEnd) clusterEnd = cand.end;
       scan++;
-    }
-    if (blockedByExempt) {
-      idx++;
-      continue;
     }
     out += text.slice(pos, first.start);
     const matched = text.slice(first.start, clusterEnd);
