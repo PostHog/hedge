@@ -583,6 +583,7 @@ describe("hedge triage", () => {
           { name: "sigma", repo: "/tmp/ΣΙΓΜΑ.git", ref: "main" },
           { name: "query-prefix", repo: "https://example.invalid/team/packs?auth=", ref: "main" },
           { name: "query-key", repo: "https://example.invalid/team/packs?key=seed", ref: "main" },
+          { name: "ssh-source", repo: "git@git.example.com:acme/private-packs", ref: "main" },
         ],
         packs: [],
         plan: "both",
@@ -602,7 +603,7 @@ describe("hedge triage", () => {
         "triage",
         "--send",
         "--note",
-        "The pack source token=example-value from /tmp/κοσμος.git and /tmp/ςιγμα.git https://example.invalid/team/packs?key=seed.synthetic-key-val https://example.invalid/team/packs?auth=synthetic-auth-val",
+        `The pack source token=example-value from /tmp/κοσμος.git and /tmp/ςιγμα.git https://example.invalid/team/packs?key=seed.synthetic-key-val https://example.invalid/team/packs?auth=synthetic-auth-val ${encodeURIComponent("git@git.example.com:acme/private-packs")}`,
       ],
       { home, engineRoot, platform: "darwin", env: { HEDGE_PROFILE_DIR: inherited }, print: io.terminal.print, terminal: io.terminal, capture: runRealGit, hostname: () => "noras-mbp.local", run: async () => 0 },
     );
@@ -615,8 +616,9 @@ describe("hedge triage", () => {
     expect(body).not.toContain("example-value");
     expect(body).not.toContain("synthetic-key-val");
     expect(body).not.toContain("synthetic-auth-val");
+    expect(body).not.toContain("private-packs");
     expect(body).toContain("The pack source <private source>=<redacted>");
-    expect(body).toContain("<private source> <private source><redacted>");
+    expect(body).toContain("<private source> <private source><redacted> <private source>");
     expect(body).not.toContain("κοσμος");
     expect(body).not.toContain("ςιγμα");
     expect(body).toContain("from <private source> and <private source>");

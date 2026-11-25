@@ -487,6 +487,18 @@ describe("hedge doctor and pack sources", () => {
     const doctor2 = await hedge(["doctor"], home2);
     expect(doctor2.code).toBe(0);
     expect(doctor2.output).toContain("Note: The pack source team is not pinned to a commit SHA.");
+
+    const sha1Repo = temp.make("sha1-reused-name-");
+    await spawnGit(sha1Repo, "init", "-q", "-b", "main");
+    mkdirSync(join(sha1Repo, "packs/team"), { recursive: true });
+    writeFileSync(join(sha1Repo, "packs/team/pack.json"), JSON.stringify({ schema: 1, name: "team", summary: "SHA-1 replacement." }));
+    await spawnGit(sha1Repo, "add", ".");
+    await spawnGit(sha1Repo, "commit", "-q", "-m", "v1");
+    const sha1Commit = await spawnGit(sha1Repo, "rev-parse", "HEAD");
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), sources: [{ name: "team", repo: sha1Repo, ref: sha1Commit }] }));
+    const reused = await hedge(["doctor"], home);
+    expect(reused.code).toBe(0);
+    expect(reused.output).not.toContain("not pinned to a commit SHA");
   });
 });
 

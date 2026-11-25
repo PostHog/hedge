@@ -778,17 +778,17 @@ esac
     expect(await spawnGit(dir, "rev-parse", "HEAD")).toBe(v1);
   });
 
-  test("keeps distinct pin namespaces across packs and packs.git, trailing carriage returns, paths containing ' of ', and repairs null-commit metadata", async () => {
-    const parent = temp.make("edge-repos-");
-    const initPackRepo = async (dir: string, summary: string) => {
-      mkdirSync(dir, { recursive: true });
-      await spawnGit(dir, "init", "-q", "-b", "main");
-      writePack(dir, summary);
-      await spawnGit(dir, "add", ".");
-      await spawnGit(dir, "commit", "-q", "-m", "v1");
-      return await spawnGit(dir, "rev-parse", "HEAD");
-    };
+  async function initPackRepo(dir: string, summary: string) {
+    mkdirSync(dir, { recursive: true });
+    await spawnGit(dir, "init", "-q", "-b", "main");
+    writePack(dir, summary);
+    await spawnGit(dir, "add", ".");
+    await spawnGit(dir, "commit", "-q", "-m", "v1");
+    return await spawnGit(dir, "rev-parse", "HEAD");
+  }
 
+  test("keeps distinct pin namespaces across sibling packs and packs.git directories", async () => {
+    const parent = temp.make("dotgit-");
     const packsDir = join(parent, "packs");
     const packsGitDir = join(parent, "packs.git");
     const thirdDir = join(parent, "third");
@@ -799,25 +799,49 @@ esac
     expect("error" in (await fetchSource({ name: "team", repo: packsDir, ref: shaA }, cache))).toBe(false);
     expect("error" in (await fetchSource({ name: "team", repo: packsGitDir, ref: shaB }, cache))).toBe(false);
     expect("error" in (await fetchSource({ name: "team", repo: thirdDir, ref: shaC }, cache))).toBe(false);
-    const cross = await fetchSource({ name: "team", repo: packsGitDir, ref: shaA }, cache);
-    expect("error" in cross).toBe(true);
+    expect("error" in (await fetchSource({ name: "team", repo: packsGitDir, ref: shaA }, cache))).toBe(true);
+  });
 
+  test("keeps distinct pin namespaces when repository paths differ by a trailing carriage return or leading UTF-8 BOM", async () => {
+    const parent = temp.make("cr-");
     const crDir = join(parent, "repo\r");
     const plainCrDir = join(parent, "repo");
     const shaCr = await initPackRepo(crDir, "CR repo.");
     const shaPlain = await initPackRepo(plainCrDir, "No CR repo.");
     const crCache = temp.make("cache-cr-");
-    const gotCr = await fetchSource({ name: "team", repo: crDir, ref: shaCr }, crCache);
-    if ("error" in gotCr) throw new Error(gotCr.error);
-    expect(gotCr.packs[0]?.manifest.summary).toBe("CR repo.");
-    const gotPlain = await fetchSource({ name: "team", repo: plainCrDir, ref: shaPlain }, crCache);
-    if ("error" in gotPlain) throw new Error(gotPlain.error);
-    expect(gotPlain.packs[0]?.manifest.summary).toBe("No CR repo.");
+    expect("error" in (await fetchSource({ name: "team", repo: crDir, ref: shaCr }, crCache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo: plainCrDir, ref: shaPlain }, crCache))).toBe(false);
     const crossCr = await fetchSource({ name: "team", repo: plainCrDir, ref: shaCr }, crCache);
     if ("error" in crossCr) throw new Error(crossCr.error);
     expect(crossCr.packs[0]?.manifest.summary).toBe("No CR repo.");
     expect(crossCr.stale).toContain(`could not fetch ${shaCr}`);
 
+    const bomCache = temp.make("cache-bom-");
+    const bomRepo = join(bomCache, "team", "\ufeffrepo");
+    const plainBomRepo = join(bomCache, "team", "repo");
+    const bomSha = await initPackRepo(bomRepo, "BOM repo.");
+    const plainBomSha = await initPackRepo(plainBomRepo, "Plain BOM sibling.");
+    expect("error" in (await fetchSource({ name: "team", repo: "\ufeffrepo", ref: bomSha }, bomCache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo: "repo", ref: plainBomSha }, bomCache))).toBe(false);
+    rmSync(plainBomRepo, { recursive: true, force: true });
+    const bomCross = await fetchSource({ name: "team", repo: "repo", ref: bomSha }, bomCache);
+    if ("error" in bomCross) throw new Error(bomCross.error);
+    expect(bomCross.packs[0]?.manifest.summary).toBe("Plain BOM sibling.");
+    expect(bomCross.stale).toContain(`could not fetch ${bomSha}`);
+  });
+
+  test("repairs null-commit metadata on the next online fetch", async () => {
+    const repairRepo = await packRepo("Repairable.");
+    const repairCache = temp.make("cache-null-commit-");
+    expect("error" in (await fetchSource({ name: "team", repo: repairRepo, ref: "main" }, repairCache))).toBe(false);
+    writeFileSync(join(repairCache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo: repairRepo, ref: "main", commit: null }) + "\n");
+    const repaired = await fetchSource({ name: "team", repo: repairRepo, ref: "main" }, repairCache);
+    if ("error" in repaired) throw new Error(repaired.error);
+    expect(repaired.packs[0]?.manifest.summary).toBe("Repairable.");
+  });
+
+  test("falls back offline for paths containing ' of ', apostrophe branches, newline paths, and HEAD mirrors", async () => {
+    const parent = temp.make("fh-edge-");
     const ofDir = join(parent, "end of path");
     await initPackRepo(ofDir, "Of path repo.");
     const ofCache = temp.make("cache-of-");
@@ -828,14 +852,57 @@ esac
     expect(ofFallback.packs[0]?.manifest.summary).toBe("Of path repo.");
     expect(ofFallback.stale).toContain("could not fetch main");
 
-    const repairRepo = await packRepo("Repairable.");
-    const repairCache = temp.make("cache-null-commit-");
-    expect("error" in (await fetchSource({ name: "team", repo: repairRepo, ref: "main" }, repairCache))).toBe(false);
-    writeFileSync(join(repairCache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo: repairRepo, ref: "main", commit: null }) + "\n");
-    const repaired = await fetchSource({ name: "team", repo: repairRepo, ref: "main" }, repairCache);
-    if ("error" in repaired) throw new Error(repaired.error);
-    expect(repaired.packs[0]?.manifest.summary).toBe("Repairable.");
+    const apostropheRepo = await packRepo("Apostrophe branch packs.");
+    await spawnGit(apostropheRepo, "checkout", "-q", "-b", "release/o'hare");
+    const apostropheSha = await spawnGit(apostropheRepo, "rev-parse", "HEAD");
+    const apostropheCache = temp.make("cache-apostrophe-");
+    const apostropheDir = join(apostropheCache, "team");
+    mkdirSync(apostropheDir, { recursive: true });
+    await spawnGit(apostropheDir, "init", "-q");
+    await spawnGit(apostropheDir, "fetch", "-q", "--depth", "1", "--no-tags", apostropheRepo, "release/o'hare");
+    await spawnGit(apostropheDir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    writeFileSync(join(apostropheDir, ".git", "hedge-source.json"), JSON.stringify({ repo: apostropheRepo, ref: "release/o'hare", commit: apostropheSha }) + "\n");
+    rmSync(apostropheRepo, { recursive: true, force: true });
+    const apostropheOffline = await fetchSource({ name: "team", repo: apostropheRepo, ref: "release/o'hare" }, apostropheCache);
+    if ("error" in apostropheOffline) throw new Error(apostropheOffline.error);
+    expect(apostropheOffline.packs[0]?.manifest.summary).toBe("Apostrophe branch packs.");
+    expect(apostropheOffline.stale).toContain("could not fetch release/o'hare");
 
+    const newlineRepo = join(parent, "dir\nwith-newline", "repo");
+    const newlineSha = await initPackRepo(newlineRepo, "Newline path packs.");
+    const newlineCache = temp.make("cache-newline-");
+    const newlineDir = join(newlineCache, "team");
+    mkdirSync(newlineDir, { recursive: true });
+    await spawnGit(newlineDir, "init", "-q");
+    await spawnGit(newlineDir, "fetch", "-q", "--depth", "1", "--no-tags", newlineRepo, "main");
+    await spawnGit(newlineDir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    writeFileSync(join(newlineDir, ".git", "hedge-source.json"), JSON.stringify({ repo: newlineRepo, ref: "main", commit: newlineSha }) + "\n");
+    rmSync(join(parent, "dir\nwith-newline"), { recursive: true, force: true });
+    const newlineOffline = await fetchSource({ name: "team", repo: newlineRepo, ref: "main" }, newlineCache);
+    if ("error" in newlineOffline) throw new Error(newlineOffline.error);
+    expect(newlineOffline.packs[0]?.manifest.summary).toBe("Newline path packs.");
+    expect(newlineOffline.stale).toContain("could not fetch main");
+
+    const headMirror = await packRepo("HEAD mirror packs.");
+    const headSha = await spawnGit(headMirror, "rev-parse", "HEAD");
+    const headConfigured = "https://example.invalid/head-mirror.git";
+    const headCache = temp.make("cache-head-legacy-");
+    const headDir = join(headCache, "team");
+    mkdirSync(headDir, { recursive: true });
+    await spawnGit(headDir, "init", "-q");
+    await spawnGit(headDir, "config", `url.${headMirror}.insteadOf`, headConfigured);
+    await spawnGit(headDir, "fetch", "-q", "--depth", "1", "--no-tags", headConfigured, "HEAD");
+    await spawnGit(headDir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    writeFileSync(join(headDir, ".git", "hedge-source.json"), JSON.stringify({ repo: headConfigured, ref: "HEAD", commit: headSha }) + "\n");
+    rmSync(headMirror, { recursive: true, force: true });
+    const headOffline = await fetchSource({ name: "team", repo: headConfigured, ref: "HEAD" }, headCache);
+    if ("error" in headOffline) throw new Error(headOffline.error);
+    expect(headOffline.packs[0]?.manifest.summary).toBe("HEAD mirror packs.");
+    expect(headOffline.stale).toContain("could not fetch HEAD");
+  });
+
+  test("never migrates ambiguous legacy insteadOf caches across .git siblings or SSH usernames", async () => {
+    const parent = temp.make("legacy-ambig-");
     const migPacks = join(parent, "mig-packs");
     const migPacksGit = join(parent, "mig-packs.git");
     const migShaA = await initPackRepo(migPacks, "Legacy target A.");
@@ -853,62 +920,55 @@ esac
     await spawnGit(migDir, "config", `url.${migPacksGit}.insteadOf`, migConfigured);
     expect("error" in (await fetchSource({ name: "team", repo: migConfigured, ref: migShaB }, migCache))).toBe(false);
     rmSync(migPacksGit, { recursive: true, force: true });
-    const migCross = await fetchSource({ name: "team", repo: migPacksGit, ref: migShaA }, migCache);
-    expect("error" in migCross).toBe(true);
+    expect("error" in (await fetchSource({ name: "team", repo: migPacksGit, ref: migShaA }, migCache))).toBe(true);
 
-    const sha256Repo = join(parent, "sha256-repo");
-    mkdirSync(sha256Repo, { recursive: true });
-    await spawnGit(sha256Repo, "init", "-q", "--object-format=sha256", "-b", "main");
-    writePack(sha256Repo, "SHA-256 branch packs.");
-    await spawnGit(sha256Repo, "add", ".");
-    await spawnGit(sha256Repo, "commit", "-q", "-m", "v1");
-    const sha256Cache = temp.make("cache-sha256-");
-    const sha256Dir = join(sha256Cache, "team");
-    mkdirSync(sha256Dir, { recursive: true });
-    await spawnGit(sha256Dir, "init", "-q", "--object-format=sha256");
-    const sha256Online = await fetchSource({ name: "team", repo: sha256Repo, ref: "main" }, sha256Cache);
-    if ("error" in sha256Online) throw new Error(sha256Online.error);
-    expect(sha256Online.packs[0]?.manifest.summary).toBe("SHA-256 branch packs.");
-    rmSync(sha256Repo, { recursive: true, force: true });
-    const sha256Offline = await fetchSource({ name: "team", repo: sha256Repo, ref: "main" }, sha256Cache);
-    if ("error" in sha256Offline) throw new Error(sha256Offline.error);
-    expect(sha256Offline.packs[0]?.manifest.summary).toBe("SHA-256 branch packs.");
-    expect(sha256Offline.stale).toContain("could not fetch main");
+    const dotgitSrc = join(parent, "swap-packs.git");
+    const plainDst = join(parent, "swap-packs");
+    const dotgitSha = await initPackRepo(dotgitSrc, "Legacy dotgit.");
+    const plainSha = await initPackRepo(plainDst, "Sibling plain.");
+    const swapConfigured = "https://example.invalid/dotgit-swap.git";
+    const swapCache = temp.make("cache-dotgit-swap-");
+    const swapDir = join(swapCache, "team");
+    mkdirSync(swapDir, { recursive: true });
+    await spawnGit(swapDir, "init", "-q");
+    await spawnGit(swapDir, "config", `url.${dotgitSrc}.insteadOf`, swapConfigured);
+    await spawnGit(swapDir, "fetch", "-q", "--depth", "1", "--no-tags", swapConfigured, dotgitSha);
+    await spawnGit(swapDir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    writeFileSync(join(swapDir, ".git", "hedge-source.json"), JSON.stringify({ repo: swapConfigured, ref: dotgitSha, commit: dotgitSha }) + "\n");
+    rmSync(dotgitSrc, { recursive: true, force: true });
+    await spawnGit(swapDir, "config", "--unset", `url.${dotgitSrc}.insteadOf`);
+    await spawnGit(swapDir, "config", `url.${plainDst}.insteadOf`, swapConfigured);
+    const swapHit = await fetchSource({ name: "team", repo: swapConfigured, ref: dotgitSha }, swapCache);
+    expect("error" in swapHit || swapHit.stale !== undefined).toBe(true);
+    expect("error" in (await fetchSource({ name: "team", repo: swapConfigured, ref: plainSha }, swapCache))).toBe(false);
+    rmSync(plainDst, { recursive: true, force: true });
+    const swapPoison = await fetchSource({ name: "team", repo: swapConfigured, ref: dotgitSha }, swapCache);
+    if ("error" in swapPoison) throw new Error(swapPoison.error);
+    expect(swapPoison.packs[0]?.manifest.summary).toBe("Sibling plain.");
+    expect(swapPoison.stale).toContain(`could not fetch ${dotgitSha}`);
 
-    const hex64Branch = "a".repeat(64);
-    const sha1HexRepo = join(parent, "sha1-hex64-branch");
-    mkdirSync(sha1HexRepo, { recursive: true });
-    await spawnGit(sha1HexRepo, "init", "-q", "-b", hex64Branch);
-    writePack(sha1HexRepo, "Hex-64 branch packs.");
-    await spawnGit(sha1HexRepo, "add", ".");
-    await spawnGit(sha1HexRepo, "commit", "-q", "-m", "v1");
-    const hexCache = temp.make("cache-hex64-");
-    const hexOnline = await fetchSource({ name: "team", repo: sha1HexRepo, ref: hex64Branch }, hexCache);
-    if ("error" in hexOnline) throw new Error(hexOnline.error);
-    expect(hexOnline.packs[0]?.manifest.summary).toBe("Hex-64 branch packs.");
-    expect(await followsBranch({ name: "team", repo: sha1HexRepo, ref: hex64Branch }, hexCache)).toBe(true);
-    rmSync(sha1HexRepo, { recursive: true, force: true });
-    const hexOffline = await fetchSource({ name: "team", repo: sha1HexRepo, ref: hex64Branch }, hexCache);
-    if ("error" in hexOffline) throw new Error(hexOffline.error);
-    expect(hexOffline.packs[0]?.manifest.summary).toBe("Hex-64 branch packs.");
-    expect(hexOffline.stale).toContain(`could not fetch ${hex64Branch}`);
-
-    const remoteSrc = await packRepo("Named remote v1.");
-    const remoteCommit1 = await spawnGit(remoteSrc, "rev-parse", "HEAD");
-    const remoteCache = temp.make("cache-named-remote-");
-    const remoteDir = join(remoteCache, "team");
-    mkdirSync(remoteDir, { recursive: true });
-    await spawnGit(remoteDir, "init", "-q");
-    await spawnGit(remoteDir, "remote", "add", "origin", remoteSrc);
-    const remoteFetched = await fetchSource({ name: "team", repo: "origin", ref: "main" }, remoteCache);
-    if ("error" in remoteFetched) throw new Error(remoteFetched.error);
-    expect(await spawnGit(remoteDir, "rev-parse", "refs/remotes/origin/main")).toBe(remoteCommit1);
-    writePack(remoteSrc, "Named remote v2.");
-    await spawnGit(remoteSrc, "commit", "-q", "-am", "v2");
-    const remoteCommit2 = await spawnGit(remoteSrc, "rev-parse", "HEAD");
-    const remoteAdvanced = await advanceSource({ name: "team", repo: "origin", ref: "main" }, remoteCache, remoteCommit1);
-    expect(remoteAdvanced).toMatchObject({ state: "moved", commit: remoteCommit2 });
-    expect(await spawnGit(remoteDir, "rev-parse", "refs/remotes/origin/main")).toBe(remoteCommit2);
+    const unsetDotgit = join(parent, "unset-packs.git");
+    const unsetPlain = join(parent, "unset-packs");
+    const unsetMirrorSha = await initPackRepo(unsetDotgit, "Unset mirror.");
+    const unsetRealSha = await initPackRepo(unsetPlain, "Unset real.");
+    const unsetCache = temp.make("cache-unset-dotgit-");
+    const unsetDir = join(unsetCache, "team");
+    mkdirSync(unsetDir, { recursive: true });
+    await spawnGit(unsetDir, "init", "-q");
+    await spawnGit(unsetDir, "config", `url.${unsetDotgit}.insteadOf`, unsetPlain);
+    await spawnGit(unsetDir, "fetch", "-q", "--depth", "1", "--no-tags", unsetPlain, unsetMirrorSha);
+    await spawnGit(unsetDir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    writeFileSync(join(unsetDir, ".git", "hedge-source.json"), JSON.stringify({ repo: unsetPlain, ref: unsetMirrorSha, commit: unsetMirrorSha }) + "\n");
+    rmSync(unsetDotgit, { recursive: true, force: true });
+    await spawnGit(unsetDir, "config", "--unset", `url.${unsetDotgit}.insteadOf`);
+    expect("error" in (await fetchSource({ name: "team", repo: unsetPlain, ref: unsetRealSha }, unsetCache))).toBe(false);
+    await spawnGit(unsetDir, "reflog", "expire", "--expire=now", "--all");
+    await spawnGit(unsetDir, "gc", "--prune=now", "-q");
+    rmSync(unsetPlain, { recursive: true, force: true });
+    const unsetBack = await fetchSource({ name: "team", repo: unsetPlain, ref: unsetMirrorSha }, unsetCache);
+    if ("error" in unsetBack) throw new Error(unsetBack.error);
+    expect(unsetBack.packs[0]?.manifest.summary).toBe("Unset real.");
+    expect(unsetBack.stale).toContain(`could not fetch ${unsetMirrorSha}`);
 
     const sshA = await packRepo("SSH legacy A.");
     const sshShaA = await spawnGit(sshA, "rev-parse", "HEAD");
@@ -960,38 +1020,100 @@ esac
       await spawnGit(sshDir, "config", "--unset", `url.${sshAlice}.insteadOf`);
       await spawnGit(sshDir, "config", `url.${sshBob}.insteadOf`, sshConfigured);
       expect("error" in (await fetchSource({ name: "team", repo: sshConfigured, ref: sshShaB }, sshCache))).toBe(false);
-      const sshCross = await fetchSource({ name: "team", repo: sshBob, ref: sshShaA }, sshCache);
-      expect("error" in sshCross).toBe(true);
+      expect("error" in (await fetchSource({ name: "team", repo: sshBob, ref: sshShaA }, sshCache))).toBe(true);
     } finally {
       if (savedPath === undefined) delete process.env.PATH;
       else process.env.PATH = savedPath;
     }
+  });
 
-    const dotgitSrc = join(parent, "swap-packs.git");
-    const plainDst = join(parent, "swap-packs");
-    const dotgitSha = await initPackRepo(dotgitSrc, "Legacy dotgit.");
-    const plainSha = await initPackRepo(plainDst, "Sibling plain.");
-    const swapConfigured = "https://example.invalid/dotgit-swap.git";
-    const swapCache = temp.make("cache-dotgit-swap-");
-    const swapDir = join(swapCache, "team");
-    mkdirSync(swapDir, { recursive: true });
-    await spawnGit(swapDir, "init", "-q");
-    await spawnGit(swapDir, "config", `url.${dotgitSrc}.insteadOf`, swapConfigured);
-    await spawnGit(swapDir, "fetch", "-q", "--depth", "1", "--no-tags", swapConfigured, dotgitSha);
-    await spawnGit(swapDir, "checkout", "-q", "--detach", "FETCH_HEAD");
-    writeFileSync(join(swapDir, ".git", "hedge-source.json"), JSON.stringify({ repo: swapConfigured, ref: dotgitSha, commit: dotgitSha }) + "\n");
-    rmSync(dotgitSrc, { recursive: true, force: true });
-    await spawnGit(swapDir, "config", "--unset", `url.${dotgitSrc}.insteadOf`);
-    await spawnGit(swapDir, "config", `url.${plainDst}.insteadOf`, swapConfigured);
-    const swapHit = await fetchSource({ name: "team", repo: swapConfigured, ref: dotgitSha }, swapCache);
-    expect("error" in swapHit || swapHit.stale !== undefined).toBe(true);
-    expect("error" in (await fetchSource({ name: "team", repo: swapConfigured, ref: plainSha }, swapCache))).toBe(false);
-    rmSync(plainDst, { recursive: true, force: true });
-    const swapPoison = await fetchSource({ name: "team", repo: swapConfigured, ref: dotgitSha }, swapCache);
-    if ("error" in swapPoison) throw new Error(swapPoison.error);
-    expect(swapPoison.packs[0]?.manifest.summary).toBe("Sibling plain.");
-    expect(swapPoison.stale).toContain(`could not fetch ${dotgitSha}`);
+  test("handles SHA-256 repositories and hexadecimal branch names on SHA-1 repositories", async () => {
+    const parent = temp.make("objfmt-");
+    const sha256Repo = join(parent, "sha256-repo");
+    mkdirSync(sha256Repo, { recursive: true });
+    await spawnGit(sha256Repo, "init", "-q", "--object-format=sha256", "-b", "main");
+    writePack(sha256Repo, "SHA-256 branch packs.");
+    await spawnGit(sha256Repo, "add", ".");
+    await spawnGit(sha256Repo, "commit", "-q", "-m", "v1");
+    const sha256Cache = temp.make("cache-sha256-");
+    const sha256Dir = join(sha256Cache, "team");
+    mkdirSync(sha256Dir, { recursive: true });
+    await spawnGit(sha256Dir, "init", "-q", "--object-format=sha256");
+    const sha256Online = await fetchSource({ name: "team", repo: sha256Repo, ref: "main" }, sha256Cache);
+    if ("error" in sha256Online) throw new Error(sha256Online.error);
+    expect(sha256Online.packs[0]?.manifest.summary).toBe("SHA-256 branch packs.");
+    rmSync(sha256Repo, { recursive: true, force: true });
+    const sha256Offline = await fetchSource({ name: "team", repo: sha256Repo, ref: "main" }, sha256Cache);
+    if ("error" in sha256Offline) throw new Error(sha256Offline.error);
+    expect(sha256Offline.packs[0]?.manifest.summary).toBe("SHA-256 branch packs.");
+    expect(sha256Offline.stale).toContain("could not fetch main");
 
+    const hex64Branch = "a".repeat(64);
+    const sha1HexRepo = join(parent, "sha1-hex64-branch");
+    mkdirSync(sha1HexRepo, { recursive: true });
+    await spawnGit(sha1HexRepo, "init", "-q", "-b", hex64Branch);
+    writePack(sha1HexRepo, "Hex-64 branch packs.");
+    await spawnGit(sha1HexRepo, "add", ".");
+    await spawnGit(sha1HexRepo, "commit", "-q", "-m", "v1");
+    const hexCache = temp.make("cache-hex64-");
+    const hexOnline = await fetchSource({ name: "team", repo: sha1HexRepo, ref: hex64Branch }, hexCache);
+    if ("error" in hexOnline) throw new Error(hexOnline.error);
+    expect(hexOnline.packs[0]?.manifest.summary).toBe("Hex-64 branch packs.");
+    expect(await followsBranch({ name: "team", repo: sha1HexRepo, ref: hex64Branch }, hexCache)).toBe(true);
+    rmSync(sha1HexRepo, { recursive: true, force: true });
+    const hexOffline = await fetchSource({ name: "team", repo: sha1HexRepo, ref: hex64Branch }, hexCache);
+    if ("error" in hexOffline) throw new Error(hexOffline.error);
+    expect(hexOffline.packs[0]?.manifest.summary).toBe("Hex-64 branch packs.");
+    expect(hexOffline.stale).toContain(`could not fetch ${hex64Branch}`);
+
+    const hex40Branch = "b".repeat(40);
+    const hex40Repo = join(parent, "sha1-hex40-branch");
+    mkdirSync(hex40Repo, { recursive: true });
+    await spawnGit(hex40Repo, "init", "-q", "-b", hex40Branch);
+    writePack(hex40Repo, "Hex-40 branch packs.");
+    await spawnGit(hex40Repo, "add", ".");
+    await spawnGit(hex40Repo, "commit", "-q", "-m", "v1");
+    const hex40Tip = await spawnGit(hex40Repo, "rev-parse", "HEAD");
+    const hex40Cache = temp.make("cache-hex40-");
+    const hex40Online = await fetchSource({ name: "team", repo: hex40Repo, ref: `refs/heads/${hex40Branch}` }, hex40Cache);
+    if ("error" in hex40Online) throw new Error(hex40Online.error);
+    expect(await followsBranch({ name: "team", repo: hex40Repo, ref: hex40Branch }, hex40Cache)).toBe(true);
+    expect(await followsBranch({ name: "team", repo: hex40Repo, ref: `refs/heads/${hex40Branch}` }, hex40Cache)).toBe(true);
+
+    const legacyHex40Cache = temp.make("cache-legacy-hex40-");
+    const legacyHex40Dir = join(legacyHex40Cache, "team");
+    mkdirSync(legacyHex40Dir, { recursive: true });
+    await spawnGit(legacyHex40Dir, "init", "-q");
+    await spawnGit(legacyHex40Dir, "fetch", "-q", "--depth", "1", "--no-tags", hex40Repo, `refs/heads/${hex40Branch}`);
+    await spawnGit(legacyHex40Dir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    writeFileSync(join(legacyHex40Dir, ".git", "hedge-source.json"), JSON.stringify({ repo: hex40Repo, ref: hex40Branch, commit: hex40Tip }) + "\n");
+    rmSync(hex40Repo, { recursive: true, force: true });
+    const legacyHex40Offline = await fetchSource({ name: "team", repo: hex40Repo, ref: hex40Branch }, legacyHex40Cache);
+    if ("error" in legacyHex40Offline) throw new Error(legacyHex40Offline.error);
+    expect(legacyHex40Offline.packs[0]?.manifest.summary).toBe("Hex-40 branch packs.");
+    expect(legacyHex40Offline.stale).toContain(`could not fetch ${hex40Branch}`);
+  });
+
+  test("updates remote tracking refs when fetching or advancing a named Git remote", async () => {
+    const remoteSrc = await packRepo("Named remote v1.");
+    const remoteCommit1 = await spawnGit(remoteSrc, "rev-parse", "HEAD");
+    const remoteCache = temp.make("cache-named-remote-");
+    const remoteDir = join(remoteCache, "team");
+    mkdirSync(remoteDir, { recursive: true });
+    await spawnGit(remoteDir, "init", "-q");
+    await spawnGit(remoteDir, "remote", "add", "origin", remoteSrc);
+    const remoteFetched = await fetchSource({ name: "team", repo: "origin", ref: "main" }, remoteCache);
+    if ("error" in remoteFetched) throw new Error(remoteFetched.error);
+    expect(await spawnGit(remoteDir, "rev-parse", "refs/remotes/origin/main")).toBe(remoteCommit1);
+    writePack(remoteSrc, "Named remote v2.");
+    await spawnGit(remoteSrc, "commit", "-q", "-am", "v2");
+    const remoteCommit2 = await spawnGit(remoteSrc, "rev-parse", "HEAD");
+    const remoteAdvanced = await advanceSource({ name: "team", repo: "origin", ref: "main" }, remoteCache, remoteCommit1);
+    expect(remoteAdvanced).toMatchObject({ state: "moved", commit: remoteCommit2 });
+    expect(await spawnGit(remoteDir, "rev-parse", "refs/remotes/origin/main")).toBe(remoteCommit2);
+  });
+
+  test("preserves FETCH_HEAD contents and permissions on failed fetches, rollbacks, and unreadable files", async () => {
     const emptyLegacyRepo = await packRepo("Empty FETCH_HEAD legacy.");
     const emptyLegacySha = await spawnGit(emptyLegacyRepo, "rev-parse", "HEAD");
     const emptyLegacyCache = temp.make("cache-empty-legacy-");
@@ -1023,28 +1145,19 @@ esac
     }
     expect(await followsBranch({ name: "team", repo: fhRepo, ref: "main" }, fhCache)).toBe(true);
 
-    const unsetDotgit = join(parent, "unset-packs.git");
-    const unsetPlain = join(parent, "unset-packs");
-    const unsetMirrorSha = await initPackRepo(unsetDotgit, "Unset mirror.");
-    const unsetRealSha = await initPackRepo(unsetPlain, "Unset real.");
-    const unsetCache = temp.make("cache-unset-dotgit-");
-    const unsetDir = join(unsetCache, "team");
-    mkdirSync(unsetDir, { recursive: true });
-    await spawnGit(unsetDir, "init", "-q");
-    await spawnGit(unsetDir, "config", `url.${unsetDotgit}.insteadOf`, unsetPlain);
-    await spawnGit(unsetDir, "fetch", "-q", "--depth", "1", "--no-tags", unsetPlain, unsetMirrorSha);
-    await spawnGit(unsetDir, "checkout", "-q", "--detach", "FETCH_HEAD");
-    writeFileSync(join(unsetDir, ".git", "hedge-source.json"), JSON.stringify({ repo: unsetPlain, ref: unsetMirrorSha, commit: unsetMirrorSha }) + "\n");
-    rmSync(unsetDotgit, { recursive: true, force: true });
-    await spawnGit(unsetDir, "config", "--unset", `url.${unsetDotgit}.insteadOf`);
-    expect("error" in (await fetchSource({ name: "team", repo: unsetPlain, ref: unsetRealSha }, unsetCache))).toBe(false);
-    await spawnGit(unsetDir, "reflog", "expire", "--expire=now", "--all");
-    await spawnGit(unsetDir, "gc", "--prune=now", "-q");
-    rmSync(unsetPlain, { recursive: true, force: true });
-    const unsetBack = await fetchSource({ name: "team", repo: unsetPlain, ref: unsetMirrorSha }, unsetCache);
-    if ("error" in unsetBack) throw new Error(unsetBack.error);
-    expect(unsetBack.packs[0]?.manifest.summary).toBe("Unset real.");
-    expect(unsetBack.stale).toContain(`could not fetch ${unsetMirrorSha}`);
+    const roRepo = await packRepo("Read-only FH.");
+    const roCache = temp.make("cache-ro-fh-");
+    expect("error" in (await fetchSource({ name: "team", repo: roRepo, ref: "main" }, roCache))).toBe(false);
+    const roFh = join(roCache, "team", ".git", "FETCH_HEAD");
+    chmodSync(roFh, 0o400);
+    try {
+      const roFailed = await fetchSource({ name: "team", repo: roRepo, ref: "main" }, roCache);
+      if ("error" in roFailed) throw new Error(roFailed.error);
+      expect(roFailed.stale).toContain("could not fetch main");
+      expect(statSync(roFh).mode & 0o777).toBe(0o400);
+    } finally {
+      chmodSync(roFh, 0o600);
+    }
 
     const unreadableRepo = await packRepo("Unreadable FH.");
     const unreadableCache = temp.make("cache-unreadable-fh-");
@@ -1061,20 +1174,9 @@ esac
       chmodSync(unreadableFh, 0o600);
     }
     expect(await followsBranch({ name: "team", repo: unreadableRepo, ref: "main" }, unreadableCache)).toBe(true);
+  });
 
-    const bomCache = temp.make("cache-bom-");
-    const bomRepo = join(bomCache, "team", "\ufeffrepo");
-    const plainBomRepo = join(bomCache, "team", "repo");
-    const bomSha = await initPackRepo(bomRepo, "BOM repo.");
-    const plainBomSha = await initPackRepo(plainBomRepo, "Plain BOM sibling.");
-    expect("error" in (await fetchSource({ name: "team", repo: "\ufeffrepo", ref: bomSha }, bomCache))).toBe(false);
-    expect("error" in (await fetchSource({ name: "team", repo: "repo", ref: plainBomSha }, bomCache))).toBe(false);
-    rmSync(plainBomRepo, { recursive: true, force: true });
-    const bomCross = await fetchSource({ name: "team", repo: "repo", ref: bomSha }, bomCache);
-    if ("error" in bomCross) throw new Error(bomCross.error);
-    expect(bomCross.packs[0]?.manifest.summary).toBe("Plain BOM sibling.");
-    expect(bomCross.stale).toContain(`could not fetch ${bomSha}`);
-
+  test("tracks branch identity across respellings, commit-named branches, tag-to-branch transitions, and rejected replacement tags", async () => {
     const spellRepo = await packRepo("Main good.");
     await spawnGit(spellRepo, "checkout", "-q", "-b", "release");
     writeFileSync(join(spellRepo, "packs/team/pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Broken release." }));
@@ -1090,19 +1192,6 @@ esac
     expect(offlineRespell.stale).toContain("could not fetch refs/heads/release");
     expect(await followsBranch({ name: "team", repo: spellRepo, ref: "release" }, spellCache)).toBe(true);
     expect(await followsBranch({ name: "team", repo: spellRepo, ref: "refs/heads/release" }, spellCache)).toBe(true);
-
-    const hex40Branch = "b".repeat(40);
-    const hex40Repo = join(parent, "sha1-hex40-branch");
-    mkdirSync(hex40Repo, { recursive: true });
-    await spawnGit(hex40Repo, "init", "-q", "-b", hex40Branch);
-    writePack(hex40Repo, "Hex-40 branch packs.");
-    await spawnGit(hex40Repo, "add", ".");
-    await spawnGit(hex40Repo, "commit", "-q", "-m", "v1");
-    const hex40Cache = temp.make("cache-hex40-");
-    const hex40Online = await fetchSource({ name: "team", repo: hex40Repo, ref: `refs/heads/${hex40Branch}` }, hex40Cache);
-    if ("error" in hex40Online) throw new Error(hex40Online.error);
-    expect(await followsBranch({ name: "team", repo: hex40Repo, ref: hex40Branch }, hex40Cache)).toBe(true);
-    expect(await followsBranch({ name: "team", repo: hex40Repo, ref: `refs/heads/${hex40Branch}` }, hex40Cache)).toBe(true);
 
     const tipBranchRepo = await packRepo("Tip-named branch v1.");
     const tipSha = await spawnGit(tipBranchRepo, "rev-parse", "HEAD");
@@ -1126,54 +1215,26 @@ esac
     expect(tagBroken.stale).toContain("does not load");
     expect(await followsBranch({ name: "team", repo: tagToBranchRepo, ref: "v1" }, tagCache)).toBe(true);
 
-    const headMirror = await packRepo("HEAD mirror packs.");
-    const headSha = await spawnGit(headMirror, "rev-parse", "HEAD");
-    const headConfigured = "https://example.invalid/head-mirror.git";
-    const headCache = temp.make("cache-head-legacy-");
-    const headDir = join(headCache, "team");
-    mkdirSync(headDir, { recursive: true });
-    await spawnGit(headDir, "init", "-q");
-    await spawnGit(headDir, "config", `url.${headMirror}.insteadOf`, headConfigured);
-    await spawnGit(headDir, "fetch", "-q", "--depth", "1", "--no-tags", headConfigured, "HEAD");
-    await spawnGit(headDir, "checkout", "-q", "--detach", "FETCH_HEAD");
-    writeFileSync(join(headDir, ".git", "hedge-source.json"), JSON.stringify({ repo: headConfigured, ref: "HEAD", commit: headSha }) + "\n");
-    rmSync(headMirror, { recursive: true, force: true });
-    const headOffline = await fetchSource({ name: "team", repo: headConfigured, ref: "HEAD" }, headCache);
-    if ("error" in headOffline) throw new Error(headOffline.error);
-    expect(headOffline.packs[0]?.manifest.summary).toBe("HEAD mirror packs.");
-    expect(headOffline.stale).toContain("could not fetch HEAD");
+    const branchRepoA = await packRepo("Repo A branch v1.");
+    await spawnGit(branchRepoA, "tag", "-d", "v1");
+    await spawnGit(branchRepoA, "checkout", "-q", "-b", "v1");
+    const tagRepoB = await packRepo("Repo B broken tag v1.");
+    await spawnGit(tagRepoB, "tag", "-d", "v1");
+    writeFileSync(join(tagRepoB, "packs/team/pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Broken tag v1." }));
+    await spawnGit(tagRepoB, "commit", "-q", "-am", "broken v1");
+    await spawnGit(tagRepoB, "tag", "v1");
+    await spawnGit(tagRepoB, "checkout", "-q", "-b", "v1");
+    writePack(tagRepoB, "Repo B branch v1.");
+    await spawnGit(tagRepoB, "commit", "-q", "-am", "branch v1");
+    const repoSwitchCache = temp.make("cache-branch-repo-switch-");
+    expect("error" in (await fetchSource({ name: "team", repo: branchRepoA, ref: "v1" }, repoSwitchCache))).toBe(false);
+    expect(await followsBranch({ name: "team", repo: branchRepoA, ref: "v1" }, repoSwitchCache)).toBe(true);
+    expect("error" in (await fetchSource({ name: "team", repo: tagRepoB, ref: "v1" }, repoSwitchCache))).toBe(true);
+    expect(await followsBranch({ name: "team", repo: tagRepoB, ref: "v1" }, repoSwitchCache)).toBe(false);
+    expect(await followsBranch({ name: "team", repo: branchRepoA, ref: "v1" }, repoSwitchCache)).toBe(true);
+  });
 
-    const apostropheRepo = await packRepo("Apostrophe branch packs.");
-    await spawnGit(apostropheRepo, "checkout", "-q", "-b", "release/o'hare");
-    const apostropheSha = await spawnGit(apostropheRepo, "rev-parse", "HEAD");
-    const apostropheCache = temp.make("cache-apostrophe-");
-    const apostropheDir = join(apostropheCache, "team");
-    mkdirSync(apostropheDir, { recursive: true });
-    await spawnGit(apostropheDir, "init", "-q");
-    await spawnGit(apostropheDir, "fetch", "-q", "--depth", "1", "--no-tags", apostropheRepo, "release/o'hare");
-    await spawnGit(apostropheDir, "checkout", "-q", "--detach", "FETCH_HEAD");
-    writeFileSync(join(apostropheDir, ".git", "hedge-source.json"), JSON.stringify({ repo: apostropheRepo, ref: "release/o'hare", commit: apostropheSha }) + "\n");
-    rmSync(apostropheRepo, { recursive: true, force: true });
-    const apostropheOffline = await fetchSource({ name: "team", repo: apostropheRepo, ref: "release/o'hare" }, apostropheCache);
-    if ("error" in apostropheOffline) throw new Error(apostropheOffline.error);
-    expect(apostropheOffline.packs[0]?.manifest.summary).toBe("Apostrophe branch packs.");
-    expect(apostropheOffline.stale).toContain("could not fetch release/o'hare");
-
-    const newlineRepo = join(parent, "dir\nwith-newline", "repo");
-    const newlineSha = await initPackRepo(newlineRepo, "Newline path packs.");
-    const newlineCache = temp.make("cache-newline-");
-    const newlineDir = join(newlineCache, "team");
-    mkdirSync(newlineDir, { recursive: true });
-    await spawnGit(newlineDir, "init", "-q");
-    await spawnGit(newlineDir, "fetch", "-q", "--depth", "1", "--no-tags", newlineRepo, "main");
-    await spawnGit(newlineDir, "checkout", "-q", "--detach", "FETCH_HEAD");
-    writeFileSync(join(newlineDir, ".git", "hedge-source.json"), JSON.stringify({ repo: newlineRepo, ref: "main", commit: newlineSha }) + "\n");
-    rmSync(join(parent, "dir\nwith-newline"), { recursive: true, force: true });
-    const newlineOffline = await fetchSource({ name: "team", repo: newlineRepo, ref: "main" }, newlineCache);
-    if ("error" in newlineOffline) throw new Error(newlineOffline.error);
-    expect(newlineOffline.packs[0]?.manifest.summary).toBe("Newline path packs.");
-    expect(newlineOffline.stale).toContain("could not fetch main");
-
+  test("pins annotated tag object IDs offline across git gc and preserves legacy annotated-tag offline fallback", async () => {
     const annotatedRepo = await packRepo("Annotated tag v1.");
     await spawnGit(annotatedRepo, "tag", "-a", "rel-v1", "-m", "release v1");
     const tagOid = await spawnGit(annotatedRepo, "rev-parse", "refs/tags/rel-v1");
@@ -1215,23 +1276,6 @@ esac
     if ("error" in legacyTagOffline) throw new Error(legacyTagOffline.error);
     expect(legacyTagOffline.packs[0]?.manifest.summary).toBe("Legacy annotated tag v1.");
     expect(legacyTagOffline.stale).toContain(`could not fetch ${legacyTagOid}`);
-
-    const branchRepoA = await packRepo("Repo A branch v1.");
-    await spawnGit(branchRepoA, "tag", "-d", "v1");
-    await spawnGit(branchRepoA, "checkout", "-q", "-b", "v1");
-    const tagRepoB = await packRepo("Repo B broken tag v1.");
-    await spawnGit(tagRepoB, "tag", "-d", "v1");
-    writeFileSync(join(tagRepoB, "packs/team/pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Broken tag v1." }));
-    await spawnGit(tagRepoB, "commit", "-q", "-am", "broken v1");
-    await spawnGit(tagRepoB, "tag", "v1");
-    await spawnGit(tagRepoB, "checkout", "-q", "-b", "v1");
-    writePack(tagRepoB, "Repo B branch v1.");
-    await spawnGit(tagRepoB, "commit", "-q", "-am", "branch v1");
-    const repoSwitchCache = temp.make("cache-branch-repo-switch-");
-    expect("error" in (await fetchSource({ name: "team", repo: branchRepoA, ref: "v1" }, repoSwitchCache))).toBe(false);
-    expect(await followsBranch({ name: "team", repo: branchRepoA, ref: "v1" }, repoSwitchCache)).toBe(true);
-    expect("error" in (await fetchSource({ name: "team", repo: tagRepoB, ref: "v1" }, repoSwitchCache))).toBe(true);
-    expect(await followsBranch({ name: "team", repo: tagRepoB, ref: "v1" }, repoSwitchCache)).toBe(false);
   });
 });
 

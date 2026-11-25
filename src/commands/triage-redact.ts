@@ -126,12 +126,15 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
     .flatMap((entry) => {
       const minLength = entry.after ? 1 : 2;
       const safeAs = applyRules(entry.as, secretRules);
-      const variants = [entry.text, applyRules(entry.text, secretRules), encodeUri(entry.text), entry.text.replace(/ /g, "+")];
+      const baseVariants = [entry.text, applyRules(entry.text, secretRules), encodeUri(entry.text), entry.text.replace(/ /g, "+")];
+      const variants = [...baseVariants];
       if (transform) {
-        variants.push(transform(entry.text));
-        if (!entry.text.startsWith("/")) {
-          const prefixed = transform(`/${entry.text}`);
-          variants.push(prefixed.startsWith("/") ? prefixed.slice(1) : prefixed);
+        for (const variant of new Set(baseVariants)) {
+          variants.push(transform(variant));
+          if (!variant.startsWith("/")) {
+            const prefixed = transform(`/${variant}`);
+            variants.push(prefixed.startsWith("/") ? prefixed.slice(1) : prefixed);
+          }
         }
       }
       return [...new Set(variants.filter((variant) => variant.length >= minLength && !exempt?.has(variant)))].map((variant) => ({
