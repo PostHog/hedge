@@ -1,9 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
-import { cachedSource, fetchSource } from "./sources.ts";
+import { advanceSource, cachedSource, fetchSource } from "./sources.ts";
 
 isolateGit();
 const temp = tempDirs();
@@ -320,6 +319,26 @@ describe("fetchSource", () => {
     expect(statSync(sourceFile).mode & 0o777).toBe(0o600);
   });
 
+  async function legacyPinnedCache(cache: string, name: string, repo: string, commit: string, extra: Record<string, string> = {}) {
+    const dir = join(cache, name);
+    mkdirSync(dir, { recursive: true });
+    if (!existsSync(join(dir, ".git"))) await spawnGit(dir, "init", "-q");
+    await spawnGit(dir, "fetch", "-q", "--depth", "1", "--no-tags", repo, commit);
+    await spawnGit(dir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    writeFileSync(join(dir, ".git", "hedge-source.json"), JSON.stringify({ repo, ref: commit, commit, ...extra }) + "\n");
+    return dir;
+  }
+
+  function setDirModes(root: string, mode: number) {
+    const dirs: string[] = [];
+    const walk = (dir: string) => {
+      dirs.push(dir);
+      for (const entry of readdirSync(dir, { withFileTypes: true })) if (entry.isDirectory()) walk(join(dir, entry.name));
+    };
+    if (existsSync(root)) walk(root);
+    for (const dir of mode & 0o200 ? dirs : dirs.reverse()) chmodSync(dir, mode);
+  }
+
   test("preserves verified pin history across repository switches, pre-ref legacy caches, and git gc", async () => {
     const repoA = await packRepo("Repo A v1.");
     const commitA1 = await spawnGit(repoA, "rev-parse", "HEAD");
@@ -327,11 +346,9 @@ describe("fetchSource", () => {
     const commitB1 = await spawnGit(repoB, "rev-parse", "HEAD");
     const cache = temp.make("cache-");
 
-    await fetchSource({ name: "team", repo: repoA, ref: commitA1 }, cache);
-    rmSync(join(cache, "team", ".git", "refs", "hedge"), { recursive: true, force: true });
+    const cacheRepo = await legacyPinnedCache(cache, "team", repoA, commitA1);
     await fetchSource({ name: "team", repo: repoB, ref: commitB1 }, cache);
 
-    const cacheRepo = join(cache, "team");
     await spawnGit(cacheRepo, "reflog", "expire", "--expire=now", "--all");
     await spawnGit(cacheRepo, "gc", "--prune=now", "-q");
 
@@ -341,7 +358,25 @@ describe("fetchSource", () => {
     expect([offlineA1.packs[0]?.manifest.summary, offlineA1.stale]).toEqual(["Repo A v1.", undefined]);
   });
 
-  test("does not report success when a stale Git ref lock prevents recording a pinned commit", async () => {
+  test("does not migrate a malformed legacy record whose ref and commit SHAs disagree", async () => {
+    const repoA = await packRepo("Repo A v1.");
+    const commitA1 = await spawnGit(repoA, "rev-parse", "HEAD");
+    const repoB = await packRepo("Repo B v1.");
+    const commitB1 = await spawnGit(repoB, "rev-parse", "HEAD");
+    const cache = temp.make("cache-");
+
+    await legacyPinnedCache(cache, "team", repoA, commitA1);
+    await fetchSource({ name: "team", repo: repoB, ref: commitB1 }, cache);
+    writeFileSync(join(cache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo: repoB, ref: commitB1, commit: commitA1 }) + "\n");
+    await fetchSource({ name: "team", repo: repoB, ref: "main" }, cache);
+
+    const bogus = await fetchSource({ name: "team", repo: repoB, ref: commitA1 }, cache);
+    if ("error" in bogus) throw new Error(bogus.error);
+    expect(bogus.packs[0]?.manifest.summary).toBe("Repo B v1.");
+    expect(bogus.stale).toContain(`could not fetch ${commitA1}`);
+  });
+
+  test("does not report success when Git cannot record a pin ref during fetch or refresh", async () => {
     const repo = await packRepo("Team rules v1.");
     const commit1 = await spawnGit(repo, "rev-parse", "HEAD");
     writePack(repo, "Team rules v2.");
@@ -350,15 +385,28 @@ describe("fetchSource", () => {
     const cache = temp.make("cache-");
     await fetchSource({ name: "team", repo, ref: commit1 }, cache);
 
-    const hash = createHash("sha256").update(repo).digest("hex");
-    const refDir = join(cache, "team", ".git", "refs", "hedge", "pins", hash);
-    mkdirSync(refDir, { recursive: true });
-    writeFileSync(join(refDir, `${commit2}.lock`), "");
+    const refsDir = join(cache, "team", ".git", "refs");
+    setDirModes(refsDir, 0o555);
+    try {
+      const blocked = await fetchSource({ name: "team", repo, ref: commit2 }, cache);
+      if ("error" in blocked) throw new Error(blocked.error);
+      expect(blocked.packs[0]?.manifest.summary).toBe("Team rules v1.");
+      expect(blocked.stale).toContain(`could not record ${commit2}`);
+    } finally {
+      setDirModes(refsDir, 0o755);
+    }
 
-    const blocked = await fetchSource({ name: "team", repo, ref: commit2 }, cache);
-    if ("error" in blocked) throw new Error(blocked.error);
-    expect(blocked.packs[0]?.manifest.summary).toBe("Team rules v1.");
-    expect(blocked.stale).toContain(`could not record ${commit2}`);
+    const refreshCache = temp.make("refresh-cache-");
+    const refreshRepo = await legacyPinnedCache(refreshCache, "team", repo, commit1, { asked: "main" });
+    const refreshRefs = join(refreshRepo, ".git", "refs");
+    setDirModes(refreshRefs, 0o555);
+    try {
+      const moved = await advanceSource({ name: "team", repo, ref: "main" }, refreshCache, commit1);
+      expect(moved).toMatchObject({ state: "failed", say: expect.stringContaining("could not record main") });
+      expect(await spawnGit(refreshRepo, "rev-parse", "HEAD")).toBe(commit1);
+    } finally {
+      setDirModes(refreshRefs, 0o755);
+    }
   });
 
   test("records pinned history even for a relative repository path named after an Object property", async () => {
@@ -420,12 +468,13 @@ describe("fetchSource", () => {
     writePack(repo, "Team rules v2.");
     await spawnGit(repo, "commit", "-q", "-am", "v2");
     const second = await spawnGit(repo, "rev-parse", "HEAD");
+    writePack(repo, "Team rules v3.");
+    await spawnGit(repo, "commit", "-q", "-am", "v3");
+    const third = await spawnGit(repo, "rev-parse", "HEAD");
     const cache = temp.make("cache-");
-    await fetchSource({ name: "team", repo, ref: first }, cache);
-    writeFileSync(join(cache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo, ref: first, commit: first }));
-    rmSync(join(cache, "team", ".git", "refs", "hedge"), { recursive: true, force: true });
+    await legacyPinnedCache(cache, "team", repo, first);
     await fetchSource({ name: "team", repo, ref: second }, cache);
-    writeFileSync(join(cache, "team", ".git", "hedge-source.json"), JSON.stringify({ repo, ref: second, commit: second }));
+    await legacyPinnedCache(cache, "team", repo, third);
     rmSync(repo, { recursive: true, force: true });
     const back = await fetchSource({ name: "team", repo, ref: first }, cache);
     if ("error" in back) throw new Error(back.error);

@@ -163,17 +163,24 @@ async function recordPinRef(dir: string, repo: string, commit: string): Promise<
   return updated.ok ? undefined : updated.stderr || "could not record pinned commit";
 }
 
+const pinnedCommit = (record: Good | undefined) =>
+  record && typeof record.repo === "string" && typeof record.ref === "string" && typeof record.commit === "string" && commitSha.test(record.ref) && record.ref.toLowerCase() === record.commit.toLowerCase()
+    ? { repo: record.repo, commit: record.commit.toLowerCase() }
+    : undefined;
+
 async function saveGood(dir: string, good: Good): Promise<string | undefined> {
   const before = await lastGood(dir);
-  if (before && typeof before.repo === "string" && typeof before.ref === "string" && commitSha.test(before.ref) && typeof before.commit === "string" && commitSha.test(before.commit)) {
-    const exists = await git(dir, "cat-file", "-e", `${before.commit.toLowerCase()}^{commit}`);
+  const previousPin = pinnedCommit(before);
+  if (previousPin) {
+    const exists = await git(dir, "cat-file", "-e", `${previousPin.commit}^{commit}`);
     if (exists.ok) {
-      const migrated = await recordPinRef(dir, before.repo, before.commit);
+      const migrated = await recordPinRef(dir, previousPin.repo, previousPin.commit);
       if (migrated) return migrated;
     }
   }
-  if (commitSha.test(good.ref) && commitSha.test(good.commit)) {
-    const recorded = await recordPinRef(dir, good.repo, good.commit);
+  const currentPin = pinnedCommit(good);
+  if (currentPin) {
+    const recorded = await recordPinRef(dir, currentPin.repo, currentPin.commit);
     if (recorded) return recorded;
   }
   await writeAtomic(goodPath(dir), JSON.stringify(good) + "\n");
@@ -297,7 +304,11 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     await git(dir, "checkout", "-q", "--detach", from);
     return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} does not load: ${loaded.error}` };
   }
-  await saveGood(dir, { repo, ref: ref.ref, commit: tip });
+  const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip });
+  if (saveError) {
+    await git(dir, "checkout", "-q", "--detach", from);
+    return { state: "failed", say: `could not record ${branch} of ${ref.repo} at ${tip.slice(0, 12)}: ${saveError}` };
+  }
   return { state: "moved", commit: tip, source: { ref, dir, packs: loaded.packs } };
 }
 

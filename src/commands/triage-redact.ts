@@ -103,7 +103,13 @@ function replaceKnown(text: string, entries: KnownName[], transform?: (value: st
       const minLength = entry.after ? 1 : 2;
       const safeAs = applyRules(entry.as, secretRules);
       const variants = [entry.text, applyRules(entry.text, secretRules), encodeUri(entry.text), entry.text.replace(/ /g, "+")];
-      if (transform) variants.push(transform(entry.text));
+      if (transform) {
+        variants.push(transform(entry.text));
+        if (!entry.text.startsWith("/")) {
+          const prefixed = transform(`/${entry.text}`);
+          if (prefixed.startsWith("/")) variants.push(prefixed.slice(1));
+        }
+      }
       return [...new Set(variants.filter((variant) => variant.length >= minLength && !exempt?.has(variant)))].map((variant) => ({ text: variant, as: safeAs }));
     });
   const exemptAlt = exempt?.size ? [...exempt].sort((a, b) => b.length - a.length).map(escape).join("|") : "";
