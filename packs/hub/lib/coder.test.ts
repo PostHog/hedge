@@ -326,7 +326,7 @@ test("terminates its detached child process group when the parent receives SIGTE
   const dir = temp.make("hedge-term-");
   const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
   expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
-  const runner = Bun.spawn([process.execPath, "-e", `import { capture } from ${JSON.stringify(join(import.meta.dir, "coder.ts"))}; await capture(["sh", "-c", "{ sleep 30 & } 3>${gone}; echo $! > ${ready}; wait"], { timeoutMs: 30_000 });`], { stdout: "ignore", stderr: "ignore" });
+  const runner = Bun.spawn([process.execPath, "-e", `import { capture } from ${JSON.stringify(join(import.meta.dir, "coder.ts"))}; await capture(["sh", "-c", '{ sleep 30 & } 3>"$1"; echo $! > "$2"; wait', "probe", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { timeoutMs: 30_000 });`], { stdout: "ignore", stderr: "ignore" });
   const holderGone = Bun.file(gone).text();
   const childPid = Number((await Bun.file(ready).text()).trim());
   try {

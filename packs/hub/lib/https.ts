@@ -1,5 +1,5 @@
-import { rmSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdtempSync, rmSync } from "node:fs";
+import { chmod, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { changedFiles, ownedFiles, readIfThere, removeUnits, requireInstalled, writeFiles, type Managed } from "./managed.ts";
@@ -171,7 +171,7 @@ async function trusted(hub: HttpsHub): Promise<number> {
   };
   process.on("SIGINT", interrupted).on("SIGTERM", interrupted);
   try {
-    folder = await mkdtemp(join(tmpdir(), "hedge-hub-ca-"));
+    folder = mkdtempSync(join(tmpdir(), "hedge-hub-ca-"));
     if (stopped) return 1;
     const path = join(folder, "hub-ca.crt");
     await writePrivateFile(path, certificate);

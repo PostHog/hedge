@@ -271,17 +271,18 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     }
   });
 
-  test("stops the human steps it still waits for with the same signal when hedge packs is interrupted", async () => {
+  test("stops both foreground and background children of human steps when hedge packs is interrupted", async () => {
     const { home } = await machineWithProfile();
-    const [ready, gone] = [join(home, "ready"), join(home, "gone")];
-    expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
-    await withTeamPack(home, { workflows: [flow("allowlist")], human: [humanStep("allowlist", 'trap "" TERM; exec 3>"$HOME/gone"; echo $$ > "$HOME/ready"; sleep 30', "allowlist")] });
-    const [holderGone, started] = [readFile(gone, "utf8"), readFile(ready, "utf8")];
+    const [ready, fgGone, bgGone] = [join(home, "ready"), join(home, "fg-gone"), join(home, "bg-gone")];
+    expect(Bun.spawnSync(["mkfifo", ready, fgGone, bgGone]).exitCode).toBe(0);
+    await withTeamPack(home, { workflows: [flow("allowlist")], human: [humanStep("allowlist", '{ sleep 30 & } 3>"$HOME/bg-gone"; trap "" TERM; exec 3>"$HOME/fg-gone"; echo $$ > "$HOME/ready"; sleep 30', "allowlist")] });
+    const [fgClosed, bgClosed, started] = [readFile(fgGone, "utf8"), readFile(bgGone, "utf8"), readFile(ready, "utf8")];
     const listing = Bun.spawn([process.execPath, join(engineRoot, "src/cli.ts"), "packs"], { env: { ...Bun.env, HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
     try {
       await started;
       listing.kill("SIGINT");
-      expect(await holderGone).toBe("");
+      expect(await fgClosed).toBe("");
+      expect(await bgClosed).toBe("");
       expect(await listing.exited).not.toBe(0);
     } finally {
       listing.kill("SIGKILL");
