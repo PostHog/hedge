@@ -645,54 +645,56 @@ await humanStepsLeft(plan, { home: ${JSON.stringify(dir)}, giveUp: new Promise((
 
   test("stops a detached clean-env worker whose intermediate helper exited when a probe times out, and skips launch if a stop is already buffered", async () => {
     const dir = temp.make("sup-subreaper-buffered-");
-    const [workerReady, workerGone] = [join(dir, "worker-ready"), join(dir, "worker-gone")];
-    mkfifo(workerReady, workerGone);
-    const started = fifoRead(workerReady);
-    const closed = fifoRead(workerGone);
     const envBin = Bun.which("env") ?? "/usr/bin/env";
     const shBin = Bun.which("sh") ?? "/bin/sh";
-    const helperScript = `const w = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "worker", ${JSON.stringify(workerGone)}, ${JSON.stringify(workerReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    const { humanStepsLeft } = await import("./apply.ts");
+    if (process.platform === "linux") {
+      const [workerReady, workerGone] = [join(dir, "worker-ready"), join(dir, "worker-gone")];
+      mkfifo(workerReady, workerGone);
+      const started = fifoRead(workerReady);
+      const closed = fifoRead(workerGone);
+      const helperScript = `const w = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "worker", ${JSON.stringify(workerGone)}, ${JSON.stringify(workerReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 w.unref();
 process.exit(0);`;
-    const probeScript = `const h = Bun.spawn([process.execPath, "-e", ${JSON.stringify(helperScript)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+      const probeScript = `const h = Bun.spawn([process.execPath, "-e", ${JSON.stringify(helperScript)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 await h.exited;
 await Bun.sleep(30_000);`;
-    const { humanStepsLeft } = await import("./apply.ts");
-    let fireDeadline!: () => void;
-    let workerPid = 0;
-    try {
-      const pending = humanStepsLeft(
-        {
-          machine: { schema: 1, role: "linux" },
-          os: "linux",
-          ai: "both",
-          packs: [],
-          workflows: [],
-          files: [],
-          config: [],
-          owners: {},
-          jobs: [],
-          human: [{ id: "escaped", pack: "team", say: "Escaped.", probe: [process.execPath, "-e", probeScript] }],
-          steps: [],
-          checks: [],
-          commands: {},
-          handlers: {},
-          models: [],
-          settings: {},
-          unanswered: [],
-          ask: [],
-          dropped: [],
-        },
-        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 0 },
-      );
-      workerPid = Number((await started).trim());
-      expect(workerPid).toBeGreaterThan(0);
-      fireDeadline();
-      const res = await pending;
-      expect(res.unchecked.map((step) => step.id)).toEqual(["escaped"]);
-      expect(await closed).toBe("");
-    } finally {
-      if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
+      let fireDeadline!: () => void;
+      let workerPid = 0;
+      try {
+        const pending = humanStepsLeft(
+          {
+            machine: { schema: 1, role: "linux" },
+            os: "linux",
+            ai: "both",
+            packs: [],
+            workflows: [],
+            files: [],
+            config: [],
+            owners: {},
+            jobs: [],
+            human: [{ id: "escaped", pack: "team", say: "Escaped.", probe: [process.execPath, "-e", probeScript] }],
+            steps: [],
+            checks: [],
+            commands: {},
+            handlers: {},
+            models: [],
+            settings: {},
+            unanswered: [],
+            ask: [],
+            dropped: [],
+          },
+          { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 0 },
+        );
+        workerPid = Number((await started).trim());
+        expect(workerPid).toBeGreaterThan(0);
+        fireDeadline();
+        const res = await pending;
+        expect(res.unchecked.map((step) => step.id)).toEqual(["escaped"]);
+        expect(await closed).toBe("");
+      } finally {
+        if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
+      }
     }
 
     const marker = join(dir, "ran-marker");

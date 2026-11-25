@@ -711,7 +711,7 @@ describe("humanStepsLeft", () => {
     const cleanupStarted = Bun.file(sawCleanup).text();
     const slowStarted = Bun.file(slowReady).text();
     const slowClosed = Bun.file(slowGone).text();
-    const childCmd = 'pid=; trap \'echo cleanup > "$3"\' TERM; exec 3>"$1"; echo $$ > "$2"; while true; do sleep 30 3>&- & pid=$!; wait "$pid"; done';
+    const childCmd = 'pid=; trap \'kill "$pid" 2>/dev/null; echo cleanup > "$3"; exit 0\' TERM; exec 3>"$1"; echo $$ > "$2"; while true; do sleep 30 3>&- & pid=$!; wait "$pid"; done';
     const failScript = `const c = Bun.spawn(["sh", "-c", ${JSON.stringify(childCmd)}, "child", ${JSON.stringify(childGone)}, ${JSON.stringify(childReady)}, ${JSON.stringify(sawCleanup)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 c.unref();
 process.exit(1);`;
@@ -734,7 +734,7 @@ process.exit(1);`;
       const pending = humanStepsLeft(plan({ human: [quickFailStep, slowStep] }), {
         home,
         giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)),
-        graceMs: 100,
+        graceMs: 0,
       });
       [childPid, slowPid] = (await Promise.all([childStarted, slowStarted])).map((s) => Number(s.trim())) as [number, number];
       expect(childPid).toBeGreaterThan(0);

@@ -101,6 +101,7 @@ export function captureWith(timer: Timer): Capture {
     let stopped = false;
     let supervisorReaped = false;
     let targetExited = false;
+    let tagSweep: Promise<void> | undefined;
     const stopStream = new AbortController();
     const closeControl = () => {
       if (controlFd === undefined) return;
@@ -116,7 +117,8 @@ export function captureWith(timer: Timer): Capture {
         killSessionSync(child.pid, "SIGKILL", tag);
         return;
       }
-      void killSession(undefined, "SIGKILL", tag);
+      const sweep = killSession(undefined, "SIGKILL", tag);
+      if (sweep && typeof (sweep as Promise<void>).then === "function") tagSweep = sweep as Promise<void>;
     };
     const stopChild = () => {
       stopped = true;
@@ -203,6 +205,7 @@ export function captureWith(timer: Timer): Capture {
         settle({ code });
       });
       let forceExpired = false;
+      const supervisorGraceMs = process.platform === "linux" ? 150 : 350;
       cancel = timer(timeoutMs, () => {
         expired = true;
         stopChild();
@@ -211,7 +214,7 @@ export function captureWith(timer: Timer): Capture {
           killStalled();
           stopStream.abort();
           settle({ code: timedOut });
-        }, 150);
+        }, supervisorGraceMs);
         void live.exited.finally(() => {
           if (hardKill) clearTimeout(hardKill);
           stopStream.abort();
@@ -238,21 +241,24 @@ export function captureWith(timer: Timer): Capture {
       }
       if (expired) {
         if (!supervisorReaped) {
-          await Promise.race([live.exited, Bun.sleep(forceExpired ? 50 : 150)]);
+          await Promise.race([live.exited, Bun.sleep(forceExpired ? 50 : supervisorGraceMs)]);
           if (!supervisorReaped) {
             killStalled();
             await Promise.race([live.exited, Bun.sleep(50)]);
           }
         }
+        if (tagSweep) await tagSweep;
+        else if (forceExpired || !supervisorReaped) await killSession(undefined, "SIGKILL", tag);
         return timeoutResult(timeoutMs, stdout);
       }
       cancel();
+      closeControl();
       if (!supervisorReaped) {
         try {
           live.send("done");
         } catch {}
+        live.unref();
       }
-      await live.exited;
       if (status.error !== undefined) {
         const err = new Error(status.error) as NodeJS.ErrnoException;
         if (status.errCode) err.code = status.errCode;
