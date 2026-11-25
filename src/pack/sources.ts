@@ -71,7 +71,45 @@ async function restoreCheckout(dir: string, before: CheckoutState | undefined): 
 async function resolvedRepoUrl(dir: string, repo: string) {
   if (!existsSync(join(dir, ".git"))) return repo;
   const read = await git(dir, "ls-remote", "--get-url", repo);
-  return read.ok && read.stdout ? read.stdout : repo;
+  const url = read.rawStdout.replace(/\r?\n$/, "");
+  return read.ok && url ? url : repo;
+}
+
+const canonicalFetchHeadUrl = (url: string) =>
+  withoutUserinfo(url)
+    .replace(/^[^/@:\s]+@/, "")
+    .replace(/\/+$/, "")
+    .replace(/\.git$/i, "");
+
+async function fetchHeadRepo(dir: string, commit: string): Promise<string | undefined> {
+  const raw = await readFile(join(dir, ".git", "FETCH_HEAD"), "utf8").catch(() => "");
+  const first = raw.split(/\r?\n/, 1)[0] ?? "";
+  const match = first.match(/^([0-9a-f]{40})\t[^\t]*\t.* of ([\s\S]+)$/i);
+  if (!match || match[1]!.toLowerCase() !== commit.toLowerCase()) return undefined;
+  return match[2];
+}
+
+function fetchHeadMatches(fetchedUrl: string, candidate: string) {
+  return fetchedUrl === candidate || fetchedUrl === canonicalFetchHeadUrl(candidate);
+}
+
+async function goodMatchesEffective(dir: string, good: Good | undefined, repo: string, effectiveRepo: string): Promise<boolean> {
+  if (!good || good.repo !== repo) return false;
+  if (typeof good.resolved === "string") return good.resolved === effectiveRepo;
+  const fetchedUrl = await fetchHeadRepo(dir, good.commit);
+  if (fetchedUrl !== undefined) return fetchHeadMatches(fetchedUrl, effectiveRepo);
+  return effectiveRepo === repo;
+}
+
+async function previousVerifiedRepo(dir: string, before: Good | undefined, effectiveBefore: string): Promise<string | undefined> {
+  if (!before || typeof before.repo !== "string") return undefined;
+  if (typeof before.resolved === "string") return before.resolved;
+  const fetchedUrl = await fetchHeadRepo(dir, before.commit);
+  if (fetchedUrl !== undefined) {
+    if (fetchHeadMatches(fetchedUrl, effectiveBefore)) return effectiveBefore;
+    return fetchHeadMatches(fetchedUrl, before.repo) ? before.repo : undefined;
+  }
+  return effectiveBefore === before.repo ? before.repo : undefined;
 }
 
 async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Promise<FetchedSource> {
@@ -81,23 +119,37 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
   const good = await lastGood(dir);
   const before = await currentCheckout(dir);
   const effectiveBefore = await resolvedRepoUrl(dir, repo);
-  const fetchError = (await checkedOutFromCache(dir, repo, effectiveBefore, ref, good)) ? undefined : await checkout(dir, repo, ref.ref);
-  const effectiveRepo = await resolvedRepoUrl(dir, repo);
+  const prevRepo = await previousVerifiedRepo(dir, good, effectiveBefore);
+  const preserveBefore =
+    before !== undefined &&
+    (!good || before.commit !== good.commit) &&
+    (Boolean(before.branch) || (await fetchHeadRepo(dir, before.commit)) === undefined);
+  let effectiveRepo = effectiveBefore;
+  let fetchError: string | undefined;
+  if (!(await checkedOutFromCache(dir, repo, effectiveBefore, ref, good))) {
+    const fetched = await checkout(dir, repo, ref.ref);
+    effectiveRepo = fetched.effectiveRepo;
+    fetchError = fetched.error;
+  }
   if (!fetchError) {
     const loaded = await load(dir, loadLimitMs);
     if (!("error" in loaded)) {
-      const saveError = await saveGood(dir, {
-        repo,
-        ref: ref.ref,
-        commit: (await git(dir, "rev-parse", "HEAD")).stdout,
-        ...(effectiveRepo === repo ? {} : { resolved: effectiveRepo }),
-      });
+      const saveError = await saveGood(
+        dir,
+        {
+          repo,
+          ref: ref.ref,
+          commit: (await git(dir, "rev-parse", "HEAD")).stdout,
+          ...(effectiveRepo === repo ? {} : { resolved: effectiveRepo }),
+        },
+        prevRepo,
+      );
       if (!saveError) return { ref, dir, packs: loaded.packs };
-      return fallBack(ref, dir, repo, effectiveRepo, good, `could not record ${ref.ref} from ${ref.repo}: ${saveError}`, loadLimitMs, before);
+      return fallBack(ref, dir, repo, effectiveRepo, good, `could not record ${ref.ref} from ${ref.repo}: ${saveError}`, loadLimitMs, before, preserveBefore, prevRepo);
     }
-    return fallBack(ref, dir, repo, effectiveRepo, good, `${ref.ref} from ${ref.repo} does not load: ${loaded.error}`, loadLimitMs, before);
+    return fallBack(ref, dir, repo, effectiveRepo, good, `${ref.ref} from ${ref.repo} does not load: ${loaded.error}`, loadLimitMs, before, preserveBefore, prevRepo);
   }
-  return fallBack(ref, dir, repo, effectiveRepo, good, `could not fetch ${ref.ref} from ${ref.repo}: ${fetchError}`, loadLimitMs, before);
+  return fallBack(ref, dir, repo, effectiveRepo, good, `could not fetch ${ref.ref} from ${ref.repo}: ${fetchError}`, loadLimitMs, before, preserveBefore, prevRepo);
 }
 
 function cacheDir(ref: SourceRef, cacheRoot: string): string | { error: string } {
@@ -132,13 +184,12 @@ export function repoUrl(repo: string) {
   return /^[\w.-]+\/[\w.-]+$/.test(repo) ? `https://github.com/${repo}.git` : repo;
 }
 
-async function fallBack(ref: SourceRef, dir: string, repo: string, effectiveRepo: string, good: Good | undefined, reason: string, loadLimitMs: number, before?: CheckoutState): Promise<FetchedSource> {
-  const goodEffective = good && typeof good.resolved === "string" ? good.resolved : good?.repo;
-  if (!good || good.repo !== repo || goodEffective !== effectiveRepo) {
+async function fallBack(ref: SourceRef, dir: string, repo: string, effectiveRepo: string, good: Good | undefined, reason: string, loadLimitMs: number, before?: CheckoutState, preserveBefore = false, prevRepo?: string): Promise<FetchedSource> {
+  if (!good || !verifiedGoodCommit(good) || good.repo !== repo || (typeof good.resolved === "string" ? good.resolved !== effectiveRepo : prevRepo !== effectiveRepo)) {
     await restoreCheckout(dir, before);
     return { ref, error: reason };
   }
-  if (before && before.commit !== good.commit) {
+  if (preserveBefore) {
     await restoreCheckout(dir, before);
     return { ref, error: reason };
   }
@@ -158,7 +209,7 @@ async function fallBack(ref: SourceRef, dir: string, repo: string, effectiveRepo
     ...(good.ref === ref.ref ? {} : { asked: ref.ref }),
     ...(effectiveRepo === repo ? {} : { resolved: effectiveRepo }),
   };
-  const saveError = await saveGood(dir, nextGood);
+  const saveError = await saveGood(dir, nextGood, prevRepo);
   if (saveError) await writeAtomic(goodPath(dir), JSON.stringify(nextGood) + "\n").catch(() => {});
   const why = saveError && !reason.includes(saveError) ? `${reason}; ${saveError}` : reason;
   return { ref, dir, packs: loaded.packs, stale: good.ref === ref.ref ? why : `${why}; using ${good.ref} instead` };
@@ -225,7 +276,7 @@ async function recordPinRef(dir: string, repo: string, commit: string): Promise<
   return updated.ok ? undefined : updated.stderr || "could not record pinned commit";
 }
 
-async function saveGood(dir: string, good: Good): Promise<string | undefined> {
+async function saveGood(dir: string, good: Good, previousRepo?: string): Promise<string | undefined> {
   const before = await lastGood(dir);
   const unchanged =
     before !== undefined &&
@@ -234,7 +285,7 @@ async function saveGood(dir: string, good: Good): Promise<string | undefined> {
     before.commit === good.commit &&
     before.asked === good.asked &&
     before.resolved === good.resolved;
-  const previousCommit = verifiedGoodCommit(before);
+  const previousCommit = previousRepo === undefined ? undefined : verifiedGoodCommit(before, previousRepo);
   if (previousCommit) {
     const exists = await git(dir, "cat-file", "-e", `${previousCommit.commit}^{commit}`);
     if (exists.ok) {
@@ -259,15 +310,20 @@ async function saveGood(dir: string, good: Good): Promise<string | undefined> {
   return undefined;
 }
 
-const verifiedGoodCommit = (record: Good | undefined) =>
-  record &&
-  typeof record.repo === "string" &&
-  typeof record.ref === "string" &&
-  typeof record.commit === "string" &&
-  commitSha.test(record.commit) &&
-  (!commitSha.test(record.ref) || record.ref.toLowerCase() === record.commit.toLowerCase())
-    ? { repo: typeof record.resolved === "string" ? record.resolved : record.repo, commit: record.commit.toLowerCase() }
-    : undefined;
+const verifiedGoodCommit = (record: Good | undefined, overrideRepo?: string) => {
+  if (
+    !record ||
+    typeof record.repo !== "string" ||
+    typeof record.ref !== "string" ||
+    typeof record.commit !== "string" ||
+    !commitSha.test(record.commit) ||
+    (commitSha.test(record.ref) && record.ref.toLowerCase() !== record.commit.toLowerCase())
+  ) {
+    return undefined;
+  }
+  const effective = overrideRepo ?? (typeof record.resolved === "string" ? record.resolved : record.repo);
+  return { repo: effective, commit: record.commit.toLowerCase() };
+};
 
 const commitSha = /^[0-9a-f]{40}$/i;
 
@@ -294,18 +350,23 @@ async function checkedOutFromCache(dir: string, repo: string, effectiveRepo: str
   const commit = ref.ref.toLowerCase();
   if (!commitSha.test(commit)) return false;
   const goodCommit = verifiedGoodCommit(good);
-  const fetchedHere = (goodCommit?.repo === effectiveRepo && goodCommit.commit === commit && (effectiveRepo === repo || typeof good?.resolved === "string")) || (await hasPinRef(dir, effectiveRepo, commit));
+  const fetchedHere =
+    (goodCommit?.commit === commit && (await goodMatchesEffective(dir, good, repo, effectiveRepo))) ||
+    (await hasPinRef(dir, effectiveRepo, commit));
   if (!fetchedHere) return false;
   return (await git(dir, "checkout", "-q", "--detach", commit)).ok;
 }
 
-async function checkout(dir: string, url: string, ref: string): Promise<string | undefined> {
+async function checkout(dir: string, repo: string, ref: string): Promise<{ effectiveRepo: string; error?: string }> {
   await mkdir(dir, { recursive: true });
   if (!existsSync(join(dir, ".git"))) await git(dir, "init", "-q");
-  const fetched = await git(dir, "fetch", "-q", "--depth", "1", "--no-tags", url, ref);
-  if (!fetched.ok) return fetched.stderr;
+  const effectiveRepo = await resolvedRepoUrl(dir, repo);
+  const target = (await resolvedRepoUrl(dir, effectiveRepo)) === effectiveRepo ? effectiveRepo : repo;
+  const fetched = await git(dir, "fetch", "-q", "--depth", "1", "--no-tags", target, ref);
+  if (!fetched.ok) return { effectiveRepo, error: fetched.stderr };
+  if ((await resolvedRepoUrl(dir, target)) !== effectiveRepo) return { effectiveRepo, error: "git remote rewrite rule changed during fetch" };
   const moved = await git(dir, "checkout", "-q", "--detach", "FETCH_HEAD");
-  return moved.ok ? undefined : moved.stderr;
+  return { effectiveRepo, ...(moved.ok ? {} : { error: moved.stderr }) };
 }
 
 /** Runs git without any prompt: no terminal, no askpass program, SSH in batch mode, and a time limit. */
@@ -314,7 +375,7 @@ async function git(dir: string, ...args: string[]) {
   const process = Bun.spawn(["git", "-C", dir, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env, timeout: fetchTimeoutMs });
   const [code, stdout, stderr] = await Promise.all([process.exited, new Response(process.stdout).text(), new Response(process.stderr).text()]);
   const message = process.signalCode ? `git timed out after ${fetchTimeoutMs / 1000} seconds` : (stderr.trim().split("\n").at(-1) ?? "");
-  return { ok: code === 0, stdout: stdout.trim(), stderr: message };
+  return { ok: code === 0, stdout: stdout.trim(), rawStdout: stdout, stderr: message };
 }
 
 export function sourceCache(home: string) {
@@ -367,7 +428,10 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
   const repo = repoUrl(ref.repo);
   const branch = ref.ref.replace(/^refs\/heads\//, "");
   const head = `refs/heads/${branch}`;
-  const listed = await git(dir, "ls-remote", repo, head);
+  const effectiveRepo = await resolvedRepoUrl(dir, repo);
+  const target = (await resolvedRepoUrl(dir, effectiveRepo)) === effectiveRepo ? effectiveRepo : repo;
+  const prevRepo = await previousVerifiedRepo(dir, await lastGood(dir), effectiveRepo);
+  const listed = await git(dir, "ls-remote", target, head);
   if (!listed.ok) return { state: "failed", say: `could not reach ${ref.repo}: ${listed.stderr}` };
   const commit = listed.stdout.split("\n").map((line) => line.split("\t")).find(([, name]) => name === head)?.[0];
   if (!commit) return { state: "failed", say: `${ref.repo} has no branch ${branch}` };
@@ -375,12 +439,12 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
   const rewritten = (tip: string) => ({ state: "refused" as const, say: `${branch} of ${ref.repo} moved to ${tip.slice(0, 12)}, which does not build on ${from.slice(0, 12)}, the commit Hedge loaded last. Hedge refresh runs no pack code from a rewritten branch. Run hedge update to take it.` });
   const edits = await localEdits(dir);
   if (edits.length) return { state: "edited", say: `${ref.name} moved, but Hedge ${editsReason(ref, dir, edits)}.` };
-  const fetched = await git(dir, "fetch", "-q", "--no-tags", repo, head);
+  const fetched = await git(dir, "fetch", "-q", "--no-tags", target, head);
   if (!fetched.ok) return { state: "failed", say: `could not fetch ${branch} from ${ref.repo}: ${fetched.stderr}` };
+  if ((await resolvedRepoUrl(dir, target)) !== effectiveRepo) return { state: "failed", say: `git remote rewrite rule changed while refreshing ${ref.repo}` };
   const tip = (await git(dir, "rev-parse", "FETCH_HEAD")).stdout;
   if (!(await git(dir, "merge-base", "--is-ancestor", from, tip)).ok) return rewritten(tip);
   const before = await currentCheckout(dir);
-  const effectiveRepo = await resolvedRepoUrl(dir, repo);
   const moved = await git(dir, "checkout", "-q", "--detach", tip);
   if (!moved.ok) return { state: "failed", say: `could not check out ${tip.slice(0, 12)} of ${ref.name}: ${moved.stderr}` };
   const loaded = await load(dir, loadLimitMs);
@@ -389,7 +453,7 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     else if ((await git(dir, "checkout", "-q", "--detach", from)).ok) clearLoadedModules(dir);
     return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} does not load: ${loaded.error}` };
   }
-  const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, ...(effectiveRepo === repo ? {} : { resolved: effectiveRepo }) });
+  const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, ...(effectiveRepo === repo ? {} : { resolved: effectiveRepo }) }, prevRepo);
   if (saveError) {
     if (before) await restoreCheckout(dir, before);
     else if ((await git(dir, "checkout", "-q", "--detach", from)).ok) clearLoadedModules(dir);

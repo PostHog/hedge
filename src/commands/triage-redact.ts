@@ -154,11 +154,14 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
   const primary = valid.filter((entry) => !entry.after && !reservedWord.test(entry.text));
   const after = valid.filter((entry) => entry.after || reservedWord.test(entry.text)).map((entry) => (entry.after ? entry : { ...entry, after: true }));
 
-  let maxTildes = 1;
-  for (const part of [text, ...valid.flatMap((entry) => [entry.text, entry.as])]) {
-    for (const run of part.matchAll(/~+/g)) if (run[0].length > maxTildes) maxTildes = run[0].length;
+  const usedNonces = new Set<number>();
+  for (const part of [text, home, ...valid.flatMap((entry) => [entry.text, entry.as])]) {
+    for (const match of part.matchAll(/~\.(\d+)\./g)) usedNonces.add(Number(match[1]));
   }
-  const fence = "~".repeat(maxTildes + 1);
+  let nonce = 0;
+  while (usedNonces.has(nonce)) nonce++;
+  const prefix = `~.${nonce}.`;
+  const suffix = ".~";
 
   const rawPrimarySpellings = compileSpellings(primary);
   const sanitizeLabel = (entry: KnownName) => applyRules(stripHome(applySpellings(entry.as, rawPrimarySpellings, undefined, entry)), allRules);
@@ -169,10 +172,10 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     const index = labels.length;
     labels.push(sanitizeLabel(entry));
     originals.push(entry.text);
-    return { ...entry, as: `${fence}${index}${fence}` };
+    return { ...entry, as: `${prefix}${index}${suffix}` };
   });
   const maskedSpellings = compileSpellings(maskedEntries);
-  const tokenPattern = `${escape(fence)}(\\d+)${escape(fence)}`;
+  const tokenPattern = `${escape(prefix)}(\\d+)${escape(suffix)}`;
   const tokenRegex = new RegExp(tokenPattern, "g");
   const maskedRandomRegex = new RegExp(`(?:${tokenPattern}|[A-Za-z0-9+/_-])+={0,2}`, "g");
 

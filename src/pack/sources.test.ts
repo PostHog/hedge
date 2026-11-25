@@ -670,6 +670,80 @@ describe("fetchSource", () => {
     if ("error" in back) throw new Error(back.error);
     expect([back.packs[0]?.manifest.summary, back.stale]).toEqual(["Team rules v1.", undefined]);
   });
+
+  test("keeps distinct pin namespaces for local repositories whose paths differ only by a trailing space", async () => {
+    const parent = temp.make("spaces-");
+    const repoA = join(parent, "repo ");
+    const repoB = join(parent, "repo");
+    for (const [dir, summary] of [[repoA, "Trailing space repo."], [repoB, "Plain repo."]] as const) {
+      mkdirSync(dir, { recursive: true });
+      await spawnGit(dir, "init", "-q", "-b", "main");
+      writePack(dir, summary);
+      await spawnGit(dir, "add", ".");
+      await spawnGit(dir, "commit", "-q", "-m", "v1");
+    }
+    const shaA = await spawnGit(repoA, "rev-parse", "HEAD");
+    const shaB = await spawnGit(repoB, "rev-parse", "HEAD");
+    const cache = temp.make("cache-");
+    const first = await fetchSource({ name: "team", repo: repoA, ref: shaA }, cache);
+    if ("error" in first) throw new Error(first.error);
+    expect(first.packs[0]?.manifest.summary).toBe("Trailing space repo.");
+    const second = await fetchSource({ name: "team", repo: repoB, ref: shaB }, cache);
+    if ("error" in second) throw new Error(second.error);
+    expect(second.packs[0]?.manifest.summary).toBe("Plain repo.");
+    const cross = await fetchSource({ name: "team", repo: repoB, ref: shaA }, cache);
+    if ("error" in cross) throw new Error(cross.error);
+    expect(cross.packs[0]?.manifest.summary).toBe("Plain repo.");
+    expect(cross.stale).toContain(`could not fetch ${shaA}`);
+  });
+
+  test("keeps a legacy insteadOf-fetched pinned cache working offline after upgrade, while rejecting a changed rewrite", async () => {
+    const repoA = await packRepo("Legacy mirror A.");
+    const shaA = await spawnGit(repoA, "rev-parse", "HEAD");
+    const repoB = await packRepo("Legacy mirror B.");
+    const configured = "https://example.invalid/team-legacy.git";
+    const cache = temp.make("cache-");
+    const dir = join(cache, "team");
+    mkdirSync(dir, { recursive: true });
+    await spawnGit(dir, "init", "-q");
+    await spawnGit(dir, "config", `url.${repoA}.insteadOf`, configured);
+    await spawnGit(dir, "fetch", "-q", "--depth", "1", "--no-tags", configured, shaA);
+    await spawnGit(dir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    writeFileSync(join(dir, ".git", "hedge-source.json"), JSON.stringify({ repo: configured, ref: shaA, commit: shaA }) + "\n");
+    rmSync(repoA, { recursive: true, force: true });
+
+    const offline = await fetchSource({ name: "team", repo: configured, ref: shaA }, cache);
+    if ("error" in offline) throw new Error(offline.error);
+    expect([offline.packs[0]?.manifest.summary, offline.stale]).toEqual(["Legacy mirror A.", undefined]);
+
+    await spawnGit(dir, "config", "--unset", `url.${repoA}.insteadOf`);
+    await spawnGit(dir, "config", `url.${repoB}.insteadOf`, configured);
+    rmSync(repoB, { recursive: true, force: true });
+    const swapped = await fetchSource({ name: "team", repo: configured, ref: shaA }, cache);
+    expect("error" in swapped).toBe(true);
+  });
+
+  test("falls back to the last-good commit offline after an interrupted apply left detached HEAD at FETCH_HEAD", async () => {
+    const repo = await packRepo("Good v1.");
+    const v1 = await spawnGit(repo, "rev-parse", "HEAD");
+    const cache = temp.make("cache-");
+    const initial = await fetchSource({ name: "team", repo, ref: "main" }, cache);
+    if ("error" in initial) throw new Error(initial.error);
+    expect(initial.packs[0]?.manifest.summary).toBe("Good v1.");
+
+    writePack(repo, "Interrupted v2.");
+    await spawnGit(repo, "commit", "-q", "-am", "v2");
+    const dir = join(cache, "team");
+    await spawnGit(dir, "fetch", "-q", "--depth", "1", "--no-tags", repo, "main");
+    await spawnGit(dir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    rmSync(repo, { recursive: true, force: true });
+
+    const recovered = await fetchSource({ name: "team", repo, ref: "main" }, cache);
+    if ("error" in recovered) throw new Error(recovered.error);
+    expect(recovered.packs[0]?.manifest.summary).toBe("Good v1.");
+    expect(recovered.stale).toContain("could not fetch main");
+    expect(await spawnGit(dir, "rev-parse", "HEAD")).toBe(v1);
+  });
 });
 
 describe("inside a Git hook of another repository", () => {

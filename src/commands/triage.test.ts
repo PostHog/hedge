@@ -471,6 +471,18 @@ describe("hedge triage", () => {
     expect(body).toContain("## Setup transcript (newest 1 lines)\n\n```text\nthe newest line\n```\n\nMade by `hedge triage`.");
     expect(body).toContain("## hedge doctor");
   }, 2_000);
+
+  test("a million-tilde transcript line still produces a bounded report without blowing up redaction", async () => {
+    const home = temp.make("home-");
+    failedMachine(home);
+    writeFileSync(join(home, ".local/state/hedge/logs/setup.log"), `${"~".repeat(1_000_000)}\nthe newest line on noras-mbp\n`);
+    const result = await triage(home, ["--send"], []);
+    expect(result.code).toBe(0);
+    const body = result.sent.find((call) => call.command[1] === "issue")!.input!;
+    expect(body.length).toBeLessThanOrEqual(60_000);
+    expect(body).toContain("## Setup transcript (newest 1 lines)\n\n```text\nthe newest line on <this machine>\n```\n\nMade by `hedge triage`.");
+    expect(body).not.toContain("noras-mbp");
+  }, 5_000);
 });
 
 describe("hedge setup and triage", () => {
