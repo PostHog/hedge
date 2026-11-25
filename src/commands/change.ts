@@ -1,4 +1,4 @@
-import type { LoadedPack, Plan, ProfileFile } from "../pack/types.ts";
+import type { HumanStep, LoadedPack, Owned, Plan, ProfileFile } from "../pack/types.ts";
 import { saveAnswers } from "../profile/profile.ts";
 import type { Machine } from "../setup/commands.ts";
 
@@ -13,6 +13,7 @@ export type ChangeContext = {
   machine: Machine;
   print(line: string): void;
   apply(): Promise<number>;
+  unmetHumanSteps(): Promise<Array<Owned<HumanStep>>>;
 };
 
 /** Commits and pushes the change, then applies it here; other machines take it at their next update. */

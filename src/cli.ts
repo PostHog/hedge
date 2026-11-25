@@ -7,7 +7,7 @@ import { cannotTell } from "./pack/types.ts";
 import type { AvailableSource, CatalogEntry, FetchedSource, Finding, LoadedPack, MachineFile, Plan, Report, SourceRef } from "./pack/types.ts";
 import { loadMachine, loadProfile, pullProfile, saveMachine, thisMachine } from "./profile/profile.ts";
 import { engineAdapters } from "./adapters/index.ts";
-import { apply, check, filesAdapter, type Adapter, type Issuer, type Runner } from "./reconciler/apply.ts";
+import { apply, check, filesAdapter, unmetHumanSteps, type Adapter, type Issuer, type Runner } from "./reconciler/apply.ts";
 import { refresh } from "./refresh.ts";
 import { listedPack, resolve } from "./reconciler/resolve.ts";
 import { undoingPack, undoVariable } from "./reconciler/ledger.ts";
@@ -243,6 +243,7 @@ async function change(command: keyof typeof changes | "hub", args: string[], opt
     machine: { ...realMachine, ...options.setup?.machine },
     print: options.print,
     apply: () => applyProfile(profileDir, options),
+    unmetHumanSteps: () => unmetHumanSteps(plan, { home: options.home, run: options.run, giveUp: (options.clock ?? { sleep: Bun.sleep }).sleep(probeLimitMs) }),
   };
   try {
     return await (command === "hub" ? hubCommand(args, { ...context, home: options.home }) : changes[command](args, context));
@@ -447,6 +448,7 @@ async function issued(value: Promise<string>) {
 const storedSecret = (home: string, pack: string, name: string) => secretStore(home, pack).read(name).catch((error: Error) => error);
 
 const pullLimitMs = 90_000;
+const probeLimitMs = 5_000;
 
 /** Asks the hub for this node's credential of each service and stores the answer. Each pull ends at a deadline, so a hub that connects but never answers cannot hold the apply. A failed pull keeps what the store holds, and its finding names the exit code and copies nothing the hub printed, since a service may print its key. */
 async function pullCredentials(entries: CatalogEntry[], node: string, hub: string, options: CliOptions): Promise<Finding[]> {

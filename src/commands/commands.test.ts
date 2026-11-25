@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { main } from "../cli.ts";
-import type { AvailableSource, ProfileFile } from "../pack/types.ts";
+import { main, type CliOptions } from "../cli.ts";
+import type { AvailableSource, PackManifest, ProfileFile } from "../pack/types.ts";
 import { defaultSources } from "../setup/defaults.ts";
 import { cachedCheckout, isolateGit, spawnGit, template, tempDirs } from "../testing/git.ts";
 import { engineSource, resolveEngine } from "../testing/packs.ts";
@@ -49,13 +49,12 @@ async function machineWithProfile(settings: Record<string, unknown> = {}) {
   return { home, elsewhere, pushed: async () => JSON.parse(await spawnGit(home, "--git-dir", remote, "show", "main:hedge.json")) };
 }
 
-/** Puts a fetched source with a pack whose first workflow yields to its second in this machine's cache, and turns that pack on in the profile. */
-async function withYieldingPack(home: string) {
+/** Puts a fetched source with a team pack in this machine's cache, and turns that pack on in the profile. */
+async function withTeamPack(home: string, parts: Pick<PackManifest, "workflows" | "human">) {
   const source = join(home, ".local/share/hedge/sources/team");
   await cachedCheckout(source, { name: "team", repo: "team/packs", ref: "main" });
   mkdirSync(join(source, "packs/team"), { recursive: true });
-  const flow = (id: string, yields: string[] = []) => ({ id, name: id, sentence: `${id}.`, default: true, yields });
-  writeFileSync(join(source, "packs/team/pack.json"), JSON.stringify({ schema: 1, name: "team", summary: "Team rules.", workflows: [flow("direct", ["routed"]), flow("routed")] }));
+  writeFileSync(join(source, "packs/team/pack.json"), JSON.stringify({ schema: 1, name: "team", summary: "Team rules.", ...parts }));
   const dir = join(home, "profile");
   const file = JSON.parse(readFileSync(join(dir, "hedge.json"), "utf8")) as ProfileFile;
   writeFileSync(join(dir, "hedge.json"), JSON.stringify({ ...file, sources: [...file.sources, { name: "team", repo: "team/packs", ref: "main" }], packs: [...file.packs, "team"] }, null, 2) + "\n");
@@ -63,11 +62,17 @@ async function withYieldingPack(home: string) {
   await spawnGit(dir, "push", "-q");
 }
 
-async function hedge(home: string, args: string[], applyCode = 0) {
+const flow = (id: string, options: { yields?: string[]; default?: boolean } = {}) => ({ id, name: id, sentence: `${id}.`, default: options.default ?? true, yields: options.yields ?? [] });
+
+const withYieldingPack = (home: string) => withTeamPack(home, { workflows: [flow("direct", { yields: ["routed"] }), flow("routed")] });
+
+const humanStep = (id: string, probe: string, workflow?: string) => ({ id, say: `Set up ${id}.`, probe: ["sh", "-c", probe], ...(workflow ? { workflow } : {}) });
+
+async function hedge(home: string, args: string[], applyCode = 0, options: Partial<CliOptions> = {}) {
   const lines: string[] = [];
   const applied: string[] = [];
   const apply = async (dir: string) => (applied.push(dir), applyCode);
-  const code = await main(args, { home, engineRoot, platform: "linux", print: (line) => lines.push(line), apply });
+  const code = await main(args, { home, engineRoot, platform: "linux", print: (line) => lines.push(line), apply, ...options });
   return { code, output: lines.join("\n"), applied };
 }
 
@@ -186,6 +191,50 @@ describe("hedge packs", () => {
       expect(result.output).toStartWith(message);
     }
     expect((await pushed()).packs).toEqual(["pull-requests"]);
+  });
+});
+
+describe("hedge packs on a machine that has not finished a pack's setup", () => {
+  const needsSetup = "      Needs setup on this machine. Run hedge doctor for the steps.";
+
+  test("marks a workflow whose human step does not pass here as needing setup, and its pack as not done, until the step passes", async () => {
+    const { home } = await machineWithProfile();
+    await withTeamPack(home, { workflows: [flow("allowlist"), flow("oom")], human: [humanStep("allowlist", 'test -f "$HOME/allowlist-done"', "allowlist"), humanStep("oom", "true", "oom")] });
+
+    const before = await hedge(home, ["packs"]);
+    expect(before.code).toBe(0);
+    expect(before.output).toContain(`  ~ team  Team rules.\n      Workflows: allowlist needs setup, oom on\n${needsSetup}`);
+
+    writeFileSync(join(home, "allowlist-done"), "");
+    const after = await hedge(home, ["packs"]);
+    expect(after.output).toContain("  ✓ team  Team rules.\n      Workflows: allowlist on, oom on");
+    expect(after.output).not.toContain(needsSetup);
+  });
+
+  test("runs no human step of a workflow that is off, so it leaves the pack done", async () => {
+    const { home } = await machineWithProfile();
+    await withTeamPack(home, { workflows: [flow("allowlist", { default: false })], human: [humanStep("allowlist", 'touch "$HOME/probed"; exit 1', "allowlist")] });
+
+    const result = await hedge(home, ["packs"]);
+    expect(result.output).toContain("  ✓ team  Team rules.\n      Workflows: allowlist off");
+    expect(result.output).not.toContain(needsSetup);
+    expect(existsSync(join(home, "probed"))).toBe(false);
+  });
+
+  test("marks a pack whose own human step does not pass here, and keeps its workflows on", async () => {
+    const { home } = await machineWithProfile();
+    await withTeamPack(home, { workflows: [flow("allowlist")], human: [humanStep("sign-in", "exit 1")] });
+
+    expect((await hedge(home, ["packs"])).output).toContain(`  ~ team  Team rules.\n      Workflows: allowlist on\n${needsSetup}`);
+  });
+
+  test("counts a human step that does not answer in time as needing setup", async () => {
+    const { home } = await machineWithProfile();
+    await withTeamPack(home, { workflows: [flow("allowlist")], human: [humanStep("allowlist", "true", "allowlist")] });
+    const silent = () => new Promise<number>(() => {});
+    const timedOut = { now: () => 0, sleep: async () => {} };
+
+    expect((await hedge(home, ["packs"], 0, { run: silent, clock: timedOut })).output).toContain("Workflows: allowlist needs setup");
   });
 });
 

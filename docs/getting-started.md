@@ -187,7 +187,9 @@ node.
 Run these on the hub, or on a node:
 
 - `hedge packs` lists your packs. `hedge packs --add <pack>` and
-  `--remove <pack>` turn one on or off.
+  `--remove <pack>` turn one on or off. A pack marked `~` is on, but a step
+  that only you can do is not done on this box yet. Its workflow shows
+  `needs setup`, and `hedge doctor` lists the steps.
 - `hedge settings` lists your settings. `hedge set <pack.key>=<value>` changes
   one.
 - `hedge doctor` checks a box against your profile without changing it.

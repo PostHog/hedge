@@ -249,6 +249,13 @@ export async function check(plan: Plan, options: { home: string; adapters?: Adap
   return report;
 }
 
+export async function unmetHumanSteps(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void> }): Promise<Array<Owned<HumanStep>>> {
+  const run = viaEngine(plan, options.run ?? spawnRunner(options.home, plan.machine.profileDir));
+  const passes = (step: Owned<HumanStep>) => Promise.race([run(step.probe).then((code) => code === 0), options.giveUp.then(() => false)]);
+  const passed = await Promise.all(plan.human.map(passes));
+  return plan.human.filter((_, index) => !passed[index]);
+}
+
 function checkFinding(item: Owned<PackCheck>, code: number): Finding {
   const id = `check:${item.id}`;
   return code === waitsForPerson && item.todo ? { id, pack: item.pack, say: item.todo, todo: true } : { id, pack: item.pack, say: item.say, repair: "apply" };
