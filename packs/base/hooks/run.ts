@@ -103,10 +103,10 @@ function exportsInProcessHook(source: string) {
   }
 }
 
-export const runInProcessWithin = (root: string, fallback: RunHook = runWithBun): RunHook => async (path, provider, input) => {
+export const runInProcessWithin = (root: string): RunHook => async (path, provider, input) => {
   try {
     const real = realpathSync(path);
-    if (!isInside(root, real) || !exportsInProcessHook(readFileSync(real, "utf8"))) return await fallback(path, provider, input);
+    if (!isInside(root, real) || !exportsInProcessHook(readFileSync(real, "utf8"))) return await runWithBun(path, provider, input);
     const { hedgeHook } = (await import(real)) as { hedgeHook?: Hook };
     if (typeof hedgeHook !== "function") return failure(new Error("hedgeHook export is not a function"));
     return await hedgeHook(provider, () => Promise.resolve(input), process.env.HOME ?? homedir());
