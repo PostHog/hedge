@@ -95,9 +95,9 @@ const failure = (error: unknown): HookResult => ({ code: 1, stdout: "", stderr: 
 
 const hookTranspiler = new Bun.Transpiler({ loader: "ts" });
 
-function exportsGuardedHook(source: string) {
+function exportsInProcessHook(source: string) {
   try {
-    return hookTranspiler.scan(source).exports.includes("hook") && hookTranspiler.transformSync(source).includes("import.meta.main");
+    return hookTranspiler.scan(source).exports.includes("hedgeHook");
   } catch {
     return false;
   }
@@ -106,10 +106,10 @@ function exportsGuardedHook(source: string) {
 export const runInProcessWithin = (root: string): RunHook => async (path, provider, input) => {
   try {
     const real = realpathSync(path);
-    if (!isInside(root, real) || !exportsGuardedHook(readFileSync(real, "utf8"))) return await runWithBun(path, provider, input);
-    const { hook } = (await import(real)) as { hook?: Hook };
-    if (typeof hook !== "function") return await runWithBun(path, provider, input);
-    return await hook(provider, () => Promise.resolve(input), process.env.HOME ?? homedir());
+    if (!isInside(root, real) || !exportsInProcessHook(readFileSync(real, "utf8"))) return await runWithBun(path, provider, input);
+    const { hedgeHook } = (await import(real)) as { hedgeHook?: Hook };
+    if (typeof hedgeHook !== "function") return await runWithBun(path, provider, input);
+    return await hedgeHook(provider, () => Promise.resolve(input), process.env.HOME ?? homedir());
   } catch (error) {
     return failure(error);
   }

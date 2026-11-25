@@ -78,4 +78,6 @@ function answer(input: string, home: string): Answer | undefined {
 
 export const hook: Hook = async (_provider, readInput, home) => printing(answer(await readInput(), home));
 
+export { hook as hedgeHook };
+
 if (import.meta.main) await runHook(hook);

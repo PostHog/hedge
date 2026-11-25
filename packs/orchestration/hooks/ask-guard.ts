@@ -188,4 +188,6 @@ export const hookWith = (shell: (home: string) => ReadShell, stop: StopDeps = {}
 
 export const hook = hookWith(liveShell);
 
+export { hook as hedgeHook };
+
 if (import.meta.main) await runHook(hook, { exitOnAnswer: true });

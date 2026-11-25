@@ -88,4 +88,6 @@ export async function guardLoopPause(event: DelegateEvent, home: string): Promis
 
 export const hook: Hook = async (_provider, readInput, home) => printing(await guardLoopPause(JSON.parse(await readInput()) as DelegateEvent, home));
 
+export { hook as hedgeHook };
+
 if (import.meta.main) await runHook(hook);

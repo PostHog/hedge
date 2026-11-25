@@ -589,7 +589,7 @@ describe("hook runner", () => {
     expect(await dispatch(dirWith("a.ts"), "codex", "{}", run)).toEqual({ code: 1, stdout: "", stderr: "hedge hook a.ts: exit 1\n" });
   });
 
-  const hookModule = (body: string) => `export const hook = async (provider, readInput, home) => {\n${body}\n};\nif (import.meta.main) console.log("ran as its own process");\n`;
+  const hookModule = (body: string) => `export const hedgeHook = async (provider, readInput, home) => {\n${body}\n};\nif (import.meta.main) console.log("ran as its own process");\n`;
 
   test("loads a hook under the root in its own process, with the provider, input, and home it would get on its own", async () => {
     const root = temp.make("root-");
@@ -612,20 +612,21 @@ describe("hook runner", () => {
     expect(result.stdout).not.toContain(githubToken);
   });
 
-  test("runs a hook in its own Bun process when it lies outside the root or is a standalone script", async () => {
+  test("runs a hook in its own Bun process when it lies outside the root or does not opt in via hedgeHook", async () => {
     const root = temp.make("root-");
     const dir = join(root, "PreToolUse");
     mkdirSync(dir);
     const printsItsInput = `const input = await Bun.stdin.text();\nconsole.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: \`\${process.argv[2]} \${input} \${process.pid}\` } }));\n`;
     writeFileSync(join(dir, "a-standalone.ts"), printsItsInput);
-    writeFileSync(join(dir, "b-commented.ts"), `// export const hook = () => {}; if (import.meta.main) {}\n${printsItsInput}`);
-    writeFileSync(join(dir, "c-aliased.ts"), `const hook = 1; export { hook as describe };\n${printsItsInput}`);
-    const outside = join(temp.make("source-"), "d-outside.ts");
-    writeFileSync(outside, printsItsInput);
-    symlinkSync(outside, join(dir, "d-outside.ts"));
+    writeFileSync(join(dir, "b-commented.ts"), `/*\nexport const hedgeHook = () => ({ code: 0, stdout: "", stderr: "" });\n*/\nif (import.meta.main) {\n${printsItsInput}}\n`);
+    writeFileSync(join(dir, "c-aliased.ts"), `const hedgeHook = 1;\nexport { hedgeHook as describe };\nif (import.meta.main) {\n${printsItsInput}}\n`);
+    writeFileSync(join(dir, "d-plain-hook.ts"), `export const hook = () => ({ code: 0, stdout: "", stderr: "" });\nconst note = "import.meta.main";\nvoid note;\n${printsItsInput}`);
+    const outside = join(temp.make("source-"), "e-outside.ts");
+    writeFileSync(outside, `export const hedgeHook = () => ({ code: 0, stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: "in-process" } }), stderr: "" });\n${printsItsInput}`);
+    symlinkSync(outside, join(dir, "e-outside.ts"));
     const { stdout } = await dispatch(dir, "claude", "{}", runInProcessWithin(root));
     const contexts = JSON.parse(stdout).hookSpecificOutput.additionalContext.split("\n\n");
-    expect(contexts.map((context: string) => context.split(" ").slice(0, 2))).toEqual([["claude", "{}"], ["claude", "{}"], ["claude", "{}"], ["claude", "{}"]]);
+    expect(contexts.map((context: string) => context.split(" ").slice(0, 2))).toEqual([["claude", "{}"], ["claude", "{}"], ["claude", "{}"], ["claude", "{}"], ["claude", "{}"]]);
     expect(contexts.map((context: string) => Number(context.split(" ")[2]))).not.toContain(process.pid);
   });
 });

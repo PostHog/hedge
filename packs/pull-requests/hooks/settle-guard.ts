@@ -8,4 +8,6 @@ export const hook: Hook = async (_provider, readInput, home) => {
   return printing(await guardSettle(call, home, liveDeps()));
 };
 
+export { hook as hedgeHook };
+
 if (import.meta.main) await runHook(hook);
