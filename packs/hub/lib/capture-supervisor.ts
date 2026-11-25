@@ -1,14 +1,15 @@
 import { closeSync, writeSync } from "node:fs";
-import { discoverTargetsSync, drainControlFd, enableChildSubreaper, killSession, ownTag, recordSparedProcess, redirectStdioOutputsToNull, setCloexec, shieldGroupSignals, spareEnvVar, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { discoverTargetsSync, drainControlFd, enableChildSubreaper, killSession, ownTag, recordSparedProcess, redirectStdioOutputsToNull, removeSpareFile, setCloexec, shieldGroupSignals, spareEnvVar, spareFilePath, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
-type StartConfig = { argv: string[]; env?: Record<string, string>; envEntries?: Array<[string, string]> };
+type StartConfig = { argv: string[]; env?: Record<string, string>; envEntries?: Array<[string, string]>; spareTag?: string; spareHome?: string };
 
 enableChildSubreaper();
 shieldGroupSignals();
 
 const runTag = ownTag(process.env[tagEnvVar]);
 const hasParentTag = (process.env[tagEnvVar] ?? "").includes(",");
-const sparePath = process.env[spareEnvVar];
+const inheritedSpare = Boolean(process.env[spareEnvVar]);
+let sparePath = process.env[spareEnvVar];
 let target: ReturnType<typeof Bun.spawn> | undefined;
 let targetReaped = false;
 let targetCode: number | undefined;
@@ -17,12 +18,14 @@ let killing = false;
 let lockCount = 0;
 
 const exitDone = () => {
-  if (sparePath) {
+  if (inheritedSpare && sparePath) {
     const found = discoverTargetsSync(process.pid, runTag, undefined, sparePath);
     if (found) {
       const sids = [...(found.sids ?? []), ...(found.hasSessionGroup ? [process.pid] : [])];
       if (found.pids.length || sids.length) recordSparedProcess(sparePath, found.pids, sids);
     }
+  } else if (!inheritedSpare && sparePath) {
+    removeSpareFile(sparePath);
   }
   process.exit(targetCode ?? 0);
 };
@@ -118,6 +121,7 @@ const parsedLockCount = parseFd(Bun.argv[2], 0);
 const controlFd = parseFd(Bun.argv[3], 3);
 const resultFd = parseFd(Bun.argv[4], 3);
 const configFd = parseFd(Bun.argv[5], 3);
+let spareFd = parseFd(Bun.argv[6], 3);
 if (parsedLockCount === undefined || controlFd === undefined || resultFd === undefined || configFd === undefined) {
   process.exit(127);
 }
@@ -126,17 +130,18 @@ lockCount = parsedLockCount;
 setCloexec(controlFd, true);
 setCloexec(resultFd, true);
 setCloexec(configFd, true);
+if (spareFd !== undefined) setCloexec(spareFd, true);
 
 const lockFds = Array.from({ length: lockCount }, (_, index) => index + 3);
 const drained = drainControlFd(controlFd);
 if (drained.closed || drained.lines.includes("kill")) {
-  for (const fd of [...lockFds, resultFd, configFd]) closeQuiet(fd);
+  for (const fd of [...lockFds, resultFd, configFd, ...(spareFd !== undefined ? [spareFd] : [])]) closeQuiet(fd);
   redirectStdioOutputsToNull();
   process.exit(137);
 }
 if (drained.lines.includes("done")) {
   confirmedDone = true;
-  for (const fd of [...lockFds, resultFd, configFd]) closeQuiet(fd);
+  for (const fd of [...lockFds, resultFd, configFd, ...(spareFd !== undefined ? [spareFd] : [])]) closeQuiet(fd);
   redirectStdioOutputsToNull();
   process.exit(0);
 }
@@ -155,11 +160,11 @@ try {
 }
 
 if (!parsed || killing) {
-  for (const fd of [...lockFds, resultFd]) closeQuiet(fd);
+  for (const fd of [...lockFds, resultFd, ...(spareFd !== undefined ? [spareFd] : [])]) closeQuiet(fd);
   redirectStdioOutputsToNull();
   killAll();
 } else {
-  const { argv, env, envEntries } = parsed;
+  const { argv, env, envEntries, spareTag, spareHome } = parsed;
   let targetEnv: Record<string, string> | undefined;
   if (Array.isArray(envEntries)) {
     targetEnv = Object.create(null) as Record<string, string>;
@@ -169,6 +174,25 @@ if (!parsed || killing) {
     for (const [k, v] of Object.entries(env)) {
       if (typeof v === "string") targetEnv[k] = v;
     }
+  }
+  if (!sparePath && typeof spareTag === "string" && spareTag) {
+    sparePath = spareFilePath(spareTag, typeof spareHome === "string" && spareHome ? spareHome : undefined);
+    if (spareFd !== undefined) {
+      try {
+        writeSync(spareFd, `${sparePath}\n`);
+      } catch {}
+      closeQuiet(spareFd);
+      spareFd = undefined;
+    }
+    if (!targetEnv) {
+      targetEnv = Object.create(null) as Record<string, string>;
+      for (const [k, v] of Object.entries(process.env)) if (v !== undefined) targetEnv[k] = v;
+    }
+    targetEnv[spareEnvVar] = sparePath;
+  }
+  if (spareFd !== undefined) {
+    closeQuiet(spareFd);
+    spareFd = undefined;
   }
   const stdio: [number, number, number, ...number[]] = [0, 1, 2, ...lockFds];
   try {

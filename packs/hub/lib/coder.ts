@@ -1,8 +1,9 @@
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, write, writeSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { boxPrefix } from "../../../src/hub/names.ts";
-import { appendTag, createPipe, killDeadSession, killDeadSessionSync, killSession, killSessionSync, setCloexec, spareEnvVar, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
+import { appendTag, createPipe, drainControlFd, killDeadSession, killDeadSessionSync, killSession, killSessionSync, setCloexec, spareEnvVar, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
 import { bunScript } from "../../../src/runner/bun.ts";
 import { heldLocks } from "./box-lock.ts";
 
@@ -101,6 +102,19 @@ const writeFd = (fd: number, data: Uint8Array, offset: number): Promise<number> 
     });
   });
 
+async function waitUpTo(promise: Promise<unknown>, ms: number): Promise<void> {
+  let handle: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    handle = setTimeout(resolve, ms);
+    if (typeof handle === "object" && handle && "unref" in handle && typeof handle.unref === "function") handle.unref();
+  });
+  try {
+    await Promise.race([promise, timeout]);
+  } finally {
+    if (handle !== undefined) clearTimeout(handle);
+  }
+}
+
 export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorGraceMs): Capture {
   return async (argv, { env, stdin, timeoutMs, inherit = false }) => {
     const output = inherit ? "inherit" : "pipe";
@@ -147,7 +161,36 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     };
     let child: ReturnType<typeof Bun.spawn> | undefined;
     const tag = crypto.randomUUID();
-    const spareFile = (env ?? process.env)[spareEnvVar] || undefined;
+    const inheritedSpare = (env ?? process.env)[spareEnvVar] || undefined;
+    const sparePipe = inheritedSpare ? undefined : createPipe();
+    if (sparePipe) setCloexec(sparePipe.readFd, true);
+    let spareReadClosed = false;
+    let spareWriteClosed = false;
+    const closeSpareRead = () => {
+      if (!sparePipe || spareReadClosed) return;
+      spareReadClosed = true;
+      try { closeSync(sparePipe.readFd); } catch {}
+    };
+    const closeSpareWrite = () => {
+      if (!sparePipe || spareWriteClosed) return;
+      spareWriteClosed = true;
+      try { closeSync(sparePipe.writeFd); } catch {}
+    };
+    let spareFile: string | undefined = inheritedSpare;
+    let spareHandedOff = Boolean(inheritedSpare);
+    const resolveSpareFile = (): string | undefined => {
+      if (!spareFile && sparePipe && !spareReadClosed) {
+        const drained = drainControlFd(sparePipe.readFd);
+        const path = drained.lines.find((line) => line.length > 0);
+        if (path) {
+          spareFile = path;
+          closeSpareRead();
+        } else if (drained.closed) {
+          closeSpareRead();
+        }
+      }
+      return spareFile;
+    };
     let controlFd: number | undefined;
     let stopped = false;
     let supervisorReaped = false;
@@ -166,11 +209,12 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     };
     const killGroups = () => {
       if (!child) return;
+      const spare = resolveSpareFile();
       if (!supervisorReaped) {
-        killSessionSync(child.pid, "SIGKILL", tag, spareFile);
+        killSessionSync(child.pid, "SIGKILL", tag, spare);
         return;
       }
-      const sweep = killDeadSession(child.pid, tag, true, spareFile);
+      const sweep = killDeadSession(child.pid, tag, true, spare);
       if (sweep && typeof (sweep as Promise<void>).then === "function") tagSweep = sweep as Promise<void>;
     };
     const stopChild = () => {
@@ -200,49 +244,69 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     };
     const interrupted = (name: NodeJS.Signals) => {
       stopChild();
+      const spare = resolveSpareFile();
       if (child && !supervisorReaped && controlFd !== undefined) {
         const fd = controlFd;
         controlFd = undefined;
         setCloexec(fd, false);
+        const extraFds = [fd];
+        let watchdogSpareFd: number | undefined;
+        if (!spare && sparePipe && !spareReadClosed) {
+          watchdogSpareFd = 3 + extraFds.length;
+          extraFds.push(sparePipe.readFd);
+          setCloexec(sparePipe.readFd, false);
+          spareReadClosed = true;
+        }
         let handedOff = false;
         try {
           const payload = JSON.stringify([
             {
               pid: child.pid,
               tag,
-              ...(spareFile ? { spareFile, keepSpareFile: true } : {}),
+              ...(spare ? { spareFile: spare } : watchdogSpareFd !== undefined ? { spareFd: watchdogSpareFd } : {}),
+              ...(inheritedSpare ? { keepSpareFile: true } : {}),
               fd: 3,
               delayMs: supervisorGraceMs,
             },
           ]);
           const watchdog = Bun.spawn(bunScript(probeWatchdog, payload), {
             env: watchdogEnv(),
-            stdio: ["ignore", "ignore", "ignore", fd],
+            stdio: ["ignore", "ignore", "ignore", ...extraFds],
             detached: true,
           });
           watchdog.unref();
           handedOff = true;
+          if (spare || watchdogSpareFd !== undefined) spareHandedOff = true;
         } catch {
         } finally {
           if (!handedOff) {
-            killSessionSync(child.pid, "SIGKILL", tag, spareFile);
+            const fallbackSpare =
+              spare ??
+              (watchdogSpareFd !== undefined && sparePipe
+                ? drainControlFd(sparePipe.readFd).lines.find((line) => line.length > 0)
+                : undefined);
+            killSessionSync(child.pid, "SIGKILL", tag, fallbackSpare);
             try {
               child.kill("SIGKILL");
             } catch {}
+            if (!inheritedSpare && fallbackSpare) void rm(fallbackSpare, { force: true }).catch(() => {});
           }
-          try {
-            closeSync(fd);
-          } catch {}
+          for (const extra of extraFds) {
+            try {
+              closeSync(extra);
+            } catch {}
+          }
         }
       } else if (child) {
         if (supervisorReaped) {
-          killDeadSessionSync(child.pid, tag, true, spareFile);
+          killDeadSessionSync(child.pid, tag, true, spare);
         } else {
-          killSessionSync(child.pid, "SIGKILL", tag, spareFile);
+          killSessionSync(child.pid, "SIGKILL", tag, spare);
           try {
             child.kill("SIGKILL");
           } catch {}
         }
+        if (!inheritedSpare && spare) void rm(spare, { force: true }).catch(() => {});
       }
       release();
       if (!process.listenerCount(name)) {
@@ -278,18 +342,22 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       const controlFdIndex = 3 + locks.length;
       const resultFdIndex = controlFdIndex + 1;
       const configFdIndex = controlFdIndex + 2;
+      const spareFdIndex = sparePipe ? configFdIndex + 1 : undefined;
       const supEnv = supervisorEnv(fullTag);
-      if (childEnv[spareEnvVar]) supEnv[spareEnvVar] = childEnv[spareEnvVar];
+      if (inheritedSpare) supEnv[spareEnvVar] = inheritedSpare;
+      const extraArgs = spareFdIndex !== undefined ? [String(spareFdIndex)] : [];
+      const extraStdio = sparePipe ? [sparePipe.writeFd] : [];
       child = Bun.spawn(
-        bunScript(captureSupervisor, String(locks.length), String(controlFdIndex), String(resultFdIndex), String(configFdIndex)),
+        bunScript(captureSupervisor, String(locks.length), String(controlFdIndex), String(resultFdIndex), String(configFdIndex), ...extraArgs),
         {
           env: supEnv,
-          stdio: [input, output, output, ...locks, "pipe", resultPipe.writeFd, configPipe.readFd],
+          stdio: [input, output, output, ...locks, "pipe", resultPipe.writeFd, configPipe.readFd, ...extraStdio],
           detached: true,
         },
       );
       closeResultWrite();
       closeConfigRead();
+      closeSpareWrite();
       const live = child;
       const fd = live.stdio[controlFdIndex];
       if (typeof fd === "number") {
@@ -344,7 +412,13 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         closeConfigWrite();
         stopChild();
       } else {
-        const configBytes = new TextEncoder().encode(JSON.stringify({ argv: command, envEntries }));
+        const configBytes = new TextEncoder().encode(
+          JSON.stringify({
+            argv: command,
+            envEntries,
+            ...(!inheritedSpare ? { spareTag: tag, ...(childEnv.HOME ? { spareHome: childEnv.HOME } : {}) } : {}),
+          }),
+        );
         configWrite = (async () => {
           try {
             let offset = 0;
@@ -375,15 +449,16 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       }
       if (expired) {
         if (!supervisorReaped) {
-          await Promise.race([live.exited, Bun.sleep(forceExpired ? 50 : supervisorGraceMs)]);
+          await waitUpTo(live.exited, forceExpired ? 50 : supervisorGraceMs);
           if (!supervisorReaped) {
             killStalled();
-            await Promise.race([live.exited, Bun.sleep(50)]);
+            await waitUpTo(live.exited, 50);
           }
         }
+        const spare = resolveSpareFile();
         if (tagSweep) await tagSweep;
-        else if (supervisorReaped && forceExpired) await killDeadSession(live.pid, tag, true, spareFile);
-        else if (!supervisorReaped) await killSession(live.pid, "SIGKILL", tag, undefined, spareFile);
+        else if (supervisorReaped && forceExpired) await killDeadSession(live.pid, tag, true, spare);
+        else if (!supervisorReaped) await killSession(live.pid, "SIGKILL", tag, undefined, spare);
         return timeoutResult(timeoutMs, stdout);
       }
       cancel();
@@ -394,8 +469,8 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         } catch {}
       }
       closeControl();
-      if (childEnv[spareEnvVar] && !supervisorReaped) {
-        await Promise.race([live.exited, Bun.sleep(2_000)]);
+      if (inheritedSpare && !supervisorReaped) {
+        await waitUpTo(live.exited, 2_000);
       }
       if (!supervisorReaped) live.unref();
       if (tagSweep) await tagSweep;
@@ -410,12 +485,18 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       cancel();
       closeResultWrite();
       closeConfigRead();
+      closeSpareWrite();
       if (configWrite) await configWrite.catch(() => {});
       else closeConfigWrite();
       stopStream.abort();
       if (resultRead) await resultRead.catch(() => {});
       closeResultRead();
       closeControl();
+      if (!spareHandedOff && (expired || !confirmedDone)) {
+        const spare = resolveSpareFile();
+        if (spare) void rm(spare, { force: true }).catch(() => {});
+      }
+      closeSpareRead();
       release();
     }
   };

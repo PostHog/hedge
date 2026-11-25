@@ -1236,6 +1236,7 @@ if (import.meta.main) {
   let controlFd: number | undefined;
   let resultFd: number | undefined;
   let spareFile: string | undefined;
+  let spareFd: number | undefined;
   let spareTag: string | undefined;
   let spareHome: string | undefined;
   let holder = false;
@@ -1256,6 +1257,7 @@ if (import.meta.main) {
         controlFd?: unknown;
         resultFd?: unknown;
         spareFile?: unknown;
+        spareFd?: unknown;
         spareTag?: unknown;
         spareHome?: unknown;
         holder?: unknown;
@@ -1276,6 +1278,7 @@ if (import.meta.main) {
       if (typeof record.controlFd === "number" && Number.isInteger(record.controlFd) && record.controlFd >= 3) controlFd = record.controlFd;
       if (typeof record.resultFd === "number" && Number.isInteger(record.resultFd) && record.resultFd >= 3) resultFd = record.resultFd;
       if (typeof record.spareFile === "string" && record.spareFile) spareFile = record.spareFile;
+      if (typeof record.spareFd === "number" && Number.isInteger(record.spareFd) && record.spareFd >= 3) spareFd = record.spareFd;
       if (typeof record.spareTag === "string" && record.spareTag) spareTag = record.spareTag;
       if (typeof record.spareHome === "string" && record.spareHome) spareHome = record.spareHome;
       if (record.holder === true) holder = true;
@@ -1285,17 +1288,30 @@ if (import.meta.main) {
       if (typeof record.innerResultFd === "number" && Number.isInteger(record.innerResultFd) && record.innerResultFd >= 3) innerResultFd = record.innerResultFd;
     }
   } catch {}
+  if (spareFd !== undefined) setCloexec(spareFd, true);
   if (!spareFile && spareTag) {
     spareFile = spareFilePath(spareTag, spareHome);
-    try {
-      writeSync(1, `spare:${spareFile}\n`);
-    } catch {}
+    if (spareFd !== undefined) {
+      try {
+        writeSync(spareFd, `${spareFile}\n`);
+      } catch {}
+      try {
+        closeSync(spareFd);
+      } catch {}
+      spareFd = undefined;
+    }
     const envObj: Record<string, string | undefined> = targetEnv ?? Object.create(null);
     if (!targetEnv) {
       for (const [k, v] of Object.entries(process.env)) if (v !== undefined) envObj[k] = v;
       targetEnv = envObj;
     }
     envObj[spareEnvVar] = spareFile;
+  }
+  if (spareFd !== undefined) {
+    try {
+      closeSync(spareFd);
+    } catch {}
+    spareFd = undefined;
   }
   if (process.platform === "linux" && holder) {
     enableChildSubreaper();
@@ -1367,6 +1383,7 @@ if (import.meta.main) {
     const runTag = ownTag(process.env[tagEnvVar]);
     if (reported) {
       if (inner.signalCode !== null) killDeadSessionSync(inner.pid, undefined, true, spareFile);
+      else removeSpareFile(spareFile);
       process.exit(inner.signalCode ? 137 : code);
     }
     killDeadSessionSync(inner.pid, runTag, true, spareFile);
@@ -1471,6 +1488,7 @@ if (import.meta.main) {
     })();
   }
   const rememberedDetached = new Map<number, number>();
+  let stopReported = false;
   await supervise(command, {
     spawn: (argv) => {
       const child = Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio: ["ignore", "ignore", "ignore"] });
@@ -1496,6 +1514,7 @@ if (import.meta.main) {
       } catch {}
     },
     reportStop: () => {
+      stopReported = true;
       try {
         writeSync(1, "stopped\n");
       } catch {}
@@ -1512,6 +1531,9 @@ if (import.meta.main) {
       } catch {}
       redirectStdioOutputsToNull();
     },
-    exit: (code) => process.exit(code),
+    exit: (code) => {
+      if (holderFd === undefined && reported && !stopReported) removeSpareFile(spareFile);
+      process.exit(code);
+    },
   }, cleanupGraceMs);
 }

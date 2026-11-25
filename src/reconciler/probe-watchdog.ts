@@ -8,6 +8,7 @@ export type WatchEntry = {
   tag?: string;
   resultFd?: number;
   spareFile?: string;
+  spareFd?: number;
   keepSpareFile?: boolean;
   holderPid?: number;
   holderFd?: number;
@@ -58,6 +59,21 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
     }
     return false;
   };
+  const resolveSpare = (entry: WatchEntry): string | undefined => {
+    if (!entry.spareFile && entry.spareFd !== undefined) {
+      const drained = drainControlFd(entry.spareFd);
+      const path = drained.lines.find((line) => line.length > 0);
+      if (path) {
+        entry.spareFile = path;
+        close(entry.spareFd);
+        entry.spareFd = undefined;
+      } else if (drained.closed) {
+        close(entry.spareFd);
+        entry.spareFd = undefined;
+      }
+    }
+    return entry.spareFile;
+  };
   const closeEntry = (entry: WatchEntry) => {
     if (entry.fd >= 0) {
       close(entry.fd);
@@ -71,9 +87,17 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
       close(entry.holderFd);
       entry.holderFd = undefined;
     }
+    if (entry.spareFd !== undefined) {
+      resolveSpare(entry);
+      if (entry.spareFd !== undefined) {
+        close(entry.spareFd);
+        entry.spareFd = undefined;
+      }
+    }
   };
   const removeSpare = (entry: WatchEntry) => {
-    if (!entry.keepSpareFile) removeSpareFile(entry.spareFile);
+    const spare = resolveSpare(entry);
+    if (!entry.keepSpareFile) removeSpareFile(spare);
   };
   const holderAlive = (entry: WatchEntry): boolean => {
     if (entry.holderFd === undefined) return false;
@@ -86,9 +110,10 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
   };
   const sweepHolderAndSpare = async (entry: WatchEntry, reported: boolean) => {
     const sweepTag = entry.tag && !reported ? entry.tag : undefined;
+    const spare = resolveSpare(entry);
     try {
       if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
-        await killDeadSession(entry.holderPid, sweepTag, false, entry.spareFile);
+        await killDeadSession(entry.holderPid, sweepTag, false, spare);
       }
     } finally {
       removeSpare(entry);
@@ -98,14 +123,15 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
     const sweepTag = entry.tag && !reported ? entry.tag : undefined;
     try {
       if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
-        const targets = await discoverTargets(entry.holderPid, sweepTag, entry.spareFile);
+        const spare = resolveSpare(entry);
+        const targets = await discoverTargets(entry.holderPid, sweepTag, spare);
         if (holderAlive(entry)) {
           signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.holderPid);
           try {
             process.kill(entry.holderPid, "SIGKILL");
           } catch {}
         }
-        await killDeadSession(entry.holderPid, sweepTag, false, entry.spareFile);
+        await killDeadSession(entry.holderPid, sweepTag, false, resolveSpare(entry));
       }
     } finally {
       closeEntry(entry);
@@ -115,7 +141,7 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
   const sweepDead = async (entry: WatchEntry, reported: boolean, waitHolder = false) => {
     const sweepTag = entry.tag && !reported ? entry.tag : undefined;
     try {
-      await killDeadSession(entry.pid, sweepTag, false, entry.spareFile);
+      await killDeadSession(entry.pid, sweepTag, false, resolveSpare(entry));
       if (waitHolder && entry.holderFd !== undefined && holderAlive(entry)) {
         await waitForFdClosed(entry.holderFd, 200);
         if (holderAlive(entry)) {
@@ -194,7 +220,7 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
       await Promise.all(
         deadRunners.map(({ entry, reported }) => {
           const sweepTag = entry.tag && !reported ? entry.tag : undefined;
-          return killDeadSession(entry.pid, sweepTag, false, entry.spareFile);
+          return killDeadSession(entry.pid, sweepTag, false, resolveSpare(entry));
         }),
       );
     }
@@ -214,10 +240,10 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
           try {
             if (alive(entry.fd)) {
               const initialTag = entry.tag && !resultReported(entry) ? entry.tag : undefined;
-              let targets = await discoverTargets(entry.pid, initialTag, entry.spareFile);
+              let targets = await discoverTargets(entry.pid, initialTag, resolveSpare(entry));
               if (alive(entry.fd)) {
                 if (initialTag && resultReported(entry)) {
-                  targets = await discoverTargets(entry.pid, undefined, entry.spareFile);
+                  targets = await discoverTargets(entry.pid, undefined, resolveSpare(entry));
                 }
                 if (alive(entry.fd)) {
                   signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.pid);
@@ -264,6 +290,7 @@ if (import.meta.main) {
           typeof (item as WatchEntry).delayMs === "number" &&
           ((item as WatchEntry).resultFd === undefined || typeof (item as WatchEntry).resultFd === "number") &&
           ((item as WatchEntry).spareFile === undefined || typeof (item as WatchEntry).spareFile === "string") &&
+          ((item as WatchEntry).spareFd === undefined || typeof (item as WatchEntry).spareFd === "number") &&
           ((item as WatchEntry).keepSpareFile === undefined || typeof (item as WatchEntry).keepSpareFile === "boolean") &&
           ((item as WatchEntry).holderPid === undefined || typeof (item as WatchEntry).holderPid === "number") &&
           ((item as WatchEntry).holderFd === undefined || typeof (item as WatchEntry).holderFd === "number"),

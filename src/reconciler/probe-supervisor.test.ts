@@ -391,7 +391,7 @@ await humanStepsLeft(${JSON.stringify(probePlan("int", [process.execPath, "-e", 
     try {
       const pending2 = humanStepsLeft(
         probePlan("normal-stubborn", ["sh", "-c", 'exec 4>"$3"; sh -c "$1" 4>&- & cat "$2" >/dev/null; exit 0', "probe", stubbornChild, gate2, leaderGone2]),
-        { home: dir2, giveUp: new Promise<void>(() => {}), graceMs: 50 },
+        { home: dir2, giveUp: new Promise<void>(() => {}), graceMs: 0 },
       );
       childPid2 = Number((await started2).trim());
       expect(childPid2).toBeGreaterThan(0);
@@ -419,20 +419,18 @@ await humanStepsLeft(${JSON.stringify(probePlan("int", [process.execPath, "-e", 
     const grandBin = join(dir, "grand.sh");
     writeFileSync(grandBin, '#!/bin/sh\ntrap "" HUP TERM\nexec 3>"$1"\necho $$ > "$2"\nexec sleep 30\n', { mode: 0o755 });
     const childScript = `trap '${grandBin} ${grandGone} ${grandReady} & exit 0' TERM; echo $$ > ${JSON.stringify(ready)}; sleep 30 & wait`;
-    let grandPid = 0;
+    const sup = spawnControlledSupervisor(["sh", "-c", 'sh -c "$1" & cat "$2" >/dev/null; exit 0', "probe", childScript, gate]);
     try {
-      const pending = humanStepsLeft(
-        probePlan("respawn", ["sh", "-c", 'sh -c "$1" & cat "$2" >/dev/null; exit 0', "probe", childScript, gate]),
-        { home: dir, giveUp: new Promise<void>(() => {}), graceMs: 250 },
-      );
       expect(Number((await started).trim())).toBeGreaterThan(0);
       await fifoWrite(gate, "go\n");
-      expect(await pending).toEqual({ failing: [], unchecked: [] });
-      grandPid = Number((await grandStarted).trim());
+      const grandPid = Number((await grandStarted).trim());
       expect(grandPid).toBeGreaterThan(0);
+      expect(() => process.kill(grandPid, 0)).not.toThrow();
+      await sup.advance();
       expect(await grandClosed).toBe("");
+      expect(await sup.proc.exited).not.toBe(0);
     } finally {
-      if (grandPid > 0) try { process.kill(grandPid, "SIGKILL"); } catch {}
+      sup.cleanup();
     }
   });
 
@@ -447,7 +445,7 @@ await humanStepsLeft(${JSON.stringify(probePlan("int", [process.execPath, "-e", 
     try {
       const pending = humanStepsLeft(
         probePlan("sigstop", ["sh", "-c", 'trap "" TERM; exec 3>"$1"; echo $$ > "$2"; kill -STOP $$', "probe", gone, ready]),
-        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 50 },
+        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 0 },
       );
       probePid = Number((await started).trim());
       expect(probePid).toBeGreaterThan(0);
@@ -1619,6 +1617,61 @@ await humanStepsLeft({
       runner.kill("SIGKILL");
       await runner.exited.catch(() => {});
       await sparedClosed.catch(() => {});
+    }
+  });
+
+  test("preserves a nested completed capture's detached env -i worker when a standalone outer capture times out", async () => {
+    const dir = temp.make("sup-standalone-capture-spare-");
+    const envBin = Bun.which("env") ?? "/usr/bin/env";
+    const shBin = Bun.which("sh") ?? "/bin/sh";
+    const [daemonReady, daemonGone, outerReady, outerGone] = [
+      join(dir, "daemon-ready"),
+      join(dir, "daemon-gone"),
+      join(dir, "outer-ready"),
+      join(dir, "outer-gone"),
+    ];
+    mkfifo(daemonReady, daemonGone, outerReady, outerGone);
+    const daemonStarted = fifoRead(daemonReady);
+    const daemonClosed = fifoRead(daemonGone);
+    const outerStarted = fifoRead(outerReady);
+    const outerClosed = fifoRead(outerGone);
+    const { captureWith, timedOut } = await import("../../packs/hub/lib/coder.ts");
+    const { spareEnvVar } = await import("./probe-supervisor.ts");
+    const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
+    const daemonScript = `const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+d.unref();
+process.exit(0);`;
+    const outerScript = `import { capture } from ${JSON.stringify(coderPath)};
+const res = await capture([process.execPath, "-e", ${JSON.stringify(daemonScript)}], { timeoutMs: 5_000 });
+if (res.code !== 0) process.exit(2);
+const hold = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "outer", ${JSON.stringify(outerGone)}, ${JSON.stringify(outerReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await hold.exited;`;
+    let fireTimeout!: () => void;
+    let daemonPid = 0;
+    let outerPid = 0;
+    try {
+      const cleanEnv: Record<string, string | undefined> = { ...process.env };
+      delete cleanEnv[spareEnvVar];
+      const capture = captureWith((_ms, fire) => {
+        fireTimeout = fire;
+        return () => {};
+      }, 0);
+      const running = capture([process.execPath, "-e", outerScript], {
+        env: cleanEnv,
+        timeoutMs: 30_000,
+      });
+      [daemonPid, outerPid] = (await Promise.all([daemonStarted, outerStarted])).map((s) => Number(s.trim())) as [number, number];
+      expect(daemonPid).toBeGreaterThan(0);
+      expect(outerPid).toBeGreaterThan(0);
+      fireTimeout();
+      const result = await running;
+      expect(result.code).toBe(timedOut);
+      expect(await outerClosed).toBe("");
+      expect(() => process.kill(daemonPid, 0)).not.toThrow();
+    } finally {
+      if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
+      if (outerPid > 0) try { process.kill(outerPid, "SIGKILL"); } catch {}
+      await daemonClosed.catch(() => {});
     }
   });
 });

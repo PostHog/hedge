@@ -1,4 +1,5 @@
 import { closeSync, existsSync, readdirSync, writeSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { install, plan as planFiles } from "../files/install.ts";
 import { packName } from "../pack/manifest.ts";
@@ -10,7 +11,7 @@ import { hublessReason, listedPack } from "./resolve.ts";
 import { wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
 import { withLegacyNames } from "../legacy.ts";
 import { bunScript } from "../runner/bun.ts";
-import { appendTag, createPipe, graceMs, interruptGraceMs, killDeadSession, killDeadSessionSync, killSessionSync, probeResultReported, removeSpareFile, setCloexec, supervisorEnv, tagEnvVar, waitForFdClosed, watchdogEnv } from "./probe-supervisor.ts";
+import { appendTag, createPipe, drainControlFd, graceMs, interruptGraceMs, killDeadSession, killDeadSessionSync, killSessionSync, probeResultReported, setCloexec, supervisorEnv, tagEnvVar, waitForFdClosed, watchdogEnv } from "./probe-supervisor.ts";
 
 export type AdapterContext = { home: string; dryRun: boolean; adopt: string[]; adoptFrom?: string[] };
 export type AdapterResult = { actions: Action[]; findings: Finding[]; blocked?: boolean; failed?: boolean };
@@ -258,11 +259,27 @@ const supervisorSpawnFailed = -1;
 
 export async function humanStepsLeft(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void>; graceMs?: number }): Promise<HumanStepsLeft> {
   const reported = new WeakMap<AbortSignal, number>();
+  const waiters = new WeakMap<AbortSignal, (code: number) => void>();
   const probeBySignal = new WeakMap<AbortSignal, LiveProbe>();
   const live = new Set<LiveProbe>();
   const run = viaEngine(
     plan,
-    options.run ?? spawnRunner(options.home, plan.machine.profileDir, (sig, code) => reported.set(sig, code), options.graceMs, live, probeBySignal),
+    options.run ??
+      spawnRunner(
+        options.home,
+        plan.machine.profileDir,
+        (sig, code) => {
+          reported.set(sig, code);
+          const wake = waiters.get(sig);
+          if (wake) {
+            waiters.delete(sig);
+            wake(code);
+          }
+        },
+        options.graceMs,
+        live,
+        probeBySignal,
+      ),
   );
   let timedOut = false;
   void options.giveUp.then(() => {
@@ -307,13 +324,19 @@ export async function humanStepsLeft(plan: Plan, options: { home: string; run?: 
       aborted = true;
       deadline.abort();
       if (!sawPipeResult) return "unchecked" as const;
+      const already = reported.get(deadline.signal);
+      if (already !== undefined) return already === 0 ? ("passes" as const) : ("fails" as const);
+      const codeArrived = new Promise<"passes" | "fails">((resolve) => {
+        waiters.set(deadline.signal, (c) => resolve(c === 0 ? "passes" : "fails"));
+      });
       let timer: ReturnType<typeof setTimeout> | undefined;
       const cap = new Promise<"unchecked">((resolve) => {
         timer = setTimeout(() => resolve("unchecked"), 50);
       });
       try {
-        return await Promise.race([result, cap]);
+        return await Promise.race([codeArrived, result, cap]);
       } finally {
+        waiters.delete(deadline.signal);
         if (timer) clearTimeout(timer);
       }
     });
@@ -527,14 +550,39 @@ const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
 let activeSupervisors = 0;
 const supervisorWaiters: Array<() => void> = [];
 
-type LiveProbe = { pid: number; runnerPid?: number; tag: string; spareFile?: string; handedOff?: boolean; spareHandedOff?: boolean; targetPid?: number; targetExited?: boolean; aliveFd?: number; resultFd?: number; guardFd?: number; holderExitFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
+type LiveProbe = { pid: number; runnerPid?: number; tag: string; spareFile?: string; spareFd?: number; handedOff?: boolean; spareHandedOff?: boolean; targetPid?: number; targetExited?: boolean; aliveFd?: number; resultFd?: number; guardFd?: number; holderExitFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
 type ActiveRunner = { stop: (name: NodeJS.Signals) => void };
 const activeRunners = new Set<ActiveRunner>();
 const allLiveProbes = new Set<LiveProbe>();
 let interruptHandlersAttached = false;
 
+function resolveProbeSpare(probe: LiveProbe): string | undefined {
+  if (!probe.spareFile && probe.spareFd !== undefined) {
+    const drained = drainControlFd(probe.spareFd);
+    const path = drained.lines.find((line) => line.length > 0);
+    if (path) {
+      probe.spareFile = path;
+      try {
+        closeSync(probe.spareFd);
+      } catch {}
+      probe.spareFd = undefined;
+    } else if (drained.closed) {
+      try {
+        closeSync(probe.spareFd);
+      } catch {}
+      probe.spareFd = undefined;
+    }
+  }
+  return probe.spareFile;
+}
+
+function removeSpareAsync(filePath: string | undefined): void {
+  if (!filePath) return;
+  void rm(filePath, { force: true }).catch(() => {});
+}
+
 function handOffWatchdog(probes: Iterable<LiveProbe>) {
-  const batch: Array<{ pid: number; holderPid?: number; holderFd?: number; tag: string; spareFile?: string; probe: LiveProbe; targetPid?: number; targetExited?: boolean; fd: number; resultFd?: number; delayMs: number }> = [];
+  const batch: Array<{ pid: number; holderPid?: number; holderFd?: number; tag: string; spareFile?: string; spareFd?: number; probe: LiveProbe; targetPid?: number; targetExited?: boolean; fd: number; resultFd?: number; delayMs: number }> = [];
   for (const probe of probes) {
     if (probe.aliveFd === undefined) continue;
     let targetExited = Boolean(probe.targetExited);
@@ -545,13 +593,17 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
     if (!targetExited && resultFd !== undefined && probeResultReported(resultFd) === "reported") {
       targetExited = true;
     }
+    const spareFile = resolveProbeSpare(probe);
+    const spareFd = spareFile ? undefined : probe.spareFd;
+    if (spareFd !== undefined) probe.spareFd = undefined;
     const holderPid = probe.runnerPid !== undefined || holderFd !== undefined ? probe.pid : undefined;
     batch.push({
       pid: probe.runnerPid ?? probe.pid,
       ...(holderPid !== undefined ? { holderPid } : {}),
       ...(holderFd !== undefined ? { holderFd } : {}),
       tag: probe.tag,
-      ...(probe.spareFile ? { spareFile: probe.spareFile } : {}),
+      ...(spareFile ? { spareFile } : {}),
+      ...(spareFd !== undefined ? { spareFd } : {}),
       probe,
       ...(probe.targetPid !== undefined ? { targetPid: probe.targetPid } : {}),
       ...(targetExited ? { targetExited: true } : {}),
@@ -577,12 +629,18 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
         holderFd = extraFds.length + 3;
         extraFds.push(entry.holderFd);
       }
+      let spareFd: number | undefined;
+      if (!entry.spareFile && entry.spareFd !== undefined) {
+        spareFd = extraFds.length + 3;
+        extraFds.push(entry.spareFd);
+      }
       return {
         pid: entry.pid,
         ...(entry.holderPid !== undefined ? { holderPid: entry.holderPid } : {}),
         ...(holderFd !== undefined ? { holderFd } : {}),
         ...(entry.targetExited ? {} : { tag: entry.tag }),
         ...(entry.spareFile ? { spareFile: entry.spareFile } : {}),
+        ...(spareFd !== undefined ? { spareFd } : {}),
         fd,
         ...(resultFd !== undefined ? { resultFd } : {}),
         delayMs: entry.delayMs,
@@ -601,12 +659,16 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
     handedOff = true;
     for (const entry of batch) {
       entry.probe.handedOff = true;
-      if (entry.spareFile) entry.probe.spareHandedOff = true;
+      if (entry.spareFile || entry.spareFd !== undefined) entry.probe.spareHandedOff = true;
     }
   } catch {
   } finally {
     if (!handedOff) {
       for (const entry of batch) {
+        let spare = entry.spareFile;
+        if (!spare && entry.spareFd !== undefined) {
+          spare = drainControlFd(entry.spareFd).lines.find((line) => line.length > 0);
+        }
         let stillAlive = false;
         try {
           writeSync(entry.fd, "\n");
@@ -614,28 +676,28 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
         } catch {}
         const sweepTag = entry.targetExited ? undefined : entry.tag;
         if (stillAlive) {
-          killSessionSync(entry.pid, "SIGKILL", sweepTag, entry.spareFile);
+          killSessionSync(entry.pid, "SIGKILL", sweepTag, spare);
           try {
             process.kill(entry.pid, "SIGKILL");
           } catch {}
           if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
-            killSessionSync(entry.holderPid, "SIGKILL", sweepTag, entry.spareFile);
+            killSessionSync(entry.holderPid, "SIGKILL", sweepTag, spare);
             try {
               process.kill(entry.holderPid, "SIGKILL");
             } catch {}
-            killDeadSessionSync(entry.holderPid, sweepTag, false, entry.spareFile);
+            killDeadSessionSync(entry.holderPid, sweepTag, false, spare);
           }
         } else {
-          killDeadSessionSync(entry.pid, sweepTag, false, entry.spareFile);
+          killDeadSessionSync(entry.pid, sweepTag, false, spare);
           if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
-            killSessionSync(entry.holderPid, "SIGKILL", sweepTag, entry.spareFile);
+            killSessionSync(entry.holderPid, "SIGKILL", sweepTag, spare);
             try {
               process.kill(entry.holderPid, "SIGKILL");
             } catch {}
-            killDeadSessionSync(entry.holderPid, sweepTag, false, entry.spareFile);
+            killDeadSessionSync(entry.holderPid, sweepTag, false, spare);
           }
         }
-        removeSpareFile(entry.spareFile);
+        removeSpareAsync(spare);
       }
     }
     for (const entry of batch) {
@@ -650,6 +712,11 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
       if (entry.holderFd !== undefined) {
         try {
           closeSync(entry.holderFd);
+        } catch {}
+      }
+      if (entry.spareFd !== undefined) {
+        try {
+          closeSync(entry.spareFd);
         } catch {}
       }
     }
@@ -718,7 +785,6 @@ async function readSupervisorResult(
   onFirstCode: (code: number) => void,
   onTarget?: (pid: number) => void,
   onRunner?: (pid: number) => void,
-  onSpare?: (path: string) => void,
 ): Promise<{ code?: number; cleanup: boolean; stopped: boolean }> {
   const reader = stdout.getReader();
   const decoder = new TextDecoder();
@@ -732,13 +798,9 @@ async function readSupervisorResult(
       if (done) break;
       buf += decoder.decode(value, { stream: true });
       for (let nl = buf.indexOf("\n"); nl !== -1; nl = buf.indexOf("\n")) {
-        const rawLine = buf.slice(0, nl);
-        const line = rawLine.trim();
+        const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
-        if (rawLine.startsWith("spare:")) {
-          const path = rawLine.slice("spare:".length);
-          if (path) onSpare?.(path);
-        } else if (line.startsWith("runner:")) {
+        if (line.startsWith("runner:")) {
           const pid = Number(line.slice("runner:".length));
           if (Number.isInteger(pid) && pid > 0) onRunner?.(pid);
         } else if (line.startsWith("target:")) {
@@ -840,6 +902,16 @@ async function runDetached(command: string[], env: Record<string, string | undef
       closeSync(holderExitPipe.writeFd);
     } catch {}
   };
+  const sparePipe = createPipe();
+  if (sparePipe) setCloexec(sparePipe.readFd, true);
+  let spareWriteClosed = false;
+  const closeSpareWrite = () => {
+    if (!sparePipe || spareWriteClosed) return;
+    spareWriteClosed = true;
+    try {
+      closeSync(sparePipe.writeFd);
+    } catch {}
+  };
   try {
     const tag = crypto.randomUUID();
     const fullTag = appendTag(env[tagEnvVar], tag);
@@ -862,12 +934,18 @@ async function runDetached(command: string[], env: Record<string, string | undef
       payloadHolderExitFd = 4 + extraStdio.length;
       extraStdio.push(holderExitPipe.writeFd);
     }
+    let payloadSpareFd: number | undefined;
+    if (sparePipe) {
+      payloadSpareFd = 4 + extraStdio.length;
+      extraStdio.push(sparePipe.writeFd);
+    }
     const payload = {
       command,
       env: targetEnv,
       controlFd: 3,
       spareTag: tag,
       ...(env.HOME ? { spareHome: env.HOME } : {}),
+      ...(payloadSpareFd !== undefined ? { spareFd: payloadSpareFd } : {}),
       ...(useLinuxHolder ? { holder: true } : {}),
       ...(payloadResultFd !== undefined ? { resultFd: payloadResultFd } : {}),
       ...(payloadGuardFd !== undefined ? { guardFd: payloadGuardFd } : {}),
@@ -883,6 +961,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
     closeResultWrite();
     closeGuardWrite();
     closeHolderExitWrite();
+    closeSpareWrite();
     const aliveFd = typeof child.stdio[3] === "number" ? child.stdio[3] : undefined;
     probe = {
       pid: child.pid,
@@ -891,6 +970,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
       ...(resultPipe ? { resultFd: resultPipe.readFd } : {}),
       ...(guardPipe ? { guardFd: guardPipe.readFd } : {}),
       ...(holderExitPipe ? { holderExitFd: holderExitPipe.readFd } : {}),
+      ...(sparePipe ? { spareFd: sparePipe.readFd } : {}),
       delayMs: (cleanupGraceMs ?? graceMs) + discoverySlackMs + 100,
       stop: endGroup,
     };
@@ -913,20 +993,20 @@ async function runDetached(command: string[], env: Record<string, string | undef
       (pid) => {
         owned.runnerPid = pid;
       },
-      (path) => {
-        owned.spareFile = path;
-      },
     );
+    let sawCleanExit = false;
     const cleanupDone = child.exited.then(
       async (supCode) => {
         reaped = true;
         await statusPromise.catch(() => {});
         const sawResult = reportedResult || Boolean(owned.targetExited) || (owned.resultFd !== undefined && probeResultReported(owned.resultFd) === "reported");
+        sawCleanExit = sawResult && child?.signalCode === null;
         if (child?.signalCode !== null || (!sawResult && supCode !== 128 && supCode !== 143)) {
           if (owned.guardFd !== undefined) await waitForFdClosed(owned.guardFd, 500);
-          await killDeadSession(owned.pid, sawResult ? undefined : owned.tag, true, owned.spareFile);
+          const spareFile = resolveProbeSpare(owned);
+          await killDeadSession(owned.pid, sawResult ? undefined : owned.tag, true, spareFile);
           if (owned.runnerPid !== undefined) {
-            await killDeadSession(owned.runnerPid, sawResult ? undefined : owned.tag, false, owned.spareFile);
+            await killDeadSession(owned.runnerPid, sawResult ? undefined : owned.tag, false, spareFile);
           }
         }
       },
@@ -958,7 +1038,15 @@ async function runDetached(command: string[], env: Record<string, string | undef
         } catch {}
         owned.holderExitFd = undefined;
       }
-      if (!owned.spareHandedOff) removeSpareFile(owned.spareFile);
+      if (!owned.spareHandedOff && !sawCleanExit) {
+        removeSpareAsync(resolveProbeSpare(owned));
+      }
+      if (owned.spareFd !== undefined) {
+        try {
+          closeSync(owned.spareFd);
+        } catch {}
+        owned.spareFd = undefined;
+      }
       allLiveProbes.delete(owned);
       live?.delete(owned);
       syncInterruptHandlers();
@@ -980,6 +1068,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
     closeResultWrite();
     closeGuardWrite();
     closeHolderExitWrite();
+    closeSpareWrite();
     if (!handedToExit) {
       if (resultPipe) {
         try {
@@ -994,6 +1083,11 @@ async function runDetached(command: string[], env: Record<string, string | undef
       if (holderExitPipe) {
         try {
           closeSync(holderExitPipe.readFd);
+        } catch {}
+      }
+      if (sparePipe) {
+        try {
+          closeSync(sparePipe.readFd);
         } catch {}
       }
       releaseSlot();
