@@ -251,7 +251,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
   const legacyBranch =
     rawFhEntry !== undefined &&
     (await fetchHeadIsBranch(dir, rawGood!.ref)) === true &&
-    (fetchHeadMatches(rawFhEntry.url, effectiveBefore) || fetchHeadMatches(rawFhEntry.url, rawGood!.repo));
+    (fetchHeadMatches(rawFhEntry.url, effectiveBefore) || (typeof rawGood!.repo === "string" && fetchHeadMatches(rawFhEntry.url, rawGood!.repo)));
   const good =
     legacyPeeled && rawGood
       ? { ...rawGood, peeled: true }
@@ -693,17 +693,6 @@ async function checkedOutFromCache(dir: string, repo: string, effectiveRepo: str
   if (!isCommitPin(oid, hashLen)) return undefined;
   const effectiveDigest = repoDigest(effectiveRepo);
   const goodDigest = goodResolvedDigest(good);
-  const sameGoodRepo =
-    good !== undefined &&
-    good.repo === repo &&
-    (goodDigest !== undefined ? goodDigest === effectiveDigest : hasGoodCommit(good) && (await legacyFallbackMatches(dir, good, effectiveRepo)));
-  if (
-    sameGoodRepo &&
-    ((good.branch === true && typeof good.ref === "string" && stripSourceRefspec(good.ref).toLowerCase() === oid) ||
-      (good.askedBranch === true && typeof good.asked === "string" && stripSourceRefspec(good.asked).toLowerCase() === oid))
-  ) {
-    return undefined;
-  }
   const goodCommit = verifiedGoodCommit(good);
   const verifiedGoodMatch =
     goodCommit !== undefined &&

@@ -229,13 +229,77 @@ describe("fetchSource", () => {
 
   test("loads a commit pinned in capitals from the cache without reaching the source", async () => {
     const repo = await packRepo("Team rules v1.");
-    const ref = { name: "team", repo, ref: (await spawnGit(repo, "rev-parse", "HEAD")).toUpperCase() };
+    const commit = (await spawnGit(repo, "rev-parse", "HEAD")).toUpperCase();
+    const httpRoot = temp.make("http-git-");
+    const bareRepo = join(httpRoot, "team.git");
+    await spawnGit(httpRoot, "clone", "-q", "--bare", repo, bareRepo);
+    await spawnGit(bareRepo, "config", "uploadpack.allowAnySHA1InWant", "true");
+    const execPath = await spawnGit(httpRoot, "--exec-path");
+    const backend = join(execPath, "git-http-backend");
+    let requests = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        requests++;
+        const url = new URL(req.url);
+        const body = new Uint8Array(await req.arrayBuffer());
+        const proc = Bun.spawn([backend], {
+          stdin: body,
+          stdout: "pipe",
+          stderr: "pipe",
+          env: {
+            ...process.env,
+            GIT_PROJECT_ROOT: httpRoot,
+            GIT_HTTP_EXPORT_ALL: "1",
+            PATH_INFO: url.pathname,
+            QUERY_STRING: url.search.slice(1),
+            REQUEST_METHOD: req.method,
+            CONTENT_TYPE: req.headers.get("content-type") ?? "",
+            CONTENT_LENGTH: String(body.byteLength),
+            ...(req.headers.get("git-protocol") ? { HTTP_GIT_PROTOCOL: req.headers.get("git-protocol")! } : {}),
+          },
+        });
+        const [raw] = await Promise.all([new Response(proc.stdout).arrayBuffer(), proc.exited]);
+        const bytes = new Uint8Array(raw);
+        let split = -1;
+        for (let i = 0; i + 3 < bytes.length; i++) {
+          if (bytes[i] === 13 && bytes[i + 1] === 10 && bytes[i + 2] === 13 && bytes[i + 3] === 10) {
+            split = i;
+            break;
+          }
+        }
+        const headerText = new TextDecoder().decode(split === -1 ? bytes : bytes.subarray(0, split));
+        const headers = new Headers();
+        let status = 200;
+        for (const line of headerText.split(/\r?\n/)) {
+          const colon = line.indexOf(":");
+          if (colon === -1) continue;
+          const key = line.slice(0, colon).trim();
+          const value = line.slice(colon + 1).trim();
+          if (key.toLowerCase() === "status") status = Number(value.split(" ")[0]) || 200;
+          else headers.append(key, value);
+        }
+        return new Response(split === -1 ? new Uint8Array() : bytes.subarray(split + 4), { status, headers });
+      },
+    });
     const cache = temp.make("cache-");
-    await fetchSource(ref, cache);
-    rmSync(repo, { recursive: true, force: true });
-    const fetched = await fetchSource(ref, cache);
-    if ("error" in fetched) throw new Error(fetched.error);
-    expect([fetched.packs[0]?.manifest.summary, fetched.stale]).toEqual(["Team rules v1.", undefined]);
+    const ref = { name: "team", repo: `http://127.0.0.1:${server.port}/team.git`, ref: commit };
+    try {
+      const first = await fetchSource(ref, cache);
+      if ("error" in first) throw new Error(first.error);
+      expect(requests).toBeGreaterThan(0);
+      requests = 0;
+      const fetched = await fetchSource(ref, cache);
+      if ("error" in fetched) throw new Error(fetched.error);
+      expect(requests).toBe(0);
+      expect([fetched.packs[0]?.manifest.summary, fetched.stale]).toEqual(["Team rules v1.", undefined]);
+    } finally {
+      server.stop(true);
+    }
+    const offline = await fetchSource(ref, cache);
+    if ("error" in offline) throw new Error(offline.error);
+    expect([offline.packs[0]?.manifest.summary, offline.stale]).toEqual(["Team rules v1.", undefined]);
   });
 
   test("moves to another pinned commit already in the cache without reaching the source", async () => {

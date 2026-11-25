@@ -1021,6 +1021,39 @@ esac
     const repaired = await fetchSource({ name: "team", repo: damagedRepo, ref: damagedSha }, damagedCache);
     if ("error" in repaired) throw new Error(repaired.error);
     expect([repaired.packs[0]?.manifest.summary, repaired.stale]).toEqual(["Damaged meta v1.", undefined]);
+
+    const otherRepo = await packRepo("Other repo v1.");
+    const otherSha = await spawnGit(otherRepo, "rev-parse", "HEAD");
+    const numMetaCache = temp.make("cache-numeric-legacy-repo-");
+    const numMetaDir = join(numMetaCache, "team");
+    mkdirSync(numMetaDir, { recursive: true });
+    await spawnGit(numMetaDir, "init", "-q");
+    await spawnGit(numMetaDir, "fetch", "-q", "--depth", "1", "--no-tags", damagedRepo, "main");
+    await spawnGit(numMetaDir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    writeFileSync(join(numMetaDir, ".git", "hedge-source.json"), JSON.stringify({ repo: 42, ref: "main", commit: damagedSha }) + "\n");
+    const switchedFromNum = await fetchSource({ name: "team", repo: otherRepo, ref: otherSha }, numMetaCache);
+    if ("error" in switchedFromNum) throw new Error(switchedFromNum.error);
+    expect([switchedFromNum.packs[0]?.manifest.summary, switchedFromNum.stale]).toEqual(["Other repo v1.", undefined]);
+
+    const hexRefreshRepo = await packRepo("Hex A.");
+    const hexASha = await spawnGit(hexRefreshRepo, "rev-parse", "HEAD");
+    await spawnGit(hexRefreshRepo, "checkout", "-q", "-b", hexASha);
+    writePack(hexRefreshRepo, "Hex B.");
+    await spawnGit(hexRefreshRepo, "commit", "-q", "-am", "hex-b");
+    const hexBSha = await spawnGit(hexRefreshRepo, "rev-parse", "HEAD");
+    const hexRefreshCache = temp.make("cache-hex-refresh-override-");
+    const pinAFirst = await fetchSource({ name: "team", repo: hexRefreshRepo, ref: hexASha }, hexRefreshCache);
+    if ("error" in pinAFirst) throw new Error(pinAFirst.error);
+    const loadHexBranch = await fetchSource({ name: "team", repo: hexRefreshRepo, ref: `refs/heads/${hexASha}` }, hexRefreshCache);
+    if ("error" in loadHexBranch) throw new Error(loadHexBranch.error);
+    writePack(hexRefreshRepo, "Hex C.");
+    await spawnGit(hexRefreshRepo, "commit", "-q", "-am", "hex-c");
+    const movedBareHex = await advanceSource({ name: "team", repo: hexRefreshRepo, ref: hexASha }, hexRefreshCache, hexBSha);
+    expect(movedBareHex.state).toBe("moved");
+    rmSync(hexRefreshRepo, { recursive: true, force: true });
+    const pinAAgain = await fetchSource({ name: "team", repo: hexRefreshRepo, ref: hexASha }, hexRefreshCache);
+    if ("error" in pinAAgain) throw new Error(pinAAgain.error);
+    expect([pinAAgain.packs[0]?.manifest.summary, pinAAgain.stale]).toEqual(["Hex A.", undefined]);
   });
 
 });

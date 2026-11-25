@@ -59,42 +59,84 @@ const emailRule: Rule = standardRules[0]!;
 const allRules: Rule[] = [...secretRules, ...standardRules, randomRule];
 const preRandomRules: Rule[] = [...contextualSecretRules, ...standardRules];
 
-function insideEmail(text: string, start: number, end: number): boolean {
-  let lo = start;
-  while (lo > 0 && /[A-Za-z0-9_.+%@-]/.test(text[lo - 1]!)) lo--;
-  let hi = end;
-  while (hi < text.length && /[A-Za-z0-9_.+%@-]/.test(text[hi]!)) hi++;
-  const slice = text.slice(lo, hi);
-  if (!slice.includes("@") && !/%40/i.test(slice)) return false;
-  const [pattern, replace] = emailRule;
-  pattern.lastIndex = 0;
-  for (let match = pattern.exec(slice); match !== null; match = pattern.exec(slice)) {
-    const mStart = lo + match.index;
-    const mEnd = mStart + match[0]!.length;
-    if (mStart < end && mEnd > start) {
-      const repl = typeof replace === "function" ? replace(match[0]!, mStart, text) : replace;
-      if (repl !== match[0]!) return true;
-    }
-  }
-  return false;
-}
+const bearerSchemeWord = /^(?:Bearer|Basic|token)$/i;
+const bearerSchemeFollow = /^\s+[A-Za-z0-9._~+/=-]{12,}/;
 
-function skipEmailOverlap([pattern, replacement]: Rule): Rule {
-  return [
-    pattern,
+const deferredContextualSecretRules: Rule[] = [
+  [
+    secretRules[8]![0],
     (match: string, ...rest: Array<string | number | undefined>) => {
-      const whole = rest.at(-1) as string;
+      const prefix = String(rest[0] ?? "");
       const offset = rest.at(-2) as number;
-      if (insideEmail(whole, offset, offset + match.length)) return match;
-      if (typeof replacement === "function") return replacement(match, ...rest);
-      return replacement.replace(/\$(\d+)/g, (_, n) => String(rest[Number(n) - 1] ?? ""));
+      const whole = rest.at(-1) as string;
+      const val = match.slice(prefix.length);
+      if (bearerSchemeWord.test(val) && bearerSchemeFollow.test(whole.slice(offset + match.length))) return match;
+      return `${prefix}<redacted>`;
     },
-  ];
+  ],
+  [
+    secretRules[9]![0],
+    (match: string, ...rest: Array<string | number | undefined>) => {
+      const key = String(rest[0] ?? "");
+      const separator = String(rest[1] ?? "");
+      const double = rest[2] as string | undefined;
+      const single = rest[3] as string | undefined;
+      if (!double && !single) {
+        const offset = rest.at(-2) as number;
+        const whole = rest.at(-1) as string;
+        const val = match.slice(key.length + separator.length);
+        if (bearerSchemeWord.test(val) && bearerSchemeFollow.test(whole.slice(offset + match.length))) return match;
+      }
+      return `${key}${separator}${double ?? single ?? ""}<redacted>${double ?? single ?? ""}`;
+    },
+  ],
+];
+
+function applyEmailSafeRule(text: string, [pattern, replacement]: Rule): string {
+  if (!text.includes("@") && !/%40/i.test(text)) {
+    return text.replace(pattern, replacement as string);
+  }
+  let runEnd = -1;
+  let runEmails: Array<[number, number]> = [];
+  let emailIdx = 0;
+  const overlapsEmail = (start: number, end: number) => {
+    if (start >= runEnd) {
+      let lo = start;
+      while (lo > Math.max(0, runEnd) && /[A-Za-z0-9_.+%@-]/.test(text[lo - 1]!)) lo--;
+      let hi = end;
+      while (hi < text.length && /[A-Za-z0-9_.+%@-]/.test(text[hi]!)) hi++;
+      runEnd = hi;
+      runEmails = [];
+      emailIdx = 0;
+      const slice = text.slice(lo, hi);
+      if (slice.includes("@") || /%40/i.test(slice)) {
+        const [emailPattern, emailReplace] = emailRule;
+        emailPattern.lastIndex = 0;
+        for (let m = emailPattern.exec(slice); m !== null; m = emailPattern.exec(slice)) {
+          const mStart = lo + m.index;
+          const mEnd = mStart + m[0]!.length;
+          const repl = typeof emailReplace === "function" ? emailReplace(m[0]!, mStart, text) : emailReplace;
+          if (repl !== m[0]!) runEmails.push([mStart, mEnd]);
+        }
+      }
+    }
+    while (emailIdx < runEmails.length && runEmails[emailIdx]![1] <= start) emailIdx++;
+    return emailIdx < runEmails.length && runEmails[emailIdx]![0] < end;
+  };
+  return text.replace(pattern, (match: string, ...rest: Array<string | number | undefined>) => {
+    const offset = rest.at(-2) as number;
+    if (overlapsEmail(offset, offset + match.length)) return match;
+    if (typeof replacement === "function") return replacement(match, ...rest);
+    return replacement.replace(/\$(\d+)/g, (_, n) => String(rest[Number(n) - 1] ?? ""));
+  });
 }
 
-const nonEmailStandardRules: Rule[] = [...standardRules.slice(1, 5).map(skipEmailOverlap), ...standardRules.slice(5)];
-const preAfterRules: Rule[] = [...contextualSecretRules, ...nonEmailStandardRules];
-const preAfterAllRules: Rule[] = [...secretRules.slice(0, 6), ...secretRules.slice(7), ...nonEmailStandardRules];
+function applyPreAfterRules(text: string, includeFixedSecrets = false): string {
+  let result = includeFixedSecrets ? applyRules(text, [...secretRules.slice(0, 6), secretRules[7]!]) : text;
+  result = applyRules(result, deferredContextualSecretRules);
+  for (const rule of standardRules.slice(1, 5)) result = applyEmailSafeRule(result, rule);
+  return applyRules(result, standardRules.slice(5));
+}
 
 const tokenLetters = 32;
 const windowLetters = 128;
@@ -1431,7 +1473,7 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     const postRandom = replaceMaskedRandom(preRandom, matchedOriginals);
     return postRandom.replace(tokenRegex, (_tok, idx) => matchedLabels[Number(idx)] ?? "");
   }
-  const preAfter = applyRules(homeStripped, preAfterRules);
+  const preAfter = applyPreAfterRules(homeStripped, false);
 
   let expanded = "";
   let expPos = 0;
@@ -1451,7 +1493,7 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
 
   const sanitizedAfter = after.map((entry) => ({ ...entry, as: sanitizeLabel(entry) }));
   const exempt = new Set([...redactorLabels, ...labels, ...sanitizedAfter.map((entry) => entry.as)]);
-  const afterTransform = (value: string) => applyRules(stripHome(value), preAfterAllRules);
+  const afterTransform = (value: string) => applyPreAfterRules(stripHome(value), true);
   const afterEntries = sanitizedAfter.flatMap((entry) => {
     const ciHome = stripHomeCi(entry.text);
     return ciHome !== entry.text && ciHome !== stripHome(entry.text) ? [entry, { ...entry, text: ciHome }] : [entry];
@@ -1487,27 +1529,21 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
       }
       return lo < intervals.length && intervals[lo]!.start < end;
     };
-    const mergeWindows = (raw: Array<{ start: number; end: number }>) => {
-      const out: Array<{ start: number; end: number }> = [];
-      for (const win of raw) {
-        const prev = out.at(-1);
-        if (prev && win.start <= prev.end) {
-          if (win.end > prev.end) prev.end = win.end;
-        } else {
-          out.push({ start: win.start, end: win.end });
-        }
+    const emailWindows: Array<{ start: number; end: number }> = [];
+    for (const { start, end } of intervals) {
+      const prev = emailWindows.at(-1);
+      if (prev && end <= prev.end) continue;
+      let lo = start;
+      const minLo = prev ? prev.end : 0;
+      while (lo > minLo && /[A-Za-z0-9_.+%@-]/.test(expanded[lo - 1]!)) lo--;
+      let hi = end;
+      while (hi < expanded.length && /[A-Za-z0-9_.+%@-]/.test(expanded[hi]!)) hi++;
+      if (prev && lo <= prev.end) {
+        if (hi > prev.end) prev.end = hi;
+      } else {
+        emailWindows.push({ start: lo, end: hi });
       }
-      return out;
-    };
-    const emailWindows = mergeWindows(
-      intervals.map(({ start, end }) => {
-        let lo = start;
-        while (lo > 0 && /[A-Za-z0-9_.+%@-]/.test(expanded[lo - 1]!)) lo--;
-        let hi = end;
-        while (hi < expanded.length && /[A-Za-z0-9_.+%@-]/.test(expanded[hi]!)) hi++;
-        return { start: lo, end: hi };
-      }),
-    );
+    }
     const [emailPattern, emailReplace] = emailRule;
     for (const win of emailWindows) {
       const slice = expanded.slice(win.start, win.end);
@@ -1524,28 +1560,46 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
         }
       }
     }
-    const bearerWindows = mergeWindows(
-      intervals.map(({ start, end }) => {
-        let lo = start;
-        while (lo > 0 && /[A-Za-z0-9._~+/=-]/.test(expanded[lo - 1]!)) lo--;
-        while (lo > 0 && /\s/.test(expanded[lo - 1]!)) lo--;
-        lo = Math.max(0, lo - 8);
-        let hi = end;
-        while (hi < expanded.length && /[A-Za-z0-9._~+/=-]/.test(expanded[hi]!)) hi++;
-        return { start: lo, end: hi };
-      }),
-    );
+    const bearerWindows: Array<{ start: number; end: number }> = [];
+    for (const { start, end } of intervals) {
+      const prev = bearerWindows.at(-1);
+      if (prev && end <= prev.end) continue;
+      let lo = start;
+      const minLo = prev ? prev.end : 0;
+      while (lo > minLo && /[A-Za-z0-9._~+/=-]/.test(expanded[lo - 1]!)) lo--;
+      while (lo > minLo && /\s/.test(expanded[lo - 1]!)) lo--;
+      lo = Math.max(minLo, lo - 8);
+      let hi = end;
+      while (hi < expanded.length && /[A-Za-z0-9._~+/=-]/.test(expanded[hi]!)) hi++;
+      let kwHi = hi;
+      while (kwHi < expanded.length && /\s/.test(expanded[kwHi]!)) kwHi++;
+      if (kwHi > hi) {
+        let bodyHi = kwHi;
+        while (bodyHi < expanded.length && /[A-Za-z0-9._~+/=-]/.test(expanded[bodyHi]!)) bodyHi++;
+        if (bodyHi - kwHi >= 12) hi = bodyHi;
+      }
+      if (prev && lo <= prev.end) {
+        if (hi > prev.end) prev.end = hi;
+      } else {
+        bearerWindows.push({ start: lo, end: hi });
+      }
+    }
     const bearerBodyRegex = /\b(Bearer|Basic|token)(\s+)([A-Za-z0-9._~+/=-]{12,})/gi;
     for (const win of bearerWindows) {
       const slice = expanded.slice(win.start, win.end);
       bearerBodyRegex.lastIndex = 0;
       for (let match = bearerBodyRegex.exec(slice); match !== null; match = bearerBodyRegex.exec(slice)) {
         if (match.index === 0 && win.start > 0 && /\w/.test(expanded[win.start - 1]!)) continue;
+        const matchStart = win.start + match.index;
         const body = match[3]!;
-        const bodyStart = win.start + match.index + match[1]!.length + match[2]!.length;
+        const bodyStart = matchStart + match[1]!.length + match[2]!.length;
         const bodyEnd = bodyStart + body.length;
-        if (!overlapsSensitive(bodyStart, bodyEnd)) continue;
-        bearerSpans.push({ start: bodyStart, end: bodyEnd, len: body.length, as: "<token>" });
+        if (!overlapsSensitive(matchStart, bodyEnd)) continue;
+        if (overlapsSensitive(matchStart, bodyStart)) {
+          bearerSpans.push({ start: matchStart, end: bodyEnd, len: bodyEnd - matchStart, as: `${match[1]!}${match[2]!}<token>` });
+        } else {
+          bearerSpans.push({ start: bodyStart, end: bodyEnd, len: body.length, as: "<token>" });
+        }
       }
     }
   }

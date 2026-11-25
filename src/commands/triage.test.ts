@@ -346,6 +346,19 @@ describe("hedge triage", () => {
     ]);
     expect(internalEmail).toBe("sent to <email> and <email>");
 
+    const authAndAssign = redact(
+      "Authorization: token abcdef1234567890 and TOKEN=Basic secretvalue987654321 and ?auth=Basic anothersecret12345",
+      home,
+      [
+        { text: "token", as: "<branch>", after: true },
+        { text: urlRepo, as: "<team source>" },
+      ],
+    );
+    expect(authAndAssign).not.toContain("abcdef1234567890");
+    expect(authAndAssign).not.toContain("secretvalue987654321");
+    expect(authAndAssign).not.toContain("anothersecret12345");
+    expect(authAndAssign).toContain("Authorization: token <token>");
+
     const repeatedHostRef = "A.INTERNAL/".repeat(300);
     const repeatedLog = "a.internal/".repeat(1_000);
     const repeatedOut = redact(repeatedLog, home, [{ text: repeatedHostRef, as: "<branch>", after: true }]);
