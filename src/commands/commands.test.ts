@@ -393,7 +393,7 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     });
   }
 
-  test("stops a human step running in a separate process group at the deadline", async () => {
+  test("stops a human step running in a separate process group or detached session at the deadline", async () => {
     const { home: pgidHome } = await machineWithProfile();
     const [pgidReady, pgidGone] = [join(pgidHome, "ready"), join(pgidHome, "gone")];
     expect(Bun.spawnSync(["mkfifo", pgidReady, pgidGone]).exitCode).toBe(0);
@@ -408,6 +408,22 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
       expect(await pgidClosed).toBe("");
     } finally {
       await endHolder(pgidStarted);
+    }
+
+    const { home: sidHome } = await machineWithProfile();
+    const [sidReady, sidGone] = [join(sidHome, "ready"), join(sidHome, "gone")];
+    expect(Bun.spawnSync(["mkfifo", sidReady, sidGone]).exitCode).toBe(0);
+    await withTeamPack(sidHome, {
+      workflows: [flow("allowlist")],
+      human: [{ id: "allowlist", say: "Allowlist.", workflow: "allowlist", probe: ["setsid", "sh", "-c", 'exec 3>"$HOME/gone"; echo $$ > "$HOME/ready"; exec sleep 30'] }],
+    });
+    const [sidStarted, sidClosed] = [fifoRead(sidReady), fifoRead(sidGone)];
+    const timesOutOnceSidStarted = { now: () => 0, sleep: async () => void (await sidStarted) };
+    try {
+      expect((await hedge(sidHome, ["packs"], 0, { clock: timesOutOnceSidStarted })).output).toContain(notChecked);
+      expect(await sidClosed).toBe("");
+    } finally {
+      await endHolder(sidStarted);
     }
   });
 

@@ -10,7 +10,7 @@ import { hublessReason, listedPack } from "./resolve.ts";
 import { wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
 import { withLegacyNames } from "../legacy.ts";
 import { bunScript } from "../runner/bun.ts";
-import { graceMs, interruptGraceMs, killSessionSync } from "./probe-supervisor.ts";
+import { graceMs, interruptGraceMs, killSession, killSessionSync, tagEnvVar } from "./probe-supervisor.ts";
 
 export type AdapterContext = { home: string; dryRun: boolean; adopt: string[]; adoptFrom?: string[] };
 export type AdapterResult = { actions: Action[]; findings: Finding[]; blocked?: boolean; failed?: boolean };
@@ -489,18 +489,19 @@ const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
 let activeSupervisors = 0;
 const supervisorWaiters: Array<() => void> = [];
 
-type LiveProbe = { pid: number; targetPid?: number; targetExited?: boolean; aliveFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
+type LiveProbe = { pid: number; tag: string; targetPid?: number; targetExited?: boolean; aliveFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
 type ActiveRunner = { stop: (name: NodeJS.Signals) => void };
 const activeRunners = new Set<ActiveRunner>();
 const allLiveProbes = new Set<LiveProbe>();
 let interruptHandlersAttached = false;
 
 function handOffWatchdog(probes: Iterable<LiveProbe>) {
-  const batch: Array<{ pid: number; targetPid?: number; targetExited?: boolean; fd: number; delayMs: number }> = [];
+  const batch: Array<{ pid: number; tag: string; targetPid?: number; targetExited?: boolean; fd: number; delayMs: number }> = [];
   for (const probe of probes) {
     if (probe.aliveFd === undefined) continue;
     batch.push({
       pid: probe.pid,
+      tag: probe.tag,
       ...(probe.targetPid !== undefined ? { targetPid: probe.targetPid } : {}),
       ...(probe.targetExited ? { targetExited: true } : {}),
       fd: probe.aliveFd,
@@ -512,6 +513,7 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
   const payload = JSON.stringify(
     batch.map((entry, index) => ({
       pid: entry.pid,
+      tag: entry.tag,
       fd: index + 3,
       delayMs: entry.delayMs,
     })),
@@ -528,7 +530,7 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
   } finally {
     if (!handedOff) {
       for (const entry of batch) {
-        killSessionSync(entry.pid, "SIGKILL", entry.targetExited ? undefined : entry.targetPid);
+        killSessionSync(entry.pid, "SIGKILL", entry.targetExited ? undefined : entry.targetPid, entry.tag);
         try {
           process.kill(entry.pid, "SIGKILL");
         } catch {}
@@ -682,16 +684,17 @@ async function runDetached(command: string[], env: Record<string, string | undef
   }
   let handedToExit = false;
   try {
+    const tag = crypto.randomUUID();
     const payload = { command, controlFd: 3, ...(cleanupGraceMs === undefined ? {} : { graceMs: cleanupGraceMs }) };
     const encoded = JSON.stringify(payload);
     const overStdin = Buffer.byteLength(encoded) > 65_536;
     child = Bun.spawn(overStdin ? bunScript(probeSupervisor) : bunScript(probeSupervisor, encoded), {
       stdio: [overStdin ? new TextEncoder().encode(encoded) : "ignore", "pipe", "ignore", "pipe"],
-      env,
+      env: { ...env, [tagEnvVar]: tag },
       detached: true,
     });
     const aliveFd = typeof child.stdio[3] === "number" ? child.stdio[3] : undefined;
-    probe = { pid: child.pid, aliveFd, delayMs: (cleanupGraceMs ?? graceMs) + 100, stop: endGroup };
+    probe = { pid: child.pid, tag, aliveFd, delayMs: (cleanupGraceMs ?? graceMs) + 100, stop: endGroup };
     allLiveProbes.add(probe);
     live?.add(probe);
     syncInterruptHandlers();
@@ -701,7 +704,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
       (supCode) => {
         reaped = true;
         if (!reportedResult && supCode !== 128 && supCode !== 143) {
-          killSessionSync(owned.pid, "SIGKILL", owned.targetExited ? undefined : owned.targetPid);
+          void killSession(undefined, "SIGKILL", owned.tag);
         }
       },
       () => {

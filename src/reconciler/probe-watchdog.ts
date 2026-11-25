@@ -1,7 +1,7 @@
 import { closeSync, writeSync } from "node:fs";
-import { sessionGroups } from "./probe-supervisor.ts";
+import { discoverTargets, signalTargets } from "./probe-supervisor.ts";
 
-export type WatchEntry = { pid: number; fd: number; delayMs: number };
+export type WatchEntry = { pid: number; fd: number; delayMs: number; tag?: string };
 export type WatchClock = { now: () => number; sleep: (ms: number) => Promise<void> };
 
 const alive = (fd: number) => {
@@ -49,20 +49,15 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
       await Promise.all(
         due.map(async (entry) => {
           if (alive(entry.fd)) {
-            const groups = await sessionGroups(entry.pid);
+            const targets = await discoverTargets(entry.pid, entry.tag);
             if (alive(entry.fd)) {
-              for (const pgrp of groups) {
-                if (pgrp === entry.pid) continue;
-                try {
-                  process.kill(-pgrp, "SIGKILL");
-                } catch {}
-              }
-              try {
-                process.kill(-entry.pid, "SIGKILL");
-              } catch {}
+              signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.pid);
               try {
                 process.kill(entry.pid, "SIGKILL");
               } catch {}
+            } else if (entry.tag) {
+              const tagged = await discoverTargets(undefined, entry.tag);
+              if (tagged) signalTargets(tagged, "SIGKILL");
             }
           }
           close(entry.fd);

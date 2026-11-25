@@ -1,8 +1,9 @@
 import { closeSync } from "node:fs";
-import { killSession } from "../../../src/reconciler/probe-supervisor.ts";
+import { killSession, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
 type StartMessage = { argv: string[]; lockCount: number; controlFd?: number };
 
+const runTag = process.env[tagEnvVar] || undefined;
 let target: ReturnType<typeof Bun.spawn> | undefined;
 let targetReaped = false;
 let targetCode: number | undefined;
@@ -16,7 +17,7 @@ const killAll = () => {
       target.kill("SIGKILL");
     } catch {}
   }
-  const done = killSession(process.pid, "SIGKILL");
+  const done = killSession(process.pid, "SIGKILL", runTag);
   if (done && typeof (done as Promise<void>).then === "function") {
     void (done as Promise<void>).finally(() => process.exit(137));
     return;

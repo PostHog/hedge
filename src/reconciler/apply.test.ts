@@ -671,8 +671,11 @@ describe("humanStepsLeft", () => {
       writers.push(proc);
       await proc.exited;
     };
+    let abortAll!: () => void;
+    const giveUp = new Promise<void>((resolve) => (abortAll = resolve));
+    let pending: ReturnType<typeof humanStepsLeft> | undefined;
     try {
-      const pending = humanStepsLeft(plan({ human: [...heldHuman, extraHuman] }), { home, giveUp: new Promise<void>(() => {}), graceMs: 0 });
+      pending = humanStepsLeft(plan({ human: [...heldHuman, extraHuman] }), { home, giveUp, graceMs: 0 });
       await Promise.all(readers.slice(0, slots).map((r) => r.text));
       expect(existsSync(extraMarker)).toBe(false);
       await release(gateFifos[0]!);
@@ -681,6 +684,8 @@ describe("humanStepsLeft", () => {
       await Promise.all(gateFifos.slice(1).map(release));
       expect(await pending).toEqual({ failing: [], unchecked: [] });
     } finally {
+      abortAll();
+      await pending?.catch(() => {});
       for (const r of readers) try { r.proc.kill("SIGKILL"); } catch {}
       for (const w of writers) try { w.kill("SIGKILL"); } catch {}
     }

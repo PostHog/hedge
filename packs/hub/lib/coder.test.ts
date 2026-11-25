@@ -400,15 +400,16 @@ test("terminates a descendant holding stdout open on SIGTERM even after the comm
 
 test("stops cleanly on timeout without hanging when a separate-group descendant keeps stdout open", async () => {
   const dir = temp.make("hedge-detached-");
-  const [ready, leaderGone] = [join(dir, "ready"), join(dir, "leader-gone")];
-  expect(Bun.spawnSync(["mkfifo", ready, leaderGone]).exitCode).toBe(0);
+  const [ready, gone, leaderGone] = [join(dir, "ready"), join(dir, "gone"), join(dir, "leader-gone")];
+  expect(Bun.spawnSync(["mkfifo", ready, gone, leaderGone]).exitCode).toBe(0);
   const started = Bun.file(ready).text();
+  const holderGone = Bun.file(gone).text();
   const leaderClosed = Bun.file(leaderGone).text();
   const clock = handTimer();
   const leaderScript = `import { openSync, writeFileSync } from "node:fs";
 openSync(${JSON.stringify(leaderGone)}, "w");
-const child = Bun.spawn(["sleep", "30"], { detached: true, stdin: "ignore", stdout: "inherit", stderr: "inherit" });
-writeFileSync(${JSON.stringify(ready)}, String(child.pid) + "\\n");
+const child = Bun.spawn(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "worker", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { detached: true, stdin: "ignore", stdout: "inherit", stderr: "inherit" });
+child.unref();
 process.exit(0);`;
   const result = captureWith(clock.timer)([process.execPath, "-e", leaderScript], { timeoutMs: 30 });
   const childPid = Number((await started).trim());
@@ -416,6 +417,7 @@ process.exit(0);`;
   try {
     clock.fire();
     expect(await result).toEqual({ code: 124, stdout: "", stderr: "timed out after 30 ms" });
+    expect(await holderGone).toBe("");
   } finally {
     if (childPid > 0) try { process.kill(-childPid, "SIGKILL"); } catch {}
     if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}

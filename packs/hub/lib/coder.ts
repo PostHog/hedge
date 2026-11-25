@@ -2,7 +2,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, re
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { boxPrefix } from "../../../src/hub/names.ts";
-import { killSessionSync } from "../../../src/reconciler/probe-supervisor.ts";
+import { killSession, killSessionSync, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 import { bunScript } from "../../../src/runner/bun.ts";
 import { heldLocks } from "./box-lock.ts";
 
@@ -95,6 +95,7 @@ export function captureWith(timer: Timer): Capture {
     const locks = heldLocks();
     const input = stdin === undefined ? "ignore" : new TextEncoder().encode(stdin);
     let child: ReturnType<typeof Bun.spawn> | undefined;
+    const tag = crypto.randomUUID();
     let controlFd: number | undefined;
     let targetPgid: number | undefined;
     let stopped = false;
@@ -111,7 +112,11 @@ export function captureWith(timer: Timer): Capture {
     };
     const killGroups = () => {
       if (!child) return;
-      killSessionSync(child.pid, "SIGKILL", !targetExited ? targetPgid : undefined);
+      if (!supervisorReaped) {
+        killSessionSync(child.pid, "SIGKILL", !targetExited ? targetPgid : undefined, tag);
+        return;
+      }
+      void killSession(undefined, "SIGKILL", tag);
     };
     const stopChild = () => {
       stopped = true;
@@ -164,7 +169,7 @@ export function captureWith(timer: Timer): Capture {
     try {
       const command = holdingLocks(argv, locks, timeoutMs, env?.PATH ?? process.env.PATH ?? "");
       child = Bun.spawn(bunScript(captureSupervisor), {
-        env: env as Record<string, string> | undefined,
+        env: { ...(env ?? process.env), [tagEnvVar]: tag } as Record<string, string>,
         stdio: [input, output, output, ...locks, "pipe"],
         detached: true,
         ipc(message) {
