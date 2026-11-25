@@ -43,6 +43,8 @@ test("the merge card line names each held decision once, with every kind it acce
   const gate = await pr.hedge("gate");
   expect(gate.code).toBe(0);
   expect(/ · held: ([^·]+) · /.exec(gate.output)?.[1]).toBe(`${other} for live-run/cross-version, ${id} for prod-shape`);
+  const json = await pr.hedge("gate", "--json");
+  expect((JSON.parse(json.output.trim().split("\n").at(-1) ?? "{}") as { mergeCard?: string }).mergeCard).toContain(` · held: ${other} for live-run/cross-version, ${id} for prod-shape · `);
 });
 
 test("the merge card takes the door from the grade line, and a draft has no ready time yet", async () => {

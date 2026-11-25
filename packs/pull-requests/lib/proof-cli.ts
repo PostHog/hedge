@@ -186,7 +186,7 @@ or with that heading at the end of the body. Only a # heading that GitHub shows 
 or ends that section, never an underlined one. When the setting changes, the next run moves the block,
 unless taking it out would join the lists or code blocks around it: then it stays and takes the new heading. Once the gate passed at HEAD, it starts with a **Merge card** line: the
 merge-risk grade and door, the reads, each gap with who accepted it, the count of known issues, and the minutes from
-opened to ready, or "still a draft". It prints the full merge card line, as hedge proof gate does, before its last line. It holds a row per owed proof (what ran, the result, the commit or the commit it
+opened to ready, or "still a draft". It prints the merge card line before its last line, as hedge proof gate does but without the gate's held: names. It holds a row per owed proof (what ran, the result, the commit or the commit it
 was reused from), a review row, a judge row, what was not checked, and each gap with who accepted it. It reads the
 proof summary the gate saved at HEAD and the decision ledger, never a proof's pass or fail itself. The block sits
 between ${receiptOpen} head=<sha> hash=<hex> --> and ${receiptClose}; the rest of the body stays as it is, and the
