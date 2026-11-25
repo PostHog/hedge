@@ -339,16 +339,17 @@ describe("fetchSource", () => {
     for (const dir of mode & 0o200 ? dirs : dirs.reverse()) chmodSync(dir, mode);
   }
 
-  test("preserves verified pin history across repository switches, pre-ref legacy caches, and git gc", async () => {
+  test("preserves verified pin history across repository switches and git gc", async () => {
     const repoA = await packRepo("Repo A v1.");
     const commitA1 = await spawnGit(repoA, "rev-parse", "HEAD");
     const repoB = await packRepo("Repo B v1.");
     const commitB1 = await spawnGit(repoB, "rev-parse", "HEAD");
     const cache = temp.make("cache-");
 
-    const cacheRepo = await legacyPinnedCache(cache, "team", repoA, commitA1);
+    await fetchSource({ name: "team", repo: repoA, ref: commitA1 }, cache);
     await fetchSource({ name: "team", repo: repoB, ref: commitB1 }, cache);
 
+    const cacheRepo = join(cache, "team");
     await spawnGit(cacheRepo, "reflog", "expire", "--expire=now", "--all");
     await spawnGit(cacheRepo, "gc", "--prune=now", "-q");
 
@@ -659,7 +660,7 @@ exec git-upload-pack "$dest"
     }
   });
 
-  test("preserves a pre-upgrade pinned commit after applying a second pin, and keeps pin history across an older binary write", async () => {
+  test("keeps verified pin history across an older binary write", async () => {
     const repo = await packRepo("Team rules v1.");
     const first = await spawnGit(repo, "rev-parse", "HEAD");
     writePack(repo, "Team rules v2.");
@@ -669,7 +670,7 @@ exec git-upload-pack "$dest"
     await spawnGit(repo, "commit", "-q", "-am", "v3");
     const third = await spawnGit(repo, "rev-parse", "HEAD");
     const cache = temp.make("cache-");
-    await legacyPinnedCache(cache, "team", repo, first);
+    await fetchSource({ name: "team", repo, ref: first }, cache);
     await fetchSource({ name: "team", repo, ref: second }, cache);
     await legacyPinnedCache(cache, "team", repo, third);
     rmSync(repo, { recursive: true, force: true });
@@ -1014,6 +1015,45 @@ exec git-upload-pack "$dest"
       setDirModes(fhRefs, 0o755);
     }
     expect(await followsBranch({ name: "team", repo: fhRepo, ref: "main" }, fhCache)).toBe(true);
+
+    const unsetDotgit = join(parent, "unset-packs.git");
+    const unsetPlain = join(parent, "unset-packs");
+    const unsetMirrorSha = await initPackRepo(unsetDotgit, "Unset mirror.");
+    const unsetRealSha = await initPackRepo(unsetPlain, "Unset real.");
+    const unsetCache = temp.make("cache-unset-dotgit-");
+    const unsetDir = join(unsetCache, "team");
+    mkdirSync(unsetDir, { recursive: true });
+    await spawnGit(unsetDir, "init", "-q");
+    await spawnGit(unsetDir, "config", `url.${unsetDotgit}.insteadOf`, unsetPlain);
+    await spawnGit(unsetDir, "fetch", "-q", "--depth", "1", "--no-tags", unsetPlain, unsetMirrorSha);
+    await spawnGit(unsetDir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    writeFileSync(join(unsetDir, ".git", "hedge-source.json"), JSON.stringify({ repo: unsetPlain, ref: unsetMirrorSha, commit: unsetMirrorSha }) + "\n");
+    rmSync(unsetDotgit, { recursive: true, force: true });
+    await spawnGit(unsetDir, "config", "--unset", `url.${unsetDotgit}.insteadOf`);
+    expect("error" in (await fetchSource({ name: "team", repo: unsetPlain, ref: unsetRealSha }, unsetCache))).toBe(false);
+    await spawnGit(unsetDir, "reflog", "expire", "--expire=now", "--all");
+    await spawnGit(unsetDir, "gc", "--prune=now", "-q");
+    rmSync(unsetPlain, { recursive: true, force: true });
+    const unsetBack = await fetchSource({ name: "team", repo: unsetPlain, ref: unsetMirrorSha }, unsetCache);
+    if ("error" in unsetBack) throw new Error(unsetBack.error);
+    expect(unsetBack.packs[0]?.manifest.summary).toBe("Unset real.");
+    expect(unsetBack.stale).toContain(`could not fetch ${unsetMirrorSha}`);
+
+    const unreadableRepo = await packRepo("Unreadable FH.");
+    const unreadableCache = temp.make("cache-unreadable-fh-");
+    expect("error" in (await fetchSource({ name: "team", repo: unreadableRepo, ref: "main" }, unreadableCache))).toBe(false);
+    rmSync(unreadableRepo, { recursive: true, force: true });
+    const unreadableFh = join(unreadableCache, "team", ".git", "FETCH_HEAD");
+    chmodSync(unreadableFh, 0o000);
+    try {
+      const failed = await fetchSource({ name: "team", repo: unreadableRepo, ref: "main" }, unreadableCache);
+      if ("error" in failed) throw new Error(failed.error);
+      expect(failed.stale).toContain("could not fetch main");
+      expect(existsSync(unreadableFh)).toBe(true);
+    } finally {
+      chmodSync(unreadableFh, 0o600);
+    }
+    expect(await followsBranch({ name: "team", repo: unreadableRepo, ref: "main" }, unreadableCache)).toBe(true);
   });
 });
 

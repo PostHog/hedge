@@ -511,6 +511,32 @@ describe("hedge triage", () => {
     expect(body).not.toContain("product-team-release-12345");
     expect(body).not.toContain("Note: <secret>");
   });
+
+  test("redacts a random token containing a plus-encoded known path with spaces", async () => {
+    const home = temp.make("home-");
+    const inherited = temp.make("inherited-profile-");
+    await spawnGit(inherited, "init", "-q");
+    writeFileSync(
+      join(inherited, "hedge.json"),
+      JSON.stringify({ schema: 1, engine: { repo: "PostHog/hedge", ref: "main", channel: "track" }, sources: [{ name: "team", repo: "/work repo", ref: "main" }], packs: [], plan: "both", settings: {}, workflows: {} }),
+    );
+    const left = "AbCdEfGhIj1234";
+    const right = "KlMnOpQrSt5678";
+    const sent: Sent[] = [];
+    const io = scripted([]);
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      sent.push({ command, ...(options.input === undefined ? {} : { input: options.input }) });
+      if (command[0] === "git") return spawnRunner(command, options);
+      return capture([], undefined)(command, options);
+    };
+    const code = await main(["triage", "--send", "--note", `tok ${left}+/work+repo/${right} end`], { home, engineRoot, platform: "darwin", env: { HEDGE_PROFILE_DIR: inherited }, print: io.terminal.print, terminal: io.terminal, capture: runRealGit, hostname: () => "noras-mbp.local", run: async () => 0 });
+    expect(code).toBe(0);
+    const body = sent.find((call) => call.command[1] === "issue")!.input!;
+    expect(body).toContain("tok <secret> end");
+    expect(body).not.toContain(left);
+    expect(body).not.toContain(right);
+    expect(body).not.toContain("/work+repo");
+  });
 });
 
 describe("hedge setup and triage", () => {

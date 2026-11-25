@@ -159,20 +159,22 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
   };
 }
 
-function applySpellings(text: string, matcher: CompiledMatcher, exempt?: Set<string>, skipOwner?: KnownName) {
+function applySpellings(text: string, matcher: CompiledMatcher, exempt?: Set<string>, skipOwner?: KnownName, onMatch?: (match: string, as: string) => string) {
   let result = text;
   if (matcher.ciRegex) {
     result = result.replace(matcher.ciRegex, (match) => {
       if (exempt?.has(match)) return match;
       const hit = matcher.ciMap.get(match.toLowerCase());
-      return !hit || (skipOwner && hit.owner === skipOwner) ? match : hit.as;
+      if (!hit || (skipOwner && hit.owner === skipOwner)) return match;
+      return onMatch ? onMatch(match, hit.as) : hit.as;
     });
   }
   if (matcher.csRegex) {
     result = result.replace(matcher.csRegex, (match) => {
       if (exempt?.has(match)) return match;
       const hit = matcher.csMap.get(match);
-      return !hit || (skipOwner && hit.owner === skipOwner) ? match : hit.as;
+      if (!hit || (skipOwner && hit.owner === skipOwner)) return match;
+      return onMatch ? onMatch(match, hit.as) : hit.as;
     });
   }
   return result;
@@ -199,19 +201,17 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
   const sanitizeLabel = (entry: KnownName) => applyRules(stripHome(applySpellings(entry.as, rawPrimarySpellings, undefined, entry)), allRules);
 
   const labels: string[] = [];
-  const originals: string[] = [];
   const maskedEntries = primary.map((entry) => {
-    const index = labels.length;
-    labels.push(sanitizeLabel(entry));
-    originals.push(entry.text);
-    return { ...entry, as: `${prefix}${index}${suffix}` };
+    const label = sanitizeLabel(entry);
+    labels.push(label);
+    return { ...entry, as: label };
   });
   const maskedSpellings = compileSpellings(maskedEntries);
   const tokenPattern = `${escape(prefix)}(\\d+)${escape(suffix)}`;
   const tokenRegex = new RegExp(tokenPattern, "g");
   const tokenOrChunk = new RegExp(`[A-Za-z0-9+/_-]+|${tokenPattern}`, "g");
 
-  const replaceMaskedRandom = (value: string) => {
+  const replaceMaskedRandom = (value: string, matchedOriginals: string[]) => {
     let out = "";
     let pos = 0;
     let runStart = -1;
@@ -225,7 +225,7 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
         eq++;
       }
       const slice = value.slice(runStart, end);
-      const expanded = slice.replace(tokenRegex, (_tok, idx) => originals[Number(idx)] ?? "");
+      const expanded = slice.replace(tokenRegex, (_tok, idx) => matchedOriginals[Number(idx)] ?? "");
       out += value.slice(pos, runStart);
       out += expanded.length >= tokenLetters && looksRandom(expanded) ? "<secret>" : slice;
       pos = end;
@@ -234,7 +234,7 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     };
     tokenOrChunk.lastIndex = 0;
     for (let match = tokenOrChunk.exec(value); match !== null; match = tokenOrChunk.exec(value)) {
-      if (match[1] !== undefined && !/^[A-Za-z0-9+/_-]+$/.test(originals[Number(match[1])] ?? "")) {
+      if (match[1] !== undefined && !/^[A-Za-z0-9+/_-]+$/.test(matchedOriginals[Number(match[1])] ?? "")) {
         flush();
         continue;
       }
@@ -253,9 +253,17 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
   };
 
   const passOne = (value: string) => {
-    let next = applyRules(stripHome(applySpellings(value, maskedSpellings)), preRandomRules);
-    next = replaceMaskedRandom(next);
-    return next.replace(tokenRegex, (_tok, idx) => labels[Number(idx)] ?? "");
+    const matchedOriginals: string[] = [];
+    const matchedLabels: string[] = [];
+    const masked = applySpellings(value, maskedSpellings, undefined, undefined, (match, as) => {
+      const index = matchedOriginals.length;
+      matchedOriginals.push(match);
+      matchedLabels.push(as);
+      return `${prefix}${index}${suffix}`;
+    });
+    let next = applyRules(stripHome(masked), preRandomRules);
+    next = replaceMaskedRandom(next, matchedOriginals);
+    return next.replace(tokenRegex, (_tok, idx) => matchedLabels[Number(idx)] ?? "");
   };
 
   const result = passOne(text);
