@@ -116,11 +116,16 @@ export async function balance(options: Balance): Promise<void> {
   }
   const credentials = all.filter((credential) => (!credential.paused || resume.includes(credential)) && !pause.includes(credential));
   if (!options.dryRun && options.pausedPath) {
-    const tracked = new Set([...pausedBefore, ...pause.map((credential) => credential.name)]);
-    if (tracked.size !== pausedBefore.size) writeStateFile(options.pausedPath, [...tracked].sort());
-    for (const credential of [...pause, ...resume]) await call("auth-files/status", { method: "PATCH", body: JSON.stringify({ name: credential.name, disabled: pause.includes(credential) }) });
+    for (const credential of [...pause, ...resume]) {
+      const disabled = pause.includes(credential);
+      await call("auth-files/status", { method: "PATCH", body: JSON.stringify({ name: credential.name, disabled }) });
+      if (disabled) {
+        pausedBefore.add(credential.name);
+        writeStateFile(options.pausedPath, [...pausedBefore].sort());
+      }
+    }
     const paused = all.filter((credential) => !credentials.includes(credential)).map((credential) => credential.name).sort();
-    if (paused.length !== tracked.size) writeStateFile(options.pausedPath, paused);
+    if (paused.length !== pausedBefore.size) writeStateFile(options.pausedPath, paused);
   }
   const claude = credentials.filter((credential) => credential.provider === "claude");
   if (!credentials.length) options.log("The proxy holds no enabled Claude or Codex subscription.");

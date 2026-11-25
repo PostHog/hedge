@@ -343,9 +343,9 @@ test("the hub keeps its exempt Claude subscription enabled at quota and resumes 
   const manual = { name: "manual.json", provider: "claude", auth_index: "manual-auth-index", priority: 0, disabled: true };
   const full = { seven_day: { utilization: 100, resets_at: new Date(now + day).toISOString() }, extra_usage: { is_enabled: true } };
   const usage = { [exempt.auth_index]: full, [guarded.auth_index]: full, [manual.auth_index]: full };
-  const run = async (files: unknown[], log = (_line: string) => {}) => {
+  const run = async (files: unknown[]) => {
     const { fetch, calls } = managementApi({ strategy: "fill-first", files, usage });
-    expect(await balanceCommand([], { home, fetch, now: () => now, ledger: false, env: {}, log })).toBe(0);
+    expect(await balanceCommand([], { home, fetch, now: () => now, ledger: false, env: {}, log: () => {} })).toBe(0);
     return calls;
   };
   const statusWrites = (calls: Call[]) => calls.filter((call) => call.path === "auth-files/status").map((call) => call.body);
@@ -357,14 +357,39 @@ test("the hub keeps its exempt Claude subscription enabled at quota and resumes 
 
   const next = await run([{ ...exempt, priority: 0 }, { ...guarded, disabled: true }, manual]);
   expect(statusWrites(next)).toEqual([]);
+});
 
-  writeFileSync(exemptionPath, "invalid JSON");
+
+test("a malformed exemption file logs why the default billing guard is used", async () => {
+  const home = roleHome(temp.make("hedge-balance-"), "hub");
+  const proxy = join(home, ".local/share/hedge-cli-proxy");
+  mkdirSync(proxy, { recursive: true });
+  writeFileSync(join(proxy, "management.env"), `MANAGEMENT_PASSWORD=${managementKey}\n`);
+  writeFileSync(join(proxy, "allow-extra-usage.json"), "invalid JSON");
+  const files = [{ name: "at-quota.json", provider: "claude", auth_index: "1", priority: 0 }];
+  const usage = { "1": { seven_day: { utilization: 100 }, extra_usage: { is_enabled: true } } };
+  const { fetch, calls } = managementApi({ strategy: "fill-first", files, usage });
   const lines: string[] = [];
-  const closed = await run([{ ...exempt, priority: 0 }, { ...guarded, disabled: true }, manual], (line) => lines.push(line));
-  expect(statusWrites(closed)).toEqual([{ name: exempt.name, disabled: true }]);
+  expect(await balanceCommand([], { home, fetch, now: () => now, ledger: false, env: {}, log: (line) => lines.push(line) })).toBe(0);
+  expect(calls.find((call) => call.path === "auth-files/status")?.body).toEqual({ name: "at-quota.json", disabled: true });
   expect(lines).toContain("Cannot read allow-extra-usage.json as a JSON array of Auth Index values. Using the default billing guard.");
 });
 
+test("a rejected pause does not give the balancer ownership of a later manual disable", async () => {
+  const pausedPath = join(temp.make(), "paused.json");
+  const seat = { name: "at-quota.json", provider: "claude", auth_index: "1", priority: 0 };
+  const usage = { "1": { seven_day: { utilization: 100 }, extra_usage: { is_enabled: true } } };
+  const api = managementApi({ strategy: "fill-first", files: [seat], usage });
+  const fetch = async (input: string | URL | Request, init?: RequestInit) => {
+    if (String(input).endsWith("auth-files/status")) return new Response("rejected", { status: 503 });
+    return api.fetch(input, init);
+  };
+  await expect(balance({ fetch, managementKey, now, dryRun: false, pausedPath, log: () => {} })).rejects.toThrow("auth-files/status returned 503");
+
+  const manual = managementApi({ strategy: "fill-first", files: [{ ...seat, disabled: true }] });
+  await balance({ fetch: manual.fetch, managementKey, now, dryRun: false, pausedPath, allowExtraUsage: new Set(["1"]), log: () => {} });
+  expect(manual.calls.filter((call) => call.path === "auth-files/status")).toEqual([]);
+});
 
 test("a pause stays owned by the balancer when a later status update fails", async () => {
   const pausedPath = join(temp.make(), "paused.json");
