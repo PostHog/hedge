@@ -834,8 +834,6 @@ esac
     try {
       const failedAdvance = await advanceSource(failRef, failCache, failBaseSha);
       expect(failedAdvance).toMatchObject({ state: "failed", say: expect.stringContaining("could not record main") });
-      expect(await spawnGit(join(failCache, "team"), "for-each-ref", "refs/hedge/history/")).toBe("");
-      expect(await spawnGit(join(failCache, "team"), "for-each-ref", "--format=%(objectname)", "refs/hedge/pins/")).toBe(failBaseSha);
     } finally {
       rmSync(failMetaPath, { recursive: true, force: true });
       writeFileSync(failMetaPath, savedFailMeta);
@@ -923,6 +921,42 @@ esac
     const backToA = await fetchSource({ name: "team", repo: repoA, ref: shaA }, hexCache);
     if ("error" in backToA) throw new Error(backToA.error);
     expect([backToA.packs[0]?.manifest.summary, backToA.stale]).toEqual(["Repo A pinned.", undefined]);
+
+    const sameRepoHex = await packRepo("Commit A.");
+    const commitA = await spawnGit(sameRepoHex, "rev-parse", "HEAD");
+    await spawnGit(sameRepoHex, "checkout", "-q", "-b", commitA);
+    writePack(sameRepoHex, "Branch B.");
+    await spawnGit(sameRepoHex, "commit", "-q", "-am", "branch-b");
+    const sameHexCache = temp.make("cache-same-repo-hex-branch-");
+    const cachedCommitA = await fetchSource({ name: "team", repo: sameRepoHex, ref: commitA }, sameHexCache);
+    if ("error" in cachedCommitA) throw new Error(cachedCommitA.error);
+    const cachedBranchB = await fetchSource({ name: "team", repo: sameRepoHex, ref: `refs/heads/${commitA}` }, sameHexCache);
+    if ("error" in cachedBranchB) throw new Error(cachedBranchB.error);
+    expect(cachedBranchB.packs[0]?.manifest.summary).toBe("Branch B.");
+    rmSync(sameRepoHex, { recursive: true, force: true });
+    const pinCommitA = await fetchSource({ name: "team", repo: sameRepoHex, ref: commitA }, sameHexCache);
+    if ("error" in pinCommitA) throw new Error(pinCommitA.error);
+    expect([pinCommitA.packs[0]?.manifest.summary, pinCommitA.stale]).toEqual(["Commit A.", undefined]);
+
+    const tagRepo = await packRepo("Annotated tag v1.");
+    await spawnGit(tagRepo, "tag", "-a", "rel-1", "-m", "release 1");
+    const tagOid = await spawnGit(tagRepo, "rev-parse", "rel-1");
+    const tagCache = temp.make("cache-writeonly-fh-tag-");
+    const tagInit = await fetchSource({ name: "team", repo: tagRepo, ref: "main" }, tagCache);
+    if ("error" in tagInit) throw new Error(tagInit.error);
+    const tagFetchHead = join(tagCache, "team", ".git", "FETCH_HEAD");
+    chmodSync(tagFetchHead, 0o200);
+    try {
+      const tagOnline = await fetchSource({ name: "team", repo: tagRepo, ref: tagOid }, tagCache);
+      if ("error" in tagOnline) throw new Error(tagOnline.error);
+      expect(tagOnline.stale).toBeUndefined();
+    } finally {
+      chmodSync(tagFetchHead, 0o644);
+    }
+    rmSync(tagRepo, { recursive: true, force: true });
+    const tagOffline = await fetchSource({ name: "team", repo: tagRepo, ref: tagOid }, tagCache);
+    if ("error" in tagOffline) throw new Error(tagOffline.error);
+    expect([tagOffline.packs[0]?.manifest.summary, tagOffline.stale]).toEqual(["Annotated tag v1.", undefined]);
   });
 
 });

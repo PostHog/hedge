@@ -55,7 +55,10 @@ const canonMaskRules: Rule[] = [
   [/(\/Users|\/home)\/(?:(?:Users|home)\/)*(?:<user>|[^/\n"'`:]{1,64}?(?=\/)|[^/\s"'`:]+)/gi, "<user-path>"],
 ];
 const contextualSecretRules: Rule[] = secretRules.slice(8);
-const preRandomAllRules: Rule[] = [...secretRules, ...standardRules];
+const emailRule: Rule = standardRules[0]!;
+const nonEmailStandardRules: Rule[] = standardRules.slice(1);
+const preAfterRules: Rule[] = [...contextualSecretRules, ...nonEmailStandardRules];
+const preAfterAllRules: Rule[] = [...secretRules, ...nonEmailStandardRules];
 const allRules: Rule[] = [...secretRules, ...standardRules, randomRule];
 const preRandomRules: Rule[] = [...contextualSecretRules, ...standardRules];
 
@@ -614,7 +617,7 @@ function findCanonAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?:
       const oEnd = mapPosToOrig(edits, cEnd, "end");
       if (oStart < 0 || oEnd <= oStart) continue;
       const slice = text.slice(oStart, oEnd);
-      const useMemo = memo !== undefined && allRulesAtU.length > 1;
+      const useMemo = memo !== undefined && slice.length <= maxMemoChars;
       let foldedSlice: string | undefined;
       if (useMemo) {
         const hitMap = memo.get(u);
@@ -663,7 +666,7 @@ function findCanonAcSpans(ac: AcAutomaton | undefined, text: string, skipOwner?:
         matchedRule = rule;
         break;
       }
-      if (useMemo && candidates.length > 1 && (matchedRule || !anyBoundaryFail)) {
+      if (useMemo && (matchedRule || !anyBoundaryFail)) {
         if (foldedSlice === undefined) foldedSlice = foldCase(slice);
         let hitMap = memo.get(u);
         const alreadyStored = hitMap?.has(foldedSlice) ?? false;
@@ -1388,18 +1391,19 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     return `${prefix}${index}${suffix}`;
   });
   const bearerRedacted = redactBearerMasked(stripHome(masked), matchedOriginals);
-  const preRandom = applyRules(bearerRedacted, preRandomRules);
   if (!after.length) {
+    const preRandom = applyRules(bearerRedacted, preRandomRules);
     const postRandom = replaceMaskedRandom(preRandom, matchedOriginals);
     return postRandom.replace(tokenRegex, (_tok, idx) => matchedLabels[Number(idx)] ?? "");
   }
+  const preAfter = applyRules(bearerRedacted, preAfterRules);
 
   let expanded = "";
   let expPos = 0;
   const primarySpans: MatchSpan[] = [];
   tokenRegex.lastIndex = 0;
-  for (let match = tokenRegex.exec(preRandom); match !== null; match = tokenRegex.exec(preRandom)) {
-    expanded += preRandom.slice(expPos, match.index);
+  for (let match = tokenRegex.exec(preAfter); match !== null; match = tokenRegex.exec(preAfter)) {
+    expanded += preAfter.slice(expPos, match.index);
     const idx = Number(match[1]);
     const orig = matchedOriginals[idx] ?? "";
     const label = matchedLabels[idx] ?? "";
@@ -1408,11 +1412,11 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     primarySpans.push({ start, end: expanded.length, len: orig.length, as: label });
     expPos = match.index + match[0].length;
   }
-  expanded += preRandom.slice(expPos);
+  expanded += preAfter.slice(expPos);
 
   const sanitizedAfter = after.map((entry) => ({ ...entry, as: sanitizeLabel(entry) }));
   const exempt = new Set([...redactorLabels, ...labels, ...sanitizedAfter.map((entry) => entry.as)]);
-  const afterTransform = (value: string) => applyRules(stripHome(value), preRandomAllRules);
+  const afterTransform = (value: string) => applyRules(stripHome(value), preAfterAllRules);
   const afterEntries = sanitizedAfter.flatMap((entry) => {
     const ciHome = stripHomeCi(entry.text);
     return ciHome !== entry.text && ciHome !== stripHome(entry.text) ? [entry, { ...entry, text: ciHome }] : [entry];
@@ -1424,7 +1428,17 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     ...findCanonAcSpans(afterSpellings.canonAc, expanded, undefined, allowPartialMerge),
     ...findAcSpans(afterSpellings.csAc, expanded, undefined, allowPartialMerge),
   ];
-  const combined = [...primarySpans, ...afterSpans];
+  const emailSpans: MatchSpan[] = [];
+  const [emailPattern, emailReplace] = emailRule;
+  emailPattern.lastIndex = 0;
+  for (let match = emailPattern.exec(expanded); match !== null; match = emailPattern.exec(expanded)) {
+    const matchedEmail = match[0]!;
+    const replacement = typeof emailReplace === "function" ? emailReplace(matchedEmail, match.index, expanded) : emailReplace;
+    if (replacement !== matchedEmail) {
+      emailSpans.push({ start: match.index, end: match.index + matchedEmail.length, len: matchedEmail.length, as: replacement });
+    }
+  }
+  const combined = [...primarySpans, ...afterSpans, ...emailSpans];
   const exemptSpans = findExemptOverlaps(exempt, expanded, combined);
   const mergedOriginals: string[] = [];
   const mergedLabels: string[] = [];

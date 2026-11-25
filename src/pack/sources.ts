@@ -291,8 +291,10 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
     const isBranch = fetchedNew ? await fetchHeadIsBranch(dir, ref.ref, fetchedOid) : false;
     const strippedRef = stripSourceRefspec(ref.ref);
     const peeled =
-      fetchedNew && isBranch === false && isCommitPin(strippedRef, commit.length) && strippedRef.toLowerCase() !== commit.toLowerCase()
-        ? fetchedOid === strippedRef.toLowerCase() || (await git(dir, "rev-parse", "--verify", "--quiet", `${strippedRef}^{commit}`)).stdout.toLowerCase() === commit.toLowerCase()
+      fetchedNew && isBranch !== true && isCommitPin(strippedRef, commit.length) && strippedRef.toLowerCase() !== commit.toLowerCase()
+        ? fetchedOid === strippedRef.toLowerCase() ||
+          (await isPeeledTagInRepo(dir, ref.ref, commit)) ||
+          (isBranch === false && (await git(dir, "rev-parse", "--verify", "--quiet", `${strippedRef}^{commit}`)).stdout.toLowerCase() === commit.toLowerCase())
         : !fetchedNew && isCommitPin(strippedRef, commit.length) && strippedRef.toLowerCase() !== commit.toLowerCase()
           ? true
           : undefined;
@@ -693,8 +695,8 @@ async function checkedOutFromCache(dir: string, repo: string, effectiveRepo: str
     (goodDigest !== undefined ? goodDigest === effectiveDigest : hasGoodCommit(good) && (await legacyFallbackMatches(dir, good, effectiveRepo)));
   if (
     sameGoodRepo &&
-    ((good.branch === true && branchName(good.ref)?.toLowerCase() === oid) ||
-      (good.askedBranch === true && branchName(good.asked)?.toLowerCase() === oid))
+    ((good.branch === true && stripSourceRefspec(good.ref).toLowerCase() === oid) ||
+      (good.askedBranch === true && typeof good.asked === "string" && stripSourceRefspec(good.asked).toLowerCase() === oid))
   ) {
     return undefined;
   }

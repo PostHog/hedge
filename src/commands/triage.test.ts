@@ -320,6 +320,25 @@ describe("hedge triage", () => {
     expect(issue.input).toContain("Created the private repo <team-n source>");
     expect(issue.input).toContain("<branch> moved, and <branch> moved");
     for (const leaked of ["correct-horse-battery-staple", "live-session-secret-value", "super-secret-value", "alice", "topsecret", "secret-owner", "secret-repo", "internal-release", keyLikeAlias, "private-project", "customer.internal", "embargoed-release", "top-secret", "private-release", "secret-home-branch", "project.git", "/work/private", "super-secret-suffix", "query-secret-suffix", "noras-mbp", "AbCdEfGhIj1234", "KlMnOpQrSt5678", "secret:nested", "private-rollout"]) expect(issue.input).not.toContain(leaked);
+
+    const urlRepo = "https://example.invalid/private-org/team-packs";
+    const withAtSuffix = redact(`failed cloning ${urlRepo}@release.stable and mailto alice@example.com`, home, [
+      { text: urlRepo, as: "<team source>" },
+      { text: "alice", as: "<branch>", after: true },
+    ]);
+    expect(withAtSuffix).not.toContain("private-org");
+    expect(withAtSuffix).not.toContain("team-packs");
+    expect(withAtSuffix).not.toContain("example.com");
+    expect(withAtSuffix).toContain("<team source>");
+    expect(withAtSuffix).toContain("mailto <email>");
+
+    const repeatedHostRef = "A.INTERNAL/".repeat(300);
+    const repeatedLog = "a.internal/".repeat(20_000);
+    const started = performance.now();
+    const repeatedOut = redact(repeatedLog, home, [{ text: repeatedHostRef, as: "<branch>", after: true }]);
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(repeatedOut).toContain("<branch>");
+    expect(repeatedOut).not.toContain("a.internal/".repeat(300));
   });
 
   test("redacts unpinned source aliases and repos from an inherited HEDGE_PROFILE_DIR without disclosing its alias or engine fork", async () => {
