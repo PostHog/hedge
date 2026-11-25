@@ -5,6 +5,7 @@ type StartMessage = { argv: string[]; env?: Record<string, string>; lockCount: n
 
 const runTag = ownTag(process.env[tagEnvVar]);
 let target: ReturnType<typeof Bun.spawn> | undefined;
+let targetPgid: number | undefined;
 let targetReaped = false;
 let targetCode: number | undefined;
 let killing = false;
@@ -17,7 +18,7 @@ const killAll = () => {
       target.kill("SIGKILL");
     } catch {}
   }
-  const done = killSession(process.pid, "SIGKILL", runTag);
+  const done = killSession(process.pid, "SIGKILL", runTag, targetPgid);
   if (done && typeof (done as Promise<void>).then === "function") {
     void (done as Promise<void>).finally(() => process.exit(137));
     return;
@@ -85,6 +86,7 @@ process.on("message", async (message: unknown) => {
   const stdio: [number, number, number, ...number[]] = [0, 1, 2, ...lockFds];
   try {
     target = Bun.spawn(argv, { ...(env ? { env } : {}), stdio });
+    targetPgid = target.pid;
   } catch (error) {
     for (const fd of [...lockFds, 1, 2]) {
       try {

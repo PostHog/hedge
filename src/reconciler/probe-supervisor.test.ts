@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { closeSync, existsSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../testing/git.ts";
-import { supervise, tagEnvVar, type StopSignal } from "./probe-supervisor.ts";
+import { tagEnvVar } from "./probe-supervisor.ts";
 import { watchEntries } from "./probe-watchdog.ts";
 
 const temp = tempDirs();
@@ -559,38 +559,71 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
     }
   });
 
-  test("excludes tagged detached daemons when SIGTERM arrives while checking group members after reporting a normal result", async () => {
-    const signalHandlers = new Map<StopSignal, () => void>();
-    const killCalls: Array<{ signal: NodeJS.Signals; includeTagged?: boolean }> = [];
-    let finishCheck!: (hasMembers: boolean) => void;
-    let fireHard!: () => void;
-    const checking = new Promise<boolean>((resolve) => (finishCheck = resolve));
-    const done = supervise(["probe"], {
-      spawn: () => ({ pid: 42, exited: Promise.resolve(0) }),
-      killGroup: (signal, includeTagged) => {
-        killCalls.push({ signal, includeTagged });
-      },
-      hasGroupMembers: () => checking,
-      timer: (_ms, fire) => {
-        fireHard = fire;
-        return () => {};
-      },
-      onSignal: (signal, handler) => {
-        signalHandlers.set(signal, handler);
-      },
-      reportResult: () => {},
-      reportCleanup: () => {},
-      exit: () => {},
+  test("stops ordinary descendants on SIGINT after a normal probe exit while keeping an intentionally detached daemon alive", async () => {
+    const dir = temp.make("sup-post-result-sigint-");
+    const [daemonReady, daemonGone, childReady, childGone, childSawSig, exitGate] = [
+      join(dir, "daemon-ready"),
+      join(dir, "daemon-gone"),
+      join(dir, "child-ready"),
+      join(dir, "child-gone"),
+      join(dir, "child-saw-sig"),
+      join(dir, "exit-gate"),
+    ];
+    mkfifo(daemonReady, daemonGone, childReady, childGone, childSawSig, exitGate);
+    const daemonStarted = fifoRead(daemonReady);
+    const daemonClosed = fifoRead(daemonGone);
+    const childStarted = fifoRead(childReady);
+    const childClosed = fifoRead(childGone);
+    const sawSig = fifoRead(childSawSig);
+    const tag = crypto.randomUUID();
+    const daemonCmd = 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30';
+    const childCmd = 'trap \'echo trapped > "$3"; exit 0\' TERM INT; exec 3>"$1"; echo $$ > "$2"; sleep 30 3>&- & wait';
+    const probeScript = `const d = Bun.spawn(["sh", "-c", ${JSON.stringify(daemonCmd)}, "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+d.unref();
+const c = Bun.spawn(["sh", "-c", ${JSON.stringify(childCmd)}, "child", ${JSON.stringify(childGone)}, ${JSON.stringify(childReady)}, ${JSON.stringify(childSawSig)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+c.unref();
+await Bun.file(${JSON.stringify(exitGate)}).text();
+process.exit(0);`;
+    const payload = JSON.stringify({ command: [process.execPath, "-e", probeScript], controlFd: 3 });
+    const sup = Bun.spawn([process.execPath, supervisorPath], {
+      stdio: [new TextEncoder().encode(payload), "pipe", "ignore", "pipe"],
+      env: { ...process.env, [tagEnvVar]: tag },
+      detached: true,
     });
-    await Promise.resolve();
-    await Promise.resolve();
-    signalHandlers.get("SIGTERM")?.();
-    fireHard();
-    finishCheck(false);
-    await done;
-    expect(killCalls).toEqual([
-      { signal: "SIGTERM", includeTagged: false },
-      { signal: "SIGKILL", includeTagged: false },
-    ]);
+    const aliveFd = sup.stdio[3] as number;
+    const stdoutReader = (sup.stdout as ReadableStream<Uint8Array>).getReader();
+    const waitResultLine = async () => {
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await stdoutReader.read();
+        if (done) return;
+        buf += dec.decode(value, { stream: true });
+        if (/(?:^|\n)0\n/.test(buf)) return;
+      }
+    };
+    let daemonPid = 0;
+    let childPid = 0;
+    try {
+      [daemonPid, childPid] = (await Promise.all([daemonStarted, childStarted])).map((s) => Number(s.trim())) as [number, number];
+      expect(daemonPid).toBeGreaterThan(0);
+      expect(childPid).toBeGreaterThan(0);
+      const sawZero = waitResultLine();
+      await fifoWrite(exitGate, "go\n");
+      await sawZero;
+      writeSync(aliveFd, "SIGINT\n");
+      expect((await sawSig).trim()).toBe("trapped");
+      expect(await childClosed).toBe("");
+      expect(() => process.kill(daemonPid, 0)).not.toThrow();
+    } finally {
+      await stdoutReader.cancel().catch(() => {});
+      if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
+      if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
+      sup.kill("SIGKILL");
+      try {
+        closeSync(aliveFd);
+      } catch {}
+      await daemonClosed.catch(() => {});
+    }
   });
 });

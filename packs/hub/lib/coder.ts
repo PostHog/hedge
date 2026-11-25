@@ -113,7 +113,7 @@ export function captureWith(timer: Timer): Capture {
     const killGroups = () => {
       if (!child) return;
       if (!supervisorReaped) {
-        killSessionSync(child.pid, "SIGKILL", !targetExited ? targetPgid : undefined, tag);
+        killSessionSync(child.pid, "SIGKILL", targetPgid, tag);
         return;
       }
       void killSession(undefined, "SIGKILL", tag);

@@ -283,18 +283,22 @@ export function killSessionSync(sessionId: number | undefined, signal: NodeJS.Si
   signalTargets({ pids: [], groups, orphanPids: [] }, signal, sessionId);
 }
 
-export function killSession(sessionId: number | undefined, signal: NodeJS.Signals, tag?: string): void | Promise<void> {
+export function killSession(sessionId: number | undefined, signal: NodeJS.Signals, tag?: string, extraPgid?: number): void | Promise<void> {
+  const withExtra = (targets: ProcTargets): ProcTargets => {
+    if (extraPgid === undefined || extraPgid === sessionId || extraPgid === process.pid || targets.groups.includes(extraPgid)) return targets;
+    return { ...targets, groups: [...targets.groups, extraPgid] };
+  };
   if (process.platform === "linux") {
-    signalTargets(discoverTargetsLinux(sessionId, tag), signal, sessionId);
+    signalTargets(withExtra(discoverTargetsLinux(sessionId, tag)), signal, sessionId);
     return;
   }
   if (signal !== "SIGKILL" && sessionId !== undefined) {
     signalOneGroup(sessionId, signal);
     return discoverTargets(sessionId, tag).then((targets) => {
-      if (targets) signalTargets(targets, signal);
+      if (targets) signalTargets(withExtra(targets), signal);
     });
   }
-  return discoverTargets(sessionId, tag).then((targets) => signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, signal, sessionId));
+  return discoverTargets(sessionId, tag).then((targets) => signalTargets(withExtra(targets ?? { pids: [], groups: [], orphanPids: [] }), signal, sessionId));
 }
 
 export async function hasOtherGroupMember(tag?: string): Promise<boolean> {
@@ -385,7 +389,12 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
       }
       if (!target) return exit(128);
       if (leaderDone && resultReported) {
-        if (sig === "SIGTERM" || sig === "SIGHUP") {
+        if (!normalCleanupStarted) {
+          normalCleanupStarted = true;
+          arm(sig);
+          forwardGroup(sig);
+          host.reportCleanup();
+        } else if (sig === "SIGTERM" || sig === "SIGHUP") {
           armHard();
           forwardGroup(sig);
         }

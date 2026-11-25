@@ -457,6 +457,31 @@ test("isolates capture supervisor from target BUN_OPTIONS and flushes oversized 
   await expect(capture([hugeMissing], { timeoutMs: 5_000 })).rejects.toMatchObject({ code: expect.stringMatching(/ENOENT|ENAMETOOLONG/) });
 });
 
+test("stops an env -i child in a separate process group after its timeout leader exits while stdout stays open", async () => {
+  const timeoutBin = Bun.which("gtimeout") ?? Bun.which("timeout");
+  if (!timeoutBin) return;
+  const dir = temp.make("hedge-timeout-envi-");
+  const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+  expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+  const started = Bun.file(ready).text();
+  const holderGone = Bun.file(gone).text();
+  const clock = handTimer();
+  let childPid = 0;
+  try {
+    const result = captureWith(clock.timer)(
+      [timeoutBin, "10", "sh", "-c", 'env -i sh -c \'exec 3>"$1"; echo $$ > "$2"; exec sleep 30\' worker "$1" "$2" &', "leader", gone, ready],
+      { timeoutMs: 30 },
+    );
+    childPid = Number((await started).trim());
+    expect(childPid).toBeGreaterThan(0);
+    clock.fire();
+    expect(await result).toEqual({ code: 124, stdout: "", stderr: "timed out after 30 ms" });
+    expect(await holderGone).toBe("");
+  } finally {
+    if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
+  }
+});
+
 test("kills a background child holding stdout open after the command exits under a box lock", async () => {
   const dir = temp.make("hedge-lock-pipe-");
   const [ready, gone, leaderGone] = [join(dir, "ready"), join(dir, "gone"), join(dir, "leader-gone")];
