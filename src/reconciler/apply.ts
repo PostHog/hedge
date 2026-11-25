@@ -255,7 +255,10 @@ export async function humanStepsLeft(plan: Plan, options: { home: string; run?: 
   const run = viaEngine(plan, options.run ?? spawnRunner(options.home, plan.machine.profileDir));
   const deadline = new AbortController();
   void options.giveUp.then(() => deadline.abort());
-  const outcome = async (step: Owned<HumanStep>) => ((await run(step.probe, {}, deadline.signal)) === 0 ? "passes" : deadline.signal.aborted ? "unchecked" : "fails");
+  const outcome = async (step: Owned<HumanStep>) => {
+    const code = await run(step.probe, {}, deadline.signal);
+    return deadline.signal.aborted ? "unchecked" : code === 0 ? "passes" : "fails";
+  };
   const outcomes = await Promise.all(plan.human.map(outcome));
   return { failing: plan.human.filter((_, index) => outcomes[index] === "fails"), unchecked: plan.human.filter((_, index) => outcomes[index] === "unchecked") };
 }
@@ -449,14 +452,25 @@ function spawnRunner(home: string, profileDir: string | undefined): Runner {
 }
 
 async function stoppedBy(signal: AbortSignal | undefined, child: { pid: number; exited: Promise<number> }) {
+  if (!signal) return await child.exited;
   const endGroup = () => {
-    try { process.kill(-child.pid, "SIGTERM"); } catch {}
+    try { process.kill(-child.pid, "SIGKILL"); } catch {}
   };
-  signal?.addEventListener("abort", endGroup, { once: true });
-  if (signal?.aborted) endGroup();
+  const interrupted = (name: NodeJS.Signals) => {
+    endGroup();
+    release();
+    if (!process.listenerCount(name)) process.kill(process.pid, name);
+  };
+  const release = () => {
+    signal.removeEventListener("abort", endGroup);
+    process.off("SIGINT", interrupted).off("SIGTERM", interrupted);
+  };
+  signal.addEventListener("abort", endGroup, { once: true });
+  process.on("SIGINT", interrupted).on("SIGTERM", interrupted);
+  if (signal.aborted) endGroup();
   try {
     return await child.exited;
   } finally {
-    signal?.removeEventListener("abort", endGroup);
+    release();
   }
 }

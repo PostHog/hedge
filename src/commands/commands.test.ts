@@ -229,19 +229,43 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     expect((await hedge(home, ["packs"])).output).toContain(`  ~ team  Team rules.\n      Workflows: allowlist on\n${needsSetup}`);
   });
 
-  test("says a human step that does not answer in time is not checked, and stops it with every process it started", async () => {
-    const { home } = await machineWithProfile();
+  const blockedProbe = 'trap "" TERM; { sleep 30 & } 3>"$HOME/gone"; echo $! > "$HOME/ready"; wait';
+
+  async function withBlockedProbe(home: string) {
     const [ready, gone] = [join(home, "ready"), join(home, "gone")];
     expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
-    await withTeamPack(home, { workflows: [flow("allowlist")], human: [humanStep("allowlist", '{ sleep 30 & } 3>"$HOME/gone"; echo $! > "$HOME/ready"; wait', "allowlist")] });
-    const holderGone = readFile(gone, "utf8");
-    const started = readFile(ready, "utf8");
+    await withTeamPack(home, { workflows: [flow("allowlist")], human: [humanStep("allowlist", blockedProbe, "allowlist")] });
+    return { holderGone: readFile(gone, "utf8"), started: readFile(ready, "utf8") };
+  }
+
+  const endHolder = async (started: Promise<string>) => {
+    try { process.kill(Number((await started).trim()), "SIGKILL"); } catch {}
+  };
+
+  test("says a human step that does not answer in time is not checked, and stops it with every process it started, even ones that ignore SIGTERM", async () => {
+    const { home } = await machineWithProfile();
+    const { holderGone, started } = await withBlockedProbe(home);
     const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await started) };
     try {
       expect((await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output).toContain("  ? team  Team rules.\n      Workflows: allowlist not checked\n      Hedge could not check this pack's setup in time. Run hedge doctor.");
       expect(await holderGone).toBe("");
     } finally {
-      try { process.kill(Number((await started).trim())); } catch {}
+      await endHolder(started);
+    }
+  });
+
+  test("stops the human steps it still waits for when hedge packs is interrupted", async () => {
+    const { home } = await machineWithProfile();
+    const { holderGone, started } = await withBlockedProbe(home);
+    const listing = Bun.spawn([process.execPath, join(engineRoot, "src/cli.ts"), "packs"], { env: { ...Bun.env, HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    try {
+      await started;
+      listing.kill("SIGINT");
+      expect(await holderGone).toBe("");
+      expect(await listing.exited).not.toBe(0);
+    } finally {
+      listing.kill("SIGKILL");
+      await endHolder(started);
     }
   });
 });
