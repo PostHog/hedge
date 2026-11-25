@@ -1231,4 +1231,142 @@ process.exit(res.failing.length === 0 && res.unchecked.length === 0 ? 0 : 1);`;
       } catch {}
     }
   });
+
+  test("preserves an inner completed capture's detached env -i worker when an enclosing capture is cancelled by a probe deadline", async () => {
+    const dir = temp.make("sup-nested-enclosing-capture-");
+    const envBin = Bun.which("env") ?? "/usr/bin/env";
+    const shBin = Bun.which("sh") ?? "/bin/sh";
+    const [daemonReady, daemonGone, outerReady, outerGone] = [
+      join(dir, "daemon-ready"),
+      join(dir, "daemon-gone"),
+      join(dir, "outer-ready"),
+      join(dir, "outer-gone"),
+    ];
+    mkfifo(daemonReady, daemonGone, outerReady, outerGone);
+    const daemonStarted = fifoRead(daemonReady);
+    const daemonClosed = fifoRead(daemonGone);
+    const outerStarted = fifoRead(outerReady);
+    const outerClosed = fifoRead(outerGone);
+    const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
+    const { humanStepsLeft } = await import("./apply.ts");
+    const daemonScript = `const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+d.unref();
+process.exit(0);`;
+    const outerScript = `import { capture } from ${JSON.stringify(coderPath)};
+const res = await capture([process.execPath, "-e", ${JSON.stringify(daemonScript)}], { timeoutMs: 5_000 });
+if (res.code !== 0) process.exit(2);
+const hold = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "outer", ${JSON.stringify(outerGone)}, ${JSON.stringify(outerReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await hold.exited;`;
+    const probeScript = `import { capture } from ${JSON.stringify(coderPath)};
+await capture([process.execPath, "-e", ${JSON.stringify(outerScript)}], { timeoutMs: 30_000 });`;
+    let fireDeadline!: () => void;
+    let daemonPid = 0;
+    let outerPid = 0;
+    try {
+      const pending = humanStepsLeft(
+        {
+          machine: { schema: 1, role: "linux" },
+          os: process.platform === "darwin" ? "darwin" : "linux",
+          ai: "both",
+          packs: [],
+          workflows: [],
+          files: [],
+          config: [],
+          owners: {},
+          jobs: [],
+          human: [{ id: "enclosing", pack: "team", say: "Enclosing.", probe: [process.execPath, "-e", probeScript] }],
+          steps: [],
+          checks: [],
+          commands: {},
+          handlers: {},
+          models: [],
+          settings: {},
+          unanswered: [],
+          ask: [],
+          dropped: [],
+        },
+        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 0 },
+      );
+      [daemonPid, outerPid] = (await Promise.all([daemonStarted, outerStarted])).map((s) => Number(s.trim())) as [number, number];
+      expect(daemonPid).toBeGreaterThan(0);
+      expect(outerPid).toBeGreaterThan(0);
+      fireDeadline();
+      const res = await pending;
+      expect(res.unchecked.map((step) => step.id)).toEqual(["enclosing"]);
+      expect(await outerClosed).toBe("");
+      expect(() => process.kill(daemonPid, 0)).not.toThrow();
+    } finally {
+      if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
+      if (outerPid > 0) try { process.kill(outerPid, "SIGKILL"); } catch {}
+      await daemonClosed.catch(() => {});
+    }
+  });
+
+  test("kills an adopted detached env -i worker when either the Linux probe runner or outer holder is SIGKILLed", async () => {
+    if (process.platform !== "linux") return;
+    const { readFileSync } = await import("node:fs");
+    const envBin = Bun.which("env") ?? "/usr/bin/env";
+    const shBin = Bun.which("sh") ?? "/bin/sh";
+    const { humanStepsLeft } = await import("./apply.ts");
+    const parentOf = (pid: number) => {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const closeParen = stat.lastIndexOf(")");
+      return Number(stat.slice(closeParen + 2).split(" ")[1]);
+    };
+    for (const killOuterHolder of [false, true]) {
+      const dir = temp.make(`sup-sigkill-adopted-${killOuterHolder ? "holder" : "runner"}-`);
+      const [workerReady, workerGone, helperDone] = [join(dir, "worker-ready"), join(dir, "worker-gone"), join(dir, "helper-done")];
+      mkfifo(workerReady, workerGone, helperDone);
+      const started = fifoRead(workerReady);
+      const closed = fifoRead(workerGone);
+      const adopted = fifoRead(helperDone);
+      const helperScript = `const w = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "worker", ${JSON.stringify(workerGone)}, ${JSON.stringify(workerReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+w.unref();
+process.exit(0);`;
+      const probeScript = `const h = Bun.spawn([process.execPath, "-e", ${JSON.stringify(helperScript)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await h.exited;
+await Bun.write(${JSON.stringify(helperDone)}, "done\\n");
+await Bun.sleep(30_000);`;
+      let workerPid = 0;
+      try {
+        const pending = humanStepsLeft(
+          {
+            machine: { schema: 1, role: "linux" },
+            os: "linux",
+            ai: "both",
+            packs: [],
+            workflows: [],
+            files: [],
+            config: [],
+            owners: {},
+            jobs: [],
+            human: [{ id: "adopted", pack: "team", say: "Adopted.", probe: [process.execPath, "-e", probeScript] }],
+            steps: [],
+            checks: [],
+            commands: {},
+            handlers: {},
+            models: [],
+            settings: {},
+            unanswered: [],
+            ask: [],
+            dropped: [],
+          },
+          { home: dir, giveUp: new Promise<void>(() => {}), graceMs: 0 },
+        );
+        const [rawWorker] = await Promise.all([started, adopted]);
+        workerPid = Number(rawWorker.trim());
+        expect(workerPid).toBeGreaterThan(0);
+        const runnerPid = parentOf(workerPid);
+        expect(runnerPid).toBeGreaterThan(1);
+        const victimPid = killOuterHolder ? parentOf(runnerPid) : runnerPid;
+        expect(victimPid).toBeGreaterThan(1);
+        process.kill(victimPid, "SIGKILL");
+        const res = await pending;
+        expect(res.unchecked.map((step) => step.id)).toEqual(["adopted"]);
+        expect(await closed).toBe("");
+      } finally {
+        if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
+      }
+    }
+  });
 });

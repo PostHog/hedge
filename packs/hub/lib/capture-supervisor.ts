@@ -18,7 +18,7 @@ let lockCount = 0;
 
 const exitDone = () => {
   if (sparePath) {
-    const found = discoverTargetsSync(process.pid, runTag);
+    const found = discoverTargetsSync(process.pid, runTag, undefined, sparePath);
     if (found) {
       const sids = [...(found.sids ?? []), ...(found.hasSessionGroup ? [process.pid] : [])];
       if (found.pids.length || sids.length) recordSparedProcess(sparePath, found.pids, sids);
@@ -38,7 +38,7 @@ const killAll = () => {
     }
     process.exit(137);
   };
-  const done = killSession(process.pid, "SIGKILL", runTag);
+  const done = killSession(process.pid, "SIGKILL", runTag, undefined, sparePath);
   if (done && typeof (done as Promise<void>).then === "function") {
     void (done as Promise<void>).finally(finish);
     return;

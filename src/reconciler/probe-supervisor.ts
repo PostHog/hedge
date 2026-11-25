@@ -2,6 +2,7 @@ import { dlopen, FFIType, ptr } from "bun:ffi";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { bunScript } from "../runner/bun.ts";
 
 export type StopSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT";
 export type Timer = (ms: number, fire: () => void) => () => void;
@@ -337,6 +338,14 @@ export function drainControlFd(fd: number): { lines: string[]; rest: string; clo
   return { lines, rest, closed };
 }
 
+export async function waitForFdClosed(fd: number, timeoutMs: number): Promise<void> {
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
+    if (drainControlFd(fd).closed) return;
+    await Bun.sleep(5);
+  }
+}
+
 export function discoverTargetsLinux(sessionId?: number, tag?: string, deadLeaderReaped?: boolean, sparePath?: string): ProcTargets {
   const self = process.pid;
   const includeDetached = Boolean(tag);
@@ -370,7 +379,7 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string, deadLeade
       const envTag = tag && pid !== self ? readEnvTagLinux(pid) : undefined;
       rows.push({ pid, ppid, pgrp, sid, ...(envTag ? { envTag } : {}) });
       const isSpared = spared.pids.has(pid) || (sid !== sessionId && sid !== self && spared.sids.has(sid));
-      if (sessionId !== undefined && (sid === sessionId || pgrp === sessionId)) {
+      if (!isSpared && sessionId !== undefined && (sid === sessionId || pgrp === sessionId)) {
         matched.add(pid);
       } else if (!isSpared && tag && envTag && envMatchesTag(envTag, tag)) {
         matched.add(pid);
@@ -588,7 +597,7 @@ function buildTargetsFromPs(
       rows.push({ pid, ppid, pgid, ...(envTag ? { envTag } : {}) });
       const sid = sessionIdDarwin(pid);
       const isSpared = spared.pids.has(pid) || (sid !== undefined && sid > 0 && sid !== sessionId && sid !== self && spared.sids.has(sid));
-      if (sessionId !== undefined && (pgid === sessionId || sid === sessionId)) {
+      if (!isSpared && sessionId !== undefined && (pgid === sessionId || sid === sessionId)) {
         matched.add(pid);
       } else if (!isSpared && tag && envTag && envMatchesTag(envTag, tag)) {
         matched.add(pid);
@@ -739,7 +748,7 @@ export function discoverTargetsSync(sessionId?: number, tag?: string, deadLeader
     rows.push({ pid, sid, pgid, ...(envTag ? { envTag } : {}) });
     const isSpared = spared.pids.has(pid) || (sid > 0 && sid !== effectiveSessionId && sid !== self && spared.sids.has(sid));
     const inSession = effectiveSessionId !== undefined && (sid === effectiveSessionId || pgid === effectiveSessionId);
-    if (inSession || (!isSpared && tag && envTag && envMatchesTag(envTag, tag))) {
+    if (!isSpared && (inSession || (tag && envTag && envMatchesTag(envTag, tag)))) {
       matched.add(pid);
     }
   }
@@ -1177,13 +1186,28 @@ if (import.meta.main) {
   let controlFd: number | undefined;
   let resultFd: number | undefined;
   let spareFile: string | undefined;
+  let holder = false;
+  let guardFd: number | undefined;
+  let holderFd: number | undefined;
+  let innerResultFd: number | undefined;
   try {
     const raw = Bun.argv[2] ?? (await Bun.stdin.text());
     const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed) && parsed.every((arg) => typeof arg === "string")) {
       command = parsed;
     } else if (parsed && typeof parsed === "object" && Array.isArray((parsed as { command?: unknown }).command)) {
-      const record = parsed as { command: unknown[]; env?: unknown; graceMs?: unknown; controlFd?: unknown; resultFd?: unknown; spareFile?: unknown };
+      const record = parsed as {
+        command: unknown[];
+        env?: unknown;
+        graceMs?: unknown;
+        controlFd?: unknown;
+        resultFd?: unknown;
+        spareFile?: unknown;
+        holder?: unknown;
+        guardFd?: unknown;
+        holderFd?: unknown;
+        innerResultFd?: unknown;
+      };
       if (record.command.every((arg) => typeof arg === "string")) command = record.command as string[];
       if (record.env && typeof record.env === "object" && !Array.isArray(record.env)) {
         const cleanEnv: Record<string, string> = Object.create(null);
@@ -1196,20 +1220,107 @@ if (import.meta.main) {
       if (typeof record.controlFd === "number" && Number.isInteger(record.controlFd) && record.controlFd >= 3) controlFd = record.controlFd;
       if (typeof record.resultFd === "number" && Number.isInteger(record.resultFd) && record.resultFd >= 3) resultFd = record.resultFd;
       if (typeof record.spareFile === "string" && record.spareFile) spareFile = record.spareFile;
+      if (record.holder === true) holder = true;
+      if (typeof record.guardFd === "number" && Number.isInteger(record.guardFd) && record.guardFd >= 3) guardFd = record.guardFd;
+      if (typeof record.holderFd === "number" && Number.isInteger(record.holderFd) && record.holderFd >= 3) holderFd = record.holderFd;
+      if (typeof record.innerResultFd === "number" && Number.isInteger(record.innerResultFd) && record.innerResultFd >= 3) innerResultFd = record.innerResultFd;
     }
   } catch {}
+  if (process.platform === "linux" && holder) {
+    enableChildSubreaper();
+    shieldGroupSignals();
+    for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) process.on(sig, () => {});
+    const closeFd = (fd: number | undefined) => {
+      if (fd === undefined) return;
+      try {
+        closeSync(fd);
+      } catch {}
+    };
+    const holderAlive = createPipe();
+    const innerResult = createPipe();
+    if (holderAlive) setCloexec(holderAlive.writeFd, true);
+    if (innerResult) setCloexec(innerResult.readFd, true);
+    const extraFds: number[] = [];
+    const addFd = (fd: number | undefined): number | undefined => {
+      if (fd === undefined) return undefined;
+      const index = 3 + extraFds.length;
+      extraFds.push(fd);
+      setCloexec(fd, false);
+      return index;
+    };
+    const childControlFd = addFd(controlFd);
+    const childResultFd = addFd(resultFd);
+    const childGuardFd = addFd(guardFd);
+    const childHolderFd = addFd(holderAlive?.readFd);
+    const childInnerResultFd = addFd(innerResult?.writeFd);
+    const innerPayload = {
+      command,
+      ...(targetEnv ? { env: targetEnv } : {}),
+      graceMs: cleanupGraceMs,
+      ...(spareFile ? { spareFile } : {}),
+      ...(childControlFd !== undefined ? { controlFd: childControlFd } : {}),
+      ...(childResultFd !== undefined ? { resultFd: childResultFd } : {}),
+      ...(childGuardFd !== undefined ? { guardFd: childGuardFd } : {}),
+      ...(childHolderFd !== undefined ? { holderFd: childHolderFd } : {}),
+      ...(childInnerResultFd !== undefined ? { innerResultFd: childInnerResultFd } : {}),
+    };
+    let inner: ReturnType<typeof Bun.spawn> | undefined;
+    try {
+      inner = Bun.spawn(bunScript(import.meta.filename), {
+        stdio: [new TextEncoder().encode(JSON.stringify(innerPayload)), 1, 2, ...extraFds],
+        env: process.env,
+        detached: true,
+      });
+    } catch {
+      closeFd(holderAlive?.readFd);
+      closeFd(holderAlive?.writeFd);
+      closeFd(innerResult?.readFd);
+      closeFd(innerResult?.writeFd);
+      closeFd(controlFd);
+      closeFd(resultFd);
+      closeFd(guardFd);
+      process.exit(127);
+    }
+    closeFd(holderAlive?.readFd);
+    closeFd(innerResult?.writeFd);
+    closeFd(controlFd);
+    closeFd(resultFd);
+    closeFd(guardFd);
+    redirectStdioOutputsToNull();
+    const code = await inner.exited;
+    const reported = innerResult ? probeResultReported(innerResult.readFd) === "reported" : false;
+    closeFd(innerResult?.readFd);
+    closeFd(holderAlive?.writeFd);
+    const runTag = ownTag(process.env[tagEnvVar]);
+    if (reported) {
+      if (inner.signalCode !== null) killDeadSessionSync(inner.pid, undefined, true, spareFile);
+      process.exit(inner.signalCode ? 137 : code);
+    }
+    killDeadSessionSync(inner.pid, runTag, true, spareFile);
+    const adopted = discoverTargetsLinux(process.pid, runTag, undefined, spareFile);
+    signalDeadTargets(adopted, process.pid);
+    process.exit(inner.signalCode ? 137 : code);
+  }
   if (controlFd !== undefined) setCloexec(controlFd, true);
   if (resultFd !== undefined) setCloexec(resultFd, true);
+  if (guardFd !== undefined) setCloexec(guardFd, true);
+  if (holderFd !== undefined) setCloexec(holderFd, true);
+  if (innerResultFd !== undefined) setCloexec(innerResultFd, true);
+  let reported = false;
+  let targetHandle: { kill?: (signal?: NodeJS.Signals) => void } | undefined;
   const markResultFd = () => {
-    if (resultFd === undefined) return;
-    const fd = resultFd;
+    reported = true;
+    for (const fd of [resultFd, innerResultFd]) {
+      if (fd === undefined) continue;
+      try {
+        writeSync(fd, "1\n");
+      } catch {}
+      try {
+        closeSync(fd);
+      } catch {}
+    }
     resultFd = undefined;
-    try {
-      writeSync(fd, "1\n");
-    } catch {}
-    try {
-      closeSync(fd);
-    } catch {}
+    innerResultFd = undefined;
   };
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
     process.on(sig, () => {
@@ -1220,6 +1331,36 @@ if (import.meta.main) {
     });
   }
   shieldGroupSignals();
+  enableChildSubreaper();
+  const runTag = ownTag(process.env[tagEnvVar]);
+  const onHolderDead = () => {
+    const sweepTag = reported ? undefined : runTag;
+    const targets = discoverTargetsLinux(process.pid, sweepTag, undefined, spareFile);
+    signalDeadTargets(targets, process.pid);
+    if (targetHandle) {
+      try {
+        targetHandle.kill?.("SIGKILL");
+      } catch {}
+    }
+    process.exit(137);
+  };
+  if (holderFd !== undefined) {
+    try {
+      writeSync(1, `runner:${process.pid}\n`);
+    } catch {}
+    const drainedHolder = drainControlFd(holderFd);
+    if (drainedHolder.closed) onHolderDead();
+    void (async () => {
+      try {
+        const reader = Bun.file(holderFd).stream().getReader();
+        for (;;) {
+          const { done } = await reader.read();
+          if (done) break;
+        }
+      } catch {}
+      onHolderDead();
+    })();
+  }
   let controlInitialBuf = "";
   if (controlFd !== undefined) {
     const drained = drainControlFd(controlFd);
@@ -1255,11 +1396,13 @@ if (import.meta.main) {
       dispatchStop("SIGTERM");
     })();
   }
-  enableChildSubreaper();
-  const runTag = ownTag(process.env[tagEnvVar]);
   const rememberedDetached = new Map<number, number>();
   await supervise(command, {
-    spawn: (argv) => Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio: ["ignore", "ignore", "ignore"] }),
+    spawn: (argv) => {
+      const child = Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio: ["ignore", "ignore", "ignore"] });
+      targetHandle = child;
+      return child;
+    },
     killGroup: (signal, includeTagged) =>
       killSession(process.pid, signal, includeTagged ? runTag : undefined, includeTagged ? rememberedDetached : undefined, spareFile),
     hasGroupMembers: () => hasOtherGroupMember(),

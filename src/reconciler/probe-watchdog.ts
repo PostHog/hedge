@@ -1,7 +1,7 @@
 import { closeSync, writeSync } from "node:fs";
 import { discoverTargets, killDeadSession, probeResultReported, removeSpareFile, signalTargets } from "./probe-supervisor.ts";
 
-export type WatchEntry = { pid: number; fd: number; delayMs: number; tag?: string; resultFd?: number; spareFile?: string };
+export type WatchEntry = { pid: number; fd: number; delayMs: number; tag?: string; resultFd?: number; spareFile?: string; holderPid?: number };
 export type WatchClock = { now: () => number; sleep: (ms: number) => Promise<void> };
 
 const alive = (fd: number) => {
@@ -57,6 +57,9 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
     const sweepTag = entry.tag && !reported ? entry.tag : undefined;
     try {
       await killDeadSession(entry.pid, sweepTag, false, entry.spareFile);
+      if (entry.holderPid !== undefined) {
+        await killDeadSession(entry.holderPid, sweepTag, false, entry.spareFile);
+      }
     } finally {
       removeSpareFile(entry.spareFile);
     }
@@ -141,7 +144,8 @@ if (import.meta.main) {
           typeof (item as WatchEntry).fd === "number" &&
           typeof (item as WatchEntry).delayMs === "number" &&
           ((item as WatchEntry).resultFd === undefined || typeof (item as WatchEntry).resultFd === "number") &&
-          ((item as WatchEntry).spareFile === undefined || typeof (item as WatchEntry).spareFile === "string"),
+          ((item as WatchEntry).spareFile === undefined || typeof (item as WatchEntry).spareFile === "string") &&
+          ((item as WatchEntry).holderPid === undefined || typeof (item as WatchEntry).holderPid === "number"),
       );
     }
   } catch {}
