@@ -2,7 +2,7 @@ import { closeSync, existsSync, openSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { askGap, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity } from "./proof.ts";
+import { answerNumbers, askGap, savedFindings, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity } from "./proof.ts";
 import { AnswerTaken, appendOnce, decideAlone, hearUser, ledgerHolds, ledgerOf } from "./decision-cli.ts";
 import { HubUnreachable, keptOwed, refText, usersAcceptance, thisMachine, type Decision, type Ssh } from "./decision-ledger.ts";
 import { autonomyOf, decidesAll, gradeOf, type Autonomy, type Grade } from "./proof-autonomy.ts";
@@ -314,14 +314,20 @@ ${overrideHelp}`,
     usage: "show [--round <number|final|final-n>]",
     summary: `Print the latest review round, or --round: who reviewed it and where its findings are. --round final is the
 latest final read. For a panel, print each lens: its state, family and model, how long it ran, and its raw answer, or
-its log while it runs. Then print each final read that hedge dropped unanswered, with its cause.`,
+its log while it runs. Then print the round's findings by the numbers hedge proof respond pairs answers with, and each
+final read that hedge dropped unanswered, with its cause.`,
     examples: ["hedge proof show", "hedge proof show --round 2", "hedge proof show --round final-1"],
     options: ["--round"],
     run: async ({ options }, identity, context) => {
       const directory = await reviewDirectory(context.home, identity(), roundOption(options));
       const dropped = (await droppedFinalReads(context.home, identity())).map(({ line, cause }) => cause ? `${line}; cause: ${cause}` : line);
-      for (const line of [...await roundLines(directory, context), ...dropped]) context.print(line);
-      return 0;
+      const { lines, findings } = await roundLines(directory, context);
+      for (const line of lines) context.print(line);
+      if (typeof findings === "string") printAnswerNumbers(findings, context.print);
+      for (const line of dropped) context.print(line);
+      if (!(findings instanceof Error)) return 0;
+      context.print(`hedge cannot read the findings of this round: ${findings.message}`);
+      return 1;
     },
   },
   "panel-lens": {
@@ -335,11 +341,13 @@ its log while it runs. Then print each final read that hedge dropped unanswered,
   respond: {
     usage: "respond --round <number|final-n> <responses.md>",
     summary: `Save your answer to each finding of a finished review: fixed in which commit, or rejected and why. Number the
-answers in the order of the findings, one line each, such as "1. fixed in 1a2b3c4: <how>" or "2. rejected: <why>". Once
+answers by the list that hedge proof review and hedge proof show print under "Answer each finding by these numbers",
+never by counting findings.md yourself. One line each, such as "1. fixed in 1a2b3c4: <how>" or "2. rejected: <why>". Once
 the review budget is spent, "3. known: <why>" answers a finding that the PR body lists by its file:line under Known
-issues; a known blocker holds the merge. Each
-list item of findings.md is one finding; findings without a list are one. The gate fails while a finding has no
-answer. A new call replaces the earlier answer. A final read takes the id that review-start printed. The judge in hedge proof gate checks
+issues; a known blocker holds the merge. In a review with a FINDINGS block, the block runs to the next TESTS line or
+unindented COVERED line, and prose outside FINDINGS and TESTS is no finding. An answer numbered past the last finding is refused, and so is a code fence, also one that
+opens a list item: quote an earlier answer with > and write code in single
+backticks. The gate fails while a finding has no answer. A new call replaces the earlier answer. A final read takes the id that review-start printed. The judge in hedge proof gate checks
 each answer against HEAD.`,
     examples: ["hedge proof respond --round 1 responses.md", "hedge proof respond --round final-1 responses.md"],
     options: ["--round"],
@@ -663,12 +671,23 @@ async function runReview(options: Map<string, string>, head: ProofIdentity, cont
   });
 }
 
+function printAnswerNumbers(findings: string, print: CommandContext["print"]) {
+  const numbers = answerNumbers(findings);
+  if (numbers) print(`\n${numbers}`);
+}
+
 async function printSavedReview({ round, id, directory }: SingleRound, { print }: CommandContext) {
   const reservation = await readReservation(directory);
-  print(JSON.stringify({ round, id, directory, reviewer: reservation?.reviewer, ...await readTriage(directory) }));
-  print((await readFile(join(directory, "findings.md"), "utf8")).trim());
+  const findings = await readFile(join(directory, "findings.md"), "utf8");
   const anchors = await readFile(join(directory, "anchors.md"), "utf8").catch(() => "");
+  return printReview({ round, id, directory, reviewer: reservation?.reviewer, ...await readTriage(directory) }, findings, anchors, print);
+}
+
+function printReview(header: object, findings: string, anchors: string, print: CommandContext["print"]) {
+  print(JSON.stringify(header));
+  print(findings.trim());
   if (anchors) print(`\n${anchors.trim()}`);
+  printAnswerNumbers(findings, print);
   return 0;
 }
 
@@ -699,10 +718,7 @@ async function askReviewer(reserved: SingleRound, head: ProofIdentity, author: F
   const anchors = anchorCheck(answer.text, diff, await reviewRecords(home, head));
   await storeCapturedFindings(reserved.directory, head, roundId(reserved.id), answer.text, answer.model, answer.usage);
   if (anchors) await writeFile(join(reserved.directory, "anchors.md"), anchors + "\n", { mode: 0o600 });
-  print(JSON.stringify({ round: reserved.round, id: reserved.id, directory: reserved.directory, reviewer: answer.model, ...await readTriage(reserved.directory) }));
-  print(answer.text.trim());
-  if (anchors) print(`\n${anchors}`);
-  return 0;
+  return printReview({ round: reserved.round, id: reserved.id, directory: reserved.directory, reviewer: answer.model, ...await readTriage(reserved.directory) }, answer.text, anchors, print);
 }
 
 async function reserveHedgeReview(options: Map<string, string>, head: ProofIdentity, context: CommandContext, panel = false) {
@@ -982,8 +998,13 @@ async function waitForReview(options: Map<string, string>, head: ProofIdentity, 
   await startStaged(directory, context);
   const restart = (name: string) => roundStep(directory, context, async () => { if (await lensIdle(directory, name)) await startLens(directory, name, context); }).catch(unless(RoundBusy));
   const code = await waitForPanel(directory, panelIO(context), restart, waitPolls);
-  for (const line of await roundLines(directory, context)) context.print(line);
-  if (code === 0) context.print(await readFile(join(directory, "findings.md"), "utf8"));
+  const round = await roundLines(directory, context);
+  for (const line of round.lines) context.print(line);
+  if (code === 0) {
+    const findings = typeof round.findings === "string" ? round.findings : await readFile(join(directory, "findings.md"), "utf8");
+    context.print(findings);
+    printAnswerNumbers(findings, context.print);
+  }
   if (code === 1) context.print("A lens failed, and the round stays unfinished. Run the same hedge proof review --lens command to rerun the failed lenses.");
   if (code === 2) context.print("Lenses still run. Run hedge proof review --wait again.");
   if (code === quotaExitCode) context.print("A lens stopped on spent quota, and the round stays unfinished. Run the same hedge proof review --lens command once the quota is back, or move the lens to the family that is up with :same or :other.");
@@ -1055,14 +1076,15 @@ function positive(value: string, option: string, name: string) {
 async function roundLines(directory: string, { now }: CommandContext) {
   const round = await readJson<{ round: number | "final"; commit: string; reviewer?: string; capturedBy?: string; standing?: { reason: string; until: string }; decision?: { mark: string; id: string } } | undefined>(join(directory, "round.json"), undefined);
   if (!round) throw new Error(`${directory} has no reservation`);
-  const finished = round.reviewer ? `finished by ${round.reviewer}, ${round.capturedBy === "hedge" ? "captured by hedge" : "saved by the author"}: ${join(directory, "findings.md")}` : "reserved, no findings yet";
+  const findings = await savedFindings(directory).catch((error: unknown) => error instanceof Error ? error : new Error(String(error)));
+  const finished = round.reviewer ? `finished by ${round.reviewer}, ${round.capturedBy === "hedge" ? "captured by hedge" : "saved by the author"}: ${join(directory, "findings.md")}` : typeof findings === "string" ? `findings saved, no reviewer recorded yet: ${join(directory, "findings.md")}` : "reserved, no findings yet";
   const header = `${round.round === "final" ? "final read" : `round ${round.round}`} on ${short(round.commit)}: ${finished}`;
   const anchors = join(directory, "anchors.md");
   const standing = round.standing ? [`accepted by the standing rule until ${round.standing.until}: ${round.standing.reason}`] : [];
   if (round.decision) standing.push(`decided by ${round.decision.mark} decision ${round.decision.id}`);
   const plan = await readPlan(directory);
   const panel = plan ? [...plan.tier ? [tierLine(plan.tier)] : [], ...await panelLines(directory, now?.() ?? new Date())] : [];
-  return [header, ...(existsSync(anchors) ? [`anchor check by hedge: ${anchors}`] : []), ...standing, ...panel];
+  return { lines: [header, ...(existsSync(anchors) ? [`anchor check by hedge: ${anchors}`] : []), ...standing, ...panel], findings };
 }
 
 const tierLine = ({ name, why }: ReviewTier) => `review tier: ${name}: ${why}`;

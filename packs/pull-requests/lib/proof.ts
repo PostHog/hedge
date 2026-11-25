@@ -165,7 +165,7 @@ type Spent = { spent: number; pastBudget: number; names: string[]; reservations:
 type ReservedAs = { reservationId?: string; startedAt?: string; commit?: string; scope?: string; phase?: FinalReadPhase; pastBudget?: true; decision?: DecisionMark };
 const reservationOf = ({ reservationId, startedAt, commit, scope, phase }: ReservedAs) => JSON.stringify([reservationId, startedAt, commit, scope, phase]);
 
-async function savedFindings(directory: string) {
+export async function savedFindings(directory: string) {
   try { return await readFile(join(directory, "findings.md"), "utf8"); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
 }
@@ -642,8 +642,12 @@ export async function respondToReview(home: string, identity: ProofIdentity, rou
   const directory = await roundDirectory(home, identity, round);
   const findings = await savedFindings(directory);
   if (findings === undefined) throw new Error(`Review round ${round} has no findings yet`);
+  if (bytes.toString().split(/\r\n?|\n/).some((line) => fenceLine.test(line))) throw new Error(`${responses} holds a code fence, a line that starts with \`\`\` or ~~~. A numbered line that says fixed, rejected or known counts as an answer, also inside a fence. Quote an earlier answer with >, which answers nothing, and write code in single backticks.`);
+  const { count, past } = numbersPast(findings, bytes.toString());
+  if (past.length && !count) throw new Error(`Round ${round} has no findings, so it needs no answers.`);
+  if (past.length) throw new Error(`Round ${round} has ${count} findings; answers numbered past them: ${spans(past)}. Number your answers by this list, which hedge proof show --round ${round} prints too:\n${answerNumbers(findings)}`);
   const missing = unanswered(findings, bytes.toString());
-  if (missing.length) throw new Error(`Answer findings ${missing.join(", ")} too: one line each, numbered in the order of findings.md, such as "${missing[0]}. fixed in 1a2b3c4: <how>", "${missing[0]}. rejected: <why>", or, at the review budget, "${missing[0]}. known: <why>" for a finding listed under Known issues. Minor and nit findings need no answer; a TESTS item gets a test-only rewrite or delete`);
+  if (missing.length) throw new Error(`Answer findings ${missing.join(", ")} too: one line each, numbered by the list below, such as "${missing[0]}. fixed in 1a2b3c4: <how>", "${missing[0]}. rejected: <why>", or, at the review budget, "${missing[0]}. known: <why>" for a finding listed under Known issues. Minor and nit findings need no answer; a TESTS item gets a test-only rewrite or delete\n${answerNumbers(findings)}`);
   if (answeredFindings(findings, bytes.toString()).findings.some(({ answer }) => answer?.verdict === "known")) {
     const reviews = join(pullRequestDirectory(home, identity), "reviews");
     const phase = (await readJson<{ phase?: FinalReadPhase }>(join(directory, "round.json"), {})).phase ?? "review";
@@ -658,6 +662,7 @@ export async function respondToReview(home: string, identity: ProofIdentity, rou
 }
 
 const findingItem = /^\s*(?:[-*]|\d+[.)])\s+\S/;
+const fenceLine = /^\uFEFF?\s*(?:(?:[-*+]|\d+[.)])\s+)*(?:`{3}|~{3})/;
 const answerItem = /^\s*(?:[-*]\s+)?(\d+)[.):]\s+\**(fixed|rejected|known)\b/i;
 
 const noFinding = /^(?:#.*|no findings\.?|findings:?|\(none\))$/i;
@@ -792,6 +797,35 @@ function listedItems(reviewed: ReviewedLine[]): { items: ReviewedItem[]; recover
 }
 
 export type Answer = { verdict: "fixed" | "rejected" | "known"; text: string };
+
+const listMark = /^[^\S\n]*(?:[-*]|\d+[.)])[^\S\n]+/;
+
+export function answerNumbers(findings: string) {
+  const items = reviewedItems(findings);
+  if (!items.length) return "";
+  const lines = items.map(({ text, test, note }, index) => `${index + 1}. ${note ? "anchor check note, no answer needed: " : test ? "TESTS: " : ""}${text.replace(listMark, "").split("\n").join("\n   ")}`);
+  return ["Answer each finding by these numbers, in hedge proof respond:", ...lines].join("\n");
+}
+
+function numbersPast(findings: string, responses: string) {
+  const count = reviewedItems(findings).length;
+  const written = new Map<bigint, string>();
+  for (const line of responses.split("\n")) {
+    const digits = answerItem.exec(line)?.[1];
+    if (digits && BigInt(digits) > BigInt(count) && !written.has(BigInt(digits))) written.set(BigInt(digits), digits);
+  }
+  return { count, past: [...written].sort(([a], [b]) => a < b ? -1 : 1) };
+}
+
+function spans(numbers: [bigint, string][]) {
+  const runs: [bigint, string][][] = [];
+  for (const number of numbers) {
+    const run = runs.at(-1);
+    if (run && run.at(-1)![0] === number[0] - 1n) run.push(number);
+    else runs.push([number]);
+  }
+  return runs.map((run) => run.length > 2 ? `${run[0]![1]} to ${run.at(-1)![1]}` : run.map(([, digits]) => digits).join(", ")).join(", ");
+}
 
 export function answeredFindings(findings: string, responses: string) {
   const items = reviewedItems(findings);
