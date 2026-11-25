@@ -403,11 +403,17 @@ async function writeAtomic(path: string, content: string | Uint8Array, mode = 0o
 
 async function pinTarget(dir: string, repo: string, oid: string): Promise<string | undefined> {
   if (!existsSync(join(dir, ".git"))) return undefined;
-  const ref = pinRef(repo, oid);
+  const normalized = oid.toLowerCase();
+  const ref = pinRef(repo, normalized);
   const exact = await git(dir, "rev-parse", "--verify", "--quiet", ref);
-  if (!exact.ok || exact.stdout.toLowerCase() !== oid.toLowerCase()) return undefined;
-  const commit = await git(dir, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`);
-  return commit.ok && gitHash.test(commit.stdout) ? commit.stdout.toLowerCase() : undefined;
+  if (exact.ok && exact.stdout.toLowerCase() === normalized) {
+    const commit = await git(dir, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`);
+    return commit.ok && gitHash.test(commit.stdout) ? commit.stdout.toLowerCase() : undefined;
+  }
+  const type = await git(dir, "cat-file", "-t", normalized);
+  if (!type.ok || type.stdout !== "commit") return undefined;
+  const containing = await git(dir, "for-each-ref", "--count=1", "--contains", normalized, "--format=%(objectname)", `refs/hedge/pins/${repoDigest(repo)}/`);
+  return containing.ok && gitHash.test(containing.stdout) ? normalized : undefined;
 }
 
 async function recordPinRef(dir: string, repo: string, oid: string): Promise<string | undefined> {

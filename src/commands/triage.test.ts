@@ -730,6 +730,7 @@ describe("hedge triage", () => {
         sources: [
           { name: "team", repo: "vendor/repo", ref: "main" },
           { name: "vendor", repo: "vendor/draft-packs", ref: "main" },
+          { name: "multi", repo: "foo bar", ref: "main" },
         ],
         packs: [],
         plan: "both",
@@ -745,7 +746,7 @@ describe("hedge triage", () => {
       return capture([], undefined)(command, options);
     };
     const code = await main(
-      ["triage", "--send", "--note", "Authorization: Bearer vendor/repo.A1 and The pack source vendor/draft-packs failed"],
+      ["triage", "--send", "--note", "Authorization: Bearer vendor/repo.A1; Bearer tok1234567890.foo bar; The pack source vendor/draft-packs"],
       {
         home,
         engineRoot,
@@ -762,9 +763,9 @@ describe("hedge triage", () => {
     const issueCall = sent.find((call) => call.command[1] === "issue")!;
     const title = issueCall.command[issueCall.command.indexOf("--title") + 1]!;
     const body = issueCall.input!;
-    expect(title).toContain("Authorization: Bearer <token> and The pack source <private source> failed");
-    expect(body).toContain("Authorization: Bearer <token> and The pack source <private source> failed");
-    for (const leaked of [".A1", "draft-packs", "vendor/repo"]) {
+    expect(title).toContain("Authorization: Bearer <token>; Bearer <token>; The pack source <private source>");
+    expect(body).toContain("Authorization: Bearer <token>; Bearer <token>; The pack source <private source>");
+    for (const leaked of [".A1", "tok1234567890", "foo bar", "draft-packs", "vendor/repo"]) {
       expect(title).not.toContain(leaked);
       expect(body).not.toContain(leaked);
     }

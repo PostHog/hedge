@@ -374,7 +374,7 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     });
     const bearerRedacted = stripHome(masked).replace(bearerMaskedRegex, (whole, kind, space, body) => {
       const expanded = String(body).replace(tokenRegex, (_tok, idx) => matchedOriginals[Number(idx)] ?? "");
-      return /^[A-Za-z0-9._~+/=-]{12,}$/.test(expanded) ? `${kind}${space}<token>` : whole;
+      return /^[A-Za-z0-9._~+/=-]{12,}/.test(expanded) ? `${kind}${space}<token>` : whole;
     });
     let next = applyRules(bearerRedacted, preRandomRules);
     next = replaceMaskedRandom(next, matchedOriginals);

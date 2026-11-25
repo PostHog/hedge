@@ -292,8 +292,17 @@ describe("hedge refresh", () => {
     expect(box.read(guide)).toBe("Rules v1.\n");
 
     box.pin("+release");
+    await commit(box.repo, "mid", { "packs/team/rules.md": "Rules mid.\n", "packs/team/AGENTS.md": "Team mid.\n", "packs/team/skills/review/SKILL.md": "# review\n" });
+    const midSha = await spawnGit(box.repo, "rev-parse", "HEAD");
     await v2(box.repo);
     expect(await box.hedge("refresh")).toBe(0);
     expect(box.read(guide)).toBe("Rules v2.\n");
+
+    rmSync(box.repo, { recursive: true, force: true });
+    box.lines.length = 0;
+    box.pin(midSha);
+    expect(await box.hedge("apply", "--profile", box.profile)).toBe(0);
+    expect(box.read(guide)).toBe("Rules mid.\n");
+    expect(box.lines.join("\n")).not.toContain("could not fetch");
   });
 });
