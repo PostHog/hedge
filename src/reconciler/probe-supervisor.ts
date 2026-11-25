@@ -21,7 +21,7 @@ const realTimer: Timer = (ms, fire) => {
   return () => clearTimeout(handle);
 };
 
-export async function supervise(command: string[], host: SupervisorHost): Promise<number> {
+export async function supervise(command: string[], host: SupervisorHost, cleanupGraceMs = graceMs): Promise<number> {
   let resolveDone!: (code: number) => void;
   const settled = new Promise<number>((resolve) => (resolveDone = resolve));
 
@@ -66,7 +66,7 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
     if (finished || cancelHard) return;
     cancelInterrupt?.();
     cancelInterrupt = undefined;
-    cancelHard = host.timer(graceMs, finishGroup);
+    cancelHard = host.timer(cleanupGraceMs, finishGroup);
   };
 
   const arm = (name: StopSignal) => {
@@ -136,10 +136,17 @@ if (import.meta.main) {
     });
   }
   let command: string[] = [];
+  let cleanupGraceMs = graceMs;
   try {
     const raw = Bun.argv[2] ?? (await Bun.stdin.text());
     const parsed = JSON.parse(raw) as unknown;
-    if (Array.isArray(parsed) && parsed.every((arg) => typeof arg === "string")) command = parsed;
+    if (Array.isArray(parsed) && parsed.every((arg) => typeof arg === "string")) {
+      command = parsed;
+    } else if (parsed && typeof parsed === "object" && Array.isArray((parsed as { command?: unknown }).command)) {
+      const record = parsed as { command: unknown[]; graceMs?: unknown };
+      if (record.command.every((arg) => typeof arg === "string")) command = record.command as string[];
+      if (typeof record.graceMs === "number" && record.graceMs >= 0) cleanupGraceMs = record.graceMs;
+    }
   } catch {}
   await supervise(command, {
     spawn: (argv) => Bun.spawn(argv, { stdio: ["ignore", "ignore", "ignore"] }),
@@ -164,5 +171,5 @@ if (import.meta.main) {
       } catch {}
     },
     exit: (code) => process.exit(code),
-  });
+  }, cleanupGraceMs);
 }

@@ -672,7 +672,7 @@ describe("humanStepsLeft", () => {
       await proc.exited;
     };
     try {
-      const pending = humanStepsLeft(plan({ human: [...heldHuman, extraHuman] }), { home, giveUp: new Promise<void>(() => {}) });
+      const pending = humanStepsLeft(plan({ human: [...heldHuman, extraHuman] }), { home, giveUp: new Promise<void>(() => {}), graceMs: 0 });
       await Promise.all(readers.slice(0, slots).map((r) => r.text));
       expect(existsSync(extraMarker)).toBe(false);
       await release(gateFifos[0]!);
@@ -687,7 +687,37 @@ describe("humanStepsLeft", () => {
 
     const trueBin = Bun.which("true")!;
     const human = Array.from({ length: 35 }, (_, idx) => ({ id: `step-${idx}`, pack: "team", say: `Step ${idx}.`, probe: [trueBin] }));
-    const result = await humanStepsLeft(plan({ human }), { home, giveUp: new Promise<void>(() => {}) });
+    const result = await humanStepsLeft(plan({ human }), { home, giveUp: new Promise<void>(() => {}), graceMs: 0 });
     expect(result).toEqual({ failing: [], unchecked: [] });
+  });
+
+  test("wakes and terminates a probe that suspends its own process group with SIGSTOP", async () => {
+    const home = temp.make("home-stop-");
+    const [ready, gone] = [join(home, "ready"), join(home, "gone")];
+    expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+    const startedProc = Bun.spawn(["cat", ready], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    const goneProc = Bun.spawn(["cat", gone], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    const started = new Response(startedProc.stdout).text();
+    const closed = new Response(goneProc.stdout).text();
+    try {
+      const result = await humanStepsLeft(
+        plan({
+          human: [
+            {
+              id: "stopper",
+              pack: "team",
+              say: "Stops itself.",
+              probe: ["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; kill -STOP 0', "probe", gone, ready],
+            },
+          ],
+        }),
+        { home, giveUp: started.then(() => undefined), graceMs: 10 },
+      );
+      expect(result.unchecked.map((s) => s.id)).toEqual(["stopper"]);
+      expect(await closed).toBe("");
+    } finally {
+      try { startedProc.kill("SIGKILL"); } catch {}
+      try { goneProc.kill("SIGKILL"); } catch {}
+    }
   });
 });

@@ -66,8 +66,13 @@ process.on("message", async (message: unknown) => {
     } catch {}
     process.exit(127);
   }
-  if (lockCount > 0 && typeof target.stdio[lockCount + 3] === "number") {
-    holdFd = target.stdio[lockCount + 3] as number;
+  if (lockCount > 0) {
+    if (typeof target.stdio[lockCount + 3] === "number") {
+      holdFd = target.stdio[lockCount + 3] as number;
+    }
+    try {
+      process.send?.({ pgid: target.pid });
+    } catch {}
   }
   for (const fd of [1, 2]) {
     try {

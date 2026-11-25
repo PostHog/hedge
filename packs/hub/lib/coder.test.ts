@@ -446,3 +446,31 @@ test("kills a background child holding stdout open after the command exits under
     if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
   }
 });
+
+test("wakes and kills a locked command even if its capture supervisor was SIGSTOPped", async () => {
+  const lockHome = temp.make("hedge-lock-stop-");
+  const dir = temp.make("hedge-stop-sup-");
+  const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+  expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+  const started = Bun.file(ready).text();
+  const holderGone = Bun.file(gone).text();
+  const clock = handTimer();
+  const result = withBoxLock(lockHome, "box-stop", { waitMs: 0 }, () =>
+    captureWith(clock.timer)(
+      ["sh", "-c", `exec 3>${JSON.stringify(gone)}; ps -o ppid= -p $PPID | tr -d " " > ${JSON.stringify(ready)}; exec sleep 30`],
+      { timeoutMs: 30 },
+    ),
+  );
+  const supPid = Number((await started).trim());
+  expect(supPid).toBeGreaterThan(0);
+  process.kill(supPid, "SIGSTOP");
+  try {
+    clock.fire();
+    expect(await result).toEqual({ code: 124, stdout: "", stderr: "timed out after 30 ms" });
+    expect(await holderGone).toBe("");
+    expect(await withBoxLock(lockHome, "box-stop", { waitMs: 0 }, async () => "free")).toBe("free");
+  } finally {
+    try { process.kill(supPid, "SIGCONT"); } catch {}
+    try { process.kill(supPid, "SIGKILL"); } catch {}
+  }
+});

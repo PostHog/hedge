@@ -89,6 +89,7 @@ export function captureWith(timer: Timer): Capture {
     const locks = heldLocks();
     const input = stdin === undefined ? "ignore" : new TextEncoder().encode(stdin);
     let child: ReturnType<typeof Bun.spawn> | undefined;
+    let lockedPgid: number | undefined;
     let stopped = false;
     let reaped = false;
     const stopStream = new AbortController();
@@ -96,7 +97,24 @@ export function captureWith(timer: Timer): Capture {
       stopped = true;
       if (!child || reaped) return;
       try {
+        process.kill(-child.pid, "SIGCONT");
+      } catch {}
+      try {
         child.kill("SIGTERM");
+      } catch {}
+    };
+    const killStalled = () => {
+      if (!child || reaped) return;
+      if (lockedPgid !== undefined) {
+        try {
+          process.kill(-lockedPgid, "SIGKILL");
+        } catch {}
+      }
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {}
+      try {
+        child.kill("SIGKILL");
       } catch {}
     };
     const interrupted = (name: NodeJS.Signals) => {
@@ -129,8 +147,10 @@ export function captureWith(timer: Timer): Capture {
         detached: true,
         ipc(message) {
           if (!message || typeof message !== "object") return;
-          const record = message as { code?: unknown; error?: unknown };
-          if (typeof record.error === "string") {
+          const record = message as { code?: unknown; error?: unknown; pgid?: unknown };
+          if (typeof record.pgid === "number") {
+            lockedPgid = record.pgid;
+          } else if (typeof record.error === "string") {
             settle({ error: record.error, ...(typeof record.code === "string" ? { errCode: record.code } : {}) });
           } else if (typeof record.code === "number") {
             settle({ code: record.code });
@@ -154,14 +174,7 @@ export function captureWith(timer: Timer): Capture {
         stopChild();
         hardKill = setTimeout(() => {
           forceExpired = true;
-          if (!reaped) {
-            try {
-              process.kill(-live.pid, "SIGKILL");
-            } catch {}
-            try {
-              live.kill("SIGKILL");
-            } catch {}
-          }
+          killStalled();
           stopStream.abort();
           settle({ code: timedOut });
         }, 150);
@@ -181,7 +194,11 @@ export function captureWith(timer: Timer): Capture {
           live.send("done");
         } catch {}
       }
-      if (!forceExpired) await live.exited;
+      if (forceExpired) {
+        await Promise.race([live.exited, Bun.sleep(50)]);
+      } else {
+        await live.exited;
+      }
       if (expired) return timeoutResult(timeoutMs, stdout);
       if (status.error !== undefined) {
         const err = new Error(status.error) as NodeJS.ErrnoException;

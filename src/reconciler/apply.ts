@@ -10,6 +10,7 @@ import { hublessReason, listedPack } from "./resolve.ts";
 import { wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
 import { withLegacyNames } from "../legacy.ts";
 import { bunScript } from "../runner/bun.ts";
+import { graceMs, interruptGraceMs } from "./probe-supervisor.ts";
 
 export type AdapterContext = { home: string; dryRun: boolean; adopt: string[]; adoptFrom?: string[] };
 export type AdapterResult = { actions: Action[]; findings: Finding[]; blocked?: boolean; failed?: boolean };
@@ -255,9 +256,9 @@ export type HumanStepsLeft = { failing: Array<Owned<HumanStep>>; unchecked: Arra
 const probeConcurrency = 8;
 const supervisorSpawnFailed = -1;
 
-export async function humanStepsLeft(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void> }): Promise<HumanStepsLeft> {
+export async function humanStepsLeft(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void>; graceMs?: number }): Promise<HumanStepsLeft> {
   const reported = new WeakMap<AbortSignal, number>();
-  const run = viaEngine(plan, options.run ?? spawnRunner(options.home, plan.machine.profileDir, (sig, code) => reported.set(sig, code)));
+  const run = viaEngine(plan, options.run ?? spawnRunner(options.home, plan.machine.profileDir, (sig, code) => reported.set(sig, code), options.graceMs));
   let timedOut = false;
   void options.giveUp.then(() => {
     timedOut = true;
@@ -463,7 +464,7 @@ function viaEngine(plan: Plan, run: Runner): Runner {
 const undoRunner = (run: Runner, step: LedgerStep): Runner => (command) => run(command, { [undoVariable]: ledgerKey(step) });
 
 /** Runs commands with the plan's home directory as HOME, so a step installs into the home it applies to, and with the plan's profile, so a nested hedge reads the profile this run applies or checks. */
-function spawnRunner(home: string, profileDir: string | undefined, onResult?: (signal: AbortSignal, code: number) => void): Runner {
+function spawnRunner(home: string, profileDir: string | undefined, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number): Runner {
   return async (command, env = {}, signal) => {
     const childEnv = withLegacyNames({ ...Bun.env, HOME: home, ...(profileDir ? { HEDGE_PROFILE_DIR: profileDir } : {}), ...env });
     if (!signal) {
@@ -473,28 +474,42 @@ function spawnRunner(home: string, profileDir: string | undefined, onResult?: (s
         return 127;
       }
     }
-    return await runDetached(command, childEnv, signal, onResult);
+    return await runDetached(command, childEnv, signal, onResult, cleanupGraceMs);
   };
 }
 
 const probeSupervisor = join(import.meta.dir, "probe-supervisor.ts");
-const activeSupervisors = new Set<Promise<unknown>>();
+let activeSupervisors = 0;
+const supervisorWaiters: Array<() => void> = [];
 
-async function waitSupervisorSlot(signal: AbortSignal): Promise<boolean> {
-  while (activeSupervisors.size >= probeConcurrency) {
-    if (signal.aborted) return false;
-    let onAbort!: () => void;
-    const aborted = new Promise<void>((resolve) => {
-      onAbort = resolve;
+async function acquireSupervisorSlot(signal: AbortSignal): Promise<(() => void) | undefined> {
+  if (signal.aborted) return undefined;
+  if (activeSupervisors >= probeConcurrency) {
+    const acquired = await new Promise<boolean>((resolve) => {
+      const wake = () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(true);
+      };
+      const onAbort = () => {
+        const index = supervisorWaiters.indexOf(wake);
+        if (index !== -1) supervisorWaiters.splice(index, 1);
+        resolve(false);
+      };
+      supervisorWaiters.push(wake);
       signal.addEventListener("abort", onAbort, { once: true });
     });
-    try {
-      await Promise.race([aborted, ...activeSupervisors]);
-    } finally {
-      signal.removeEventListener("abort", onAbort);
-    }
+    if (!acquired) return undefined;
+  } else {
+    activeSupervisors++;
   }
-  return !signal.aborted;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const next = supervisorWaiters.shift();
+    if (next) next();
+    else activeSupervisors--;
+  };
 }
 
 async function readSupervisorResult(stdout: ReadableStream<Uint8Array>, onFirstCode: (code: number) => void): Promise<{ code?: number; cleanup: boolean }> {
@@ -527,15 +542,37 @@ async function readSupervisorResult(stdout: ReadableStream<Uint8Array>, onFirstC
   return { code, cleanup };
 }
 
-async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal, onResult?: (signal: AbortSignal, code: number) => void) {
+async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number) {
   if (!command.length) return 127;
   let child: { pid: number; exited: Promise<number>; stdout: ReadableStream<Uint8Array>; kill(signal?: NodeJS.Signals): void; unref(): void } | undefined;
   let stopSignal: NodeJS.Signals | undefined;
   let reaped = false;
+  let hardKill: ReturnType<typeof setTimeout> | undefined;
+  const armParentHardKill = (name: NodeJS.Signals) => {
+    if (hardKill || !child || reaped) return;
+    const target = child;
+    const extra = name === "SIGINT" || name === "SIGQUIT" ? interruptGraceMs : 0;
+    hardKill = setTimeout(() => {
+      hardKill = undefined;
+      if (reaped) return;
+      try {
+        process.kill(-target.pid, "SIGKILL");
+      } catch {}
+      try {
+        target.kill("SIGKILL");
+      } catch {}
+    }, (cleanupGraceMs ?? graceMs) + extra + 100);
+  };
   const endGroup = (name: NodeJS.Signals = "SIGTERM") => {
     stopSignal ??= name;
     if (!child || reaped) return;
-    try { child.kill(name); } catch {}
+    try {
+      process.kill(-child.pid, "SIGCONT");
+    } catch {}
+    try {
+      child.kill(name);
+    } catch {}
+    armParentHardKill(name);
   };
   const onAbort = () => endGroup("SIGTERM");
   const interrupted = (name: NodeJS.Signals) => {
@@ -553,12 +590,15 @@ async function runDetached(command: string[], env: Record<string, string | undef
   };
   signal.addEventListener("abort", onAbort, { once: true });
   for (const name of stopSignals) process.on(name, interrupted);
-  if (!(await waitSupervisorSlot(signal))) {
+  const releaseSlot = await acquireSupervisorSlot(signal);
+  if (!releaseSlot) {
     release();
     return 124;
   }
+  let handedToExit = false;
   try {
-    const encoded = JSON.stringify(command);
+    const payload = cleanupGraceMs === undefined ? command : { command, graceMs: cleanupGraceMs };
+    const encoded = JSON.stringify(payload);
     const overStdin = Buffer.byteLength(encoded) > 65_536;
     child = Bun.spawn(overStdin ? bunScript(probeSupervisor) : bunScript(probeSupervisor, encoded), {
       stdin: overStdin ? new TextEncoder().encode(encoded) : "ignore",
@@ -567,11 +607,15 @@ async function runDetached(command: string[], env: Record<string, string | undef
       env,
       detached: true,
     });
-    const done = child.exited.finally(() => {
+    handedToExit = true;
+    void child.exited.finally(() => {
       reaped = true;
-      activeSupervisors.delete(done);
+      if (hardKill) {
+        clearTimeout(hardKill);
+        hardKill = undefined;
+      }
+      releaseSlot();
     });
-    activeSupervisors.add(done);
     if (stopSignal || signal.aborted) endGroup(stopSignal ?? "SIGTERM");
     const status = await readSupervisorResult(child.stdout, (code) => onResult?.(signal, code));
     if (status.code !== undefined && status.cleanup) {
@@ -581,6 +625,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
     await child.exited;
     return status.code ?? supervisorSpawnFailed;
   } catch {
+    if (!handedToExit) releaseSlot();
     return supervisorSpawnFailed;
   } finally {
     release();
