@@ -10,7 +10,7 @@ import { hublessReason, listedPack } from "./resolve.ts";
 import { wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
 import { withLegacyNames } from "../legacy.ts";
 import { bunScript } from "../runner/bun.ts";
-import { appendTag, createPipe, graceMs, interruptGraceMs, killSession, killSessionSync, probeResultReported, setCloexec, supervisorEnv, tagEnvVar, watchdogEnv } from "./probe-supervisor.ts";
+import { appendTag, createPipe, graceMs, interruptGraceMs, killDeadSession, killDeadSessionSync, killSessionSync, probeResultReported, setCloexec, supervisorEnv, tagEnvVar, watchdogEnv } from "./probe-supervisor.ts";
 
 export type AdapterContext = { home: string; dryRun: boolean; adopt: string[]; adoptFrom?: string[] };
 export type AdapterResult = { actions: Action[]; findings: Finding[]; blocked?: boolean; failed?: boolean };
@@ -270,11 +270,14 @@ export async function humanStepsLeft(plan: Plan, options: { home: string; run?: 
     if (timedOut) return;
     const step = plan.human[index]!;
     const deadline = new AbortController();
-    const result = run(step.probe, {}, deadline.signal).then((code) =>
-      code === supervisorSpawnFailed ? ("unchecked" as const) : code === 0 ? ("passes" as const) : ("fails" as const),
-    );
+    let aborted = false;
+    const result = run(step.probe, {}, deadline.signal).then((code) => {
+      if (aborted && options.run) return "unchecked" as const;
+      return code === supervisorSpawnFailed ? ("unchecked" as const) : code === 0 ? ("passes" as const) : ("fails" as const);
+    });
     const late = options.giveUp.then(async () => {
       const code = reported.get(deadline.signal);
+      aborted = true;
       deadline.abort();
       if (code !== undefined) return code === 0 ? ("passes" as const) : ("fails" as const);
       if (options.run) return "unchecked" as const;
@@ -559,10 +562,20 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
   } finally {
     if (!handedOff) {
       for (const entry of batch) {
-        killSessionSync(entry.pid, "SIGKILL", entry.targetExited ? undefined : entry.tag);
+        let stillAlive = false;
         try {
-          process.kill(entry.pid, "SIGKILL");
+          writeSync(entry.fd, "\n");
+          stillAlive = true;
         } catch {}
+        const sweepTag = entry.targetExited ? undefined : entry.tag;
+        if (stillAlive) {
+          killSessionSync(entry.pid, "SIGKILL", sweepTag);
+          try {
+            process.kill(entry.pid, "SIGKILL");
+          } catch {}
+        } else {
+          killDeadSessionSync(entry.pid, sweepTag, false);
+        }
       }
     }
     for (const entry of batch) {
@@ -782,8 +795,8 @@ async function runDetached(command: string[], env: Record<string, string | undef
         reaped = true;
         await statusPromise.catch(() => {});
         const sawResult = reportedResult || (owned.resultFd !== undefined && probeResultReported(owned.resultFd) === "reported");
-        if (!sawResult && supCode !== 128 && supCode !== 143) {
-          void killSession(undefined, "SIGKILL", owned.tag);
+        if (child?.signalCode !== null || (!sawResult && supCode !== 128 && supCode !== 143)) {
+          await killDeadSession(owned.pid, sawResult ? undefined : owned.tag, true);
         }
       },
       () => {

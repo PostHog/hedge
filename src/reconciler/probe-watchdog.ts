@@ -1,5 +1,5 @@
 import { closeSync, writeSync } from "node:fs";
-import { discoverTargets, probeResultReported, signalTargets } from "./probe-supervisor.ts";
+import { discoverTargets, killDeadSession, probeResultReported, signalTargets } from "./probe-supervisor.ts";
 
 export type WatchEntry = { pid: number; fd: number; delayMs: number; tag?: string; resultFd?: number };
 export type WatchClock = { now: () => number; sleep: (ms: number) => Promise<void> };
@@ -53,17 +53,21 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
       entry.resultFd = undefined;
     }
   };
+  const sweepDead = async (entry: WatchEntry, reported: boolean) => {
+    const sweepTag = entry.tag && !reported ? entry.tag : undefined;
+    await killDeadSession(entry.pid, sweepTag, false);
+  };
   while (pending.size > 0) {
     const elapsed = clock.now() - started;
     let nextWake = Number.POSITIVE_INFINITY;
     const due: WatchEntry[] = [];
-    const dead: WatchEntry[] = [];
+    const dead: Array<{ entry: WatchEntry; reported: boolean }> = [];
     for (const entry of [...pending]) {
       if (!alive(entry.fd)) {
         const reported = resultReported(entry);
         closeEntry(entry);
         pending.delete(entry);
-        if (entry.tag && !reported) dead.push(entry);
+        dead.push({ entry, reported });
         continue;
       }
       const left = entry.delayMs - elapsed;
@@ -75,12 +79,7 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
       }
     }
     if (dead.length > 0) {
-      await Promise.all(
-        dead.map(async (entry) => {
-          const tagged = await discoverTargets(undefined, entry.tag);
-          if (tagged) signalTargets(tagged, "SIGKILL");
-        }),
-      );
+      await Promise.all(dead.map(({ entry, reported }) => sweepDead(entry, reported)));
     }
     if (due.length > 0) {
       await Promise.all(
@@ -97,17 +96,14 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
                 try {
                   process.kill(entry.pid, "SIGKILL");
                 } catch {}
-              } else if (entry.tag && !resultReported(entry)) {
-                const tagged = await discoverTargets(undefined, entry.tag);
-                if (tagged) signalTargets(tagged, "SIGKILL");
+              } else {
+                await sweepDead(entry, resultReported(entry));
               }
-            } else if (entry.tag && !resultReported(entry)) {
-              const tagged = await discoverTargets(undefined, entry.tag);
-              if (tagged) signalTargets(tagged, "SIGKILL");
+            } else {
+              await sweepDead(entry, resultReported(entry));
             }
-          } else if (entry.tag && !resultReported(entry)) {
-            const tagged = await discoverTargets(undefined, entry.tag);
-            if (tagged) signalTargets(tagged, "SIGKILL");
+          } else {
+            await sweepDead(entry, resultReported(entry));
           }
           closeEntry(entry);
         }),

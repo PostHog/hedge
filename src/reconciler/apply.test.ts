@@ -794,4 +794,23 @@ process.exit(0);`;
       await daemonClosed.catch(() => {});
     }
   });
+
+  test("marks a timed-out custom probe unchecked even when its abort handler synchronously resolves 0", async () => {
+    const home = temp.make("home-sync-abort-runner-");
+    let fireGiveUp!: () => void;
+    const step = { id: "sync-abort", pack: "team", say: "Sync abort.", probe: ["true"] };
+    const result = await humanStepsLeft(plan({ human: [step] }), {
+      home,
+      giveUp: new Promise<void>((resolve) => {
+        fireGiveUp = resolve;
+      }),
+      run: (_cmd, _env, signal) =>
+        new Promise<number>((resolve) => {
+          signal?.addEventListener("abort", () => resolve(0), { once: true });
+          queueMicrotask(() => fireGiveUp());
+        }),
+    });
+    expect(result.failing).toEqual([]);
+    expect(result.unchecked.map((item) => item.id)).toEqual(["sync-abort"]);
+  });
 });

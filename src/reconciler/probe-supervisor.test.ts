@@ -898,4 +898,43 @@ process.exit(res.failing.length === 0 && res.unchecked.length === 0 ? 0 : 1);`;
     const child = Bun.spawn([process.execPath, "-e", script], { env, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
     expect(await child.exited).toBe(0);
   });
+
+  test("watchdog kills a same-session clean-env worker when the supervisor dies early", async () => {
+    const dir = temp.make("sup-watchdog-dead-envi-");
+    const envBin = Bun.which("env") ?? "/usr/bin/env";
+    const shBin = Bun.which("sh") ?? "/bin/sh";
+    const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+    mkfifo(ready, gone);
+    const started = fifoRead(ready);
+    const closed = fifoRead(gone);
+    const tag = crypto.randomUUID();
+    const payload = JSON.stringify({
+      command: [envBin, "-i", shBin, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "worker", gone, ready],
+      controlFd: 3,
+    });
+    const sup = Bun.spawn([process.execPath, supervisorPath], {
+      stdio: [new TextEncoder().encode(payload), "pipe", "ignore", "pipe"],
+      env: { ...process.env, [tagEnvVar]: tag },
+      detached: true,
+    });
+    const aliveFd = sup.stdio[3] as number;
+    let workerPid = 0;
+    try {
+      workerPid = Number((await started).trim());
+      expect(workerPid).toBeGreaterThan(0);
+      sup.kill("SIGKILL");
+      await sup.exited;
+      await watchEntries([{ pid: sup.pid, fd: aliveFd, delayMs: 250, tag }], {
+        now: () => 0,
+        sleep: async () => {},
+      });
+      expect(await closed).toBe("");
+    } finally {
+      if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
+      sup.kill("SIGKILL");
+      try {
+        closeSync(aliveFd);
+      } catch {}
+    }
+  });
 });

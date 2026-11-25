@@ -2,7 +2,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, re
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { boxPrefix } from "../../../src/hub/names.ts";
-import { appendTag, killSession, killSessionSync, setCloexec, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
+import { appendTag, killDeadSession, killDeadSessionSync, killSession, killSessionSync, setCloexec, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
 import { bunScript } from "../../../src/runner/bun.ts";
 import { heldLocks } from "./box-lock.ts";
 
@@ -118,7 +118,7 @@ export function captureWith(timer: Timer): Capture {
         killSessionSync(child.pid, "SIGKILL", tag);
         return;
       }
-      const sweep = killSession(undefined, "SIGKILL", tag);
+      const sweep = killDeadSession(child.pid, tag, true);
       if (sweep && typeof (sweep as Promise<void>).then === "function") tagSweep = sweep as Promise<void>;
     };
     const stopChild = () => {
@@ -179,8 +179,10 @@ export function captureWith(timer: Timer): Capture {
           } catch {}
         }
       } else if (child) {
-        killSessionSync(supervisorReaped ? undefined : child.pid, "SIGKILL", tag);
-        if (!supervisorReaped) {
+        if (supervisorReaped) {
+          killDeadSessionSync(child.pid, tag, true);
+        } else {
+          killSessionSync(child.pid, "SIGKILL", tag);
           try {
             child.kill("SIGKILL");
           } catch {}
@@ -285,7 +287,8 @@ export function captureWith(timer: Timer): Capture {
           }
         }
         if (tagSweep) await tagSweep;
-        else if (forceExpired || !supervisorReaped) await killSession(undefined, "SIGKILL", tag);
+        else if (supervisorReaped && forceExpired) await killDeadSession(live.pid, tag, true);
+        else if (!supervisorReaped) await killSession(live.pid, "SIGKILL", tag);
         return timeoutResult(timeoutMs, stdout);
       }
       cancel();
@@ -296,6 +299,7 @@ export function captureWith(timer: Timer): Capture {
         } catch {}
         live.unref();
       }
+      if (tagSweep) await tagSweep;
       if (status.error !== undefined) {
         const err = new Error(status.error) as NodeJS.ErrnoException;
         if (status.errCode) err.code = status.errCode;

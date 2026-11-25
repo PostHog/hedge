@@ -45,7 +45,7 @@ export type SupervisorHost = {
   exit: (code: number) => void;
 };
 
-type ProcTargets = { pids: number[]; groups: number[]; orphanPids: number[] };
+type ProcTargets = { pids: number[]; groups: number[]; orphanPids: number[]; hasSessionGroup?: boolean };
 
 function envMatchesTag(value: string, tag: string): boolean {
   return value.split(",").includes(tag);
@@ -265,6 +265,7 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string): ProcTarg
   const pids: number[] = [];
   const groups = new Set<number>();
   const orphanPids: number[] = [];
+  let hasSessionGroup = false;
   for (const row of rows) {
     if (!matched.has(row.pid) || row.pid === self || row.pid === sessionId) continue;
     pids.push(row.pid);
@@ -272,11 +273,13 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string): ProcTarg
       orphanPids.push(row.pid);
     } else if (row.pgrp > 0 && row.pgrp !== sessionId && row.pgrp !== self) {
       groups.add(row.pgrp);
-    } else if (row.pgrp !== sessionId) {
+    } else if (row.pgrp === sessionId) {
+      hasSessionGroup = true;
+    } else {
       orphanPids.push(row.pid);
     }
   }
-  return { pids, groups: [...groups], orphanPids };
+  return { pids, groups: [...groups], orphanPids, hasSessionGroup };
 }
 
 const psLookupLimitMs = 200;
@@ -451,20 +454,50 @@ function buildTargetsFromPs(
   const pgidByPid = new Map<number, number>();
   for (const row of rows) pgidByPid.set(row.pid, row.pgid);
   const orphanPids: number[] = [];
+  let hasSessionGroup = false;
   for (const pid of pids) {
     const pgid = pgidByPid.get(pid);
     if (sessionId === undefined) {
       orphanPids.push(pid);
     } else if (pgid !== undefined && pgid > 0 && pgid !== sessionId && pgid !== self) {
       groups.add(pgid);
-    } else if (pgid !== sessionId) {
+    } else if (pgid === sessionId) {
+      hasSessionGroup = true;
+    } else {
       orphanPids.push(pid);
     }
   }
-  return { pids, groups: [...groups], orphanPids };
+  return { pids, groups: [...groups], orphanPids, hasSessionGroup };
 }
 
-function discoverTargetsSync(sessionId?: number, tag?: string): ProcTargets | undefined {
+function psPidStat(treeText: string, targetPid: number): string | undefined {
+  for (const line of treeText.split("\n")) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 4) continue;
+    if (Number(parts[0]) === targetPid) return parts[3];
+  }
+  return undefined;
+}
+
+function pidStateLinux(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const closeParen = stat.lastIndexOf(")");
+    if (closeParen === -1) return undefined;
+    return stat.slice(closeParen + 2).split(" ")[0];
+  } catch {
+    return undefined;
+  }
+}
+
+function isDeadLeaderRecycledLinux(pid: number, reaped: boolean): boolean {
+  const state = pidStateLinux(pid);
+  if (state === undefined) return false;
+  if (reaped) return true;
+  return state !== "Z" && state !== "X" && state !== "x";
+}
+
+function discoverTargetsSync(sessionId?: number, tag?: string, skipIfLeaderPresent = false): ProcTargets | undefined {
   if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag);
   if (sessionId === undefined && !tag) return undefined;
   const lib = getDarwinLib();
@@ -476,27 +509,40 @@ function discoverTargetsSync(sessionId?: number, tag?: string): ProcTargets | un
   const actual = lib.proc_listallpids(ptr(buf), buf.byteLength);
   if (actual <= 0) return undefined;
   const self = process.pid;
+  const limit = Math.min(actual, capacity);
+  let effectiveSessionId = sessionId;
+  if (skipIfLeaderPresent && sessionId !== undefined) {
+    for (let i = 0; i < limit; i++) {
+      if (buf[i] === sessionId) {
+        effectiveSessionId = undefined;
+        break;
+      }
+    }
+    if (effectiveSessionId === undefined && !tag) return { pids: [], groups: [], orphanPids: [], hasSessionGroup: false };
+  }
   const pids: number[] = [];
   const groups = new Set<number>();
   const orphanPids: number[] = [];
-  const limit = Math.min(actual, capacity);
+  let hasSessionGroup = false;
   for (let i = 0; i < limit; i++) {
     const pid = buf[i]!;
-    if (pid <= 0 || pid === self || pid === sessionId) continue;
+    if (pid <= 0 || pid === self || pid === effectiveSessionId) continue;
     const sid = lib.getsid(pid);
     const pgid = lib.getpgid(pid);
-    const inSession = sessionId !== undefined && (sid === sessionId || pgid === sessionId);
+    const inSession = effectiveSessionId !== undefined && (sid === effectiveSessionId || pgid === effectiveSessionId);
     if (!inSession && !(tag && hasEnvTagDarwin(pid, tag))) continue;
     pids.push(pid);
-    if (sessionId === undefined) {
+    if (effectiveSessionId === undefined) {
       orphanPids.push(pid);
-    } else if (pgid > 0 && pgid !== sessionId && pgid !== self) {
+    } else if (pgid > 0 && pgid !== effectiveSessionId && pgid !== self) {
       groups.add(pgid);
-    } else if (pgid !== sessionId) {
+    } else if (pgid === effectiveSessionId) {
+      hasSessionGroup = true;
+    } else {
       orphanPids.push(pid);
     }
   }
-  return { pids, groups: [...groups], orphanPids };
+  return { pids, groups: [...groups], orphanPids, hasSessionGroup };
 }
 
 async function runBoundedPs(args: string[]): Promise<{ pid: number; text: string } | undefined> {
@@ -583,6 +629,70 @@ export function signalTargets(targets: ProcTargets, signal: NodeJS.Signals, sess
     signalOnePid(pid, signal);
   }
   if (sessionId !== undefined) signalOneGroup(sessionId, signal);
+}
+
+function signalDeadTargets(targets: ProcTargets, deadSessionId?: number): void {
+  for (const pgrp of targets.groups) {
+    if (pgrp === deadSessionId) continue;
+    signalOneGroup(pgrp, "SIGKILL");
+  }
+  for (const pid of targets.pids) {
+    if (pid === deadSessionId || pid === process.pid) continue;
+    signalOnePid(pid, "SIGKILL");
+  }
+  if (deadSessionId !== undefined && targets.hasSessionGroup) {
+    signalOneGroup(deadSessionId, "SIGKILL");
+  }
+}
+
+export function killDeadSessionSync(deadSessionId: number, tag?: string, reaped = false): void {
+  if (process.platform === "linux") {
+    const recycled = isDeadLeaderRecycledLinux(deadSessionId, reaped);
+    const sid = recycled ? undefined : deadSessionId;
+    if (sid === undefined && !tag) return;
+    signalDeadTargets(discoverTargetsLinux(sid, tag), sid);
+    return;
+  }
+  const found = discoverTargetsSync(deadSessionId, tag, true);
+  if (found) signalDeadTargets(found, deadSessionId);
+}
+
+export function killDeadSession(deadSessionId: number, tag?: string, reaped = false): void | Promise<void> {
+  if (process.platform === "linux") {
+    const run = () => {
+      const recycled = isDeadLeaderRecycledLinux(deadSessionId, reaped);
+      const sid = recycled ? undefined : deadSessionId;
+      if (sid === undefined && !tag) return;
+      signalDeadTargets(discoverTargetsLinux(sid, tag), sid);
+    };
+    if (!reaped && isDeadLeaderRecycledLinux(deadSessionId, false)) {
+      return Bun.sleep(15).then(run);
+    }
+    run();
+    return;
+  }
+  return (async () => {
+    let treeRes = await runBoundedPs(["-Ao", "pid=,ppid=,pgid=,stat="]);
+    if (!treeRes) {
+      killDeadSessionSync(deadSessionId, tag, reaped);
+      return;
+    }
+    let stat = psPidStat(treeRes.text, deadSessionId);
+    if (!reaped && stat !== undefined && !stat.includes("Z")) {
+      await Bun.sleep(15);
+      treeRes = await runBoundedPs(["-Ao", "pid=,ppid=,pgid=,stat="]);
+      if (!treeRes) {
+        killDeadSessionSync(deadSessionId, tag, reaped);
+        return;
+      }
+      stat = psPidStat(treeRes.text, deadSessionId);
+    }
+    const recycled = stat !== undefined && (reaped || !stat.includes("Z"));
+    const sid = recycled ? undefined : deadSessionId;
+    if (sid === undefined && !tag) return;
+    const targets = buildTargetsFromPs(process.pid, sid, tag, treeRes.text, new Set([treeRes.pid]));
+    signalDeadTargets(targets, sid);
+  })();
 }
 
 export function killSessionSync(sessionId: number | undefined, signal: NodeJS.Signals, tag?: string): void {
