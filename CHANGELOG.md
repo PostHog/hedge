@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### A check that a person passes no longer turns into a ci gap
+
+- A new setting, `pull-requests.personChecks`, lists the required checks that
+  a person passes on GitHub, as owner/name=check pairs, such as
+  `PostHog/posthog=Visual Review gate / storybook`. No CI produces their
+  result: someone accepts the visual change.
+- `hedge proof gate` does not wait on such a check, does not count it red,
+  and does not ask for a ci gap on it. The CI line names it and what it
+  reports. GitHub still holds the merge until the person passes it.
+
 ### Proof provenance is checked in code, and the judge asks less
 
 - `hedge proof run` now records the commit, exit 0, when the run started and

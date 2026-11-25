@@ -411,3 +411,51 @@ test("with --repo and --pr, the gate reads the PR head and the required checks o
   expect(calls).toContainEqual(expect.stringMatching(/^api repos\/example\/product\/rules\/branches\/main/));
   expect(calls.filter((call) => call.startsWith("pr view"))).toEqual([]);
 });
+
+async function personChecked(listing: unknown = "example/product=Visual Review gate / storybook") {
+  const { pr } = await reviewed();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.personChecks": listing });
+  pr.required("main", [{ context: "Visual Review gate / storybook", integration_id: 7 }, { context: "build" }]);
+  pr.githubApp("product", 7);
+  return pr;
+}
+
+const personLine = (outcome: string) => `a person passes it on GitHub, so the gate does not wait on it: Visual Review gate / storybook (${outcome})`;
+
+test("a required check that pull-requests.personChecks lists neither holds the gate nor asks for a ci gap, whatever it reports", async () => {
+  const pr = await personChecked();
+  pr.ci([{ name: "build", bucket: "pass" }]);
+
+  pr.statuses([{ context: "Visual Review gate / storybook", state: "failure", by: "product[bot]" }]);
+  const changed = await pr.hedge("gate");
+  expect(ciLine(changed.output)).toBe(`ci: green, 1 required check(s) pass; ${personLine("fail")}`);
+  expect(changed.output).not.toContain("--kind ci");
+  expect(changed.code).toBe(0);
+
+  pr.statuses([{ context: "Visual Review gate / storybook", state: "pending", by: "product[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toBe(`ci: green, 1 required check(s) pass; ${personLine("pending")}`);
+
+  pr.statuses([]);
+  const unreported = await pr.hedge("gate");
+  expect(ciLine(unreported.output)).toBe(`ci: green, 1 required check(s) pass; ${personLine("not reported yet")}`);
+  expect(unreported.code).toBe(0);
+});
+
+test("the other required checks still decide beside a check a person passes", async () => {
+  const pr = await personChecked();
+  pr.statuses([{ context: "Visual Review gate / storybook", state: "success", by: "product[bot]" }]);
+  pr.ci([{ name: "build", bucket: "fail" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith(`ci: red, required failing: build; ${personLine("pass")}. Fix it`);
+
+  pr.ci([{ name: "build", bucket: "pending" }]);
+  const running = await pr.hedge("gate");
+  expect(ciLine(running.output)).toBe(`ci: pending, required waiting on: build; ${personLine("pass")}`);
+  expect(running.code).toBe(75);
+});
+
+test("a check another repository's pull-requests.personChecks lists still holds the gate", async () => {
+  const pr = await personChecked("example/other=Visual Review gate / storybook");
+  pr.ci([{ name: "build", bucket: "pass" }]);
+  pr.statuses([{ context: "Visual Review gate / storybook", state: "failure", by: "product[bot]" }]);
+  expect(ciLine((await pr.hedge("gate")).output)).toStartWith("ci: red, required failing: Visual Review gate / storybook");
+});
