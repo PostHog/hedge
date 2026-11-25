@@ -103,9 +103,11 @@ async function fallBack(ref: SourceRef, dir: string, repo: string, good: Good | 
   if (!(await git(dir, "checkout", "-q", "--detach", good.commit)).ok) return { ref, error: reason };
   const loaded = await load(dir, loadLimitMs);
   if ("error" in loaded) return { ref, error: reason };
-  const saveError = await saveGood(dir, { repo: good.repo, ref: good.ref, commit: good.commit, ...(good.ref === ref.ref ? {} : { asked: ref.ref }) });
-  if (saveError) return { ref, error: reason };
-  return { ref, dir, packs: loaded.packs, stale: good.ref === ref.ref ? reason : `${reason}; using ${good.ref} instead` };
+  const nextGood = { repo: good.repo, ref: good.ref, commit: good.commit, ...(good.ref === ref.ref ? {} : { asked: ref.ref }) };
+  const saveError = await saveGood(dir, nextGood);
+  if (saveError) await writeAtomic(goodPath(dir), JSON.stringify(nextGood) + "\n").catch(() => {});
+  const why = saveError && !reason.includes(saveError) ? `${reason}; ${saveError}` : reason;
+  return { ref, dir, packs: loaded.packs, stale: good.ref === ref.ref ? why : `${why}; using ${good.ref} instead` };
 }
 
 const loadedModules = createRequire(import.meta.url).cache;
@@ -187,9 +189,19 @@ async function saveGood(dir: string, good: Good): Promise<string | undefined> {
   return undefined;
 }
 
+const verifiedGoodCommit = (record: Good | undefined) =>
+  record &&
+  typeof record.repo === "string" &&
+  typeof record.ref === "string" &&
+  typeof record.commit === "string" &&
+  commitSha.test(record.commit) &&
+  (!commitSha.test(record.ref) || record.ref.toLowerCase() === record.commit.toLowerCase())
+    ? { repo: record.repo, commit: record.commit.toLowerCase() }
+    : undefined;
+
 const commitSha = /^[0-9a-f]{40}$/i;
 
-const githubRepoPattern = /^(?:[a-z][a-z0-9+.-]*:\/\/(?:[^/@\s]+@)?(?:(?:ssh|www)\.)?github\.com(?::\d+)?\/|(?:[^/@:\s]+@)?(?:(?:ssh|www)\.)?github\.com:)(.+)$/i;
+const githubRepoPattern = /^(?:https:\/\/(?:[^/@\s]+@)?(?:www\.)?github\.com(?::443)?\/|ssh:\/\/(?:[^/@\s]+@)?(?:github\.com(?::22)?|ssh\.github\.com(?::443)?)\/|git:\/\/github\.com(?::9418)?\/|(?:[^/@:\s]+@)?github\.com:)(.+)$/i;
 
 const repoKey = (repo: string) => {
   const url = repoUrl(repo);
@@ -210,8 +222,8 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string): Pr
 async function checkedOutFromCache(dir: string, repo: string, ref: SourceRef, good: Good | undefined) {
   const commit = ref.ref.toLowerCase();
   if (!commitSha.test(commit)) return false;
-  const goodPin = pinnedCommit(good);
-  const fetchedHere = (goodPin?.repo === repo && goodPin.commit === commit) || (await hasPinRef(dir, repo, commit));
+  const goodCommit = verifiedGoodCommit(good);
+  const fetchedHere = (goodCommit?.repo === repo && goodCommit.commit === commit) || (await hasPinRef(dir, repo, commit));
   if (!fetchedHere) return false;
   return (await git(dir, "checkout", "-q", "--detach", commit)).ok;
 }

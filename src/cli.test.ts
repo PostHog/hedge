@@ -418,8 +418,8 @@ describe("hedge doctor and pack sources", () => {
     });
   }
 
-  for (const repo of ["https://evil-github.com:443/someone/Profile.git", "git@notgithub.com:someone/Profile.git"]) {
-    test(`still notes an external host ${repo} that only ends in github.com`, async () => {
+  for (const repo of ["https://evil-github.com:443/someone/Profile.git", "git@notgithub.com:someone/Profile.git", "https://github.com:8443/someone/Profile.git"]) {
+    test(`still notes an external host or non-standard endpoint ${repo}`, async () => {
       const home = await applied(() => ({ name: "external", repo, ref: "main" }), "git@github.com:someone/profile.git");
       expect((await hedge(["doctor"], home)).output).toContain("Note: The pack source external is not pinned to a commit SHA.");
     });

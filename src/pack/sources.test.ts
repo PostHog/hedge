@@ -380,6 +380,36 @@ describe("fetchSource", () => {
     expect(afterBranch.stale).toContain(`could not fetch ${commitA1}`);
   });
 
+  test("loads a pinned commit offline right after loading that exact commit through a branch", async () => {
+    const repo = await packRepo("Branch rules v1.");
+    const commit = await spawnGit(repo, "rev-parse", "HEAD");
+    const cache = temp.make("cache-");
+    const online = await fetchSource({ name: "team", repo, ref: "main" }, cache);
+    if ("error" in online) throw new Error(online.error);
+    rmSync(repo, { recursive: true, force: true });
+    const pinned = await fetchSource({ name: "team", repo, ref: commit }, cache);
+    if ("error" in pinned) throw new Error(pinned.error);
+    expect([pinned.packs[0]?.manifest.summary, pinned.stale]).toEqual(["Branch rules v1.", undefined]);
+  });
+
+  test("preserves usable fallback packs as stale when pin migration cannot write refs offline", async () => {
+    const repo = await packRepo("Legacy pinned v1.");
+    const commit = await spawnGit(repo, "rev-parse", "HEAD");
+    const cache = temp.make("cache-");
+    const dir = await legacyPinnedCache(cache, "team", repo, commit);
+    rmSync(repo, { recursive: true, force: true });
+    const refsDir = join(dir, ".git", "refs");
+    setDirModes(refsDir, 0o555);
+    try {
+      const fallback = await fetchSource({ name: "team", repo, ref: "main" }, cache);
+      if ("error" in fallback) throw new Error(fallback.error);
+      expect(fallback.packs[0]?.manifest.summary).toBe("Legacy pinned v1.");
+      expect(fallback.stale).toContain("could not fetch main");
+    } finally {
+      setDirModes(refsDir, 0o755);
+    }
+  });
+
   test("does not report success when Git cannot record a pin ref during fetch or refresh", async () => {
     const repo = await packRepo("Team rules v1.");
     const commit1 = await spawnGit(repo, "rev-parse", "HEAD");
