@@ -73,10 +73,11 @@ export function captureWith(timer: Timer): Capture {
       release();
       if (!process.listenerCount(name)) process.kill(process.pid, name);
     };
+    const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
     const release = () => {
-      process.off("SIGINT", interrupted).off("SIGTERM", interrupted).off("SIGHUP", interrupted);
+      for (const name of stopSignals) process.off(name, interrupted);
     };
-    process.on("SIGINT", interrupted).on("SIGTERM", interrupted).on("SIGHUP", interrupted);
+    for (const name of stopSignals) process.on(name, interrupted);
     let expired = false;
     let cancel = () => {};
     try {

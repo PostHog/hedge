@@ -80,8 +80,10 @@ async function listPacks(context: ChangeContext) {
     if (on.has(manifest.name) && partly.has(manifest.name))
       for (const name of context.profile.packs.filter((name) => aliases.get(name)?.pack === manifest.name)) context.print(`      The old name ${name} selects only: ${aliases.get(name)!.workflows.join(", ")}. Add ${manifest.name} for the whole pack.`);
     const workflows = context.plan.workflows.filter((workflow) => workflow.pack === manifest.name);
+    const firstHuman = new Map<string, Plan["human"][number]>();
+    for (const step of context.plan.human) if (step.pack === manifest.name && !firstHuman.has(step.id)) firstHuman.set(step.id, step);
     const waitsOn = (steps: typeof failing) => {
-      const ids = new Set(steps.map((step) => step.id));
+      const ids = new Set(steps.filter((step) => firstHuman.get(step.id) === step).map((step) => step.id));
       const waiting = new Set(steps.map((step) => step.workflow).filter((id): id is string => id !== undefined));
       for (const item of [...context.plan.steps, ...context.plan.jobs, ...context.plan.config]) {
         if (item.pack === manifest.name && item.after && ids.has(item.after) && item.workflow) waiting.add(item.workflow);

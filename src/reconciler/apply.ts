@@ -467,12 +467,13 @@ async function runDetached(command: string[], env: Record<string, string | undef
     release();
     if (!process.listenerCount(name)) process.kill(process.pid, name);
   };
+  const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
   const release = () => {
     signal.removeEventListener("abort", onAbort);
-    process.off("SIGINT", interrupted).off("SIGTERM", interrupted).off("SIGHUP", interrupted);
+    for (const name of stopSignals) process.off(name, interrupted);
   };
   signal.addEventListener("abort", onAbort, { once: true });
-  process.on("SIGINT", interrupted).on("SIGTERM", interrupted).on("SIGHUP", interrupted);
+  for (const name of stopSignals) process.on(name, interrupted);
   if (signal.aborted) {
     release();
     return 124;
