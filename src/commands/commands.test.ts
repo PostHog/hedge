@@ -289,6 +289,20 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
       try { process.kill(-Number((await started).trim()), "SIGKILL"); } catch {}
     }
   });
+
+  test("stops a background child a human step leaves behind after exiting", async () => {
+    const { home } = await machineWithProfile();
+    const [ready, gone] = [join(home, "ready"), join(home, "gone")];
+    expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+    await withTeamPack(home, { workflows: [flow("allowlist")], human: [humanStep("allowlist", '{ sleep 30 & } 3>"$HOME/gone"; echo $! > "$HOME/ready"; exit 0', "allowlist")] });
+    const [holderGone, started] = [readFile(gone, "utf8"), readFile(ready, "utf8")];
+    try {
+      expect((await hedge(home, ["packs"])).output).toContain("  ✓ team  Team rules.\n      Workflows: allowlist on");
+      expect(await holderGone).toBe("");
+    } finally {
+      await endHolder(started);
+    }
+  });
 });
 
 describe("hedge packs with a profile that still names an old pack", () => {

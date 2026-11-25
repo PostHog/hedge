@@ -484,6 +484,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
   } catch {
     return 127;
   } finally {
+    endGroup(stopSignal ?? "SIGTERM");
     release();
   }
 }
