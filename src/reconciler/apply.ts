@@ -469,10 +469,10 @@ async function runDetached(command: string[], env: Record<string, string | undef
   };
   const release = () => {
     signal.removeEventListener("abort", onAbort);
-    process.off("SIGINT", interrupted).off("SIGTERM", interrupted);
+    process.off("SIGINT", interrupted).off("SIGTERM", interrupted).off("SIGHUP", interrupted);
   };
   signal.addEventListener("abort", onAbort, { once: true });
-  process.on("SIGINT", interrupted).on("SIGTERM", interrupted);
+  process.on("SIGINT", interrupted).on("SIGTERM", interrupted).on("SIGHUP", interrupted);
   if (signal.aborted) {
     release();
     return 124;
@@ -485,6 +485,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
     return 127;
   } finally {
     endGroup(stopSignal ?? "SIGTERM");
+    endGroup("SIGKILL");
     release();
   }
 }

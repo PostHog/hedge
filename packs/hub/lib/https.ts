@@ -161,7 +161,7 @@ async function trusted(hub: HttpsHub): Promise<number> {
     if (folder) rmSync(folder, { recursive: true, force: true });
   };
   const release = () => {
-    process.off("SIGINT", interrupted).off("SIGTERM", interrupted);
+    process.off("SIGINT", interrupted).off("SIGTERM", interrupted).off("SIGHUP", interrupted);
   };
   const interrupted = (signal: NodeJS.Signals) => {
     stopped = signal;
@@ -169,7 +169,7 @@ async function trusted(hub: HttpsHub): Promise<number> {
     release();
     if (!process.listenerCount(signal)) process.kill(process.pid, signal);
   };
-  process.on("SIGINT", interrupted).on("SIGTERM", interrupted);
+  process.on("SIGINT", interrupted).on("SIGTERM", interrupted).on("SIGHUP", interrupted);
   try {
     folder = mkdtempSync(join(tmpdir(), "hedge-hub-ca-"));
     if (stopped) return 1;

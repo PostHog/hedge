@@ -80,15 +80,24 @@ async function listPacks(context: ChangeContext) {
     if (on.has(manifest.name) && partly.has(manifest.name))
       for (const name of context.profile.packs.filter((name) => aliases.get(name)?.pack === manifest.name)) context.print(`      The old name ${name} selects only: ${aliases.get(name)!.workflows.join(", ")}. Add ${manifest.name} for the whole pack.`);
     const workflows = context.plan.workflows.filter((workflow) => workflow.pack === manifest.name);
-    const leftFor = (steps: typeof failing, workflow: Plan["workflows"][number]) => steps.some((step) => step.workflow === workflow.id);
+    const waitsOn = (steps: typeof failing) => {
+      const ids = new Set(steps.map((step) => step.id));
+      const waiting = new Set(steps.map((step) => step.workflow).filter((id): id is string => id !== undefined));
+      for (const item of [...context.plan.steps, ...context.plan.jobs, ...context.plan.config]) {
+        if (item.pack === manifest.name && item.after && ids.has(item.after) && item.workflow) waiting.add(item.workflow);
+      }
+      return waiting;
+    };
+    const failingWorkflows = waitsOn(failing);
+    const uncheckedWorkflows = waitsOn(unchecked);
     const state = (workflow: Plan["workflows"][number]) =>
       !workflow.active ? (workflow.reason && workflow.reason !== "turned off" ? `off: ${workflow.reason}` : "off")
-      : leftFor(failing, workflow) ? "needs setup"
-      : leftFor(unchecked, workflow) ? "not checked"
+      : failingWorkflows.has(workflow.id) ? "needs setup"
+      : uncheckedWorkflows.has(workflow.id) ? "not checked"
       : "on";
     if (on.has(manifest.name) && workflows.length) context.print(`      Workflows: ${workflows.map((workflow) => `${workflow.id} ${state(workflow)}`).join(", ")}`);
     if (failing.length) context.print("      Needs setup on this machine. Run hedge doctor for the steps.");
-    else if (unchecked.length) context.print("      Hedge could not check this pack's setup in time. Run hedge doctor.");
+    if (unchecked.length) context.print("      Hedge could not check this pack's setup in time. Run hedge doctor.");
     if (on.has(manifest.name)) for (const workflow of manifest.workflows ?? []) if (workflow.risk) context.print(`      Terms note for ${workflow.id}: ${workflow.risk}`);
   }
   for (const pack of missing) context.print(`  ! ${pack.name}  is in your profile, but ${pack.reason ?? "its source is not here"}`);

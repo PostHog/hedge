@@ -51,7 +51,7 @@ async function machineWithProfile(settings: Record<string, unknown> = {}) {
 }
 
 /** Puts a fetched source with a team pack in this machine's cache, and turns that pack on in the profile. */
-async function withTeamPack(home: string, parts: Pick<PackManifest, "workflows" | "human">) {
+async function withTeamPack(home: string, parts: Pick<PackManifest, "workflows" | "human" | "steps">) {
   const source = join(home, ".local/share/hedge/sources/team");
   await cachedCheckout(source, { name: "team", repo: "team/packs", ref: "main" });
   mkdirSync(join(source, "packs/team"), { recursive: true });
@@ -290,14 +290,49 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     }
   });
 
-  test("stops a background child a human step leaves behind after exiting", async () => {
+  test("stops a background child a human step leaves behind after exiting, even when it ignores SIGTERM", async () => {
     const { home } = await machineWithProfile();
     const [ready, gone] = [join(home, "ready"), join(home, "gone")];
     expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
-    await withTeamPack(home, { workflows: [flow("allowlist")], human: [humanStep("allowlist", '{ sleep 30 & } 3>"$HOME/gone"; echo $! > "$HOME/ready"; exit 0', "allowlist")] });
+    await withTeamPack(home, { workflows: [flow("allowlist")], human: [humanStep("allowlist", 'trap "" TERM; { sleep 30 & } 3>"$HOME/gone"; echo $! > "$HOME/ready"; exit 0', "allowlist")] });
     const [holderGone, started] = [readFile(gone, "utf8"), readFile(ready, "utf8")];
     try {
       expect((await hedge(home, ["packs"])).output).toContain("  ✓ team  Team rules.\n      Workflows: allowlist on");
+      expect(await holderGone).toBe("");
+    } finally {
+      await endHolder(started);
+    }
+  });
+
+  test("stops human steps when hedge packs receives SIGHUP", async () => {
+    const { home } = await machineWithProfile();
+    const { holderGone, started } = await withBlockedProbe(home);
+    const listing = Bun.spawn([process.execPath, join(engineRoot, "src/cli.ts"), "packs"], { env: { ...Bun.env, HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    try {
+      await started;
+      listing.kill("SIGHUP");
+      expect(await holderGone).toBe("");
+      expect(await listing.exited).not.toBe(0);
+    } finally {
+      listing.kill("SIGKILL");
+      await endHolder(started);
+    }
+  });
+
+  test("propagates pack-level human prerequisite timeouts to dependent workflows and prints both hints when another probe fails", async () => {
+    const { home } = await machineWithProfile();
+    const [ready, gone] = [join(home, "ready"), join(home, "gone")];
+    expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+    await withTeamPack(home, {
+      workflows: [flow("allowlist"), flow("sync")],
+      human: [humanStep("allowlist", "exit 1", "allowlist"), humanStep("sign-in", blockedProbe("-"))],
+      steps: [{ id: "sync-step", workflow: "sync", after: "sign-in", run: ["true"] }],
+    });
+    const [holderGone, started] = [readFile(gone, "utf8"), readFile(ready, "utf8")];
+    const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await started) };
+    try {
+      const output = (await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output;
+      expect(output).toContain("  ~ team  Team rules.\n      Workflows: allowlist needs setup, sync not checked\n      Needs setup on this machine. Run hedge doctor for the steps.\n      Hedge could not check this pack's setup in time. Run hedge doctor.");
       expect(await holderGone).toBe("");
     } finally {
       await endHolder(started);

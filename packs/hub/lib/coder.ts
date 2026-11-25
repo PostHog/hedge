@@ -74,9 +74,9 @@ export function captureWith(timer: Timer): Capture {
       if (!process.listenerCount(name)) process.kill(process.pid, name);
     };
     const release = () => {
-      process.off("SIGINT", interrupted).off("SIGTERM", interrupted);
+      process.off("SIGINT", interrupted).off("SIGTERM", interrupted).off("SIGHUP", interrupted);
     };
-    process.on("SIGINT", interrupted).on("SIGTERM", interrupted);
+    process.on("SIGINT", interrupted).on("SIGTERM", interrupted).on("SIGHUP", interrupted);
     let expired = false;
     let cancel = () => {};
     try {
