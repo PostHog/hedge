@@ -272,7 +272,7 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     }
   });
 
-  test("resolves probe executables via PATH, allows execute-only binaries, and rejects no-shebang scripts, matching hedge doctor", async () => {
+  test("resolves probe executables via PATH, allows execute-only binaries, and rejects no-shebang scripts and leading --, matching hedge doctor", async () => {
     const { home } = await machineWithProfile();
     const bin = join(home, "bin");
     mkdirSync(bin, { recursive: true });
@@ -283,19 +283,20 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     copyFileSync(Bun.which("true")!, execOnly);
     chmodSync(execOnly, 0o111);
     await withTeamPack(home, {
-      workflows: [flow("external"), flow("builtin"), flow("noshebang"), flow("execonly")],
+      workflows: [flow("external"), flow("builtin"), flow("noshebang"), flow("execonly"), flow("dashdash")],
       human: [
         { id: "external", say: "Check external set.", probe: ["set", "--hedge-external-flag"], workflow: "external" },
         { id: "builtin", say: "Check builtin export.", probe: ["export", "HEDGE_BUILTIN=1"], workflow: "builtin" },
         { id: "noshebang", say: "Check plain script.", probe: [noShebang], workflow: "noshebang" },
         { id: "execonly", say: "Check execute-only binary.", probe: [execOnly], workflow: "execonly" },
+        { id: "dashdash", say: "Check leading --.", probe: ["--", "true"], workflow: "dashdash" },
       ],
     });
     const prevPath = process.env.PATH;
     process.env.PATH = `${bin}:${prevPath ?? ""}`;
     try {
       const output = (await hedge(home, ["packs"])).output;
-      expect(output).toContain(`  ~ team  Team rules.\n      Workflows: external on, builtin needs setup, noshebang needs setup, execonly on\n${needsSetup}`);
+      expect(output).toContain(`  ~ team  Team rules.\n      Workflows: external on, builtin needs setup, noshebang needs setup, execonly on, dashdash needs setup\n${needsSetup}`);
     } finally {
       if (prevPath === undefined) delete process.env.PATH;
       else process.env.PATH = prevPath;

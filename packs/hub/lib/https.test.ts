@@ -206,7 +206,10 @@ test("trusted removes its temporary certificate directory and stops security whe
   const dir = temp.make("hedge-sig-");
   const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
   expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
-  const sandbox = trustSandbox({ trusted: true, securityBody: `#!/bin/sh\n{ /bin/sleep 30 & } 3>"${gone}"\necho $! > "${ready}"\nwait\n` });
+  const sandbox = trustSandbox({
+    trusted: true,
+    securityBody: `#!/bin/sh\n[ "$1" = "verify-cert" ] && [ "$2" = "-l" ] && [ "$3" = "-L" ] && [ "$4" = "-p" ] && [ "$5" = "ssl" ] && [ "$6" = "-c" ] && [ -s "$7" ] || exit 2\n{ /bin/sleep 30 & } 3>"${gone}"\necho $! > "${ready}"\nwait\n`,
+  });
   const started = readFile(ready, "utf8");
   const holderGone = readFile(gone, "utf8");
   const child = sandbox.spawn();

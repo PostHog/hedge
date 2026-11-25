@@ -1,3 +1,5 @@
+import { closeSync, writeSync } from "node:fs";
+
 export type StopSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT";
 export type Timer = (ms: number, fire: () => void) => () => void;
 
@@ -9,6 +11,7 @@ export type SupervisorHost = {
   killGroup: (signal: NodeJS.Signals) => void;
   timer: Timer;
   onSignal: (signal: StopSignal, handler: () => void) => void;
+  reportResult: (code: number) => void;
   exit: (code: number) => void;
 };
 
@@ -41,6 +44,7 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
   };
 
   if (!command.length) {
+    host.reportResult(127);
     exit(127);
     return settled;
   }
@@ -93,6 +97,7 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
   try {
     target = host.spawn(command);
   } catch {
+    host.reportResult(127);
     exit(127);
     return settled;
   }
@@ -106,17 +111,21 @@ export async function supervise(command: string[], host: SupervisorHost): Promis
   leaderDone = true;
   if (finished) return settled;
   if (!stop) {
-    forwardGroup("SIGHUP");
+    host.reportResult(code);
+    armHard();
     forwardGroup("SIGTERM");
-    exit(code);
-    return settled;
   }
   return settled;
 }
 
 if (import.meta.main) {
-  await supervise(Bun.argv.slice(2), {
-    spawn: (command) => Bun.spawn(command, { stdio: ["ignore", "ignore", "ignore"] }),
+  let command: string[] = [];
+  try {
+    const parsed = JSON.parse(Bun.argv[2] ?? "[]") as unknown;
+    if (Array.isArray(parsed) && parsed.every((arg) => typeof arg === "string")) command = parsed;
+  } catch {}
+  await supervise(command, {
+    spawn: (argv) => Bun.spawn(argv, { stdio: ["ignore", "ignore", "ignore"] }),
     killGroup: (signal) => {
       try {
         process.kill(-process.pid, signal);
@@ -124,6 +133,14 @@ if (import.meta.main) {
     },
     timer: realTimer,
     onSignal: (signal, handler) => void process.on(signal, handler),
+    reportResult: (code) => {
+      try {
+        writeSync(1, `${code}\n`);
+      } catch {}
+      try {
+        closeSync(1);
+      } catch {}
+    },
     exit: (code) => process.exit(code),
   });
 }

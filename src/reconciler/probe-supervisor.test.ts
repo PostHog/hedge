@@ -43,10 +43,11 @@ await supervise(${JSON.stringify(command)}, {
   timer: (_ms, fire) => {
     const entry = { fire, cancelled: false };
     timers.push(entry);
-    write("ready");
+    write("armed");
     return () => { entry.cancelled = true; };
   },
   onSignal: (signal, handler) => void process.on(signal, handler),
+  reportResult: (code) => write("result " + code),
   exit: (code) => process.exit(code),
 });
 `;
@@ -59,18 +60,32 @@ await supervise(${JSON.stringify(command)}, {
   const reader = proc.stdout.getReader();
   const decoder = new TextDecoder();
   let buffered = "";
-  const waitArmed = async () => {
+  const armedWaiters: Array<() => void> = [];
+  let armedCount = 0;
+  let resolveResult!: (code: number) => void;
+  const result = new Promise<number>((resolve) => (resolveResult = resolve));
+  void (async () => {
     for (;;) {
-      const nl = buffered.indexOf("\n");
-      if (nl !== -1) {
-        buffered = buffered.slice(nl + 1);
-        return;
-      }
       const { value, done } = await reader.read();
-      if (done) return;
+      if (done) break;
       buffered += decoder.decode(value, { stream: true });
+      for (let nl = buffered.indexOf("\n"); nl !== -1; nl = buffered.indexOf("\n")) {
+        const line = buffered.slice(0, nl);
+        buffered = buffered.slice(nl + 1);
+        if (line === "armed") {
+          const waiter = armedWaiters.shift();
+          if (waiter) waiter();
+          else armedCount++;
+        } else if (line.startsWith("result ")) {
+          resolveResult(Number(line.slice("result ".length)));
+        }
+      }
     }
-  };
+  })();
+  const waitArmed = () =>
+    armedCount > 0
+      ? (armedCount--, Promise.resolve())
+      : new Promise<void>((resolve) => armedWaiters.push(resolve));
   const advance = async () => {
     await waitArmed();
     proc.stdin.write("tick\n");
@@ -82,7 +97,7 @@ await supervise(${JSON.stringify(command)}, {
     } catch {}
     proc.kill("SIGKILL");
   };
-  return { proc, advance, cleanup };
+  return { proc, result, advance, cleanup };
 }
 
 function mkfifo(...paths: string[]) {
@@ -257,44 +272,88 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
     }
   });
 
-  test("exits with the probe command's exact exit status and cleans up any stray background child on normal exit", async () => {
-    const exitSeven = Bun.spawn([process.execPath, supervisorPath, "sh", "-c", "exit 7"], {
+  test("reports exact probe exit code, lets stray descendants run SIGTERM cleanup, and kills descendants ignoring SIGHUP and SIGTERM", async () => {
+    const exitSeven = Bun.spawn([process.execPath, supervisorPath, JSON.stringify(["sh", "-c", "exit 7"])], {
       stdin: "ignore",
-      stdout: "ignore",
+      stdout: "pipe",
       stderr: "ignore",
       detached: true,
     });
-    expect(await exitSeven.exited).toBe(7);
+    expect((await new Response(exitSeven.stdout).text()).trim()).toBe("7");
+    try {
+      process.kill(-exitSeven.pid, "SIGKILL");
+    } catch {}
 
-    const dir = temp.make("sup-orphan-");
-    const [ready, gate, gone] = [join(dir, "ready"), join(dir, "gate"), join(dir, "gone")];
-    mkfifo(ready, gate, gone);
+    const leadingDash = Bun.spawn([process.execPath, supervisorPath, JSON.stringify(["--", "true"])], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+      detached: true,
+    });
+    expect((await new Response(leadingDash.stdout).text()).trim()).toBe("127");
+    expect(await leadingDash.exited).toBe(127);
+
+    const dir = temp.make("sup-normal-");
+    const [ready, gate, trapGate, cleaned, gone] = [
+      join(dir, "ready"),
+      join(dir, "gate"),
+      join(dir, "trap-gate"),
+      join(dir, "cleaned"),
+      join(dir, "gone"),
+    ];
+    mkfifo(ready, gate, trapGate, cleaned, gone);
     const started = readFile(ready, "utf8");
+    const sawCleaned = readFile(cleaned, "utf8");
     const holderGone = readFile(gone, "utf8");
-    const childScript = `exec 3>${JSON.stringify(gone)}; echo $$ > ${JSON.stringify(ready)}; exec sleep 30`;
-    const proc = Bun.spawn(
-      [
-        process.execPath,
-        supervisorPath,
-        "sh",
-        "-c",
-        'sh -c "$1" & cat "$2" >/dev/null; exit 0',
-        "probe",
-        childScript,
-        gate,
-      ],
-      { stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true },
-    );
+    const trapChild = `trap 'cat ${JSON.stringify(trapGate)} >/dev/null; echo cleaned > ${JSON.stringify(cleaned)}; exit 0' TERM; exec 3>${JSON.stringify(gone)}; echo $$ > ${JSON.stringify(ready)}; sleep 30 3>&- & wait`;
+    const trapSup = spawnControlledSupervisor([
+      "sh",
+      "-c",
+      'sh -c "$1" & cat "$2" >/dev/null; exit 0',
+      "probe",
+      trapChild,
+      gate,
+    ]);
     try {
       const childPid = Number((await started).trim());
       expect(childPid).toBeGreaterThan(0);
       await writeFile(gate, "go\n");
-      expect(await proc.exited).toBe(0);
+      expect(await trapSup.result).toBe(0);
+      expect(() => process.kill(childPid, 0)).not.toThrow();
+      await writeFile(trapGate, "go\n");
+      expect((await sawCleaned).trim()).toBe("cleaned");
       expect(await holderGone).toBe("");
+      await trapSup.advance();
+      expect(await trapSup.proc.exited).not.toBe(0);
     } finally {
-      try {
-        process.kill(-proc.pid, "SIGKILL");
-      } catch {}
+      trapSup.cleanup();
+    }
+
+    const dir2 = temp.make("sup-orphan-");
+    const [ready2, gate2, gone2] = [join(dir2, "ready"), join(dir2, "gate"), join(dir2, "gone")];
+    mkfifo(ready2, gate2, gone2);
+    const started2 = readFile(ready2, "utf8");
+    const holderGone2 = readFile(gone2, "utf8");
+    const stubbornChild = `trap "" HUP TERM; exec 3>${JSON.stringify(gone2)}; echo $$ > ${JSON.stringify(ready2)}; exec sleep 30`;
+    const stubbornSup = spawnControlledSupervisor([
+      "sh",
+      "-c",
+      'sh -c "$1" & cat "$2" >/dev/null; exit 0',
+      "probe",
+      stubbornChild,
+      gate2,
+    ]);
+    try {
+      const childPid = Number((await started2).trim());
+      expect(childPid).toBeGreaterThan(0);
+      await writeFile(gate2, "go\n");
+      expect(await stubbornSup.result).toBe(0);
+      expect(() => process.kill(childPid, 0)).not.toThrow();
+      await stubbornSup.advance();
+      expect(await holderGone2).toBe("");
+      expect(await stubbornSup.proc.exited).not.toBe(0);
+    } finally {
+      stubbornSup.cleanup();
     }
   });
 });
