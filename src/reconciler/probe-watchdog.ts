@@ -102,6 +102,8 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
                   try {
                     process.kill(entry.pid, "SIGKILL");
                   } catch {}
+                  sweptDead = true;
+                  await sweepDead(entry, resultReported(entry));
                 } else {
                   sweptDead = true;
                   await sweepDead(entry, resultReported(entry));
