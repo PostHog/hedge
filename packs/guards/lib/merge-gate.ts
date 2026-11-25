@@ -277,7 +277,8 @@ function mcpIntent(tool: string, input: Record<string, unknown>): MergeIntent {
   if (reads.test(name)) return { targets: [] };
   const merges = /merge/i.test(name) && !/disable|update_pull_request_branch/i.test(name);
   const writesComment = /comment|review|respond/i.test(name);
-  if (!merges && !(writesComment && strings(input).some((text) => enqueueLine.test(text)))) return { targets: [] };
+  const texts = t3Tool.test(tool) ? strings(input).flatMap((text) => [text, text.trim()]) : strings(input);
+  if (!merges && !(writesComment && texts.some((text) => enqueueLine.test(text)))) return { targets: [] };
   if (!merges && (/review/i.test(name) || input.reviewThreadId !== undefined)) return { targets: [], refusal: otherEndpointReason };
   const named = t3Tool.test(tool) ? t3Pr(name, input) : mcpPr(input);
   return named ? { targets: [{ ...named, via: merges ? tool : `${tool} comment` }] } : { targets: [], refusal: unnamedReason(merges ? "merges a PR" : "posts `/trunk merge`") };

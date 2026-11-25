@@ -206,6 +206,13 @@ describe("which calls enqueue or merge", () => {
     expect(mcp("mcp__t3-code__comment_on_issue", { url: "https://linear.app/example/issue/ENG-7", body: "/trunk merge" }).refusal).toContain("without naming the PR");
   });
 
+  test.each([["\r/trunk merge"], ["\v/trunk merge"], ["\uFEFF/trunk merge"], ["\u00A0\u2028/trunk merge"]])("a T3 body that T3 trims to /trunk merge counts as one: %j", (body) => {
+    const pr = { repository: "example/product", number: 7 };
+    expect(mcp("mcp__t3-code__pull_request_respond", { ...pr, body })).toEqual({ targets: [target("example/product", 7)] });
+    expect(mcp("mcp__t3-code__comment_on_issue", { url: "https://github.com/example/product/pull/7", body })).toEqual({ targets: [target("example/product", 7)] });
+    expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "comment", body }).refusal).toBe(otherEndpointReason);
+  });
+
   test("a T3 call checks the PR T3 merges, not one that a GitHub-style key beside it names", () => {
     const decoys = { pull_number: 9, pullNumber: 9, owner: "own", repo: "tooling", repository_full_name: "own/tooling" };
     expect(mcp("mcp__t3-code__pull_request_merge", { ...decoys, repository: "example/product", number: 7, expectedHeadSha: head })).toEqual({ targets: [target("example/product", 7)] });
