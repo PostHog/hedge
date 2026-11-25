@@ -831,7 +831,7 @@ describe("hedge triage", () => {
     const schemeSent: Sent[] = [];
     const schemeIo = scripted([]);
     const schemeCode = await main(
-      ["triage", "--send", "--note", "https://alice:SyntheticUrlPass123@example.com/repo"],
+      ["triage", "--send", "--note", "https://alice:SyntheticUrlPass123@example.com/repo token Bearer secretToken12345"],
       {
         home: schemeHome,
         engineRoot,
@@ -852,10 +852,10 @@ describe("hedge triage", () => {
     const schemeIssue = schemeSent.find((call) => call.command[1] === "issue")!;
     const schemeTitle = schemeIssue.command[schemeIssue.command.indexOf("--title") + 1]!;
     const schemeBody = schemeIssue.input!;
-    expect(schemeTitle).toContain("<credentials>@example.com/repo");
-    expect(schemeBody).toContain("<credentials>@example.com/repo");
+    expect(schemeTitle).toContain("<credentials>@example.com/repo token Bearer <token>");
+    expect(schemeBody).toContain("<credentials>@example.com/repo token Bearer <token>");
     expect(schemeBody).toContain("The pack <branch> <private source> is not pinned to a commit SHA.");
-    for (const leaked of ["SyntheticUrlPass123", "secret-alias"]) {
+    for (const leaked of ["SyntheticUrlPass123", "secretToken12345", "secret-alias"]) {
       expect(schemeTitle).not.toContain(leaked);
       expect(schemeBody).not.toContain(leaked);
     }

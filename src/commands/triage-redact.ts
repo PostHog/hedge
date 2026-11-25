@@ -379,6 +379,25 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
 
   const bearerMaskedRegex = /\b(Bearer|Basic|token)(\s+)([A-Za-z0-9._~+/=-]+)/gi;
 
+  const redactBearerMasked = (value: string, matchedOriginals: string[]) => {
+    let out = "";
+    let pos = 0;
+    bearerMaskedRegex.lastIndex = 0;
+    for (let match = bearerMaskedRegex.exec(value); match !== null; match = bearerMaskedRegex.exec(value)) {
+      const kind = match[1]!;
+      const space = match[2]!;
+      const body = match[3]!;
+      const expanded = body.replace(tokenRegex, (_tok, idx) => matchedOriginals[Number(idx)] ?? "");
+      if (/^[A-Za-z0-9._~+/=-]{12,}/.test(expanded)) {
+        out += value.slice(pos, match.index) + `${kind}${space}<token>`;
+        pos = match.index + match[0].length;
+      } else {
+        bearerMaskedRegex.lastIndex = match.index + kind.length + space.length;
+      }
+    }
+    return pos === 0 ? value : out + value.slice(pos);
+  };
+
   const passOne = (value: string) => {
     const preMasked = applyRules(value, fixedSecretRules);
     const matchedOriginals: string[] = [];
@@ -389,19 +408,30 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
       matchedLabels.push(as);
       return `${prefix}${index}${suffix}`;
     });
-    const bearerRedacted = stripHome(masked).replace(bearerMaskedRegex, (whole, kind, space, body) => {
-      const expanded = String(body).replace(tokenRegex, (_tok, idx) => matchedOriginals[Number(idx)] ?? "");
-      return /^[A-Za-z0-9._~+/=-]{12,}/.test(expanded) ? `${kind}${space}<token>` : whole;
-    });
+    const bearerRedacted = redactBearerMasked(stripHome(masked), matchedOriginals);
     let next = applyRules(bearerRedacted, preRandomRules);
     next = replaceMaskedRandom(next, matchedOriginals);
     return next.replace(tokenRegex, (_tok, idx) => matchedLabels[Number(idx)] ?? "");
   };
 
   const result = passOne(text);
+  if (!after.length) return result;
   const sanitizedAfter = after.map((entry) => ({ ...entry, as: sanitizeLabel(entry) }));
   const exempt = new Set([...redactorLabels, ...labels, ...sanitizedAfter.map((entry) => entry.as)]);
-  const presentExempt = [...exempt].filter((label) => result.includes(label)).sort((a, b) => b.length - a.length);
+  const angleExempt = new Set<string>();
+  const otherExempt: string[] = [];
+  for (const label of exempt) {
+    if (/^<[^<>\r\n]+>$/.test(label)) angleExempt.add(label);
+    else otherExempt.push(label);
+  }
+  const presentSet = new Set<string>();
+  for (const match of result.matchAll(/<[^<>\r\n]+>/g)) {
+    if (angleExempt.has(match[0])) presentSet.add(match[0]);
+  }
+  for (const label of otherExempt) {
+    if (result.includes(label)) presentSet.add(label);
+  }
+  const presentExempt = [...presentSet].sort((a, b) => b.length - a.length);
   const afterSpellings = compileSpellings(sanitizedAfter, passOne, exempt, presentExempt);
   return applySpellings(result, afterSpellings, exempt);
 }

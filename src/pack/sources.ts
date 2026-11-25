@@ -259,7 +259,8 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
       if (savedFetchHead) await restoreFetchHead(dir, savedFetchHead);
       return fallBack(ref, dir, repo, effectiveRepo, good, `could not record ${ref.ref} from ${ref.repo}: ${saveError}`, loadLimitMs, before, preserveBefore, legacyOk && effectiveRepo === effectiveBefore, isBranch);
     }
-    if (savedFetchHead) await restoreFetchHead(dir, savedFetchHead);
+    const keepBranchFetchHead = isBranch && good !== undefined && good.repo === repo && effectiveRepo === effectiveBefore;
+    if (savedFetchHead && !keepBranchFetchHead) await restoreFetchHead(dir, savedFetchHead);
     return fallBack(ref, dir, repo, effectiveRepo, good, `${ref.ref} from ${ref.repo} does not load: ${loaded.error}`, loadLimitMs, before, preserveBefore, legacyOk && effectiveRepo === effectiveBefore, isBranch);
   }
   if (savedFetchHead) await restoreFetchHead(dir, savedFetchHead);

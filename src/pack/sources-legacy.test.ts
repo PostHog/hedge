@@ -318,6 +318,22 @@ esac
     expect(readFileSync(join(fhCache, "team", ".git", "FETCH_HEAD"), "utf8")).toBe(beforeFh);
     expect(await followsBranch({ name: "team", repo: fhRepo, ref: "main" }, fhCache)).toBe(true);
 
+    const brokenRelRepo = await packRepo("Main v1.");
+    await spawnGit(brokenRelRepo, "checkout", "-q", "-b", "release");
+    writeFileSync(join(brokenRelRepo, "packs/team/pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Broken release." }));
+    await spawnGit(brokenRelRepo, "commit", "-q", "-am", "broken release");
+    const brokenRelCache = temp.make("cache-broken-release-fh-");
+    expect("error" in (await fetchSource({ name: "team", repo: brokenRelRepo, ref: "main" }, brokenRelCache))).toBe(false);
+    const brokenRelRes = await fetchSource({ name: "team", repo: brokenRelRepo, ref: "release" }, brokenRelCache);
+    if ("error" in brokenRelRes) throw new Error(brokenRelRes.error);
+    expect(brokenRelRes.stale).toContain("does not load");
+    expect(readFileSync(join(brokenRelCache, "team", ".git", "FETCH_HEAD"), "utf8")).toContain("\tbranch 'release' of ");
+    const recordPath = join(brokenRelCache, "team", ".git", "hedge-source.json");
+    const record = JSON.parse(readFileSync(recordPath, "utf8")) as Record<string, unknown>;
+    delete record.askedBranch;
+    writeFileSync(recordPath, JSON.stringify(record) + "\n");
+    expect(await followsBranch({ name: "team", repo: brokenRelRepo, ref: "release" }, brokenRelCache)).toBe(true);
+
     const roRepo = await packRepo("Read-only FH.");
     const roCache = temp.make("cache-ro-fh-");
     expect("error" in (await fetchSource({ name: "team", repo: roRepo, ref: "main" }, roCache))).toBe(false);
