@@ -105,11 +105,11 @@ export async function fakeGitHub(home: string, fixture: GitHubFixture): Promise<
   await writeFile(join(bin, "gh"), `#!/bin/sh
 dir="$(dirname "$0")"
 if [ "$2" != graphql ]; then
-  for arg; do case "$arg" in --paginate) paginate=1 ;; '.[]') each=1 ;; repos/*) path=$arg ;; esac; done
+  for arg; do case "$arg" in --paginate) paginate=1 ;; '.[] | tojson') each=1 ;; repos/*) path=$arg ;; esac; done
   echo "$path" >> "$dir/rest.log"
   base="$dir/rest-$(printf '%s' "$path" | sed 's/[?].*//' | tr / -)"
   if [ -f "$base.page-001.ndjson" ]; then
-    [ -n "\${each:-}" ] || { echo "fake gh: a list read needs --jq .[]" >&2; exit 1; }
+    [ -n "\${each:-}" ] || { echo "fake gh: a list read needs --jq '.[] | tojson'" >&2; exit 1; }
     if [ -n "\${paginate:-}" ]; then cat "$base".page-*.ndjson; else cat "$base.page-001.ndjson"; fi
     exit 0
   fi

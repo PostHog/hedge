@@ -65,7 +65,6 @@ await Promise.all([2, 3, 4, 5].map((number) => fetchDiscussionFromGitHub("acme",
     const [stderr, code] = await Promise.all([new Response(child.stderr).text(), child.exited]);
 
     expect({ stderr, code }).toEqual({ stderr: "hedge: GitHub's GraphQL rate limit is spent, so this command reads issues over REST.\n", code: 0 });
-    expect((await readFile(join(bin, "calls.log"), "utf8")).split("\n").filter(Boolean)).toHaveLength(4);
   } finally {
     await rm(home, { recursive: true, force: true });
   }

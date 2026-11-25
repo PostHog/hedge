@@ -146,7 +146,7 @@ test("hedge frontier reads the map over REST, every page of it, with the same re
   ]);
 });
 
-test("hedge frontier over REST refuses a pull request number, as GraphQL does", async () => {
+test("hedge frontier over REST refuses a pull request number", async () => {
   const home = await temporaryHome();
   const bin = await fakeGitHub(home, { issues: [], pullRequests: ["acme/maps#9"], graphqlError: rateLimited });
 
@@ -164,5 +164,19 @@ test("hedge frontier fails on a secondary rate limit or any other GraphQL error,
 
     expect(result).toEqual({ stdout: "", stderr: `hedge: gh api failed: gh: ${error}\n`, code: 1 });
     expect(await Bun.file(join(bin, "rest.log")).exists()).toBe(false);
+  }
+});
+
+test("hedge frontier lists a ticket's blockers by number, whatever order GitHub returns them in, over GraphQL and over REST", async () => {
+  const repository = "acme/maps";
+  const blocked = issueNode(repository, 2, { title: "Ship it", blockedBy: [{ number: 5, state: "OPEN", repository }, { number: 3, state: "OPEN", repository }] });
+  const fixture = { issues: [issueNode(repository, 1, { title: "Map", children: [blocked] })] };
+  for (const graphqlError of [undefined, rateLimited]) {
+    const home = await temporaryHome();
+    const bin = await fakeGitHub(home, { ...fixture, graphqlError });
+
+    const result = await runPackCommand("frontier", ["acme/maps#1"], { HOME: home, PATH: `${bin}:${Bun.env.PATH}`, HEDGE_SETTINGS: "{}" });
+
+    expect(result.stdout).toContain("  #2 task: Ship it (blocked by #3, #5)\n");
   }
 });

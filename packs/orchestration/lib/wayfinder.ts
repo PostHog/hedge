@@ -157,7 +157,7 @@ async function restGetIssue(owner: string, repo: string, number: number): Promis
 }
 
 async function restList<T>(path: string): Promise<T[]> {
-  const lines = await gh(["api", "--paginate", "--jq", ".[]", `${path}?per_page=100`]);
+  const lines = await gh(["api", "--paginate", "--jq", ".[] | tojson", `${path}?per_page=100`]);
   return lines.split("\n").filter(Boolean).map((line) => JSON.parse(line) as T);
 }
 
