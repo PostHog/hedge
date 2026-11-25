@@ -537,6 +537,29 @@ describe("hedge triage", () => {
     expect(body).not.toContain(right);
     expect(body).not.toContain("/work+repo");
   });
+
+  test("redacts a longer overlapping private source repo even when an earlier shorter user name overlaps its prefix", async () => {
+    const home = temp.make("home-");
+    const inherited = temp.make("inherited-profile-");
+    await spawnGit(inherited, "init", "-q");
+    writeFileSync(
+      join(inherited, "hedge.json"),
+      JSON.stringify({ schema: 1, engine: { repo: "PostHog/hedge", ref: "main", channel: "track" }, sources: [{ name: "team", repo: "Person/confidential-releases", ref: "main" }], packs: [], plan: "both", settings: {}, workflows: {} }),
+    );
+    const sent: Sent[] = [];
+    const io = scripted([]);
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      sent.push({ command, ...(options.input === undefined ? {} : { input: options.input }) });
+      if (command[0] === "git" && command.includes("user.name")) return { code: 0, stdout: "Demo Person\n", stderr: "" };
+      if (command[0] === "git") return spawnRunner(command, options);
+      return capture([], undefined)(command, options);
+    };
+    const code = await main(["triage", "--send", "--note", "Checked out Demo Person/confidential-releases"], { home, engineRoot, platform: "darwin", env: { HEDGE_PROFILE_DIR: inherited }, print: io.terminal.print, terminal: io.terminal, capture: runRealGit, hostname: () => "noras-mbp.local", run: async () => 0 });
+    expect(code).toBe(0);
+    const body = sent.find((call) => call.command[1] === "issue")!.input!;
+    expect(body).toContain("Checked out Demo <private source>");
+    expect(body).not.toContain("confidential-releases");
+  });
 });
 
 describe("hedge setup and triage", () => {

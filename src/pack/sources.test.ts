@@ -1126,6 +1126,45 @@ esac
     if ("error" in hex40Online) throw new Error(hex40Online.error);
     expect(await followsBranch({ name: "team", repo: hex40Repo, ref: hex40Branch }, hex40Cache)).toBe(true);
     expect(await followsBranch({ name: "team", repo: hex40Repo, ref: `refs/heads/${hex40Branch}` }, hex40Cache)).toBe(true);
+
+    const tipBranchRepo = await packRepo("Tip-named branch v1.");
+    const tipSha = await spawnGit(tipBranchRepo, "rev-parse", "HEAD");
+    await spawnGit(tipBranchRepo, "checkout", "-q", "-b", tipSha);
+    const tipCache = temp.make("cache-tip-pin-");
+    expect("error" in (await fetchSource({ name: "team", repo: tipBranchRepo, ref: `refs/heads/${tipSha}` }, tipCache))).toBe(false);
+    expect(await followsBranch({ name: "team", repo: tipBranchRepo, ref: `refs/heads/${tipSha}` }, tipCache)).toBe(true);
+    expect("error" in (await fetchSource({ name: "team", repo: tipBranchRepo, ref: tipSha }, tipCache))).toBe(false);
+    expect(await followsBranch({ name: "team", repo: tipBranchRepo, ref: tipSha }, tipCache)).toBe(false);
+
+    const tagToBranchRepo = await packRepo("Tag v1 good.");
+    const tagCache = temp.make("cache-tag-to-branch-");
+    expect("error" in (await fetchSource({ name: "team", repo: tagToBranchRepo, ref: "v1" }, tagCache))).toBe(false);
+    expect(await followsBranch({ name: "team", repo: tagToBranchRepo, ref: "v1" }, tagCache)).toBe(false);
+    await spawnGit(tagToBranchRepo, "tag", "-d", "v1");
+    await spawnGit(tagToBranchRepo, "checkout", "-q", "-b", "v1");
+    writeFileSync(join(tagToBranchRepo, "packs/team/pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Broken v1 branch." }));
+    await spawnGit(tagToBranchRepo, "commit", "-q", "-am", "broken branch v1");
+    const tagBroken = await fetchSource({ name: "team", repo: tagToBranchRepo, ref: "v1" }, tagCache);
+    if ("error" in tagBroken) throw new Error(tagBroken.error);
+    expect(tagBroken.stale).toContain("does not load");
+    expect(await followsBranch({ name: "team", repo: tagToBranchRepo, ref: "v1" }, tagCache)).toBe(true);
+
+    const headMirror = await packRepo("HEAD mirror packs.");
+    const headSha = await spawnGit(headMirror, "rev-parse", "HEAD");
+    const headConfigured = "https://example.invalid/head-mirror.git";
+    const headCache = temp.make("cache-head-legacy-");
+    const headDir = join(headCache, "team");
+    mkdirSync(headDir, { recursive: true });
+    await spawnGit(headDir, "init", "-q");
+    await spawnGit(headDir, "config", `url.${headMirror}.insteadOf`, headConfigured);
+    await spawnGit(headDir, "fetch", "-q", "--depth", "1", "--no-tags", headConfigured, "HEAD");
+    await spawnGit(headDir, "checkout", "-q", "--detach", "FETCH_HEAD");
+    writeFileSync(join(headDir, ".git", "hedge-source.json"), JSON.stringify({ repo: headConfigured, ref: "HEAD", commit: headSha }) + "\n");
+    rmSync(headMirror, { recursive: true, force: true });
+    const headOffline = await fetchSource({ name: "team", repo: headConfigured, ref: "HEAD" }, headCache);
+    if ("error" in headOffline) throw new Error(headOffline.error);
+    expect(headOffline.packs[0]?.manifest.summary).toBe("HEAD mirror packs.");
+    expect(headOffline.stale).toContain("could not fetch HEAD");
   });
 });
 

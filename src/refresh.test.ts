@@ -256,4 +256,28 @@ describe("hedge refresh", () => {
     expect(await bad.hedge("refresh")).toBe(0);
     expect(bad.read(guide)).toBe("Rules v1.\n");
   });
+
+  test("refreshes a 40-character hexadecimal branch shortened to its bare name and keeps the refreshed commit available offline", async () => {
+    const hex40 = "e".repeat(40);
+    const box = await machine("main");
+    await spawnGit(box.repo, "checkout", "-q", "-b", hex40);
+    box.pin(`refs/heads/${hex40}`);
+    expect(await box.hedge("apply", "--profile", box.profile)).toBe(0);
+    expect(box.read(guide)).toBe("Rules v1.\n");
+
+    box.pin(hex40);
+    await v2(box.repo);
+    const tip2 = await spawnGit(box.repo, "rev-parse", "HEAD");
+    expect(await box.hedge("refresh")).toBe(0);
+    expect(box.read(guide)).toBe("Rules v2.\n");
+
+    rmSync(box.repo, { recursive: true, force: true });
+    box.pin(`refs/heads/${hex40}`);
+    expect(await box.hedge("apply", "--profile", box.profile)).toBe(0);
+    expect(box.read(guide)).toBe("Rules v2.\n");
+
+    box.pin(tip2);
+    expect(await box.hedge("apply", "--profile", box.profile)).toBe(0);
+    expect(box.read(guide)).toBe("Rules v2.\n");
+  });
 });

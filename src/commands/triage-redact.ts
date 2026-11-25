@@ -100,8 +100,10 @@ function encodeUri(text: string) {
 
 type CompiledMatcher = {
   ciRegex?: RegExp;
+  ciMaxLen: number;
   ciMap: Map<string, { as: string; owner: KnownName }>;
   csRegex?: RegExp;
+  csMaxLen: number;
   csMap: Map<string, { as: string; owner: KnownName }>;
 };
 
@@ -151,18 +153,63 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
   }
   const byLen = (a: { len: number; exempt?: boolean }, b: { len: number; exempt?: boolean }) => b.len - a.len || Number(Boolean(b.exempt)) - Number(Boolean(a.exempt));
   const exemptItems = presentExempt?.map((label) => ({ len: label.length, pattern: escape(label), exempt: true })) ?? [];
+  const ciSorted = [...ciItems, ...exemptItems].sort(byLen);
+  const csSorted = [...csItems, ...exemptItems].sort(byLen);
   return {
-    ...(ciItems.length ? { ciRegex: new RegExp([...ciItems, ...exemptItems].sort(byLen).map((item) => item.pattern).join("|"), "gi") } : {}),
+    ...(ciItems.length ? { ciRegex: new RegExp(ciSorted.map((item) => item.pattern).join("|"), "gi") } : {}),
+    ciMaxLen: ciSorted[0]?.len ?? 0,
     ciMap,
-    ...(csItems.length ? { csRegex: new RegExp([...csItems, ...exemptItems].sort(byLen).map((item) => item.pattern).join("|"), "g") } : {}),
+    ...(csItems.length ? { csRegex: new RegExp(csSorted.map((item) => item.pattern).join("|"), "g") } : {}),
+    csMaxLen: csSorted[0]?.len ?? 0,
     csMap,
   };
+}
+
+function replaceLongestFirst(text: string, regex: RegExp, maxLen: number, replacer: (match: string) => string): string {
+  const replaceRange = (slice: string): string => {
+    let out = "";
+    let pos = 0;
+    while (pos < slice.length) {
+      regex.lastIndex = pos;
+      const first = regex.exec(slice);
+      if (!first) break;
+      let bestStart = first.index;
+      let bestEnd = bestStart + first[0].length;
+      let bestMatch = first[0];
+      if (bestMatch.length < maxLen) {
+        let probe = bestStart + 1;
+        while (probe < bestEnd) {
+          regex.lastIndex = probe;
+          const next = regex.exec(slice);
+          if (!next || next.index >= bestEnd) break;
+          if (next[0].length > bestMatch.length) {
+            bestStart = next.index;
+            bestEnd = bestStart + next[0].length;
+            bestMatch = next[0];
+            if (bestMatch.length >= maxLen) break;
+            probe = bestStart + 1;
+          } else {
+            probe = next.index + 1;
+          }
+        }
+      }
+      if (bestStart > first.index) {
+        out += slice.slice(pos, first.index) + replaceRange(slice.slice(first.index, bestStart));
+      } else {
+        out += slice.slice(pos, bestStart);
+      }
+      out += replacer(bestMatch);
+      pos = bestEnd;
+    }
+    return pos === 0 ? slice : out + slice.slice(pos);
+  };
+  return replaceRange(text);
 }
 
 function applySpellings(text: string, matcher: CompiledMatcher, exempt?: Set<string>, skipOwner?: KnownName, onMatch?: (match: string, as: string) => string) {
   let result = text;
   if (matcher.ciRegex) {
-    result = result.replace(matcher.ciRegex, (match) => {
+    result = replaceLongestFirst(result, matcher.ciRegex, matcher.ciMaxLen, (match) => {
       if (exempt?.has(match)) return match;
       const hit = matcher.ciMap.get(match.toLowerCase());
       if (!hit || (skipOwner && hit.owner === skipOwner)) return match;
@@ -170,7 +217,7 @@ function applySpellings(text: string, matcher: CompiledMatcher, exempt?: Set<str
     });
   }
   if (matcher.csRegex) {
-    result = result.replace(matcher.csRegex, (match) => {
+    result = replaceLongestFirst(result, matcher.csRegex, matcher.csMaxLen, (match) => {
       if (exempt?.has(match)) return match;
       const hit = matcher.csMap.get(match);
       if (!hit || (skipOwner && hit.owner === skipOwner)) return match;
