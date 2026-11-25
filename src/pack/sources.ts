@@ -635,10 +635,10 @@ export async function advanceSource(ref: SourceRef, cacheRoot: string, from: str
 }
 
 async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimitMs: number): Promise<Advance> {
-  if (isInvalidRef(ref.ref)) return { state: "failed", say: `invalid ref ${JSON.stringify(ref.ref)} for ${ref.repo}` };
   const repo = repoUrl(ref.repo);
   const branch = ref.ref.replace(/^refs\/heads\//, "");
   const head = `refs/heads/${branch}`;
+  if (!branch || isInvalidRef(head)) return { state: "failed", say: `invalid ref ${JSON.stringify(ref.ref)} for ${ref.repo}` };
   const effectiveRepo = await resolvedRepoUrl(dir, repo);
   const listed = await git(dir, "ls-remote", repo, head);
   if (!listed.ok) return { state: "failed", say: `could not reach ${ref.repo}: ${listed.stderr}` };

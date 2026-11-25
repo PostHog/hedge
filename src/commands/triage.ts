@@ -177,7 +177,7 @@ function knownNames(hostname: string, machine: MachineFile | undefined, profile:
   const publicRepos = new Set([engineRepo, ...defaultSources.map((source) => source.repo)]);
   const publicSourceNames = new Set(defaultSources.map((source) => source.name));
   for (const source of [...(machine?.setup?.draft?.sources ?? []), ...(profile?.sources ?? [])]) {
-    if (typeof source.name === "string" && !publicSourceNames.has(source.name)) names.push({ text: `The pack source ${source.name}`, as: "The pack source <private source>" });
+    if (typeof source.name === "string" && !publicSourceNames.has(source.name)) names.push({ text: `The pack source ${source.name}`, as: "The pack source <private source>", after: true });
     if (typeof source.ref === "string" && !/^[0-9a-f]{40}$/i.test(source.ref)) {
       const shortRef = source.ref.replace(/^refs\/heads\//, "");
       if (shortRef !== "main" && shortRef !== "master") {

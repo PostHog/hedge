@@ -30,7 +30,7 @@ const standardRules: Rule[] = [
 
 const randomRule: Rule = [/[A-Za-z0-9+/_-]{32,}={0,2}/g, (text) => (looksRandom(text) ? "<secret>" : text)];
 const fixedSecretRules: Rule[] = secretRules.slice(0, 6);
-const contextualSecretRules: Rule[] = secretRules.slice(6);
+const contextualSecretRules: Rule[] = secretRules.slice(7);
 const allRules: Rule[] = [...secretRules, ...standardRules, randomRule];
 const preRandomRules: Rule[] = [...contextualSecretRules, ...standardRules];
 
@@ -360,6 +360,8 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     return pos === 0 ? value : out + value.slice(pos);
   };
 
+  const bearerMaskedRegex = /\b(Bearer|Basic|token)(\s+)([A-Za-z0-9._~+/=-]+)/gi;
+
   const passOne = (value: string) => {
     const preMasked = applyRules(value, fixedSecretRules);
     const matchedOriginals: string[] = [];
@@ -370,17 +372,27 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
       matchedLabels.push(as);
       return `${prefix}${index}${suffix}`;
     });
-    let next = applyRules(stripHome(masked), preRandomRules);
+    const bearerRedacted = stripHome(masked).replace(bearerMaskedRegex, (whole, kind, space, body) => {
+      const expanded = String(body).replace(tokenRegex, (_tok, idx) => matchedOriginals[Number(idx)] ?? "");
+      return /^[A-Za-z0-9._~+/=-]{12,}$/.test(expanded) ? `${kind}${space}<token>` : whole;
+    });
+    let next = applyRules(bearerRedacted, preRandomRules);
     next = replaceMaskedRandom(next, matchedOriginals);
     return next.replace(tokenRegex, (_tok, idx) => matchedLabels[Number(idx)] ?? "");
   };
 
   const result = passOne(text);
   const sanitizedAfter = after.map((entry) => ({ ...entry, as: sanitizeLabel(entry) }));
+  const phraseAfter = sanitizedAfter.filter((entry) => entry.text.startsWith("The pack source "));
+  const valueAfter = sanitizedAfter.filter((entry) => !entry.text.startsWith("The pack source "));
   const exempt = new Set([...redactorLabels, ...labels, ...sanitizedAfter.map((entry) => entry.as)]);
   const presentExempt = [...exempt].filter((label) => result.includes(label)).sort((a, b) => b.length - a.length);
-  const afterSpellings = compileSpellings(sanitizedAfter, passOne, exempt, presentExempt);
-  return applySpellings(result, afterSpellings, exempt);
+  const valueAfterSpellings = compileSpellings(valueAfter, passOne, exempt, presentExempt);
+  const afterValues = applySpellings(result, valueAfterSpellings, exempt);
+  if (!phraseAfter.length) return afterValues;
+  const phraseExempt = [...exempt].filter((label) => afterValues.includes(label)).sort((a, b) => b.length - a.length);
+  const phraseSpellings = compileSpellings(phraseAfter, passOne, exempt, phraseExempt);
+  return applySpellings(afterValues, phraseSpellings, exempt);
 }
 
 function escape(text: string) {

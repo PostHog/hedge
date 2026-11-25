@@ -283,4 +283,17 @@ describe("hedge refresh", () => {
     expect(box.read(guide)).toBe("Rules v2.\n");
     expect(box.lines.join("\n")).not.toContain("could not fetch");
   });
+
+  test("refreshes a branch whose name starts with a plus sign after shortening refs/heads/+release", async () => {
+    const box = await machine("main");
+    await spawnGit(box.repo, "checkout", "-q", "-b", "+release");
+    box.pin("refs/heads/+release");
+    expect(await box.hedge("apply", "--profile", box.profile)).toBe(0);
+    expect(box.read(guide)).toBe("Rules v1.\n");
+
+    box.pin("+release");
+    await v2(box.repo);
+    expect(await box.hedge("refresh")).toBe(0);
+    expect(box.read(guide)).toBe("Rules v2.\n");
+  });
 });

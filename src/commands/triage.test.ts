@@ -717,6 +717,58 @@ describe("hedge triage", () => {
       expect(body).not.toContain(part);
     }
   });
+
+  test("keeps full Bearer redaction when a source repo appears inside the token and redacts repos matching a source alias prefix", async () => {
+    const home = temp.make("home-");
+    const inherited = temp.make("inherited-bearer-");
+    await spawnGit(inherited, "init", "-q");
+    writeFileSync(
+      join(inherited, "hedge.json"),
+      JSON.stringify({
+        schema: 1,
+        engine: { repo: "PostHog/hedge", ref: "main", channel: "track" },
+        sources: [
+          { name: "team", repo: "vendor/repo", ref: "main" },
+          { name: "vendor", repo: "vendor/draft-packs", ref: "main" },
+        ],
+        packs: [],
+        plan: "both",
+        settings: {},
+        workflows: {},
+      }),
+    );
+    const sent: Sent[] = [];
+    const io = scripted([]);
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      sent.push({ command, ...(options.input === undefined ? {} : { input: options.input }) });
+      if (command[0] === "git") return spawnRunner(command, options);
+      return capture([], undefined)(command, options);
+    };
+    const code = await main(
+      ["triage", "--send", "--note", "Authorization: Bearer vendor/repo.A1 and The pack source vendor/draft-packs failed"],
+      {
+        home,
+        engineRoot,
+        platform: "darwin",
+        env: { HEDGE_PROFILE_DIR: inherited },
+        print: io.terminal.print,
+        terminal: io.terminal,
+        capture: runRealGit,
+        hostname: () => "noras-mbp.local",
+        run: async () => 0,
+      },
+    );
+    expect(code).toBe(0);
+    const issueCall = sent.find((call) => call.command[1] === "issue")!;
+    const title = issueCall.command[issueCall.command.indexOf("--title") + 1]!;
+    const body = issueCall.input!;
+    expect(title).toContain("Authorization: Bearer <token> and The pack source <private source> failed");
+    expect(body).toContain("Authorization: Bearer <token> and The pack source <private source> failed");
+    for (const leaked of [".A1", "draft-packs", "vendor/repo"]) {
+      expect(title).not.toContain(leaked);
+      expect(body).not.toContain(leaked);
+    }
+  });
 });
 
 describe("hedge setup and triage", () => {
