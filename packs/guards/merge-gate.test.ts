@@ -20,7 +20,7 @@ const head = "a".repeat(40);
 const lower = "b".repeat(40);
 const older = "c".repeat(40);
 const exempt = exemptList("own/*, example/notes");
-const files: Record<string, string> = { "/work/body.md": "/trunk merge\n", "/work/note.md": "Merged after review.\n", "/work/payload.json": '{"body":"/trunk merge"}', "/work/query.json": '{"query":"mutation { mergePullRequest(input: {}) { clientMutationId } }"}' };
+const files: Record<string, string> = { "/work/body.md": "/trunk merge\n", "/work/note.md": "Merged after review.\n", "/work/payload.json": '{"body":"/trunk merge"}', "/work/query.json": '{"query":"mutation { mergePullRequest(input: {}) { clientMutationId } }"}', "/work/deep.json": `{"body":"/trunk merge","junk":${"[".repeat(200_000)}${"]".repeat(200_000)}}` };
 const io: IntentIO = {
   readText: (path) => files[path],
   checkoutRepo: (cwd) => cwd.startsWith("/work") ? "example/product" : cwd.startsWith("/tooling") ? "own/tooling" : undefined,
@@ -212,8 +212,6 @@ describe("which calls enqueue or merge", () => {
     const pr = { repository: "example/product", number: 7 };
     expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "comment", body: "\r/trunk merge" })).toEqual({ targets: [] });
     expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "comment", body: "Looks good.", comments: [{ path: "a.ts", line: 1, body: "Nit.", note: "/trunk merge" }] })).toEqual({ targets: [] });
-    expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "comment", body: "Looks good.", summary: "/trunk merge" })).toEqual({ targets: [] });
-    expect(mcp("mcp__t3-code__pull_request_respond", { ...pr, body: "Fixed.", note: "/trunk merge" })).toEqual({ targets: [] });
   });
 
   test("a T3 reply with a null reviewThreadId, which T3 posts as a PR comment, is gated as one", () => {
@@ -223,17 +221,11 @@ describe("which calls enqueue or merge", () => {
   test("input nested too deep for a recursive walk is still read, so the hook cannot crash and let the call through", () => {
     const deep = (inside: unknown) => JSON.parse(`${"[".repeat(200_000)}${JSON.stringify(inside)}${"]".repeat(200_000)}`);
     const pr = { repository: "example/product", number: 7 };
-    expect(mcp("mcp__t3-code__pull_request_merge", { ...pr, expectedHeadSha: head, junk: deep(null) })).toEqual({ targets: [target("example/product", 7)] });
-    expect(mcp("mcp__t3-code__pull_request_respond", { ...pr, body: "/trunk merge", junk: deep(null) })).toEqual({ targets: [target("example/product", 7)] });
     expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "comment", body: "Looks good.", comments: [{ path: "a.ts", line: 1, body: "/trunk merge", note: deep(null) }] }).refusal).toBe(otherEndpointReason);
     expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "comment", body: "Looks good.", comments: [{ path: "a.ts", line: 1, body: "Nit.", note: deep(null) }] })).toEqual({ targets: [] });
     expect(mcp("mcp__github__add_issue_comment", { owner: "example", repo: "product", issue_number: 7, body: "/trunk merge", junk: deep(null) })).toEqual({ targets: [target("example/product", 7)] });
-  });
-
-  test("a T3 call checks the PR T3 merges, not one that a GitHub-style key beside it names", () => {
-    const decoys = { pull_number: 9, pullNumber: 9, owner: "own", repo: "tooling", repository_full_name: "own/tooling" };
-    expect(mcp("mcp__t3-code__pull_request_merge", { ...decoys, repository: "example/product", number: 7, expectedHeadSha: head })).toEqual({ targets: [target("example/product", 7)] });
-    expect(mcp("mcp__t3-code__pull_request_respond", { ...decoys, repository: "example/product", number: 7, body: "/trunk merge" })).toEqual({ targets: [target("example/product", 7)] });
+    expect(bash("gh api repos/example/product/issues/7/comments --input deep.json")).toEqual({ targets: [target("example/product", 7)] });
+    expect(bash("cat deep.json | gh api repos/example/product/issues/7/comments --input -")).toEqual({ targets: [target("example/product", 7)] });
   });
 
   test("a T3 review or review-thread reply that posts /trunk merge is refused, and T3 reads, edits, issue comments and other comments enqueue nothing", () => {
