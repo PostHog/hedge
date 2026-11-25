@@ -946,6 +946,7 @@ describe("hedge triage", () => {
       { text: `private-owner/${deepSk}`, as: "<private source>" },
       { text: "12", as: "<this machine>" },
       { text: "acme/private-packs", as: "<private source>" },
+      { text: "https://github.com/acme/project.abcdefghijklmnopqrstuvwxyz0123456789", as: "<private source>" },
     ];
     expect(redact("clone https://server.internal/demo-owner/demo-pack", "/Users/alice", caseKnown)).toBe(
       "clone <private source>",
@@ -966,6 +967,9 @@ describe("hedge triage", () => {
     expect(redact(`${repeated} on 12`, "/Users/alice", caseKnown)).toBe(
       `${Array.from({ length: 15 }, () => "<private source>").join(" ")} on <this machine>`,
     );
+    expect(
+      redact("clone https://github.com/acme/project.AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "/Users/alice", caseKnown),
+    ).toBe("clone <private source>");
   });
 });
 

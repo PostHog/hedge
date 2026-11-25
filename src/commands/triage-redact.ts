@@ -750,42 +750,37 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     return pos === 0 ? value : out + value.slice(pos);
   };
 
-  const runPassOne = (value: string) => {
-    const preMasked = applyRules(value, fixedSecretRules);
-    const matchedOriginals: string[] = [];
-    const matchedLabels: string[] = [];
-    const masked = applySpellings(preMasked, maskedSpellings, undefined, undefined, (match, as) => {
-      const index = matchedOriginals.length;
-      matchedOriginals.push(match);
-      matchedLabels.push(as);
-      return `${prefix}${index}${suffix}`;
-    });
-    const bearerRedacted = redactBearerMasked(stripHome(masked), matchedOriginals);
-    let next = applyRules(bearerRedacted, preRandomRules);
-    next = replaceMaskedRandom(next, matchedOriginals);
-    return { next, matchedOriginals, matchedLabels };
-  };
-
-  const passOneResult = runPassOne(text);
+  const preMasked = applyRules(text, fixedSecretRules);
+  const matchedOriginals: string[] = [];
+  const matchedLabels: string[] = [];
+  const masked = applySpellings(preMasked, maskedSpellings, undefined, undefined, (match, as) => {
+    const index = matchedOriginals.length;
+    matchedOriginals.push(match);
+    matchedLabels.push(as);
+    return `${prefix}${index}${suffix}`;
+  });
+  const bearerRedacted = redactBearerMasked(stripHome(masked), matchedOriginals);
+  const preRandom = applyRules(bearerRedacted, preRandomRules);
   if (!after.length) {
-    return passOneResult.next.replace(tokenRegex, (_tok, idx) => passOneResult.matchedLabels[Number(idx)] ?? "");
+    const postRandom = replaceMaskedRandom(preRandom, matchedOriginals);
+    return postRandom.replace(tokenRegex, (_tok, idx) => matchedLabels[Number(idx)] ?? "");
   }
 
   let expanded = "";
   let expPos = 0;
   const primarySpans: MatchSpan[] = [];
   tokenRegex.lastIndex = 0;
-  for (let match = tokenRegex.exec(passOneResult.next); match !== null; match = tokenRegex.exec(passOneResult.next)) {
-    expanded += passOneResult.next.slice(expPos, match.index);
+  for (let match = tokenRegex.exec(preRandom); match !== null; match = tokenRegex.exec(preRandom)) {
+    expanded += preRandom.slice(expPos, match.index);
     const idx = Number(match[1]);
-    const orig = passOneResult.matchedOriginals[idx] ?? "";
-    const label = passOneResult.matchedLabels[idx] ?? "";
+    const orig = matchedOriginals[idx] ?? "";
+    const label = matchedLabels[idx] ?? "";
     const start = expanded.length;
     expanded += orig;
     primarySpans.push({ start, end: expanded.length, len: orig.length, as: label });
     expPos = match.index + match[0].length;
   }
-  expanded += passOneResult.next.slice(expPos);
+  expanded += preRandom.slice(expPos);
 
   const sanitizedAfter = after.map((entry) => ({ ...entry, as: sanitizeLabel(entry) }));
   const exempt = new Set([...redactorLabels, ...labels, ...sanitizedAfter.map((entry) => entry.as)]);
@@ -814,7 +809,16 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     ...findFlexSpans(afterSpellings.flexRules, expanded),
     ...findAcSpans(afterSpellings.csAc, expanded),
   ];
-  return applySpans(expanded, [...primarySpans, ...afterSpans], exempt);
+  const mergedOriginals: string[] = [];
+  const mergedLabels: string[] = [];
+  const merged = applySpans(expanded, [...primarySpans, ...afterSpans], exempt, (match, as) => {
+    const index = mergedOriginals.length;
+    mergedOriginals.push(match);
+    mergedLabels.push(as);
+    return `${prefix}${index}${suffix}`;
+  });
+  const postRandom = replaceMaskedRandom(merged, mergedOriginals);
+  return postRandom.replace(tokenRegex, (_tok, idx) => mergedLabels[Number(idx)] ?? "");
 }
 
 function trailingTokenRun(text: string): string {
