@@ -7,7 +7,8 @@
 - When an agent accepted a gap, the `merge card:` line of `hedge proof gate`
   adds `held:` with each 🤖 decision as the merge-gate hook names it, such as `d-1a2b3c4d for live-run/prod-shape`.
   Copy those names into the merge card question: before, only the hook's
-  refusal on a merge showed them.
+  refusal on a merge showed them. The line that `hedge proof receipt` prints
+  has no `held:`, so copy the merge card from the gate's line.
 
 ### The merge card line, and a hold on gaps the agent accepted
 
