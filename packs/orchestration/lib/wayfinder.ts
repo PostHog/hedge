@@ -156,14 +156,7 @@ async function restGetIssue(owner: string, repo: string, number: number): Promis
   return issue;
 }
 
-const restLists = new Map<string, Promise<unknown[]>>();
-
-function restList<T>(path: string): Promise<T[]> {
-  if (!restLists.has(path)) restLists.set(path, readRestList(path));
-  return restLists.get(path) as Promise<T[]>;
-}
-
-async function readRestList(path: string): Promise<unknown[]> {
+async function restList<T>(path: string): Promise<T[]> {
   const lines = await gh(["api", "--paginate", "--jq", ".[] | tojson", `${path}?per_page=100`]);
   return lines.split("\n").filter(Boolean).map((line) => JSON.parse(line));
 }
@@ -172,7 +165,10 @@ function restRepository(issue: RestIssue): string {
   return issue.repository_url.split("/").slice(-2).join("/");
 }
 
-const childCountUntilRead = 1;
+function restChildCount(issue: RestIssue): number {
+  if (!issue.sub_issues_summary) throw new Error(`GitHub's REST answer for ${restRepository(issue)}#${issue.number} has no sub_issues_summary`);
+  return issue.sub_issues_summary.total;
+}
 
 async function restNode(issue: RestIssue, children?: RestIssue[]): Promise<IssueNode> {
   const path = `repos/${restRepository(issue)}/issues/${issue.number}`;
@@ -183,7 +179,7 @@ async function restNode(issue: RestIssue, children?: RestIssue[]): Promise<Issue
     number: issue.number, title: issue.title, state: issue.state.toUpperCase(), repository: restRepository(issue),
     assignees: issue.assignees.map((user) => user.login), labels: issue.labels.map((label) => label.name),
     blockedBy: blockers.map((blocker) => ({ number: blocker.number, state: blocker.state.toUpperCase(), repository: restRepository(blocker) })).sort(byIssue),
-    childCount: children?.length ?? issue.sub_issues_summary?.total ?? childCountUntilRead,
+    childCount: children?.length ?? restChildCount(issue),
     children: nodes,
   };
 }

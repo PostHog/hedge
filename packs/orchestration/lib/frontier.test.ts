@@ -146,17 +146,22 @@ test("hedge frontier reads the map over REST, every page of it, with the same re
   ]);
 });
 
-test("hedge frontier over REST gives the same report, reading each path once, when gh pretty-prints for a terminal and when GitHub leaves out the issue summaries", async () => {
-  for (const [fields, env] of [[{}, { GH_FORCE_TTY: "120" }], [{ restWithoutSummaries: true }, {}]] as const) {
-    const home = await temporaryHome();
-    const bin = await fakeGitHub(home, { ...mapFixture("acme/maps"), graphqlError: rateLimited, restPageSize: 1, ...fields });
+test("hedge frontier over REST gives the same report when gh pretty-prints for a terminal", async () => {
+  const home = await temporaryHome();
+  const bin = await fakeGitHub(home, { ...mapFixture("acme/maps"), graphqlError: rateLimited, restPageSize: 1 });
 
-    const result = await runPackCommand("frontier", ["acme/maps#1"], { HOME: home, PATH: `${bin}:${Bun.env.PATH}`, HEDGE_SETTINGS: "{}", ...env });
+  const result = await runPackCommand("frontier", ["acme/maps#1"], { HOME: home, PATH: `${bin}:${Bun.env.PATH}`, HEDGE_SETTINGS: "{}", GH_FORCE_TTY: "120" });
 
-    expect(result).toEqual({ stdout: `${expected("acme/maps")}\n`, stderr: restNotice, code: 0 });
-    const reads = (await readFile(join(bin, "rest.log"), "utf8")).split("\n").filter(Boolean);
-    expect(reads).toEqual([...new Set(reads)]);
-  }
+  expect(result).toEqual({ stdout: `${expected("acme/maps")}\n`, stderr: restNotice, code: 0 });
+});
+
+test("hedge frontier over REST fails and names the issue when GitHub leaves out its sub-issue summary", async () => {
+  const home = await temporaryHome();
+  const bin = await fakeGitHub(home, { ...mapFixture("acme/maps"), graphqlError: rateLimited, restWithoutSummaries: true });
+
+  const result = await runPackCommand("frontier", ["acme/maps#1"], { HOME: home, PATH: `${bin}:${Bun.env.PATH}`, HEDGE_SETTINGS: "{}" });
+
+  expect(result).toEqual({ stdout: "", stderr: `${restNotice}hedge: GitHub's REST answer for acme/maps#2 has no sub_issues_summary\n`, code: 1 });
 });
 
 test("hedge frontier over REST refuses a pull request number", async () => {
