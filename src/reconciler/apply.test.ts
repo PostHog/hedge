@@ -698,22 +698,25 @@ describe("humanStepsLeft", () => {
 
   test("preserves an already-completed real probe failure when the deadline fires during cleanup while marking a timed-out real probe unchecked and stopping it", async () => {
     const home = temp.make("home-busy-deadline-");
-    const [childReady, childGone, sawCleanup, slowReady, slowGone] = [
+    const [childReady, trapReady, childGone, sawCleanup, cleanupGate, slowReady, slowGone] = [
       join(home, "child-ready"),
+      join(home, "trap-ready"),
       join(home, "child-gone"),
       join(home, "saw-cleanup"),
+      join(home, "cleanup-gate"),
       join(home, "slow-ready"),
       join(home, "slow-gone"),
     ];
-    expect(Bun.spawnSync(["mkfifo", childReady, childGone, sawCleanup, slowReady, slowGone]).exitCode).toBe(0);
+    expect(Bun.spawnSync(["mkfifo", childReady, trapReady, childGone, sawCleanup, cleanupGate, slowReady, slowGone]).exitCode).toBe(0);
     const childStarted = Bun.file(childReady).text();
     const childClosed = Bun.file(childGone).text();
     const cleanupStarted = Bun.file(sawCleanup).text();
     const slowStarted = Bun.file(slowReady).text();
     const slowClosed = Bun.file(slowGone).text();
-    const childCmd = 'pid=; trap \'kill "$pid" 2>/dev/null; echo cleanup > "$3"; exit 0\' TERM; exec 3>"$1"; echo $$ > "$2"; while true; do sleep 30 3>&- & pid=$!; wait "$pid"; done';
-    const failScript = `const c = Bun.spawn(["sh", "-c", ${JSON.stringify(childCmd)}, "child", ${JSON.stringify(childGone)}, ${JSON.stringify(childReady)}, ${JSON.stringify(sawCleanup)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    const childCmd = 'pid=; trap \'kill "$pid" 2>/dev/null; echo cleanup > "$4"; cat "$5" >/dev/null; exit 0\' TERM; exec 3>"$1"; echo $$ > "$2"; echo armed > "$3"; while true; do sleep 30 3>&- & pid=$!; wait "$pid"; done';
+    const failScript = `const c = Bun.spawn(["sh", "-c", ${JSON.stringify(childCmd)}, "child", ${JSON.stringify(childGone)}, ${JSON.stringify(childReady)}, ${JSON.stringify(trapReady)}, ${JSON.stringify(sawCleanup)}, ${JSON.stringify(cleanupGate)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 c.unref();
+await Bun.file(${JSON.stringify(trapReady)}).text();
 process.exit(1);`;
     let fireDeadline!: () => void;
     const quickFailStep = {
@@ -734,7 +737,7 @@ process.exit(1);`;
       const pending = humanStepsLeft(plan({ human: [quickFailStep, slowStep] }), {
         home,
         giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)),
-        graceMs: 0,
+        graceMs: 10_000,
       });
       [childPid, slowPid] = (await Promise.all([childStarted, slowStarted])).map((s) => Number(s.trim())) as [number, number];
       expect(childPid).toBeGreaterThan(0);
@@ -745,6 +748,7 @@ process.exit(1);`;
       expect(res.failing.map((item) => item.id)).toEqual(["quick-fail"]);
       expect(res.unchecked.map((item) => item.id)).toEqual(["slow-real"]);
       expect(await slowClosed).toBe("");
+      await Bun.spawn(["sh", "-c", 'printf "go\\n" > "$1"', "gate", cleanupGate], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exited;
       expect(await childClosed).toBe("");
     } finally {
       if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}

@@ -3,11 +3,9 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFile
 import { join } from "node:path";
 import { main, type CliOptions } from "../cli.ts";
 import type { AvailableSource, PackManifest, ProfileFile } from "../pack/types.ts";
-import { humanStepsLeft } from "../reconciler/apply.ts";
 import { defaultSources } from "../setup/defaults.ts";
 import { cachedCheckout, isolateGit, spawnGit, template, tempDirs } from "../testing/git.ts";
 import { engineSource, resolveEngine } from "../testing/packs.ts";
-import { packsCommand } from "./packs.ts";
 import { settingsCommand } from "./settings.ts";
 
 isolateGit();
@@ -507,88 +505,62 @@ process.exit(await c.exited);`;
     expect(onNode.code).toBe(0);
     expect(onNode.output).toContain(`  ~ team  Team rules.\n      Workflows: service-only on\n${needsSetup}`);
 
-    const engine = await engineSource();
-    const team: AvailableSource = {
-      ref: { name: "team", repo: "team/packs", ref: "main" },
-      dir: "/team",
-      packs: [
-        {
-          dir: "/team/packs/team",
-          manifest: {
-            schema: 1,
-            name: "team",
-            summary: "Team rules.",
-            workflows: [flow("linux-wf"), flow("mac-wf")],
-            human: [{ id: "sign-in", say: "Sign in.", probe: ["false"] }],
-            served: [
-              { id: "svc", port: 4599, health: "/health", on: ["linux"], workflow: "linux-wf", after: "sign-in" },
-              { id: "svc", port: 4599, health: "/health", on: ["darwin"], workflow: "mac-wf", after: "sign-in" },
-            ],
-          },
-        },
+    const { home: osHome } = await machineWithProfile();
+    await withTeamPack(osHome, {
+      workflows: [flow("linux-wf"), flow("mac-wf")],
+      human: [{ id: "sign-in", say: "Sign in.", probe: ["false"] }],
+      steps: [
+        { id: "linux-step", on: ["linux"], workflow: "linux-wf", after: "sign-in", run: ["true"] },
+        { id: "mac-step", on: ["darwin"], workflow: "mac-wf", after: "sign-in", run: ["true"] },
       ],
-    };
-    const linuxPlan = resolveEngine([engine, team], { packs: ["team"], hub: "hub-1" }, { schema: 1, role: "hub", name: "hub-1" });
-    const lines: string[] = [];
-    const profile = { schema: 1, engine: { repo: "PostHog/hedge", ref: "main", channel: "track" }, sources: [team.ref], packs: ["team"], plan: "both", settings: {}, workflows: {} } satisfies ProfileFile;
-    const osHome = temp.make("home-os-served-");
-    const ctx = {
-      profile,
-      plan: linuxPlan,
-      packs: [...engine.packs, ...team.packs],
-      print: (line: string) => lines.push(line),
-      humanStepsLeft: () => humanStepsLeft(linuxPlan, { home: osHome, giveUp: new Promise<void>(() => {}) }),
-    } as unknown as Parameters<typeof packsCommand>[1];
-    expect(await packsCommand([], ctx)).toBe(0);
-    expect(lines.join("\n")).toContain(`  ~ team  Team rules.\n      Workflows: linux-wf needs setup, mac-wf on\n${needsSetup}`);
+    });
+    const osDir = join(osHome, "profile");
+    const osFile = JSON.parse(readFileSync(join(osDir, "hedge.json"), "utf8")) as ProfileFile;
+    writeFileSync(join(osDir, "hedge.json"), JSON.stringify({ ...osFile, hub: "hub-1" }, null, 2) + "\n");
+    writeFileSync(join(osHome, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "hub", name: "hub-1", profileDir: osDir }));
+    const linuxHub = await hedge(osHome, ["packs"], 0, { platform: "linux" });
+    expect(linuxHub.code).toBe(0);
+    expect(linuxHub.output).toContain(`  ~ team  Team rules.\n      Workflows: linux-wf needs setup, mac-wf on\n${needsSetup}`);
 
-    const soloMacPlan = resolveEngine([engine, team], { packs: ["team"] }, { schema: 1, role: "mac" });
-    const macLines: string[] = [];
-    const macCtx = {
-      profile,
-      plan: soloMacPlan,
-      packs: [...engine.packs, ...team.packs],
-      print: (line: string) => macLines.push(line),
-      humanStepsLeft: () => humanStepsLeft(soloMacPlan, { home: osHome, giveUp: new Promise<void>(() => {}) }),
-    } as unknown as Parameters<typeof packsCommand>[1];
-    expect(await packsCommand([], macCtx)).toBe(0);
-    expect(macLines.join("\n")).toContain(`  ~ team  Team rules.\n      Workflows: linux-wf needs setup, mac-wf on\n${needsSetup}`);
+    const soloMacProfile = JSON.parse(readFileSync(join(osDir, "hedge.json"), "utf8")) as ProfileFile;
+    delete soloMacProfile.hub;
+    writeFileSync(join(osDir, "hedge.json"), JSON.stringify(soloMacProfile, null, 2) + "\n");
+    writeFileSync(join(osHome, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "mac", profileDir: osDir }));
+    const soloMac = await hedge(osHome, ["packs"], 0, { platform: "darwin" });
+    expect(soloMac.code).toBe(0);
+    expect(soloMac.output).toContain(`  ~ team  Team rules.\n      Workflows: linux-wf on, mac-wf needs setup\n${needsSetup}`);
 
-    const roleSplitTeam: AvailableSource = {
-      ref: { name: "team", repo: "team/packs", ref: "main" },
-      dir: "/team",
-      packs: [
-        {
-          dir: "/team/packs/team",
-          manifest: {
-            schema: 1,
-            name: "team",
-            summary: "Team rules.",
-            workflows: [
-              { ...flow("server-wf"), needs: ["hub"] },
-              { ...flow("local-wf"), yields: ["server-wf"] },
-            ],
-            human: [{ id: "sign-in", say: "Sign in.", probe: ["false"] }],
-            served: [
-              { id: "svc", port: 4599, health: "/health", workflow: "server-wf", after: "sign-in" },
-              { id: "local-svc", port: 4599, health: "/health", workflow: "local-wf" },
-            ],
-          },
-        },
-      ],
-    };
-    const roleMacPlan = resolveEngine([engine, roleSplitTeam], { packs: ["team"] }, { schema: 1, role: "mac" });
-    const roleLines: string[] = [];
-    const roleCtx = {
-      profile,
-      plan: roleMacPlan,
-      packs: [...engine.packs, ...roleSplitTeam.packs],
-      print: (line: string) => roleLines.push(line),
-      humanStepsLeft: () => humanStepsLeft(roleMacPlan, { home: osHome, giveUp: new Promise<void>(() => {}) }),
-    } as unknown as Parameters<typeof packsCommand>[1];
-    expect(await packsCommand([], roleCtx)).toBe(0);
-    expect(roleLines.join("\n")).toContain("local-wf on");
-    expect(roleLines.join("\n")).not.toContain("local-wf needs setup");
+    const { home: roleHome } = await machineWithProfile();
+    const roleSource = join(roleHome, ".local/share/hedge/sources/team");
+    await cachedCheckout(roleSource, { name: "team", repo: "team/packs", ref: "main" });
+    mkdirSync(join(roleSource, "packs/team"), { recursive: true });
+    writeFileSync(
+      join(roleSource, "packs/team/pack.ts"),
+      `export default {
+  sdk: 1,
+  name: "team",
+  summary: "Team rules.",
+  register(hedge) {
+    const serverWf = hedge.workflow({ id: "server-wf", name: "server-wf", sentence: "Server.", default: true, needs: ["hub"] });
+    const localWf = hedge.workflow({ id: "local-wf", name: "local-wf", sentence: "Local.", default: true, yields: ["server-wf"] });
+    const signIn = hedge.check({ id: "sign-in", say: "Sign in.", test: async () => false, repair: { ask: "Sign in." } });
+    hedge.service({ on: "hub", id: "svc", when: serverWf, after: signIn, serve: { port: 4599, health: "/health", credential: async () => "x" } });
+    hedge.service({ on: "hub", id: "local-svc", when: localWf, serve: { port: 4599, health: "/health", credential: async () => "x" } });
+  },
+};
+`,
+    );
+    const roleDir = join(roleHome, "profile");
+    const roleFile = JSON.parse(readFileSync(join(roleDir, "hedge.json"), "utf8")) as ProfileFile;
+    writeFileSync(
+      join(roleDir, "hedge.json"),
+      JSON.stringify({ ...roleFile, sources: [...roleFile.sources, { name: "team", repo: "team/packs", ref: "main" }], packs: [...roleFile.packs, "team"] }, null, 2) + "\n",
+    );
+    writeFileSync(join(roleHome, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "mac", profileDir: roleDir }));
+    const roleMac = await hedge(roleHome, ["packs"], 0, { platform: "darwin" });
+    expect(roleMac.code).toBe(0);
+    expect(roleMac.output).toContain("local-wf on");
+    expect(roleMac.output).not.toContain("local-wf needs setup");
   });
 });
 

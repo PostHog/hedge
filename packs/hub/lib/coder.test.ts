@@ -631,14 +631,24 @@ test("preserves a __proto__ environment variable through supervised capture", as
 
 test("kills a repeatedly self-stopping detached capture group when the caller receives SIGTERM", async () => {
   const dir = temp.make("hedge-capture-term-stop-");
+  const cwdA = temp.make("hedge-capture-preload-a-");
+  const cwdB = temp.make("hedge-capture-preload-b-");
+  writeFileSync(join(cwdA, "preload.ts"), "export {};\n");
   const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
   expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
   const started = Bun.file(ready).text();
   const holderGone = Bun.file(gone).text();
   const coderPath = join(import.meta.dir, "coder.ts");
   const callerScript = `import { capture } from ${JSON.stringify(coderPath)};
+process.chdir(${JSON.stringify(cwdB)});
 await capture(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; while true; do kill -STOP 0; done', "probe", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { timeoutMs: 30_000 });`;
-  const caller = Bun.spawn([process.execPath, "-e", callerScript], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  const caller = Bun.spawn([process.execPath, "-e", callerScript], {
+    cwd: cwdA,
+    env: { ...process.env, BUN_OPTIONS: "--preload=./preload.ts" },
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
   let targetPid = 0;
   try {
     targetPid = Number((await started).trim());

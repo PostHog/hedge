@@ -17,12 +17,17 @@ export function ownTag(value: string | undefined): string | undefined {
   return last || undefined;
 }
 
-export function supervisorEnv(fullTag: string): Record<string, string> {
+export function watchdogEnv(): Record<string, string> {
   const clean: Record<string, string> = Object.create(null);
   for (const [key, value] of Object.entries(process.env)) {
     if (key === "BUN_OPTIONS" || value === undefined) continue;
     clean[key] = value;
   }
+  return clean;
+}
+
+export function supervisorEnv(fullTag: string): Record<string, string> {
+  const clean = watchdogEnv();
   clean[tagEnvVar] = fullTag;
   return clean;
 }
@@ -649,6 +654,7 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
   let finished = false;
   let cancelInterrupt: (() => void) | undefined;
   let cancelHard: (() => void) | undefined;
+  let armEpoch = 0;
   const forwarded = new Set<StopSignal>();
 
   const exit = (code: number) => {
@@ -678,10 +684,22 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
     exit(143);
   };
 
-  const forwardGroup = (name: StopSignal) => {
-    if (forwarded.has(name)) return;
+  const forwardGroup = (name: StopSignal, afterSend?: () => void) => {
+    const myEpoch = armEpoch;
+    const runAfter = () => {
+      if (!finished && armEpoch === myEpoch) afterSend?.();
+    };
+    if (forwarded.has(name)) {
+      runAfter();
+      return;
+    }
     forwarded.add(name);
-    host.killGroup(name, Boolean(stop) && !resultReported);
+    const sent = host.killGroup(name, Boolean(stop) && !resultReported);
+    if (sent && typeof (sent as Promise<void>).then === "function") {
+      void (sent as Promise<void>).finally(runAfter);
+      return;
+    }
+    runAfter();
   };
 
   const armHard = () => {
@@ -700,8 +718,7 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
     if (!cancelInterrupt && !cancelHard) {
       cancelInterrupt = host.timer(interruptGraceMs, () => {
         cancelInterrupt = undefined;
-        armHard();
-        forwardGroup("SIGTERM");
+        forwardGroup("SIGTERM", armHard);
       });
     }
   };
@@ -717,22 +734,19 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
       if (leaderDone && resultReported) {
         if (!normalCleanupStarted) {
           normalCleanupStarted = true;
-          arm(sig);
-          forwardGroup(sig);
+          forwardGroup(sig, () => arm(sig));
           host.reportCleanup();
         } else if (sig === "SIGTERM" || sig === "SIGHUP") {
-          armHard();
-          forwardGroup(sig);
+          forwardGroup(sig, armHard);
         } else {
+          armEpoch++;
           cancelHard?.();
           cancelHard = undefined;
-          arm(sig);
-          forwardGroup(sig);
+          forwardGroup(sig, () => arm(sig));
         }
         return;
       }
-      arm(sig);
-      forwardGroup(sig);
+      forwardGroup(sig, () => arm(sig));
     });
   }
 
@@ -746,8 +760,7 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
   if (target.pid !== undefined) host.reportTarget?.(target.pid);
 
   if (stop) {
-    arm(stop);
-    forwardGroup(stop);
+    forwardGroup(stop, () => arm(stop!));
   }
 
   const code = await target.exited;
@@ -766,8 +779,7 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
     }
     if (stop) return settled;
     normalCleanupStarted = true;
-    armHard();
-    forwardGroup("SIGTERM");
+    forwardGroup("SIGTERM", armHard);
     host.reportCleanup();
   }
   return settled;

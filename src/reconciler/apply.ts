@@ -10,7 +10,7 @@ import { hublessReason, listedPack } from "./resolve.ts";
 import { wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
 import { withLegacyNames } from "../legacy.ts";
 import { bunScript } from "../runner/bun.ts";
-import { appendTag, createPipe, graceMs, interruptGraceMs, killSession, killSessionSync, probeResultReported, setCloexec, supervisorEnv, tagEnvVar } from "./probe-supervisor.ts";
+import { appendTag, createPipe, graceMs, interruptGraceMs, killSession, killSessionSync, probeResultReported, setCloexec, supervisorEnv, tagEnvVar, watchdogEnv } from "./probe-supervisor.ts";
 
 export type AdapterContext = { home: string; dryRun: boolean; adopt: string[]; adoptFrom?: string[] };
 export type AdapterResult = { actions: Action[]; findings: Finding[]; blocked?: boolean; failed?: boolean };
@@ -549,6 +549,7 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
   let handedOff = false;
   try {
     const watchdog = Bun.spawn(bunScript(probeWatchdog, payload), {
+      env: watchdogEnv(),
       stdio: ["ignore", "ignore", "ignore", ...extraFds],
       detached: true,
     });
@@ -682,7 +683,8 @@ async function runDetached(command: string[], env: Record<string, string | undef
   let stopSignal: NodeJS.Signals | undefined;
   let reaped = false;
   let reportedResult = false;
-  const delayFor = (name: NodeJS.Signals) => (cleanupGraceMs ?? graceMs) + (name === "SIGINT" || name === "SIGQUIT" ? interruptGraceMs : 0) + 100;
+  const discoverySlackMs = process.platform === "darwin" ? 250 : 0;
+  const delayFor = (name: NodeJS.Signals) => (cleanupGraceMs ?? graceMs) + (name === "SIGINT" || name === "SIGQUIT" ? interruptGraceMs : 0) + discoverySlackMs + 100;
   let lastSignal: NodeJS.Signals | undefined;
   const endGroup = (name: NodeJS.Signals = "SIGTERM") => {
     stopSignal ??= name;
@@ -756,7 +758,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
       tag,
       aliveFd,
       ...(resultPipe ? { resultFd: resultPipe.readFd } : {}),
-      delayMs: (cleanupGraceMs ?? graceMs) + 100,
+      delayMs: (cleanupGraceMs ?? graceMs) + discoverySlackMs + 100,
       stop: endGroup,
     };
     allLiveProbes.add(probe);
