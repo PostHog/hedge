@@ -705,7 +705,7 @@ export default { sdk: 1, name: "team", summary: "Mutating.", register() {} };
     expect(await spawnGit(join(mutateCache, "team"), "rev-parse", "HEAD")).toBe(cleanSha);
   });
 
-  test("falls back cleanly when git fetch does not support --porcelain", async () => {
+  test("falls back cleanly when git fetch does not support --porcelain even with localized errors, verifies branch rollback commits, and omits raw resolved insteadOf URLs from metadata", async () => {
     const repo = await packRepo("Older git packs.");
     const sha = await spawnGit(repo, "rev-parse", "HEAD");
     const realGit = Bun.which("git")!;
@@ -716,7 +716,7 @@ export default { sdk: 1, name: "team", summary: "Mutating.", register() {} };
       `#!/bin/sh
 for arg in "$@"; do
   if [ "$arg" = "--porcelain" ]; then
-    printf "error: unknown option \\\`porcelain'\\nusage: git fetch [<options>] [<repository> [<refspec>...]]\\n" >&2
+    printf "Fehler: Unbekannte Option \\\`porcelain'\\nAufruf: git fetch [<Optionen>] [<Repository> [<Refspec>...]]\\n" >&2
     exit 129
   fi
 done
@@ -738,8 +738,53 @@ exec "${realGit}" "$@"
     } finally {
       process.env.PATH = savedPath;
     }
-    const leftover = await spawnGit(join(cache, "team"), "for-each-ref", "refs/hedge/tmp");
-    expect(leftover).toBe("");
+
+    const moveRepo = await packRepo("Original good pack.");
+    const goodCommit = await spawnGit(moveRepo, "rev-parse", "HEAD");
+    writePack(moveRepo, "Moved branch pack.");
+    await spawnGit(moveRepo, "commit", "-q", "-am", "moved");
+    const movedCommit = await spawnGit(moveRepo, "rev-parse", "HEAD");
+    await spawnGit(moveRepo, "checkout", "-q", "-b", "broken");
+    rmSync(join(moveRepo, "packs/team/pack.json"));
+    writeFileSync(
+      join(moveRepo, "packs/team/pack.ts"),
+      `import { join } from "node:path";
+Bun.spawnSync(["git", "-C", join(import.meta.dir, "../.."), "branch", "-f", "local-main", ${JSON.stringify(movedCommit)}]);
+throw new Error("broken pack");
+`,
+    );
+    await spawnGit(moveRepo, "add", "-A");
+    await spawnGit(moveRepo, "commit", "-q", "-m", "broken");
+    const moveCache = temp.make("cache-moved-branch-");
+    const initial = await fetchSource({ name: "team", repo: moveRepo, ref: goodCommit }, moveCache);
+    if ("error" in initial) throw new Error(initial.error);
+    const moveDir = join(moveCache, "team");
+    await spawnGit(moveDir, "fetch", "-q", "--no-tags", moveRepo, movedCommit);
+    await spawnGit(moveDir, "checkout", "-q", "-B", "local-main", goodCommit);
+    const rolled = await fetchSource({ name: "team", repo: moveRepo, ref: "broken" }, moveCache);
+    if ("error" in rolled) throw new Error(rolled.error);
+    expect(rolled.packs[0]?.manifest.summary).toBe("Original good pack.");
+    expect(await spawnGit(moveDir, "rev-parse", "HEAD")).toBe(goodCommit);
+
+    const secretParent = temp.make("secret-mirror-");
+    const secretMirror = join(secretParent, "cred-token-987654321");
+    const mirrorSha = await initPackRepo(secretMirror, "Rewritten mirror packs.");
+    const cfgUrl = "https://example.invalid/private-mirror.git";
+    const mirrorCache = temp.make("cache-digest-resolved-");
+    const mirrorDir = join(mirrorCache, "team");
+    mkdirSync(mirrorDir, { recursive: true });
+    await spawnGit(mirrorDir, "init", "-q");
+    await spawnGit(mirrorDir, "config", `url.${secretMirror}.insteadOf`, cfgUrl);
+    const mirrorRes = await fetchSource({ name: "team", repo: cfgUrl, ref: mirrorSha }, mirrorCache);
+    if ("error" in mirrorRes) throw new Error(mirrorRes.error);
+    const metaText = readFileSync(join(mirrorDir, ".git", "hedge-source.json"), "utf8");
+    expect(metaText).not.toContain("cred-token-987654321");
+    expect(metaText).not.toContain(secretMirror);
+    rmSync(secretMirror, { recursive: true, force: true });
+    const mirrorOffline = await fetchSource({ name: "team", repo: cfgUrl, ref: mirrorSha }, mirrorCache);
+    if ("error" in mirrorOffline) throw new Error(mirrorOffline.error);
+    expect(mirrorOffline.packs[0]?.manifest.summary).toBe("Rewritten mirror packs.");
+    expect(mirrorOffline.stale).toBeUndefined();
   });
 });
 

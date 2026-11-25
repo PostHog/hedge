@@ -17,8 +17,8 @@ export type Clock = { sleep(ms: number): Promise<void> };
 
 const realClock: Clock = { sleep: (ms) => Bun.sleep(ms) };
 
-type BlockedSwitch = { repo: string; resolved: string };
-type Good = { repo: string; ref: string; commit: string; branch?: boolean; peeled?: boolean; asked?: string; askedBranch?: boolean; blocked?: BlockedSwitch[]; resolved?: string };
+type BlockedSwitch = { repo: string; resolved?: string; resolvedDigest?: string };
+type Good = { repo: string; ref: string; commit: string; branch?: boolean; peeled?: boolean; asked?: string; askedBranch?: boolean; blocked?: BlockedSwitch[]; resolved?: string; resolvedDigest?: string };
 
 export const withoutUserinfo = (text: string) => text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi, "$1");
 
@@ -63,10 +63,20 @@ async function currentCheckout(dir: string): Promise<CheckoutState | undefined> 
 async function restoreCheckout(dir: string, before: CheckoutState | undefined): Promise<boolean> {
   if (!before) return false;
   const now = await currentCheckout(dir);
-  if (now?.commit === before.commit && now.branch === before.branch) return true;
-  const restored = before.branch ? await git(dir, "switch", "-q", before.branch) : await git(dir, "checkout", "-q", "--detach", before.commit);
-  if (restored.ok) clearLoadedModules(dir);
-  return restored.ok;
+  if (now?.commit.toLowerCase() === before.commit.toLowerCase() && now.branch === before.branch) return true;
+  let ok = false;
+  if (before.branch) {
+    const tip = await git(dir, "rev-parse", "--verify", "--quiet", `refs/heads/${before.branch}`);
+    if (tip.ok && tip.stdout.toLowerCase() === before.commit.toLowerCase()) {
+      ok = (await git(dir, "switch", "-q", before.branch)).ok;
+    }
+  }
+  if (!ok) ok = (await git(dir, "checkout", "-q", "--detach", before.commit)).ok;
+  if (!ok) return false;
+  const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
+  if (!head.ok || head.stdout.toLowerCase() !== before.commit.toLowerCase()) return false;
+  clearLoadedModules(dir);
+  return true;
 }
 
 const fatalUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -192,16 +202,17 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
   const edits = await localEdits(dir);
   if (edits.length) return keepEdits(ref, dir, edits, loadLimitMs);
   const rawGood = await lastGood(dir);
+  const rawGoodDigest = goodResolvedDigest(rawGood);
   const legacyPeeled =
     rawGood !== undefined &&
-    typeof rawGood.resolved !== "string" &&
+    rawGoodDigest === undefined &&
     rawGood.peeled !== true &&
     rawGood.branch !== true &&
     (await isPeeledTagInRepo(dir, rawGood.ref, rawGood.commit));
   const legacyBranch =
     !legacyPeeled &&
     rawGood !== undefined &&
-    typeof rawGood.resolved !== "string" &&
+    rawGoodDigest === undefined &&
     rawGood.branch === undefined &&
     typeof rawGood.ref === "string" &&
     (await fetchHeadIsBranch(dir, rawGood.ref)) &&
@@ -212,20 +223,22 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
       : legacyBranch && rawGood
         ? { ...rawGood, branch: true }
         : rawGood;
+  const goodDigest = goodResolvedDigest(good);
   const before = await currentCheckout(dir);
   const effectiveBefore = await resolvedRepoUrl(dir, repo);
+  const effectiveBeforeDigest = repoDigest(effectiveBefore);
   const legacyOk =
     good !== undefined &&
     good.repo === repo &&
-    typeof good.resolved !== "string" &&
+    goodDigest === undefined &&
     verifiedGoodCommit(good) !== undefined &&
     (await legacyFallbackMatches(dir, good, effectiveBefore));
   const managedDetached =
     before !== undefined &&
     !before.branch &&
     ((await fetchHeadRepo(dir, before.commit)) !== undefined ||
-      (await pinTarget(dir, effectiveBefore, before.commit)) !== undefined ||
-      (typeof good?.resolved === "string" && (await pinTarget(dir, good.resolved, before.commit)) !== undefined));
+      (await pinTarget(dir, effectiveBeforeDigest, before.commit)) !== undefined ||
+      (goodDigest !== undefined && (await pinTarget(dir, goodDigest, before.commit)) !== undefined));
   const preserveBefore = before !== undefined && (!good || before.commit !== good.commit) && !managedDetached;
   let effectiveRepo = effectiveBefore;
   let fetchError: string | undefined;
@@ -242,6 +255,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
     checkedOutCommit = fetched.commit;
     fetchedOid = fetched.fetchedOid;
   }
+  const effectiveDigest = repoDigest(effectiveRepo);
   if (!fetchError && checkedOutCommit) {
     const commit = checkedOutCommit;
     const isBranch = fetchedNew ? await fetchHeadIsBranch(dir, ref.ref, fetchedOid) : false;
@@ -264,7 +278,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
         commit,
         branch: isBranch,
         ...(peeled ? { peeled: true } : {}),
-        resolved: effectiveRepo,
+        resolvedDigest: effectiveDigest,
       });
       if (!saveError) return { ref, dir, packs: loaded.packs };
       if (savedFetchHead) await restoreFetchHead(dir, savedFetchHead);
@@ -276,7 +290,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
       good.repo === repo &&
       good.ref !== ref.ref &&
       effectiveRepo === effectiveBefore &&
-      (typeof good.resolved === "string" ? good.resolved === effectiveRepo : legacyOk);
+      (goodDigest !== undefined ? goodDigest === effectiveDigest : legacyOk);
     if (savedFetchHead && !keepBranchFetchHead) await restoreFetchHead(dir, savedFetchHead);
     return fallBack(ref, dir, repo, effectiveRepo, good, `${ref.ref} from ${ref.repo} does not load: ${loaded.error}`, loadLimitMs, before, preserveBefore, legacyOk && effectiveRepo === effectiveBefore, isBranch);
   }
@@ -317,18 +331,32 @@ export function repoUrl(repo: string) {
 }
 
 async function fallBack(ref: SourceRef, dir: string, repo: string, effectiveRepo: string, good: Good | undefined, reason: string, loadLimitMs: number, before?: CheckoutState, preserveBefore = false, legacyFallback = false, askedBranch?: boolean): Promise<FetchedSource> {
+  const effectiveDigest = repoDigest(effectiveRepo);
+  const goodDigest = goodResolvedDigest(good);
   const effectiveMatch =
     good !== undefined &&
     verifiedGoodCommit(good) !== undefined &&
     good.repo === repo &&
-    (typeof good.resolved === "string" ? good.resolved === effectiveRepo : legacyFallback);
+    (goodDigest !== undefined ? goodDigest === effectiveDigest : legacyFallback);
+  const normalizedBlocked = (entries: BlockedSwitch[] | undefined) =>
+    Array.isArray(entries)
+      ? entries
+          .map((entry) => {
+            const digest = goodResolvedDigest(entry);
+            return entry && typeof entry.repo === "string" && digest !== undefined ? { repo: entry.repo, resolvedDigest: digest } : undefined;
+          })
+          .filter((entry): entry is { repo: string; resolvedDigest: string } => entry !== undefined)
+      : [];
   const recordBlocked = async () => {
     if (!good) return;
-    const existing = Array.isArray(good.blocked)
-      ? good.blocked.filter((entry): entry is BlockedSwitch => !!entry && typeof entry.repo === "string" && typeof entry.resolved === "string")
-      : [];
-    if (existing.some((entry) => entry.repo === repo && entry.resolved === effectiveRepo)) return;
-    const updated: Good = { ...good, blocked: [...existing, { repo, resolved: effectiveRepo }] };
+    const existing = normalizedBlocked(good.blocked);
+    if (existing.some((entry) => entry.repo === repo && entry.resolvedDigest === effectiveDigest)) return;
+    const { resolved: _drop, ...rest } = good;
+    const updated: Good = {
+      ...rest,
+      ...(goodDigest !== undefined ? { resolvedDigest: goodDigest } : {}),
+      blocked: [...existing, { repo, resolvedDigest: effectiveDigest }],
+    };
     await writeAtomic(goodPath(dir), JSON.stringify(updated) + "\n").catch(() => {});
   };
   if (!effectiveMatch || !good) {
@@ -340,17 +368,19 @@ async function fallBack(ref: SourceRef, dir: string, repo: string, effectiveRepo
     await restoreCheckout(dir, before);
     return { ref, error: reason };
   }
-  if (before?.branch) {
+  if (before?.branch && before.commit.toLowerCase() === good.commit.toLowerCase()) {
     if (!(await restoreCheckout(dir, before))) return { ref, error: reason };
-  } else if (!(await git(dir, "checkout", "-q", "--detach", good.commit)).ok) {
-    return { ref, error: reason };
   } else {
+    if (!(await git(dir, "checkout", "-q", "--detach", good.commit)).ok) return { ref, error: reason };
+    const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
+    if (!head.ok || head.stdout.toLowerCase() !== good.commit.toLowerCase()) return { ref, error: reason };
     clearLoadedModules(dir);
   }
   const loaded = await load(dir, loadLimitMs);
   if ("error" in loaded) return { ref, error: reason };
   const nextAskedBranch = askedBranch !== undefined ? askedBranch : branchName(good.asked) === branchName(ref.ref) ? good.askedBranch : undefined;
   const recordAsked = good.ref !== ref.ref || (nextAskedBranch !== undefined && nextAskedBranch !== good.branch);
+  const existingBlocked = normalizedBlocked(good.blocked);
   const nextGood: Good = {
     repo: good.repo,
     ref: good.ref,
@@ -359,11 +389,11 @@ async function fallBack(ref: SourceRef, dir: string, repo: string, effectiveRepo
     ...(good.peeled ? { peeled: true } : {}),
     ...(recordAsked ? { asked: ref.ref } : {}),
     ...(recordAsked && nextAskedBranch !== undefined ? { askedBranch: nextAskedBranch } : {}),
-    ...(Array.isArray(good.blocked) && good.blocked.length ? { blocked: good.blocked } : {}),
-    ...(typeof good.resolved === "string" ? { resolved: good.resolved } : {}),
+    ...(existingBlocked.length ? { blocked: existingBlocked } : {}),
+    ...(goodDigest !== undefined ? { resolvedDigest: goodDigest } : {}),
   };
   let saveError: string | undefined;
-  if (typeof good.resolved === "string") {
+  if (goodDigest !== undefined) {
     saveError = await saveGood(dir, nextGood);
     if (saveError) await writeAtomic(goodPath(dir), JSON.stringify(nextGood) + "\n").catch(() => {});
   } else if (nextGood.asked !== good.asked || nextGood.askedBranch !== good.askedBranch) {
@@ -408,7 +438,14 @@ async function lastGood(dir: string): Promise<Good | undefined> {
 
 const repoDigest = (repo: string) => createHash("sha256").update(repo).digest("hex");
 
-const pinRef = (repo: string, commit: string) => `refs/hedge/pins/${repoDigest(repo)}/${commit.toLowerCase()}`;
+const goodResolvedDigest = (record: { resolved?: string; resolvedDigest?: string } | undefined): string | undefined =>
+  typeof record?.resolvedDigest === "string"
+    ? record.resolvedDigest
+    : typeof record?.resolved === "string"
+      ? repoDigest(record.resolved)
+      : undefined;
+
+const pinRef = (repoHash: string, commit: string) => `refs/hedge/pins/${repoHash}/${commit.toLowerCase()}`;
 
 async function writeAtomic(path: string, content: string | Uint8Array, mode = 0o600) {
   const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
@@ -422,43 +459,42 @@ async function writeAtomic(path: string, content: string | Uint8Array, mode = 0o
   }
 }
 
-async function exactPinTarget(dir: string, repo: string, oid: string): Promise<string | undefined> {
+async function exactPinTarget(dir: string, repoHash: string, oid: string): Promise<string | undefined> {
   if (!existsSync(join(dir, ".git"))) return undefined;
   const normalized = oid.toLowerCase();
-  const ref = pinRef(repo, normalized);
+  const ref = pinRef(repoHash, normalized);
   const exact = await git(dir, "rev-parse", "--verify", "--quiet", ref);
   if (!exact.ok || exact.stdout.toLowerCase() !== normalized) return undefined;
   const commit = await git(dir, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`);
   return commit.ok && gitHash.test(commit.stdout) ? commit.stdout.toLowerCase() : undefined;
 }
 
-async function pinTarget(dir: string, repo: string, oid: string): Promise<string | undefined> {
-  const exact = await exactPinTarget(dir, repo, oid);
+async function pinTarget(dir: string, repoHash: string, oid: string): Promise<string | undefined> {
+  const exact = await exactPinTarget(dir, repoHash, oid);
   if (exact) return exact;
   if (!existsSync(join(dir, ".git"))) return undefined;
   const normalized = oid.toLowerCase();
   const type = await git(dir, "cat-file", "-t", normalized);
   if (!type.ok || type.stdout !== "commit") return undefined;
-  const containing = await git(dir, "for-each-ref", "--count=1", "--contains", normalized, "--format=%(objectname)", `refs/hedge/pins/${repoDigest(repo)}/`);
+  const containing = await git(dir, "for-each-ref", "--count=1", "--contains", normalized, "--format=%(objectname)", `refs/hedge/pins/${repoHash}/`);
   return containing.ok && gitHash.test(containing.stdout) ? normalized : undefined;
 }
 
-async function recordPinRef(dir: string, repo: string, oid: string): Promise<string | undefined> {
-  if ((await exactPinTarget(dir, repo, oid)) !== undefined) return undefined;
-  const updated = await git(dir, "update-ref", pinRef(repo, oid), oid.toLowerCase());
+async function recordPinRef(dir: string, repoHash: string, oid: string): Promise<string | undefined> {
+  if ((await exactPinTarget(dir, repoHash, oid)) !== undefined) return undefined;
+  const updated = await git(dir, "update-ref", pinRef(repoHash, oid), oid.toLowerCase());
   return updated.ok ? undefined : updated.stderr || "could not record pinned commit";
 }
 
-async function recordPinRefs(dir: string, repo: string, oids: string[]): Promise<string | undefined> {
+async function recordPinRefs(dir: string, repoHash: string, oids: string[]): Promise<string | undefined> {
   const unique = [...new Set(oids.map((oid) => oid.toLowerCase()).filter((oid) => gitHash.test(oid)))];
   if (!unique.length) return undefined;
-  const lines = unique.map((oid) => `update ${pinRef(repo, oid)} ${oid}\n`).join("");
-  const env = { ...withoutRepoEnv(), GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "true", SSH_ASKPASS: "true", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" };
+  const lines = unique.map((oid) => `update ${pinRef(repoHash, oid)} ${oid}\n`).join("");
   const proc = Bun.spawn(["git", "-C", dir, "update-ref", "--stdin"], {
     stdin: new TextEncoder().encode(lines),
     stdout: "ignore",
     stderr: "pipe",
-    env,
+    env: gitEnv(),
     timeout: fetchTimeoutMs,
   });
   const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
@@ -478,13 +514,14 @@ async function saveGood(dir: string, good: Good): Promise<string | undefined> {
     before.asked === good.asked &&
     before.askedBranch === good.askedBranch &&
     JSON.stringify(before.blocked) === JSON.stringify(good.blocked) &&
-    before.resolved === good.resolved;
+    before.resolved === undefined &&
+    before.resolvedDigest === good.resolvedDigest;
   const currentCommit = verifiedGoodCommit(good);
   if (currentCommit) {
-    const recorded = await recordPinRef(dir, currentCommit.repo, currentCommit.commit);
+    const recorded = await recordPinRef(dir, currentCommit.repoHash, currentCommit.commit);
     if (recorded && !unchanged) return recorded;
     if (good.peeled === true && isCommitPin(good.ref, currentCommit.commit.length)) {
-      const recordedTag = await recordPinRef(dir, currentCommit.repo, good.ref);
+      const recordedTag = await recordPinRef(dir, currentCommit.repoHash, good.ref);
       if (recordedTag && !unchanged) return recordedTag;
     }
   }
@@ -500,7 +537,7 @@ async function saveGood(dir: string, good: Good): Promise<string | undefined> {
   return undefined;
 }
 
-const verifiedGoodCommit = (record: Good | undefined, overrideRepo?: string) => {
+const verifiedGoodCommit = (record: Good | undefined) => {
   if (
     !record ||
     typeof record.repo !== "string" ||
@@ -511,8 +548,8 @@ const verifiedGoodCommit = (record: Good | undefined, overrideRepo?: string) => 
   ) {
     return undefined;
   }
-  const effective = overrideRepo ?? (typeof record.resolved === "string" ? record.resolved : record.repo);
-  return { repo: effective, commit: record.commit.toLowerCase() };
+  const repoHash = goodResolvedDigest(record) ?? repoDigest(record.repo);
+  return { repoHash, commit: record.commit.toLowerCase() };
 };
 
 const githubRepoPattern = /^(?:https:\/\/(?:[^/@\s]+@)?(?:www\.)?github\.com(?::443)?\/|ssh:\/\/(?:[^/@\s]+@)?(?:github\.com(?::22)?|ssh\.github\.com(?::443)?)\/|git:\/\/github\.com(?::9418)?\/|(?:[^/@:\s]+@)?github\.com:)(.+)$/i;
@@ -529,10 +566,11 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string, cac
     const dir = cacheRoot ? join(cacheRoot, ref.name) : undefined;
     const good = dir ? await lastGood(dir) : undefined;
     const repo = repoUrl(ref.repo);
+    const goodDigest = goodResolvedDigest(good);
     const sameCachedRepo =
       dir !== undefined &&
       good?.repo === repo &&
-      (typeof good.resolved !== "string" || (await resolvedRepoUrl(dir, repo)) === good.resolved);
+      (goodDigest === undefined || repoDigest(await resolvedRepoUrl(dir, repo)) === goodDigest);
     const hashLen = sameCachedRepo ? await repoHashLength(dir) : 40;
     const pinned = isCommitPin(ref.ref, hashLen) && !(sameCachedRepo && cacheRoot && (await followsBranch(ref, cacheRoot)));
     if (!pinned) unpinned.push(ref);
@@ -550,14 +588,16 @@ async function checkedOutFromCache(dir: string, repo: string, effectiveRepo: str
   const oid = ref.ref.toLowerCase();
   const hashLen = await repoHashLength(dir);
   if (!isCommitPin(oid, hashLen)) return undefined;
+  const effectiveDigest = repoDigest(effectiveRepo);
+  const goodDigest = goodResolvedDigest(good);
   const goodCommit = verifiedGoodCommit(good);
   const verifiedGoodMatch =
     goodCommit !== undefined &&
     good?.repo === repo &&
-    typeof good.resolved === "string" &&
-    good.resolved === effectiveRepo &&
+    goodDigest !== undefined &&
+    goodDigest === effectiveDigest &&
     (goodCommit.commit === oid || (good.peeled === true && good.ref.toLowerCase() === oid));
-  const target = verifiedGoodMatch ? goodCommit.commit : await pinTarget(dir, effectiveRepo, oid);
+  const target = verifiedGoodMatch ? goodCommit.commit : await pinTarget(dir, effectiveDigest, oid);
   if (!target) return undefined;
   return (await git(dir, "checkout", "-q", "--detach", target)).ok ? target : undefined;
 }
@@ -600,7 +640,8 @@ async function fetchExact(dir: string, repo: string, ref: string, shallow: boole
     const oid = parsePorcelainFetchHead(fetched.stdout);
     if (oid) return { ok: true, oid, stderr: "" };
   }
-  if (!fetched.ok && !/unknown option.*porcelain/i.test(fetched.fullStderr)) {
+  const unsupportedPorcelain = !fetched.ok && (fetched.code === 129 || /unknown option.*porcelain/i.test(fetched.fullStderr)) && /porcelain/i.test(fetched.fullStderr);
+  if (!fetched.ok && !unsupportedPorcelain) {
     return { ok: false, stderr: fetched.stderr };
   }
   const src = ref.startsWith("+") ? ref.slice(1) : ref;
@@ -643,15 +684,30 @@ async function checkout(dir: string, repo: string, ref: string, savedFetchHead: 
   return head.ok && head.stdout.toLowerCase() === targetCommit ? { effectiveRepo, commit: targetCommit, fetchedOid: fetched.oid } : { effectiveRepo, error: head.stderr || "could not resolve checked-out HEAD" };
 }
 
+function gitEnv() {
+  const base = withoutRepoEnv();
+  const ctype = base.LC_CTYPE ?? base.LC_ALL ?? base.LANG;
+  delete base.LC_ALL;
+  return {
+    ...base,
+    ...(ctype ? { LC_CTYPE: ctype } : {}),
+    LC_MESSAGES: "C",
+    LANGUAGE: "C",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ASKPASS: "true",
+    SSH_ASKPASS: "true",
+    GIT_SSH_COMMAND: "ssh -o BatchMode=yes",
+  };
+}
+
 /** Runs git without any prompt: no terminal, no askpass program, SSH in batch mode, and a time limit. */
 async function git(dir: string, ...args: string[]) {
-  const env = { ...withoutRepoEnv(), GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "true", SSH_ASKPASS: "true", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" };
-  const process = Bun.spawn(["git", "-C", dir, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env, timeout: fetchTimeoutMs });
+  const process = Bun.spawn(["git", "-C", dir, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: gitEnv(), timeout: fetchTimeoutMs });
   const [code, rawBytes, stderr] = await Promise.all([process.exited, new Response(process.stdout).arrayBuffer(), new Response(process.stderr).text()]);
   const bytes = new Uint8Array(rawBytes);
   const rawStdout = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes);
   const message = process.signalCode ? `git timed out after ${fetchTimeoutMs / 1000} seconds` : (stderr.trim().split("\n").at(-1) ?? "");
-  return { ok: code === 0, stdout: rawStdout.trim(), rawStdout, rawBytes: bytes, stderr: message, fullStderr: stderr };
+  return { ok: code === 0, code, stdout: rawStdout.trim(), rawStdout, rawBytes: bytes, stderr: message, fullStderr: stderr };
 }
 
 export function sourceCache(home: string) {
@@ -679,8 +735,8 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
   const repo = repoUrl(ref.repo);
   if (!good || !branch) return false;
   if (Array.isArray(good.blocked) && good.blocked.length) {
-    const effective = await resolvedRepoUrl(dir, repo);
-    if (good.blocked.some((entry) => entry && entry.repo === repo && entry.resolved === effective)) return false;
+    const effectiveDigest = repoDigest(await resolvedRepoUrl(dir, repo));
+    if (good.blocked.some((entry) => entry && entry.repo === repo && goodResolvedDigest(entry) === effectiveDigest)) return false;
   }
   if (branchName(good.asked) === branch) {
     if (good.askedBranch === true) return true;
@@ -782,8 +838,9 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     await restoreFetchHead(dir, savedFetchHead);
     return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} changed checkout HEAD while loading` };
   }
-  const pinError = await recordPinRefs(dir, effectiveRepo, refreshPins);
-  const saveError = pinError ?? (await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolved: effectiveRepo }));
+  const effectiveDigest = repoDigest(effectiveRepo);
+  const pinError = await recordPinRefs(dir, effectiveDigest, refreshPins);
+  const saveError = pinError ?? (await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest }));
   if (saveError) {
     if (before) await restoreCheckout(dir, before);
     else if ((await git(dir, "checkout", "-q", "--detach", from)).ok) clearLoadedModules(dir);
