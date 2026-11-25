@@ -31,10 +31,12 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
     const elapsed = clock.now() - started;
     let nextWake = Number.POSITIVE_INFINITY;
     const due: WatchEntry[] = [];
+    const dead: WatchEntry[] = [];
     for (const entry of [...pending]) {
       if (!alive(entry.fd)) {
         close(entry.fd);
         pending.delete(entry);
+        if (entry.tag) dead.push(entry);
         continue;
       }
       const left = entry.delayMs - elapsed;
@@ -44,6 +46,14 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
       } else if (left < nextWake) {
         nextWake = left;
       }
+    }
+    if (dead.length > 0) {
+      await Promise.all(
+        dead.map(async (entry) => {
+          const tagged = await discoverTargets(undefined, entry.tag);
+          if (tagged) signalTargets(tagged, "SIGKILL");
+        }),
+      );
     }
     if (due.length > 0) {
       await Promise.all(
@@ -59,6 +69,9 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
               const tagged = await discoverTargets(undefined, entry.tag);
               if (tagged) signalTargets(tagged, "SIGKILL");
             }
+          } else if (entry.tag) {
+            const tagged = await discoverTargets(undefined, entry.tag);
+            if (tagged) signalTargets(tagged, "SIGKILL");
           }
           close(entry.fd);
         }),

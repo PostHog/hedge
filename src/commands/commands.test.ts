@@ -6,6 +6,7 @@ import type { AvailableSource, PackManifest, ProfileFile } from "../pack/types.t
 import { defaultSources } from "../setup/defaults.ts";
 import { cachedCheckout, isolateGit, spawnGit, template, tempDirs } from "../testing/git.ts";
 import { engineSource, resolveEngine } from "../testing/packs.ts";
+import { packsCommand } from "./packs.ts";
 import { settingsCommand } from "./settings.ts";
 
 isolateGit();
@@ -496,6 +497,42 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     const onNode = await hedge(home, ["packs"]);
     expect(onNode.code).toBe(0);
     expect(onNode.output).toContain(`  ~ team  Team rules.\n      Workflows: service-only on\n${needsSetup}`);
+
+    const engine = await engineSource();
+    const team: AvailableSource = {
+      ref: { name: "team", repo: "team/packs", ref: "main" },
+      dir: "/team",
+      packs: [
+        {
+          dir: "/team/packs/team",
+          manifest: {
+            schema: 1,
+            name: "team",
+            summary: "Team rules.",
+            workflows: [flow("linux-wf"), flow("mac-wf")],
+            human: [{ id: "sign-in", say: "Sign in.", probe: ["false"] }],
+            served: [
+              { id: "svc", port: 4599, health: "/health", on: ["linux"], workflow: "linux-wf", after: "sign-in" },
+              { id: "svc", port: 4599, health: "/health", on: ["darwin"], workflow: "mac-wf", after: "sign-in" },
+            ],
+          },
+        },
+      ],
+    };
+    const linuxPlan = resolveEngine([engine, team], { packs: ["team"], hub: "hub-1" }, { schema: 1, role: "hub", name: "hub-1" });
+    expect(linuxPlan.onHub).toBe(true);
+    const lines: string[] = [];
+    const profile = { schema: 1, engine: { repo: "PostHog/hedge", ref: "main", channel: "track" }, sources: [team.ref], packs: ["team"], plan: "both", settings: {}, workflows: {} } satisfies ProfileFile;
+    const failingStep = linuxPlan.human.find((step) => step.pack === "team" && step.id === "sign-in")!;
+    const ctx = {
+      profile,
+      plan: linuxPlan,
+      packs: [...engine.packs, ...team.packs],
+      print: (line: string) => lines.push(line),
+      humanStepsLeft: async () => ({ failing: [failingStep], unchecked: [] }),
+    } as unknown as Parameters<typeof packsCommand>[1];
+    expect(await packsCommand([], ctx)).toBe(0);
+    expect(lines.join("\n")).toContain(`  ~ team  Team rules.\n      Workflows: linux-wf needs setup, mac-wf on\n${needsSetup}`);
   });
 });
 

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { closeSync, existsSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../testing/git.ts";
+import { tagEnvVar } from "./probe-supervisor.ts";
 import { watchEntries } from "./probe-watchdog.ts";
 
 const temp = tempDirs();
@@ -482,6 +483,44 @@ await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore"
       try {
         process.kill(-sup.pid, "SIGKILL");
       } catch {}
+      sup.kill("SIGKILL");
+      try {
+        closeSync(aliveFd);
+      } catch {}
+    }
+  });
+
+  test("watchdog still kills a tagged detached child when the supervisor dies and closes its control pipe early", async () => {
+    const dir = temp.make("sup-watchdog-dead-");
+    const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+    mkfifo(ready, gone);
+    const started = fifoRead(ready);
+    const closed = fifoRead(gone);
+    const tag = crypto.randomUUID();
+    const detachedScript = `const c = Bun.spawn(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "worker", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" }); c.unref(); await Bun.sleep(30_000);`;
+    const payload = JSON.stringify({
+      command: [process.execPath, "-e", detachedScript],
+      controlFd: 3,
+    });
+    const sup = Bun.spawn([process.execPath, supervisorPath, payload], {
+      stdio: ["ignore", "pipe", "ignore", "pipe"],
+      env: { ...process.env, [tagEnvVar]: tag },
+      detached: true,
+    });
+    const aliveFd = sup.stdio[3] as number;
+    let workerPid = 0;
+    try {
+      workerPid = Number((await started).trim());
+      expect(workerPid).toBeGreaterThan(0);
+      sup.kill("SIGKILL");
+      await sup.exited;
+      await watchEntries([{ pid: sup.pid, fd: aliveFd, delayMs: 250, tag }], {
+        now: () => 0,
+        sleep: async () => {},
+      });
+      expect(await closed).toBe("");
+    } finally {
+      if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
       sup.kill("SIGKILL");
       try {
         closeSync(aliveFd);

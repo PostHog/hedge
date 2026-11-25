@@ -695,4 +695,30 @@ describe("humanStepsLeft", () => {
     const result = await humanStepsLeft(plan({ human }), { home, giveUp: new Promise<void>(() => {}) });
     expect(result).toEqual({ failing: [], unchecked: [] });
   });
+
+  test("drains an already-written failure exit code when the deadline fires after a busy event loop", async () => {
+    const home = temp.make("home-busy-deadline-");
+    const doneMarker = join(home, "done");
+    let fire!: () => void;
+    const giveUp = new Promise<void>((resolve) => (fire = resolve));
+    const step = {
+      id: "quick-fail",
+      pack: "team",
+      say: "Quick fail.",
+      probe: ["sh", "-c", 'printf x > "$1"; exit 1', "probe", doneMarker],
+    };
+    const pending = humanStepsLeft(plan({ human: [step] }), { home, giveUp });
+    await Bun.sleep(1);
+    const limit = performance.now() + 2000;
+    const sab = new Int32Array(new SharedArrayBuffer(4));
+    while (!existsSync(doneMarker) && performance.now() < limit) {
+      Atomics.wait(sab, 0, 0, 2);
+    }
+    expect(existsSync(doneMarker)).toBe(true);
+    Atomics.wait(sab, 0, 0, 25);
+    fire();
+    const res = await pending;
+    expect(res.failing.map((item) => item.id)).toEqual(["quick-fail"]);
+    expect(res.unchecked).toEqual([]);
+  });
 });

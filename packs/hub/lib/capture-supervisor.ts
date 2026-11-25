@@ -1,9 +1,9 @@
 import { closeSync } from "node:fs";
-import { killSession, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { killSession, ownTag, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
 type StartMessage = { argv: string[]; lockCount: number; controlFd?: number };
 
-const runTag = process.env[tagEnvVar] || undefined;
+const runTag = ownTag(process.env[tagEnvVar]);
 let target: ReturnType<typeof Bun.spawn> | undefined;
 let targetReaped = false;
 let targetCode: number | undefined;

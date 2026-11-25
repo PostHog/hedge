@@ -7,6 +7,15 @@ export const graceMs = 150;
 export const interruptGraceMs = 300;
 export const tagEnvVar = "HEDGE_SUPERVISOR_TAG";
 
+export function appendTag(existing: string | undefined, tag: string): string {
+  return existing ? `${existing},${tag}` : tag;
+}
+
+export function ownTag(value: string | undefined): string | undefined {
+  const last = value?.split(",").at(-1)?.trim();
+  return last || undefined;
+}
+
 export type SupervisorHost = {
   spawn: (command: string[]) => { pid?: number; exited: Promise<number>; kill?: (signal?: NodeJS.Signals) => void };
   killGroup: (signal: NodeJS.Signals) => void | Promise<void>;
@@ -14,6 +23,7 @@ export type SupervisorHost = {
   timer: Timer;
   onSignal: (signal: StopSignal, handler: () => void) => void;
   reportTarget?: (pid: number) => void;
+  reportStop?: () => void;
   reportResult: (code: number) => void;
   reportCleanup: () => void;
   exit: (code: number) => void;
@@ -21,10 +31,18 @@ export type SupervisorHost = {
 
 type ProcTargets = { pids: number[]; groups: number[]; orphanPids: number[] };
 
-function hasEnvTagLinux(pid: number, marker: string): boolean {
+function envMatchesTag(value: string, tag: string): boolean {
+  return value.split(",").includes(tag);
+}
+
+function hasEnvTagLinux(pid: number, tag: string): boolean {
+  const prefix = `${tagEnvVar}=`;
   try {
     const raw = readFileSync(`/proc/${pid}/environ`, "utf8");
-    return raw === marker || raw.startsWith(`${marker}\0`) || raw.includes(`\0${marker}\0`) || raw.endsWith(`\0${marker}`);
+    for (const entry of raw.split("\0")) {
+      if (entry.startsWith(prefix) && envMatchesTag(entry.slice(prefix.length), tag)) return true;
+    }
+    return false;
   } catch {
     return false;
   }
@@ -35,7 +53,6 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string): ProcTarg
   const rows: Array<{ pid: number; ppid: number; pgrp: number; sid: number }> = [];
   const matched = new Set<number>();
   if (sessionId !== undefined) matched.add(sessionId);
-  const marker = tag ? `${tagEnvVar}=${tag}` : undefined;
   try {
     for (const name of readdirSync("/proc")) {
       if (!/^\d+$/.test(name)) continue;
@@ -55,7 +72,7 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string): ProcTarg
       rows.push({ pid, ppid, pgrp, sid });
       if (sessionId !== undefined && (sid === sessionId || pgrp === sessionId)) {
         matched.add(pid);
-      } else if (marker && pid !== self && hasEnvTagLinux(pid, marker)) {
+      } else if (tag && pid !== self && hasEnvTagLinux(pid, tag)) {
         matched.add(pid);
       }
     }
@@ -159,13 +176,25 @@ export async function discoverTargets(sessionId?: number, tag?: string): Promise
     }
   }
   if (tag && envRes) {
-    const token = `${tagEnvVar}=${tag}`;
+    const prefix = `${tagEnvVar}=`;
     for (const line of envRes.text.split("\n")) {
-      const idx = line.indexOf(token);
-      if (idx === -1) continue;
-      const before = idx > 0 ? line[idx - 1] : " ";
-      const after = idx + token.length < line.length ? line[idx + token.length] : " ";
-      if (!/\s/.test(before!) || !/\s/.test(after!)) continue;
+      let from = 0;
+      let matchedLine = false;
+      for (;;) {
+        const idx = line.indexOf(prefix, from);
+        if (idx === -1) break;
+        const before = idx > 0 ? line[idx - 1] : " ";
+        if (/\s/.test(before!)) {
+          let end = idx + prefix.length;
+          while (end < line.length && !/\s/.test(line[end]!)) end++;
+          if (envMatchesTag(line.slice(idx + prefix.length, end), tag)) {
+            matchedLine = true;
+            break;
+          }
+        }
+        from = idx + prefix.length;
+      }
+      if (!matchedLine) continue;
       const pidMatch = line.trimStart().match(/^(\d+)\s/);
       if (!pidMatch) continue;
       const pid = Number(pidMatch[1]);
@@ -338,7 +367,10 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
     host.onSignal(sig, () => {
       if (forwarded.has(sig)) return;
-      if (!stop) stop = sig;
+      if (!stop) {
+        stop = sig;
+        if (!leaderDone) host.reportStop?.();
+      }
       if (!target) return exit(128);
       if (leaderDone && normalCleanupStarted) {
         if (sig === "SIGTERM" || sig === "SIGHUP") {
@@ -440,7 +472,7 @@ if (import.meta.main) {
       dispatchStop("SIGTERM");
     })();
   }
-  const runTag = process.env[tagEnvVar] || undefined;
+  const runTag = ownTag(process.env[tagEnvVar]);
   await supervise(command, {
     spawn: (argv) => Bun.spawn(argv, { stdio: ["ignore", "ignore", "ignore"] }),
     killGroup: (signal) => killSession(process.pid, signal, runTag),
@@ -458,6 +490,11 @@ if (import.meta.main) {
     reportTarget: (pid) => {
       try {
         writeSync(1, `target:${pid}\n`);
+      } catch {}
+    },
+    reportStop: () => {
+      try {
+        writeSync(1, "stopped\n");
       } catch {}
     },
     reportResult: (code) => {

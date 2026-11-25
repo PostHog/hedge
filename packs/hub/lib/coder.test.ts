@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, symlinkSync, watch, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tempDirs } from "../../../src/testing/git.ts";
+import { killSession, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 import { withBoxLock } from "./box-lock.ts";
 import { capture, captureWith, Coder, grant, reap, type Box, type Capture, type Timer } from "./coder.ts";
 import { appeared } from "./testing.ts";
@@ -421,6 +422,35 @@ process.exit(0);`;
   } finally {
     if (childPid > 0) try { process.kill(-childPid, "SIGKILL"); } catch {}
     if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
+  }
+});
+
+test("preserves ancestor HEDGE_SUPERVISOR_TAG across nested capture so outer tag cleanup stops reparented children", async () => {
+  const dir = temp.make("hedge-nested-tag-");
+  const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+  expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+  const outerTag = crypto.randomUUID();
+  const holderGone = Bun.file(gone).text();
+  const started = Bun.file(ready).text();
+  const outer = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      `import { capture } from ${JSON.stringify(join(import.meta.dir, "coder.ts"))}; await capture(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "worker", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { timeoutMs: 30_000 });`,
+    ],
+    { env: { ...process.env, [tagEnvVar]: outerTag }, stdout: "ignore", stderr: "ignore" },
+  );
+  let workerPid = 0;
+  try {
+    workerPid = Number((await started).trim());
+    expect(workerPid).toBeGreaterThan(0);
+    outer.kill("SIGKILL");
+    await outer.exited;
+    await killSession(undefined, "SIGKILL", outerTag);
+    expect(await holderGone).toBe("");
+  } finally {
+    outer.kill("SIGKILL");
+    if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
   }
 });
 

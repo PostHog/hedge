@@ -10,7 +10,7 @@ import { hublessReason, listedPack } from "./resolve.ts";
 import { wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
 import { withLegacyNames } from "../legacy.ts";
 import { bunScript } from "../runner/bun.ts";
-import { graceMs, interruptGraceMs, killSession, killSessionSync, tagEnvVar } from "./probe-supervisor.ts";
+import { appendTag, graceMs, interruptGraceMs, killSession, killSessionSync, tagEnvVar } from "./probe-supervisor.ts";
 
 export type AdapterContext = { home: string; dryRun: boolean; adopt: string[]; adoptFrom?: string[] };
 export type AdapterResult = { actions: Action[]; findings: Finding[]; blocked?: boolean; failed?: boolean };
@@ -273,11 +273,20 @@ export async function humanStepsLeft(plan: Plan, options: { home: string; run?: 
     const result = run(step.probe, {}, deadline.signal).then((code) =>
       code === supervisorSpawnFailed ? ("unchecked" as const) : code === 0 ? ("passes" as const) : ("fails" as const),
     );
-    const late = options.giveUp.then(() => {
+    const late = options.giveUp.then(async () => {
       const code = reported.get(deadline.signal);
       deadline.abort();
       if (code !== undefined) return code === 0 ? ("passes" as const) : ("fails" as const);
-      return "unchecked" as const;
+      if (options.run) return "unchecked" as const;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cap = new Promise<"unchecked">((resolve) => {
+        timer = setTimeout(() => resolve("unchecked"), 50);
+      });
+      try {
+        return await Promise.race([result, cap]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     });
     outcomes[index] = await Promise.race([result, late]);
   };
@@ -605,12 +614,13 @@ async function readSupervisorResult(
   stdout: ReadableStream<Uint8Array>,
   onFirstCode: (code: number) => void,
   onTarget?: (pid: number) => void,
-): Promise<{ code?: number; cleanup: boolean }> {
+): Promise<{ code?: number; cleanup: boolean; stopped: boolean }> {
   const reader = stdout.getReader();
   const decoder = new TextDecoder();
   let buf = "";
   let code: number | undefined;
   let cleanup = false;
+  let stopped = false;
   try {
     for (;;) {
       const { value, done } = await reader.read();
@@ -627,7 +637,10 @@ async function readSupervisorResult(
           onFirstCode(code);
         } else if (line === "cleanup") {
           cleanup = true;
-          return { code, cleanup };
+          return { code, cleanup, stopped };
+        } else if (line === "stopped") {
+          stopped = true;
+          return { code, cleanup, stopped };
         }
       }
     }
@@ -635,7 +648,7 @@ async function readSupervisorResult(
   } finally {
     await reader.cancel().catch(() => {});
   }
-  return { code, cleanup };
+  return { code, cleanup, stopped };
 }
 
 async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number, live?: Set<LiveProbe>) {
@@ -675,12 +688,12 @@ async function runDetached(command: string[], env: Record<string, string | undef
   const releaseSlot = await acquireSupervisorSlot(signal);
   if (!releaseSlot) {
     release();
-    return 124;
+    return supervisorSpawnFailed;
   }
   if (signal.aborted || stopSignal) {
     releaseSlot();
     release();
-    return 124;
+    return supervisorSpawnFailed;
   }
   let handedToExit = false;
   try {
@@ -690,7 +703,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
     const overStdin = Buffer.byteLength(encoded) > 65_536;
     child = Bun.spawn(overStdin ? bunScript(probeSupervisor) : bunScript(probeSupervisor, encoded), {
       stdio: [overStdin ? new TextEncoder().encode(encoded) : "ignore", "pipe", "ignore", "pipe"],
-      env: { ...env, [tagEnvVar]: tag },
+      env: { ...env, [tagEnvVar]: appendTag(env[tagEnvVar], tag) },
       detached: true,
     });
     const aliveFd = typeof child.stdio[3] === "number" ? child.stdio[3] : undefined;
@@ -737,6 +750,10 @@ async function runDetached(command: string[], env: Record<string, string | undef
     if (status.code !== undefined && status.cleanup) {
       child.unref();
       return status.code;
+    }
+    if (status.stopped) {
+      child.unref();
+      return status.code ?? supervisorSpawnFailed;
     }
     await child.exited;
     return status.code ?? supervisorSpawnFailed;
