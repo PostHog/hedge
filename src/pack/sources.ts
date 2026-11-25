@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, relative, resolve, sep } from "node:path";
 import { loadPacks } from "./manifest.ts";
@@ -134,8 +134,6 @@ async function lastGood(dir: string): Promise<Good | undefined> {
   }
 }
 
-type Pins = { repoHash: string; commits: string[] };
-
 const repoDigest = (repo: string) => createHash("sha256").update(repo).digest("hex");
 
 function pinsPath(dir: string) {
@@ -144,7 +142,8 @@ function pinsPath(dir: string) {
 
 async function writeAtomic(path: string, content: string) {
   const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(temp, content);
+  await writeFile(temp, content, { mode: 0o600 });
+  await chmod(temp, 0o600);
   try {
     await rename(temp, path);
   } catch (error) {
@@ -158,12 +157,24 @@ const isDirectoryError = (error: unknown) => {
   return code === "EISDIR" || code === "ENOTEMPTY" || code === "ERR_FS_EISDIR";
 };
 
-async function readPins(dir: string): Promise<Pins | undefined> {
+function parsePinEntry(entry: unknown): [string, string[]] | undefined {
+  if (!entry || typeof entry !== "object") return undefined;
+  const { repoHash, commits } = entry as { repoHash?: unknown; commits?: unknown };
+  if (typeof repoHash !== "string" || !Array.isArray(commits)) return undefined;
+  return [repoHash, commits.filter((commit): commit is string => typeof commit === "string" && commitSha.test(commit)).map((commit) => commit.toLowerCase())];
+}
+
+async function readPins(dir: string): Promise<Map<string, string[]> | undefined> {
   try {
-    const raw = JSON.parse(await readFile(pinsPath(dir), "utf8")) as { repoHash?: unknown; commits?: unknown } | null;
-    if (!raw || typeof raw !== "object" || typeof raw.repoHash !== "string" || !Array.isArray(raw.commits)) return undefined;
-    const commits = raw.commits.filter((commit): commit is string => typeof commit === "string" && commitSha.test(commit)).map((commit) => commit.toLowerCase());
-    return { repoHash: raw.repoHash, commits };
+    const raw = JSON.parse(await readFile(pinsPath(dir), "utf8")) as { repos?: unknown; repoHash?: unknown; commits?: unknown } | null;
+    if (!raw || typeof raw !== "object") return undefined;
+    const entries = Array.isArray(raw.repos) ? raw.repos : [raw];
+    const parsed = new Map<string, string[]>();
+    for (const entry of entries) {
+      const pair = parsePinEntry(entry);
+      if (pair) parsed.set(pair[0], [...new Set([...(parsed.get(pair[0]) ?? []), ...pair[1]])]);
+    }
+    return parsed.size || Array.isArray(raw.repos) ? parsed : undefined;
   } catch {
     return undefined;
   }
@@ -171,15 +182,16 @@ async function readPins(dir: string): Promise<Pins | undefined> {
 
 async function saveGood(dir: string, good: Good) {
   const before = await lastGood(dir);
-  const pins = await readPins(dir);
+  const pins = (await readPins(dir)) ?? new Map<string, string[]>();
   const digest = repoDigest(good.repo);
-  const known = new Set(pins?.repoHash === digest ? pins.commits : []);
+  const known = new Set(pins.get(digest) ?? []);
   if (before?.repo === good.repo && typeof before.ref === "string" && commitSha.test(before.ref) && typeof before.commit === "string" && commitSha.test(before.commit)) {
     known.add(before.commit.toLowerCase());
   }
   if (commitSha.test(good.ref) && commitSha.test(good.commit)) known.add(good.commit.toLowerCase());
+  if (known.size) pins.set(digest, [...known]);
   try {
-    if (known.size) await writeAtomic(pinsPath(dir), JSON.stringify({ repoHash: digest, commits: [...known] }) + "\n");
+    if (pins.size) await writeAtomic(pinsPath(dir), JSON.stringify({ repos: [...pins].map(([repoHash, commits]) => ({ repoHash, commits })) }) + "\n");
     else await rm(pinsPath(dir), { force: true });
   } catch (error) {
     if (!isDirectoryError(error)) throw error;
@@ -211,7 +223,7 @@ async function checkedOutFromCache(dir: string, repo: string, ref: SourceRef, go
   const commit = ref.ref.toLowerCase();
   if (!commitSha.test(commit) || good?.repo !== repo) return false;
   const pins = await readPins(dir);
-  const fetchedHere = (typeof good.commit === "string" && good.commit.toLowerCase() === commit) || (pins?.repoHash === repoDigest(repo) && pins.commits.includes(commit));
+  const fetchedHere = (typeof good.commit === "string" && good.commit.toLowerCase() === commit) || Boolean(pins?.get(repoDigest(repo))?.includes(commit));
   if (!fetchedHere) return false;
   return (await git(dir, "checkout", "-q", "--detach", commit)).ok;
 }

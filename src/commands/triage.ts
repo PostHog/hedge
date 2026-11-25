@@ -82,7 +82,7 @@ export async function triageReport(context: TriageContext, note?: string): Promi
       : undefined;
   const known = [
     ...knownNames(context.hostname, machine, profile, gitName, origin),
-    ...(inspected ? knownNames(context.hostname, undefined, inspected.profile, undefined, doctorOrigin) : []),
+    ...(inspected ? knownNames(context.hostname, undefined, inspected.profile, undefined, doctorOrigin, true) : []),
   ];
   const clean = (text: string) => redact(text, context.home, known);
   const described = note?.trim() ? clean(note.trim()) : "Not described.";
@@ -161,7 +161,7 @@ async function firstLine(context: TriageContext, command: string[]) {
   return line || undefined;
 }
 
-function knownNames(hostname: string, machine: MachineFile | undefined, profile: Profile | undefined, gitName: string | undefined, origin: string | undefined): KnownName[] {
+function knownNames(hostname: string, machine: MachineFile | undefined, profile: Profile | undefined, gitName: string | undefined, origin: string | undefined, anonymousSources = false): KnownName[] {
   const names: KnownName[] = [];
   const profileRepo = origin?.match(/github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?$/)?.[1];
   if (profileRepo) names.push({ text: profileRepo, as: "<profile repo>" });
@@ -186,7 +186,7 @@ function knownNames(hostname: string, machine: MachineFile | undefined, profile:
       }
     }
     if (publicRepos.has(source.repo)) continue;
-    names.push({ text: source.repo, as: `<${source.name} source>` });
+    names.push({ text: source.repo, as: anonymousSources ? "<private source>" : `<${source.name} source>` });
   }
   if (gitName) names.push({ text: gitName, as: "<name>" });
   return names;
