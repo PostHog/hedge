@@ -324,7 +324,9 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     let pos = 0;
     let runStart = -1;
     let runEnd = -1;
-    const flush = () => {
+    let prevBoundaryEnd = -1;
+    let prevTail = "";
+    const flush = (nextLead = "") => {
       if (runStart === -1) return;
       let end = runEnd;
       let eq = 0;
@@ -334,17 +336,27 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
       }
       const slice = value.slice(runStart, end);
       const expanded = slice.replace(tokenRegex, (_tok, idx) => matchedOriginals[Number(idx)] ?? "");
+      const prefixTail = runStart === prevBoundaryEnd ? prevTail : "";
+      const suffixLead = end === runEnd ? nextLead : "";
+      const candidate = `${prefixTail}${expanded}${suffixLead}`;
+      const isRandom = (sample: string) => sample.length >= tokenLetters && looksRandom(sample);
       out += value.slice(pos, runStart);
-      out += expanded.length >= tokenLetters && looksRandom(expanded) ? "<secret>" : slice;
+      out += isRandom(expanded) || isRandom(candidate) ? "<secret>" : slice;
       pos = end;
       runStart = -1;
       runEnd = -1;
     };
     tokenOrChunk.lastIndex = 0;
     for (let match = tokenOrChunk.exec(value); match !== null; match = tokenOrChunk.exec(value)) {
-      if (match[1] !== undefined && !/^[A-Za-z0-9+/_-]+$/.test(matchedOriginals[Number(match[1])] ?? "")) {
-        flush();
-        continue;
+      if (match[1] !== undefined) {
+        const orig = matchedOriginals[Number(match[1])] ?? "";
+        if (!/^[A-Za-z0-9+/_-]+$/.test(orig)) {
+          const lead = match.index === runEnd ? (orig.match(/^[A-Za-z0-9+/_-]+={0,2}/)?.[0] ?? "") : "";
+          flush(lead);
+          prevBoundaryEnd = match.index + match[0].length;
+          prevTail = orig.match(/[A-Za-z0-9+/_-]+$/)?.[0] ?? "";
+          continue;
+        }
       }
       const start = match.index;
       const end = start + match[0].length;

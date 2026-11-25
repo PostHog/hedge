@@ -769,6 +769,50 @@ describe("hedge triage", () => {
       expect(title).not.toContain(leaked);
       expect(body).not.toContain(leaked);
     }
+
+    const overlapHome = temp.make("home-overlap-rand-");
+    const overlapProfile = temp.make("profile-overlap-rand-");
+    writeFileSync(
+      join(overlapProfile, "hedge.json"),
+      JSON.stringify({
+        schema: 1,
+        engine: { repo: "PostHog/hedge", ref: "main", channel: "track" },
+        sources: [{ name: "priv", repo: "/work/private dir", ref: "main" }],
+        packs: [],
+        plan: "both",
+        settings: {},
+        workflows: {},
+      }),
+    );
+    const overlapSent: Sent[] = [];
+    const overlapIo = scripted([]);
+    const overlapCode = await main(
+      ["triage", "--send", "--note", "aB3x9K2mP7qR4sT8uV1w+/work/private dir/tail"],
+      {
+        home: overlapHome,
+        engineRoot,
+        platform: "darwin",
+        env: { HEDGE_PROFILE_DIR: overlapProfile },
+        print: overlapIo.terminal.print,
+        terminal: overlapIo.terminal,
+        capture: async (command, options = {}) => {
+          overlapSent.push({ command, ...(options.input === undefined ? {} : { input: options.input }) });
+          if (command[0] === "git") return spawnRunner(command, options);
+          return capture([], undefined)(command, options);
+        },
+        hostname: () => "noras-mbp.local",
+        run: async () => 0,
+      },
+    );
+    expect(overlapCode).toBe(0);
+    const overlapIssue = overlapSent.find((call) => call.command[1] === "issue")!;
+    const overlapTitle = overlapIssue.command[overlapIssue.command.indexOf("--title") + 1]!;
+    const overlapBody = overlapIssue.input!;
+    expect(overlapBody).toContain("<secret><private source>/tail");
+    for (const leaked of ["aB3x9K2mP7qR4sT8uV1w", "private dir"]) {
+      expect(overlapTitle).not.toContain(leaked);
+      expect(overlapBody).not.toContain(leaked);
+    }
   });
 });
 

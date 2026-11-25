@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
 import { advanceSource, cachedSource, fetchSource, followsBranch } from "./sources.ts";
@@ -305,6 +305,7 @@ esac
     const fhInitial = await fetchSource({ name: "team", repo: fhRepo, ref: "main" }, fhCache);
     if ("error" in fhInitial) throw new Error(fhInitial.error);
     expect(await followsBranch({ name: "team", repo: fhRepo, ref: "main" }, fhCache)).toBe(true);
+    const beforeFh = readFileSync(join(fhCache, "team", ".git", "FETCH_HEAD"), "utf8");
     const fhRefs = join(fhCache, "team", ".git", "refs");
     setDirModes(fhRefs, 0o555);
     try {
@@ -314,6 +315,7 @@ esac
     } finally {
       setDirModes(fhRefs, 0o755);
     }
+    expect(readFileSync(join(fhCache, "team", ".git", "FETCH_HEAD"), "utf8")).toBe(beforeFh);
     expect(await followsBranch({ name: "team", repo: fhRepo, ref: "main" }, fhCache)).toBe(true);
 
     const roRepo = await packRepo("Read-only FH.");
@@ -464,6 +466,11 @@ esac
     if ("error" in afterForge) throw new Error(afterForge.error);
     expect(afterForge.packs[0]?.manifest.summary).toBe("Trusted repo A.");
     expect(afterForge.stale).toContain(`could not fetch ${shaB}`);
+
+    const plusCache = temp.make("cache-plus-refspec-");
+    const plusMain = await fetchSource({ name: "team", repo: repoB, ref: "+main" }, plusCache);
+    if ("error" in plusMain) throw new Error(plusMain.error);
+    expect(plusMain.packs[0]?.manifest.summary).toBe("Untrusted repo B.");
 
     const legacyMirror = await packRepo("Legacy insteadOf good v1.");
     const legacyGoodSha = await spawnGit(legacyMirror, "rev-parse", "HEAD");

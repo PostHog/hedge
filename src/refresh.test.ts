@@ -298,7 +298,17 @@ describe("hedge refresh", () => {
     expect(await box.hedge("refresh")).toBe(0);
     expect(box.read(guide)).toBe("Rules v2.\n");
 
-    rmSync(box.repo, { recursive: true, force: true });
+    box.pin(midSha);
+    expect(await box.hedge("apply", "--profile", box.profile)).toBe(0);
+    expect(box.read(guide)).toBe("Rules mid.\n");
+    expect(box.lines.join("\n")).not.toContain("could not fetch");
+
+    const v3Repo = box.repo;
+    box.pin("refs/heads/+release");
+    expect(await box.hedge("apply", "--profile", box.profile)).toBe(0);
+    expect(box.read(guide)).toBe("Rules v2.\n");
+
+    rmSync(v3Repo, { recursive: true, force: true });
     box.lines.length = 0;
     box.pin(midSha);
     expect(await box.hedge("apply", "--profile", box.profile)).toBe(0);

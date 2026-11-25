@@ -93,7 +93,7 @@ async function resolvedRepoUrl(dir: string, repo: string) {
 }
 
 const gitHash = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
-const isInvalidRef = (ref: string) => !ref || ref.startsWith("-") || ref.startsWith("+") || ref.startsWith("^") || ref.includes(":") || /[\0\r\n]/.test(ref);
+const isInvalidRef = (ref: string) => !ref || ref.startsWith("-") || ref.startsWith("^") || ref.includes(":") || /[\0\r\n]/.test(ref);
 
 async function repoHashLength(dir: string): Promise<number> {
   if (!existsSync(join(dir, ".git"))) return 40;
@@ -132,10 +132,13 @@ async function fetchHeadEntry(dir: string, refs?: Array<string | undefined>): Pr
   for (const ref of refs ?? []) {
     if (typeof ref !== "string" || !ref) continue;
     const short = ref.replace(/^refs\/(?:heads|tags)\//, "");
-    for (const prefix of [`branch '${short}' of `, `tag '${short}' of `, `'${short}' of `, `'${ref}' of `]) {
-      const latinPrefix = Buffer.from(prefix, "utf8").toString("latin1");
-      if (desc.startsWith(latinPrefix)) {
-        return { oid, url: decodeRepoBytes(raw.subarray(descOffset + latinPrefix.length, first.length)) };
+    const names = short.startsWith("+") && short.length > 1 ? [short, short.slice(1)] : [short];
+    for (const name of names) {
+      for (const prefix of [`branch '${name}' of `, `tag '${name}' of `, `'${name}' of `, `'${ref}' of `]) {
+        const latinPrefix = Buffer.from(prefix, "utf8").toString("latin1");
+        if (desc.startsWith(latinPrefix)) {
+          return { oid, url: decodeRepoBytes(raw.subarray(descOffset + latinPrefix.length, first.length)) };
+        }
       }
     }
   }
@@ -401,15 +404,21 @@ async function writeAtomic(path: string, content: string | Uint8Array, mode = 0o
   }
 }
 
-async function pinTarget(dir: string, repo: string, oid: string): Promise<string | undefined> {
+async function exactPinTarget(dir: string, repo: string, oid: string): Promise<string | undefined> {
   if (!existsSync(join(dir, ".git"))) return undefined;
   const normalized = oid.toLowerCase();
   const ref = pinRef(repo, normalized);
   const exact = await git(dir, "rev-parse", "--verify", "--quiet", ref);
-  if (exact.ok && exact.stdout.toLowerCase() === normalized) {
-    const commit = await git(dir, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`);
-    return commit.ok && gitHash.test(commit.stdout) ? commit.stdout.toLowerCase() : undefined;
-  }
+  if (!exact.ok || exact.stdout.toLowerCase() !== normalized) return undefined;
+  const commit = await git(dir, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`);
+  return commit.ok && gitHash.test(commit.stdout) ? commit.stdout.toLowerCase() : undefined;
+}
+
+async function pinTarget(dir: string, repo: string, oid: string): Promise<string | undefined> {
+  const exact = await exactPinTarget(dir, repo, oid);
+  if (exact) return exact;
+  if (!existsSync(join(dir, ".git"))) return undefined;
+  const normalized = oid.toLowerCase();
   const type = await git(dir, "cat-file", "-t", normalized);
   if (!type.ok || type.stdout !== "commit") return undefined;
   const containing = await git(dir, "for-each-ref", "--count=1", "--contains", normalized, "--format=%(objectname)", `refs/hedge/pins/${repoDigest(repo)}/`);
@@ -417,7 +426,7 @@ async function pinTarget(dir: string, repo: string, oid: string): Promise<string
 }
 
 async function recordPinRef(dir: string, repo: string, oid: string): Promise<string | undefined> {
-  if ((await pinTarget(dir, repo, oid)) !== undefined) return undefined;
+  if ((await exactPinTarget(dir, repo, oid)) !== undefined) return undefined;
   const updated = await git(dir, "update-ref", pinRef(repo, oid), oid.toLowerCase());
   return updated.ok ? undefined : updated.stderr || "could not record pinned commit";
 }
