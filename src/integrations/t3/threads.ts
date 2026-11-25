@@ -123,8 +123,7 @@ export async function readThreadWords(client: T3HttpClient, value: string, state
     if (item.type === "assistant_message" && item.text) lastAssistant = item.text;
     if (typedByUser(item) && item.text) words.push({ thread: threadId, id: item.messageId ?? item.id ?? "", text: item.text, answered: lastAssistant.slice(0, answeredCap), at: item.updatedAt ?? item.startedAt, source: "typed" });
     const answer = item.type === "user_input_request" && answeredInClient().has(item.requestId ?? "") ? item.questionAnswer : undefined;
-    Object.entries(answer?.answers ?? {}).forEach(([question, chosen], index) => {
-      const card = (item.nativeItemRef?.driver === "antigravity" ? antigravityAnswer : cardAnswer)(item.questions ?? [], answer!, question, chosen);
+    cardAnswers(item, answer).forEach((card, index) => {
       if (card) words.push({ thread: threadId, id: `${item.id}:${index}`, text: card.text, answered: card.answered, at: item.updatedAt ?? item.startedAt, source: "question" });
     });
   }
@@ -146,17 +145,19 @@ function antigravityAnswer(questions: CardQuestion[], answer: QuestionAnswer, id
   const picked = id.slice(0, -otherSuffix.length);
   if (asked && isOtherField(asked) && byId(picked)) {
     const beside = typed(answer.answers[picked] ?? "") !== "";
-    return beside && !typedInOtherField(chosen) ? undefined : { text: [chosen].flat().join(", "), answered: cutOutsideNumber(answer.questionTextById[id] ?? asked.question!, otherPrompt.length + answeredCap) };
+    return beside && !typedInOtherField(chosen) ? undefined : { text: [chosen].flat().join(", "), answered: answer.questionTextById[id] ?? asked.question! };
   }
   if (other && isOtherField(other) && typedInOtherField(answer.answers[other.id] ?? "")) return undefined;
   if (!asked) return cardAnswer(questions, answer, id, chosen);
   const labels = [chosen].flat().map((value) => onlyLabelOf(asked.options ?? [], value));
-  return { text: labels.join(", "), answered: cutOutsideNumber(promptOf(asked, answer.questionTextById[id]), answeredCap) };
+  return { text: labels.join(", "), answered: promptOf(asked, answer.questionTextById[id]) };
 }
 
-function cutOutsideNumber(text: string, cap: number) {
-  const cut = text.slice(0, cap);
-  return /\d/u.test(text[cap] ?? "") ? cut.replace(/\d+$/u, "") : cut;
+function cardAnswers({ nativeItemRef, questions = [] }: TurnItem["item"], answer: QuestionAnswer | undefined) {
+  const entries = Object.entries(answer?.answers ?? {});
+  const read = (reader: typeof antigravityAnswer) => entries.map(([id, chosen]) => reader(questions, answer!, id, chosen));
+  const antigravity = nativeItemRef?.driver === "antigravity" ? read(antigravityAnswer) : undefined;
+  return antigravity?.every((card) => !card || card.answered.length <= answeredCap) ? antigravity : read(cardAnswer);
 }
 
 function isOtherField(question: CardQuestion) {
