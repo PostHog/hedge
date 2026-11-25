@@ -86,12 +86,13 @@ async function listPacks(context: ChangeContext) {
       const ids = new Set(steps.filter((step) => firstHuman.get(step.id) === step).map((step) => step.id));
       const waiting = new Set(steps.map((step) => step.workflow).filter((id): id is string => id !== undefined));
       const activeWorkflowIds = new Set(workflows.filter((workflow) => workflow.active).map((workflow) => workflow.id));
+      const catalogOs = context.plan.machine.role === "hub" ? context.plan.os : "linux";
       const servedWorkflow = new Map(
         (manifest.served ?? [])
           .filter(
             (service) =>
               service.workflow &&
-              (!service.on || service.on.includes(context.plan.os)) &&
+              (!service.on || service.on.includes(catalogOs)) &&
               (!service.plans || service.plans.includes(context.plan.ai)) &&
               activeWorkflowIds.has(service.workflow),
           )

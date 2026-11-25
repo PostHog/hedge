@@ -534,6 +534,20 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     } as unknown as Parameters<typeof packsCommand>[1];
     expect(await packsCommand([], ctx)).toBe(0);
     expect(lines.join("\n")).toContain(`  ~ team  Team rules.\n      Workflows: linux-wf needs setup, mac-wf on\n${needsSetup}`);
+
+    const soloMacPlan = resolveEngine([engine, team], { packs: ["team"] }, { schema: 1, role: "mac" });
+    expect(soloMacPlan.onHub).toBe(true);
+    expect(soloMacPlan.os).toBe("darwin");
+    const macLines: string[] = [];
+    const macCtx = {
+      profile,
+      plan: soloMacPlan,
+      packs: [...engine.packs, ...team.packs],
+      print: (line: string) => macLines.push(line),
+      humanStepsLeft: () => humanStepsLeft(soloMacPlan, { home: osHome, giveUp: new Promise<void>(() => {}) }),
+    } as unknown as Parameters<typeof packsCommand>[1];
+    expect(await packsCommand([], macCtx)).toBe(0);
+    expect(macLines.join("\n")).toContain(`  ~ team  Team rules.\n      Workflows: linux-wf needs setup, mac-wf on\n${needsSetup}`);
   });
 });
 

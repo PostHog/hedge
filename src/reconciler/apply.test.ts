@@ -696,49 +696,85 @@ describe("humanStepsLeft", () => {
     expect(result).toEqual({ failing: [], unchecked: [] });
   });
 
-  test("drains an already-written failure exit code when the deadline fires after a busy event loop", async () => {
+  test("drains an already-completed probe failure when the deadline fires before result delivery, and marks it unchecked if the drain cap expires", async () => {
     const home = temp.make("home-busy-deadline-");
-    const ppidFile = join(home, "sup-pid");
-    let fire!: () => void;
-    const giveUp = new Promise<void>((resolve) => (fire = resolve));
-    const step = {
-      id: "quick-fail",
-      pack: "team",
-      say: "Quick fail.",
-      probe: ["sh", "-c", 'printf "%s" "$PPID" > "$1.tmp" && mv "$1.tmp" "$1"; exit 1', "probe", ppidFile],
+    let fireDeadline!: () => void;
+    let fireDrainCap!: () => void;
+    let deliverResult!: (code: number) => void;
+    let aborted = false;
+    const giveUp = new Promise<void>((resolve) => (fireDeadline = resolve));
+    const drain = new Promise<void>((resolve) => (fireDrainCap = resolve));
+    const run = (_cmd: string[], _env?: Record<string, string | undefined>, signal?: AbortSignal) => {
+      signal?.addEventListener("abort", () => {
+        aborted = true;
+      });
+      return new Promise<number>((resolve) => (deliverResult = resolve));
     };
-    const supFinished = (pid: number) => {
-      if (process.platform === "linux") {
-        try {
-          const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-          const close = stat.lastIndexOf(")");
-          return close !== -1 && stat.slice(close + 2, close + 3) === "Z";
-        } catch {
-          return true;
-        }
-      }
-      const res = Bun.spawnSync(["/bin/ps", "-o", "stat=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" });
-      const state = res.stdout.toString().trim();
-      return !state || state.startsWith("Z");
-    };
-    const pending = humanStepsLeft(plan({ human: [step] }), { home, giveUp });
+    const step = { id: "quick-fail", pack: "team", say: "Quick fail.", probe: ["false"] };
+    const pending = humanStepsLeft(plan({ human: [step] }), { home, run, giveUp, drain });
     await Promise.resolve();
+    fireDeadline();
     await Promise.resolve();
-    const limit = performance.now() + 3000;
-    const sab = new Int32Array(new SharedArrayBuffer(4));
-    while (!existsSync(ppidFile) && performance.now() < limit) {
-      Atomics.wait(sab, 0, 0, 2);
-    }
-    expect(existsSync(ppidFile)).toBe(true);
-    const supPid = Number(readFileSync(ppidFile, "utf8").trim());
-    expect(supPid).toBeGreaterThan(0);
-    while (!supFinished(supPid) && performance.now() < limit) {
-      Atomics.wait(sab, 0, 0, 2);
-    }
-    expect(supFinished(supPid)).toBe(true);
-    fire();
+    expect(aborted).toBe(true);
+    deliverResult(1);
     const res = await pending;
     expect(res.failing.map((item) => item.id)).toEqual(["quick-fail"]);
     expect(res.unchecked).toEqual([]);
+    fireDrainCap();
+
+    let fireDeadline2!: () => void;
+    let fireDrainCap2!: () => void;
+    const pending2 = humanStepsLeft(plan({ human: [step] }), {
+      home,
+      run: () => new Promise<number>(() => {}),
+      giveUp: new Promise<void>((resolve) => (fireDeadline2 = resolve)),
+      drain: new Promise<void>((resolve) => (fireDrainCap2 = resolve)),
+    });
+    await Promise.resolve();
+    fireDeadline2();
+    await Promise.resolve();
+    fireDrainCap2();
+    const res2 = await pending2;
+    expect(res2.failing).toEqual([]);
+    expect(res2.unchecked.map((item) => item.id)).toEqual(["quick-fail"]);
+  });
+
+  test("preserves an intentionally detached daemon while watchdog cleans up an ordinary child after normal probe exit", async () => {
+    const home = temp.make("home-detached-watchdog-");
+    const [daemonReady, daemonGone, childReady, childGone, exitGate] = [
+      join(home, "daemon-ready"),
+      join(home, "daemon-gone"),
+      join(home, "child-ready"),
+      join(home, "child-gone"),
+      join(home, "exit-gate"),
+    ];
+    expect(Bun.spawnSync(["mkfifo", daemonReady, daemonGone, childReady, childGone, exitGate]).exitCode).toBe(0);
+    const daemonStarted = Bun.file(daemonReady).text();
+    const daemonClosed = Bun.file(daemonGone).text();
+    const childStarted = Bun.file(childReady).text();
+    const childClosed = Bun.file(childGone).text();
+    const script = `const daemon = Bun.spawn(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+daemon.unref();
+const child = Bun.spawn(["sh", "-c", 'trap "" TERM; exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "child", ${JSON.stringify(childGone)}, ${JSON.stringify(childReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+child.unref();
+await Bun.file(${JSON.stringify(exitGate)}).text();
+process.exit(0);`;
+    let daemonPid = 0;
+    let childPid = 0;
+    try {
+      const step = { id: "ssh-mux", pack: "team", say: "SSH.", probe: [process.execPath, "-e", script] };
+      const pending = humanStepsLeft(plan({ human: [step] }), { home, giveUp: new Promise<void>(() => {}), graceMs: 0 });
+      [daemonPid, childPid] = (await Promise.all([daemonStarted, childStarted])).map((s) => Number(s.trim())) as [number, number];
+      expect(daemonPid).toBeGreaterThan(0);
+      expect(childPid).toBeGreaterThan(0);
+      await Bun.spawn(["sh", "-c", 'printf go > "$1"', "gate", exitGate], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exited;
+      expect(await pending).toEqual({ failing: [], unchecked: [] });
+      expect(await childClosed).toBe("");
+      expect(() => process.kill(daemonPid, 0)).not.toThrow();
+    } finally {
+      if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
+      if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
+      await daemonClosed.catch(() => {});
+    }
   });
 });
