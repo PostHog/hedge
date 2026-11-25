@@ -328,15 +328,17 @@ test("strips a leading UTF-8 BOM from captured output so JSON callers parse it",
   expect(JSON.parse(result.stdout)).toEqual({ ok: true });
 });
 
-test("stops a descendant holding stdout open and returns at the time limit after the leader exits", async () => {
+test("stops a descendant holding stdout open and returns at the time limit after the command exits", async () => {
   const dir = temp.make("hedge-pipe-");
-  const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
-  expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+  const [ready, gone, leaderGone] = [join(dir, "ready"), join(dir, "gone"), join(dir, "leader-gone")];
+  expect(Bun.spawnSync(["mkfifo", ready, gone, leaderGone]).exitCode).toBe(0);
   const started = Bun.file(ready).text();
   const holderGone = Bun.file(gone).text();
+  const commandExited = Bun.file(leaderGone).text();
   const clock = handTimer();
-  const result = captureWith(clock.timer)(["sh", "-c", `{ sleep 30 & } 3>${JSON.stringify(gone)}; echo $! > ${JSON.stringify(ready)}`], { timeoutMs: 30 });
+  const result = captureWith(clock.timer)(["sh", "-c", `exec 4>${JSON.stringify(leaderGone)}; { sleep 30 4>&- & } 3>${JSON.stringify(gone)}; echo $! > ${JSON.stringify(ready)}`], { timeoutMs: 30 });
   const childPid = Number((await started).trim());
+  expect(await commandExited).toBe("");
   try {
     clock.fire();
     expect(await result).toEqual({ code: 124, stdout: "", stderr: "timed out after 30 ms" });

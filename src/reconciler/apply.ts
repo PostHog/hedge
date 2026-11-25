@@ -452,7 +452,10 @@ function spawnRunner(home: string, profileDir: string | undefined): Runner {
   };
 }
 
+const probeSupervisor = 'interrupted=0; trap "interrupted=1" INT QUIT; "$@"; code=$?; if [ "$interrupted" = 1 ]; then trap "" TERM; kill -TERM 0 2>/dev/null || true; fi; exit "$code"';
+
 async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal) {
+  if (!command.length || (command[0]!.includes("/") && !existsSync(command[0]!))) return 127;
   let child: { pid: number; exited: Promise<number> } | undefined;
   let stopSignal: NodeJS.Signals | undefined;
   let reaped = false;
@@ -479,7 +482,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
     return 124;
   }
   try {
-    child = Bun.spawn(command, { stdout: "ignore", stderr: "ignore", env, detached: true });
+    child = Bun.spawn(["/bin/sh", "-c", probeSupervisor, "hedge-probe", ...command], { stdout: "ignore", stderr: "ignore", env, detached: true });
     if (stopSignal || signal.aborted) endGroup(stopSignal ?? "SIGTERM");
     return await child.exited;
   } catch {

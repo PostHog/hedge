@@ -49,11 +49,13 @@ const realTimer: Timer = (ms, fire) => {
 
 export const orphanGraceSeconds = 10;
 
-function holdingLocks(argv: string[], locks: number[], timeoutMs: number): string[] {
+function holdingLocks(argv: string[], locks: number[], timeoutMs: number, firstLockFd = 3): string[] {
   if (!locks.length) return argv;
-  const closed = locks.map((_, index) => `${index + 3}>&-`).join(" ");
+  const closed = locks.map((_, index) => `${index + firstLockFd}>&-`).join(" ");
   return ["timeout", "-s", "KILL", String(Math.ceil(timeoutMs / 1000) + orphanGraceSeconds), "/bin/sh", "-c", `exec "$@" ${closed}`, "hedge-box-lock", ...argv];
 }
+
+const captureSupervisor = 'exec 9<&3 3<&-; "$@" 9<&-; code=$?; exec 1>&- 2>&-; read _ <&9; exit "$code"';
 
 async function readStream(stream: ReadableStream<Uint8Array> | number | undefined, abort: AbortSignal) {
   if (!(stream instanceof ReadableStream)) return "";
@@ -86,26 +88,33 @@ async function readStream(stream: ReadableStream<Uint8Array> | number | undefine
 
 export function captureWith(timer: Timer): Capture {
   return async (argv, { env, stdin, timeoutMs, inherit = false }) => {
-    const output = inherit ? "inherit" : "pipe";
     const locks = heldLocks();
     const input = stdin === undefined ? "ignore" : new TextEncoder().encode(stdin);
+    const supervised = !inherit;
+    const command = holdingLocks(supervised ? ["/bin/sh", "-c", captureSupervisor, "hedge-capture", ...argv] : argv, locks, timeoutMs, supervised ? 4 : 3);
+    const stdio = supervised ? ([input, "pipe", "pipe", "pipe", ...locks] as const) : ([input, "inherit", "inherit", ...locks] as const);
     let child: ReturnType<typeof Bun.spawn> | undefined;
+    let ctrl: number | undefined;
+    let ctrlClosed = false;
     let stopped = false;
     let reaped = false;
     const done = new AbortController();
-    const stopGroup = (includeReapedGroup: boolean) => {
+    const closeCtrl = () => {
+      if (ctrlClosed || typeof ctrl !== "number") return;
+      ctrlClosed = true;
+      try { closeSync(ctrl); } catch {}
+    };
+    const stopGroup = () => {
       stopped = true;
       done.abort();
-      if (!child) return;
-      if (!reaped) {
+      if (child && !reaped) {
         kill(-child.pid);
         kill(child.pid);
-      } else if (includeReapedGroup) {
-        kill(-child.pid);
       }
+      closeCtrl();
     };
     const interrupted = (name: NodeJS.Signals) => {
-      stopGroup(false);
+      stopGroup();
       release();
       if (!process.listenerCount(name)) process.kill(process.pid, name);
     };
@@ -117,17 +126,21 @@ export function captureWith(timer: Timer): Capture {
     let expired = false;
     let cancel = () => {};
     try {
-      child = Bun.spawn(holdingLocks(argv, locks, timeoutMs), { env: env as Record<string, string> | undefined, stdio: [input, output, output, ...locks], detached: true });
+      child = Bun.spawn(command, { env: env as Record<string, string> | undefined, stdio: [...stdio], detached: true });
+      if (supervised && typeof child.stdio[3] === "number") ctrl = child.stdio[3];
       void child.exited.finally(() => { reaped = true; });
-      if (stopped) stopGroup(false);
+      if (stopped) stopGroup();
       cancel = timer(timeoutMs, () => {
         expired = true;
-        stopGroup(true);
+        stopGroup();
       });
-      const [stdout, stderr, code] = await Promise.all([readStream(child.stdout, done.signal), readStream(child.stderr, done.signal), child.exited]);
+      const [stdout, stderr] = await Promise.all([readStream(child.stdout, done.signal), readStream(child.stderr, done.signal)]);
+      closeCtrl();
+      const code = await child.exited;
       return expired ? timeoutResult(timeoutMs, stdout) : { code, stdout, stderr };
     } finally {
       cancel();
+      closeCtrl();
       release();
     }
   };
