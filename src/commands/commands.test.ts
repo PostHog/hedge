@@ -229,12 +229,12 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     expect((await hedge(home, ["packs"])).output).toContain(`  ~ team  Team rules.\n      Workflows: allowlist on\n${needsSetup}`);
   });
 
-  const blockedProbe = 'trap "" TERM; { sleep 30 & } 3>"$HOME/gone"; echo $! > "$HOME/ready"; wait';
+  const blockedProbe = (trap: string) => `trap ${trap} TERM; { sleep 30 & } 3>"$HOME/gone"; echo $! > "$HOME/ready"; wait`;
 
-  async function withBlockedProbe(home: string) {
+  async function withBlockedProbe(home: string, trap = "-") {
     const [ready, gone] = [join(home, "ready"), join(home, "gone")];
     expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
-    await withTeamPack(home, { workflows: [flow("allowlist")], human: [humanStep("allowlist", blockedProbe, "allowlist")] });
+    await withTeamPack(home, { workflows: [flow("allowlist")], human: [humanStep("allowlist", blockedProbe(trap), "allowlist")] });
     return { holderGone: readFile(gone, "utf8"), started: readFile(ready, "utf8") };
   }
 
@@ -242,13 +242,26 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     try { process.kill(Number((await started).trim()), "SIGKILL"); } catch {}
   };
 
-  test("says a human step that does not answer in time is not checked, and stops it with every process it started, even ones that ignore SIGTERM", async () => {
+  const notChecked = "  ? team  Team rules.\n      Workflows: allowlist not checked\n      Hedge could not check this pack's setup in time. Run hedge doctor.";
+
+  test("says a human step that does not answer in time is not checked, even when it exits well once asked to stop, and stops every process it started", async () => {
     const { home } = await machineWithProfile();
-    const { holderGone, started } = await withBlockedProbe(home);
+    const { holderGone, started } = await withBlockedProbe(home, '"exit 0"');
     const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await started) };
     try {
-      expect((await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output).toContain("  ? team  Team rules.\n      Workflows: allowlist not checked\n      Hedge could not check this pack's setup in time. Run hedge doctor.");
+      expect((await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output).toContain(notChecked);
       expect(await holderGone).toBe("");
+    } finally {
+      await endHolder(started);
+    }
+  });
+
+  test("lists the packs at the deadline even when a human step ignores the request to stop", async () => {
+    const { home } = await machineWithProfile();
+    const { started } = await withBlockedProbe(home, '""');
+    const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await started) };
+    try {
+      expect((await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output).toContain(notChecked);
     } finally {
       await endHolder(started);
     }
