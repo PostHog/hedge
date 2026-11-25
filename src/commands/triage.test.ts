@@ -970,6 +970,12 @@ describe("hedge triage", () => {
     expect(
       redact("clone https://github.com/acme/project.AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "/Users/alice", caseKnown),
     ).toBe("clone <private source>");
+    expect(
+      redact("checkout /home/alice/project/confidential-release", "/home/alice", [
+        { text: "/home/alice/project", as: "<private source>" },
+        { text: "project/confidential-release", as: "<branch>", after: true },
+      ]),
+    ).toBe("checkout ~/<branch>");
   });
 });
 

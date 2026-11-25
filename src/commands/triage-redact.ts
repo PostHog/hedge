@@ -817,7 +817,9 @@ export function redact(text: string, home: string, known: KnownName[] = []): str
     mergedLabels.push(as);
     return `${prefix}${index}${suffix}`;
   });
-  const postRandom = replaceMaskedRandom(merged, mergedOriginals);
+  const afterBearer = redactBearerMasked(stripHome(merged), mergedOriginals);
+  const afterStandard = applyRules(afterBearer, preRandomRules);
+  const postRandom = replaceMaskedRandom(afterStandard, mergedOriginals);
   return postRandom.replace(tokenRegex, (_tok, idx) => mergedLabels[Number(idx)] ?? "");
 }
 
