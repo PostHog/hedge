@@ -546,19 +546,71 @@ describe("hedge triage", () => {
       join(inherited, "hedge.json"),
       JSON.stringify({ schema: 1, engine: { repo: "PostHog/hedge", ref: "main", channel: "track" }, sources: [{ name: "team", repo: "Person/confidential-releases", ref: "main" }], packs: [], plan: "both", settings: {}, workflows: {} }),
     );
+    const gitConfig = join(home, "gitconfig");
+    writeFileSync(gitConfig, "[user]\n\tname = Demo Person\n");
+    const prevGitConfig = process.env.GIT_CONFIG_GLOBAL;
+    process.env.GIT_CONFIG_GLOBAL = gitConfig;
     const sent: Sent[] = [];
     const io = scripted([]);
     const runRealGit: CommandRunner = async (command, options = {}) => {
       sent.push({ command, ...(options.input === undefined ? {} : { input: options.input }) });
-      if (command[0] === "git" && command.includes("user.name")) return { code: 0, stdout: "Demo Person\n", stderr: "" };
       if (command[0] === "git") return spawnRunner(command, options);
       return capture([], undefined)(command, options);
     };
-    const code = await main(["triage", "--send", "--note", "Checked out Demo Person/confidential-releases"], { home, engineRoot, platform: "darwin", env: { HEDGE_PROFILE_DIR: inherited }, print: io.terminal.print, terminal: io.terminal, capture: runRealGit, hostname: () => "noras-mbp.local", run: async () => 0 });
-    expect(code).toBe(0);
+    try {
+      const code = await main(["triage", "--send", "--note", "Checked out Demo Person/confidential-releases"], { home, engineRoot, platform: "darwin", env: { HEDGE_PROFILE_DIR: inherited }, print: io.terminal.print, terminal: io.terminal, capture: runRealGit, hostname: () => "noras-mbp.local", run: async () => 0 });
+      expect(code).toBe(0);
+    } finally {
+      if (prevGitConfig === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = prevGitConfig;
+    }
     const body = sent.find((call) => call.command[1] === "issue")!.input!;
     expect(body).toContain("Checked out Demo <private source>");
     expect(body).not.toContain("confidential-releases");
+  });
+
+  test("still redacts secret values when a private source alias ends with a credential keyword and redacts Unicode case-folded private paths", async () => {
+    const home = temp.make("home-");
+    const inherited = temp.make("inherited-profile-");
+    await spawnGit(inherited, "init", "-q");
+    writeFileSync(
+      join(inherited, "hedge.json"),
+      JSON.stringify({
+        schema: 1,
+        engine: { repo: "PostHog/hedge", ref: "main", channel: "track" },
+        sources: [
+          { name: "token", repo: "/tmp/ΚΟΣΜΟΣ.git", ref: "main" },
+          { name: "sigma", repo: "/tmp/ΣΙΓΜΑ.git", ref: "main" },
+        ],
+        packs: [],
+        plan: "both",
+        settings: {},
+        workflows: {},
+      }),
+    );
+    const sent: Sent[] = [];
+    const io = scripted([]);
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      sent.push({ command, ...(options.input === undefined ? {} : { input: options.input }) });
+      if (command[0] === "git") return spawnRunner(command, options);
+      return capture([], undefined)(command, options);
+    };
+    const code = await main(
+      ["triage", "--send", "--note", "The pack source token=example-value from /tmp/κοσμος.git and /tmp/ςιγμα.git"],
+      { home, engineRoot, platform: "darwin", env: { HEDGE_PROFILE_DIR: inherited }, print: io.terminal.print, terminal: io.terminal, capture: runRealGit, hostname: () => "noras-mbp.local", run: async () => 0 },
+    );
+    expect(code).toBe(0);
+    const issueCall = sent.find((call) => call.command[1] === "issue")!;
+    const title = issueCall.command[issueCall.command.indexOf("--title") + 1]!;
+    const body = issueCall.input!;
+    expect(title).not.toContain("example-value");
+    expect(title).toContain("The pack source <private source>=<redacted>");
+    expect(body).not.toContain("example-value");
+    expect(body).toContain("The pack source <private source>=<redacted>");
+    expect(body).not.toContain("κοσμος");
+    expect(body).not.toContain("ςιγμα");
+    expect(body).toContain("from <private source> and <private source>");
+    expect(body).toContain("Note: The pack source <private source> is not pinned to a commit SHA.");
   });
 });
 

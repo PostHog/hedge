@@ -98,10 +98,23 @@ function encodeUri(text: string) {
   }
 }
 
+function foldCase(text: string): string {
+  let out = "";
+  for (let index = 0; index < text.length; index++) {
+    const ch = text[index]!;
+    const upper = ch.toUpperCase();
+    out += upper.length === 1 && !(ch.charCodeAt(0) >= 128 && upper.charCodeAt(0) < 128) ? upper : ch;
+  }
+  return out;
+}
+
+type CiEntry = { text: string; as: string; owner: KnownName; ambiguous?: boolean; regex?: RegExp };
+
 type CompiledMatcher = {
   ciRegex?: RegExp;
   ciMaxLen: number;
-  ciMap: Map<string, { as: string; owner: KnownName }>;
+  ciMap: Map<string, CiEntry>;
+  ciEntries: CiEntry[];
   csRegex?: RegExp;
   csMaxLen: number;
   csMap: Map<string, { as: string; owner: KnownName }>;
@@ -132,7 +145,8 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
 
   const ciItems: Array<{ len: number; pattern: string; exempt?: boolean }> = [];
   const csItems: Array<{ len: number; pattern: string; exempt?: boolean }> = [];
-  const ciMap = new Map<string, { as: string; owner: KnownName }>();
+  const ciMap = new Map<string, CiEntry>();
+  const ciEntries: CiEntry[] = [];
   const csMap = new Map<string, { as: string; owner: KnownName }>();
   for (const name of raw) {
     const left = name.after && /^[~<]/.test(name.text) ? "" : "(?<![\\w-])";
@@ -144,9 +158,17 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
         csItems.push({ len: name.text.length, pattern });
       }
     } else {
-      const key = name.text.toLowerCase();
-      if (!ciMap.has(key)) {
-        ciMap.set(key, { as: name.as, owner: name.owner });
+      const key = foldCase(name.text);
+      const existing = ciMap.get(key);
+      if (!existing) {
+        const entry: CiEntry = { text: name.text, as: name.as, owner: name.owner };
+        ciMap.set(key, entry);
+        ciEntries.push(entry);
+        ciItems.push({ len: name.text.length, pattern });
+      } else if (!(existing.regex ??= new RegExp(`^${escape(existing.text)}$`, "i")).test(name.text)) {
+        existing.ambiguous = true;
+        const entry: CiEntry = { text: name.text, as: name.as, owner: name.owner };
+        ciEntries.push(entry);
         ciItems.push({ len: name.text.length, pattern });
       }
     }
@@ -159,6 +181,7 @@ function compileSpellings(entries: KnownName[], transform?: (value: string) => s
     ...(ciItems.length ? { ciRegex: new RegExp(ciSorted.map((item) => item.pattern).join("|"), "gi") } : {}),
     ciMaxLen: ciSorted[0]?.len ?? 0,
     ciMap,
+    ciEntries,
     ...(csItems.length ? { csRegex: new RegExp(csSorted.map((item) => item.pattern).join("|"), "g") } : {}),
     csMaxLen: csSorted[0]?.len ?? 0,
     csMap,
@@ -211,7 +234,11 @@ function applySpellings(text: string, matcher: CompiledMatcher, exempt?: Set<str
   if (matcher.ciRegex) {
     result = replaceLongestFirst(result, matcher.ciRegex, matcher.ciMaxLen, (match) => {
       if (exempt?.has(match)) return match;
-      const hit = matcher.ciMap.get(match.toLowerCase());
+      const fast = matcher.ciMap.get(foldCase(match));
+      const hit =
+        fast && !fast.ambiguous
+          ? fast
+          : matcher.ciEntries.find((entry) => (entry.regex ??= new RegExp(`^${escape(entry.text)}$`, "i")).test(match));
       if (!hit || (skipOwner && hit.owner === skipOwner)) return match;
       return onMatch ? onMatch(match, hit.as) : hit.as;
     });
@@ -227,13 +254,16 @@ function applySpellings(text: string, matcher: CompiledMatcher, exempt?: Set<str
   return result;
 }
 
-const reservedWord = new RegExp(String.raw`^(?:${secretKey}|bearer|basic|auth|code|sig|key|users|home)$`, "i");
+const reservedTail = new RegExp(
+  String.raw`(?:^|[^\w])(?:${secretKey}|[A-Za-z_]*(?:token|key|secret|password|auth|code|sig)[A-Za-z_]*|bearer|basic|users|home)$|^[a-z][a-z0-9+.-]*:\/\/[^\s/:@]*$`,
+  "i",
+);
 
 export function redact(text: string, home: string, known: KnownName[] = []): string {
   const stripHome = (value: string) => (home.length > 1 ? value.split(home.replace(/\/$/, "")).join("~") : value);
   const valid = known.filter((entry) => typeof entry.text === "string" && typeof entry.as === "string");
-  const primary = valid.filter((entry) => !entry.after && !reservedWord.test(entry.text));
-  const after = valid.filter((entry) => entry.after || reservedWord.test(entry.text)).map((entry) => (entry.after ? entry : { ...entry, after: true }));
+  const primary = valid.filter((entry) => !entry.after && !reservedTail.test(entry.text));
+  const after = valid.filter((entry) => entry.after || reservedTail.test(entry.text)).map((entry) => (entry.after ? entry : { ...entry, after: true }));
 
   const usedNonces = new Set<number>();
   for (const part of [text, home, ...valid.flatMap((entry) => [entry.text, entry.as])]) {
