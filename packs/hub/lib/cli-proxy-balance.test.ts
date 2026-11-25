@@ -352,7 +352,10 @@ test("the hub keeps its exempt Claude subscription enabled at quota and resumes 
 
   const first = await run([{ ...exempt, disabled: true }, guarded, manual]);
   expect(statusWrites(first)).toEqual([{ name: guarded.name, disabled: true }, { name: exempt.name, disabled: false }]);
-  expect(first.find((call) => call.path === "auth-files/fields")?.body).toEqual({ name: exempt.name, priority: 0 });
+  const priorityWrite = first.findIndex((call) => call.method === "PATCH" && call.path === "auth-files/fields" && (call.body as { name: string }).name === exempt.name);
+  const resumeWrite = first.findIndex((call) => call.method === "PATCH" && call.path === "auth-files/status" && (call.body as { name: string }).name === exempt.name);
+  expect(first[priorityWrite]?.body).toEqual({ name: exempt.name, priority: 0 });
+  expect(resumeWrite).toBeGreaterThan(priorityWrite);
   expect(JSON.parse(readFileSync(pausedPath, "utf8"))).toEqual([guarded.name]);
 
   const next = await run([{ ...exempt, priority: 0 }, { ...guarded, disabled: true }, manual]);

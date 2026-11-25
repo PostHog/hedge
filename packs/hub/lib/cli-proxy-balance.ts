@@ -118,6 +118,10 @@ export async function balance(options: Balance): Promise<void> {
   if (!options.dryRun && options.pausedPath) {
     for (const credential of [...pause, ...resume]) {
       const disabled = pause.includes(credential);
+      if (!disabled && credential.priority !== 0 && !hasCapacity(credential)) {
+        await call("auth-files/fields", { method: "PATCH", body: JSON.stringify({ name: credential.name, priority: 0 }) });
+        credential.priority = 0;
+      }
       await call("auth-files/status", { method: "PATCH", body: JSON.stringify({ name: credential.name, disabled }) });
       if (disabled) {
         pausedBefore.add(credential.name);
