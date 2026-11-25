@@ -99,7 +99,10 @@ export function repoUrl(repo: string) {
 }
 
 async function fallBack(ref: SourceRef, dir: string, repo: string, good: Good | undefined, reason: string, loadLimitMs: number): Promise<FetchedSource> {
-  if (!good || good.repo !== repo) return { ref, error: reason };
+  if (!good || good.repo !== repo) {
+    if (good && typeof good.commit === "string" && commitSha.test(good.commit)) await git(dir, "checkout", "-q", "--detach", good.commit);
+    return { ref, error: reason };
+  }
   if (!(await git(dir, "checkout", "-q", "--detach", good.commit)).ok) return { ref, error: reason };
   const loaded = await load(dir, loadLimitMs);
   if ("error" in loaded) return { ref, error: reason };

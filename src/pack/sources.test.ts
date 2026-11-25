@@ -426,6 +426,12 @@ describe("fetchSource", () => {
       if ("error" in blocked) throw new Error(blocked.error);
       expect(blocked.packs[0]?.manifest.summary).toBe("Team rules v1.");
       expect(blocked.stale).toContain(`could not record ${commit2}`);
+
+      const repoB = await packRepo("Repo B rules.");
+      const commitB = await spawnGit(repoB, "rev-parse", "HEAD");
+      const switched = await fetchSource({ name: "team", repo: repoB, ref: commitB }, cache);
+      expect(switched).toMatchObject({ error: expect.stringContaining(`could not record ${commitB}`) });
+      expect(await spawnGit(join(cache, "team"), "rev-parse", "HEAD")).toBe(commit1);
     } finally {
       setDirModes(refsDir, 0o755);
     }
