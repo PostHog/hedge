@@ -1,8 +1,8 @@
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, write, writeSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { boxPrefix } from "../../../src/hub/names.ts";
-import { appendTag, killDeadSession, killDeadSessionSync, killSession, killSessionSync, setCloexec, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
+import { appendTag, createPipe, killDeadSession, killDeadSessionSync, killSession, killSessionSync, setCloexec, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
 import { bunScript } from "../../../src/runner/bun.ts";
 import { heldLocks } from "./box-lock.ts";
 
@@ -91,18 +91,69 @@ async function readText(stream: ReadableStream<Uint8Array> | number | undefined,
   return out;
 }
 
-export function captureWith(timer: Timer): Capture {
+const defaultSupervisorGraceMs = process.platform === "linux" ? 150 : 350;
+
+const writeFd = (fd: number, data: Uint8Array, offset: number): Promise<number> =>
+  new Promise((resolve, reject) => {
+    write(fd, data, offset, data.byteLength - offset, null, (error, written) => {
+      if (error) reject(error);
+      else resolve(written);
+    });
+  });
+
+export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorGraceMs): Capture {
   return async (argv, { env, stdin, timeoutMs, inherit = false }) => {
     const output = inherit ? "inherit" : "pipe";
     const locks = heldLocks();
     const input = stdin === undefined ? "ignore" : new TextEncoder().encode(stdin);
+    const resultPipe = createPipe();
+    const configPipe = createPipe();
+    if (!resultPipe || !configPipe) {
+      if (resultPipe) {
+        try { closeSync(resultPipe.readFd); } catch {}
+        try { closeSync(resultPipe.writeFd); } catch {}
+      }
+      if (configPipe) {
+        try { closeSync(configPipe.readFd); } catch {}
+        try { closeSync(configPipe.writeFd); } catch {}
+      }
+      throw new Error("could not create supervisor pipes");
+    }
+    setCloexec(resultPipe.readFd, true);
+    setCloexec(configPipe.writeFd, true);
+    let resultReadClosed = false;
+    let resultWriteClosed = false;
+    let configReadClosed = false;
+    let configWriteClosed = false;
+    const closeResultRead = () => {
+      if (resultReadClosed) return;
+      resultReadClosed = true;
+      try { closeSync(resultPipe.readFd); } catch {}
+    };
+    const closeResultWrite = () => {
+      if (resultWriteClosed) return;
+      resultWriteClosed = true;
+      try { closeSync(resultPipe.writeFd); } catch {}
+    };
+    const closeConfigRead = () => {
+      if (configReadClosed) return;
+      configReadClosed = true;
+      try { closeSync(configPipe.readFd); } catch {}
+    };
+    const closeConfigWrite = () => {
+      if (configWriteClosed) return;
+      configWriteClosed = true;
+      try { closeSync(configPipe.writeFd); } catch {}
+    };
     let child: ReturnType<typeof Bun.spawn> | undefined;
     const tag = crypto.randomUUID();
     let controlFd: number | undefined;
     let stopped = false;
     let supervisorReaped = false;
-    let targetExited = false;
+    let confirmedDone = false;
     let tagSweep: Promise<void> | undefined;
+    let configWrite: Promise<void> | undefined;
+    let resultRead: Promise<{ code?: number; error?: string; errCode?: string } | undefined> | undefined;
     const stopStream = new AbortController();
     const closeControl = () => {
       if (controlFd === undefined) return;
@@ -131,9 +182,6 @@ export function captureWith(timer: Timer): Capture {
           } catch {}
         }
         try {
-          child.send("kill");
-        } catch {}
-        try {
           process.kill(-child.pid, "SIGCONT");
         } catch {}
         return;
@@ -149,7 +197,6 @@ export function captureWith(timer: Timer): Capture {
         } catch {}
       }
     };
-    const supervisorGraceMs = process.platform === "linux" ? 150 : 350;
     const interrupted = (name: NodeJS.Signals) => {
       stopChild();
       if (child && !supervisorReaped && controlFd !== undefined) {
@@ -219,29 +266,52 @@ export function captureWith(timer: Timer): Capture {
         if (v !== undefined && k !== tagEnvVar) envEntries.push([k, v]);
       }
       envEntries.push([tagEnvVar, tag]);
-      child = Bun.spawn(bunScript(captureSupervisor), {
-        env: supervisorEnv(fullTag),
-        stdio: [input, output, output, ...locks, "pipe"],
-        detached: true,
-        ipc(message) {
-          if (!message || typeof message !== "object") return;
-          const record = message as { code?: unknown; error?: unknown };
-          if (typeof record.error === "string") {
-            targetExited = true;
-            settle({ error: record.error, ...(typeof record.code === "string" ? { errCode: record.code } : {}) });
-          } else if (typeof record.code === "number") {
-            targetExited = true;
-            settle({ code: record.code });
-          }
+      const controlFdIndex = 3 + locks.length;
+      const resultFdIndex = controlFdIndex + 1;
+      const configFdIndex = controlFdIndex + 2;
+      child = Bun.spawn(
+        bunScript(captureSupervisor, String(locks.length), String(controlFdIndex), String(resultFdIndex), String(configFdIndex)),
+        {
+          env: supervisorEnv(fullTag),
+          stdio: [input, output, output, ...locks, "pipe", resultPipe.writeFd, configPipe.readFd],
+          detached: true,
         },
-      });
+      );
+      closeResultWrite();
+      closeConfigRead();
       const live = child;
-      const fd = live.stdio[3 + locks.length];
-      if (typeof fd === "number") controlFd = fd;
-      void live.exited.then((code) => {
+      const fd = live.stdio[controlFdIndex];
+      if (typeof fd === "number") {
+        setCloexec(fd, true);
+        controlFd = fd;
+      }
+      resultRead = readText(Bun.file(resultPipe.readFd).stream(), stopStream.signal).then(
+        (raw) => {
+          const line = raw.trim();
+          if (!line) return undefined;
+          try {
+            const record = JSON.parse(line) as { code?: unknown; error?: unknown };
+            if (typeof record.error === "string") {
+              const status = { error: record.error, ...(typeof record.code === "string" ? { errCode: record.code } : {}) };
+              settle(status);
+              return status;
+            }
+            if (typeof record.code === "number") {
+              const status = { code: record.code };
+              settle(status);
+              return status;
+            }
+          } catch {}
+          return undefined;
+        },
+        () => undefined,
+      );
+      void live.exited.then(async (code) => {
         supervisorReaped = true;
         closeControl();
-        if (!targetExited || expired) killGroups();
+        const reported = resultRead ? await resultRead : undefined;
+        if (reported) settle(reported);
+        if (!confirmedDone || expired) killGroups();
         settle({ code });
       });
       let forceExpired = false;
@@ -260,9 +330,23 @@ export function captureWith(timer: Timer): Capture {
         });
       });
       if (stopped || expired) {
+        closeConfigWrite();
         stopChild();
       } else {
-        live.send({ argv: command, envEntries, lockCount: locks.length, controlFd: 3 + locks.length });
+        const configBytes = new TextEncoder().encode(JSON.stringify({ argv: command, envEntries }));
+        configWrite = (async () => {
+          try {
+            let offset = 0;
+            while (offset < configBytes.byteLength) {
+              const written = await writeFd(configPipe.writeFd, configBytes, offset);
+              if (written <= 0) break;
+              offset += written;
+            }
+          } catch {
+          } finally {
+            closeConfigWrite();
+          }
+        })();
       }
       let stdout: string;
       let stderr: string;
@@ -292,13 +376,14 @@ export function captureWith(timer: Timer): Capture {
         return timeoutResult(timeoutMs, stdout);
       }
       cancel();
-      closeControl();
-      if (!supervisorReaped) {
+      confirmedDone = true;
+      if (!supervisorReaped && controlFd !== undefined) {
         try {
-          live.send("done");
+          writeSync(controlFd, "done\n");
         } catch {}
-        live.unref();
       }
+      closeControl();
+      if (!supervisorReaped) live.unref();
       if (tagSweep) await tagSweep;
       if (status.error !== undefined) {
         const err = new Error(status.error) as NodeJS.ErrnoException;
@@ -309,6 +394,13 @@ export function captureWith(timer: Timer): Capture {
     } finally {
       if (hardKill) clearTimeout(hardKill);
       cancel();
+      closeResultWrite();
+      closeConfigRead();
+      if (configWrite) await configWrite.catch(() => {});
+      else closeConfigWrite();
+      stopStream.abort();
+      if (resultRead) await resultRead.catch(() => {});
+      closeResultRead();
       closeControl();
       release();
     }

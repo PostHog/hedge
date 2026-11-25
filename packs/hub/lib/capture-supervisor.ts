@@ -1,7 +1,7 @@
-import { closeSync } from "node:fs";
+import { closeSync, writeSync } from "node:fs";
 import { drainControlFd, enableChildSubreaper, killSession, ownTag, setCloexec, shieldGroupSignals, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
-type StartMessage = { argv: string[]; env?: Record<string, string>; envEntries?: Array<[string, string]>; lockCount: number; controlFd?: number };
+type StartConfig = { argv: string[]; env?: Record<string, string>; envEntries?: Array<[string, string]> };
 
 enableChildSubreaper();
 shieldGroupSignals();
@@ -10,6 +10,7 @@ const runTag = ownTag(process.env[tagEnvVar]);
 let target: ReturnType<typeof Bun.spawn> | undefined;
 let targetReaped = false;
 let targetCode: number | undefined;
+let confirmedDone = false;
 let killing = false;
 
 const killAll = () => {
@@ -35,78 +36,111 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
   process.on(sig, () => {});
 }
 
+const closeQuiet = (fd: number) => {
+  try {
+    closeSync(fd);
+  } catch {}
+};
+
+const writeResult = (fd: number, payload: { code: number } | { error: string; code?: string }) => {
+  const bytes = new TextEncoder().encode(JSON.stringify(payload) + "\n");
+  try {
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const written = writeSync(fd, bytes, offset, bytes.byteLength - offset);
+      if (written <= 0) break;
+      offset += written;
+    }
+  } catch {}
+  closeQuiet(fd);
+};
+
 let readingControl = false;
 
 const watchControl = (fd: number, initialBuf = "") => {
   if (readingControl) return;
   readingControl = true;
   void (async () => {
-    let sawKill = false;
     try {
       const reader = Bun.file(fd).stream().getReader();
       const decoder = new TextDecoder();
       let buf = initialBuf;
+      const handleLine = (line: string): boolean => {
+        if (line === "kill") {
+          killAll();
+          return true;
+        }
+        if (line === "done") {
+          confirmedDone = true;
+          process.exit(targetCode ?? 0);
+        }
+        return false;
+      };
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         for (let nl = buf.indexOf("\n"); nl !== -1; nl = buf.indexOf("\n")) {
-          if (buf.slice(0, nl).trim() === "kill") {
-            sawKill = true;
-            killAll();
-            return;
-          }
+          if (handleLine(buf.slice(0, nl).trim())) return;
           buf = buf.slice(nl + 1);
         }
       }
-      if (buf.trim() === "kill") {
-        sawKill = true;
-        killAll();
-        return;
-      }
+      if (handleLine(buf.trim())) return;
     } catch {}
-    if (!sawKill && !killing) {
-      if (!targetReaped) {
-        killAll();
-        return;
-      }
-      process.exit(targetCode ?? 0);
+    if (!killing) {
+      if (confirmedDone) process.exit(targetCode ?? 0);
+      killAll();
     }
   })();
 };
 
-process.on("disconnect", () => {
-  if (!readingControl) {
-    if (!targetReaped) killAll();
-    else process.exit(targetCode ?? 0);
-  }
-});
+const parseFd = (raw: string | undefined, min: number) => {
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= min ? n : undefined;
+};
 
-process.on("message", async (message: unknown) => {
-  if (killing) return;
-  if (message === "done") {
-    process.exit(targetCode ?? 0);
+const lockCount = parseFd(Bun.argv[2], 0);
+const controlFd = parseFd(Bun.argv[3], 3);
+const resultFd = parseFd(Bun.argv[4], 3);
+const configFd = parseFd(Bun.argv[5], 3);
+if (lockCount === undefined || controlFd === undefined || resultFd === undefined || configFd === undefined) {
+  process.exit(127);
+}
+
+setCloexec(controlFd, true);
+setCloexec(resultFd, true);
+setCloexec(configFd, true);
+
+const lockFds = Array.from({ length: lockCount }, (_, index) => index + 3);
+const drained = drainControlFd(controlFd);
+if (drained.closed || drained.lines.includes("kill")) {
+  for (const fd of [...lockFds, resultFd, configFd, 1, 2]) closeQuiet(fd);
+  process.exit(137);
+}
+if (drained.lines.includes("done")) {
+  confirmedDone = true;
+  for (const fd of [...lockFds, resultFd, configFd, 1, 2]) closeQuiet(fd);
+  process.exit(0);
+}
+watchControl(controlFd, drained.rest);
+
+let parsed: StartConfig | undefined;
+try {
+  const rawConfig = await Bun.file(configFd).text();
+  closeQuiet(configFd);
+  if (rawConfig.trim()) {
+    const candidate = JSON.parse(rawConfig) as StartConfig;
+    if (candidate && typeof candidate === "object" && Array.isArray(candidate.argv)) parsed = candidate;
   }
-  if (message === "kill") {
-    killAll();
-    return;
-  }
-  if (!message || typeof message !== "object" || !Array.isArray((message as StartMessage).argv)) return;
-  const { argv, env, envEntries, lockCount, controlFd } = message as StartMessage;
-  const lockFds = Array.from({ length: lockCount }, (_, index) => index + 3);
-  if (typeof controlFd === "number" && Number.isInteger(controlFd) && controlFd >= 3) {
-    setCloexec(controlFd, true);
-    const drained = drainControlFd(controlFd);
-    if (drained.closed || drained.lines.includes("kill")) {
-      for (const fd of [...lockFds, 1, 2]) {
-        try {
-          closeSync(fd);
-        } catch {}
-      }
-      process.exit(137);
-    }
-    watchControl(controlFd, drained.rest);
-  }
+} catch {
+  closeQuiet(configFd);
+}
+
+if (!parsed || killing) {
+  for (const fd of [...lockFds, resultFd, 1, 2]) closeQuiet(fd);
+  killAll();
+} else {
+  const { argv, env, envEntries } = parsed;
   let targetEnv: Record<string, string> | undefined;
   if (Array.isArray(envEntries)) {
     targetEnv = Object.create(null) as Record<string, string>;
@@ -121,32 +155,17 @@ process.on("message", async (message: unknown) => {
   try {
     target = Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio });
   } catch (error) {
-    for (const fd of [...lockFds, 1, 2]) {
-      try {
-        closeSync(fd);
-      } catch {}
-    }
+    for (const fd of [...lockFds, 1, 2]) closeQuiet(fd);
     targetReaped = true;
     targetCode = 127;
     const err = error as NodeJS.ErrnoException;
-    try {
-      process.send?.({ error: err?.message ?? String(error), ...(err?.code ? { code: err.code } : {}) });
-    } catch {
-      process.exit(127);
-    }
-    return;
+    writeResult(resultFd, { error: err?.message ?? String(error), ...(err?.code ? { code: err.code } : {}) });
   }
-  for (const fd of [...lockFds, 1, 2]) {
-    try {
-      closeSync(fd);
-    } catch {}
+  if (target) {
+    for (const fd of [...lockFds, 1, 2]) closeQuiet(fd);
+    const code = await target.exited;
+    targetReaped = true;
+    targetCode = code;
+    writeResult(resultFd, { code });
   }
-  const code = await target.exited;
-  targetReaped = true;
-  targetCode = code;
-  try {
-    process.send?.({ code });
-  } catch {
-    process.exit(code);
-  }
-});
+}

@@ -1,6 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, symlinkSync, watch, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, symlinkSync, watch, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { createPipe } from "../../../src/reconciler/probe-supervisor.ts";
+import { watchEntries, type WatchClock } from "../../../src/reconciler/probe-watchdog.ts";
 import { tempDirs } from "../../../src/testing/git.ts";
 import { withBoxLock } from "./box-lock.ts";
 import { capture, captureWith, Coder, grant, reap, type Box, type Capture, type Timer } from "./coder.ts";
@@ -639,9 +641,10 @@ test("kills a repeatedly self-stopping detached capture group when the caller re
   const started = Bun.file(ready).text();
   const holderGone = Bun.file(gone).text();
   const coderPath = join(import.meta.dir, "coder.ts");
-  const callerScript = `import { capture } from ${JSON.stringify(coderPath)};
+  const callerScript = `import { captureWith } from ${JSON.stringify(coderPath)};
 process.chdir(${JSON.stringify(cwdB)});
-await capture(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; while true; do kill -STOP 0; done', "probe", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { timeoutMs: 30_000 });`;
+const fastCapture = captureWith((ms, fire) => { const t = setTimeout(fire, ms); return () => clearTimeout(t); }, 0);
+await fastCapture(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; while true; do kill -STOP 0; done', "probe", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { timeoutMs: 30_000 });`;
   const caller = Bun.spawn([process.execPath, "-e", callerScript], {
     cwd: cwdA,
     env: { ...process.env, BUN_OPTIONS: "--preload=./preload.ts" },
@@ -663,4 +666,95 @@ await capture(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; while true; do kill -ST
       try { process.kill(targetPid, "SIGKILL"); } catch {}
     }
   }
+});
+
+test("watchdog kills a real stopped process group when its controlled clock reaches delayMs", async () => {
+  const dir = temp.make("hedge-watchdog-clock-");
+  const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+  expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+  const started = Bun.file(ready).text();
+  const holderGone = Bun.file(gone).text();
+  const pipe = createPipe();
+  expect(pipe).toBeDefined();
+  const child = Bun.spawn(
+    ["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; while true; do kill -STOP 0; done', "probe", gone, ready],
+    { stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true },
+  );
+  let now = 0;
+  const sleepers: Array<() => void> = [];
+  const clock: WatchClock = {
+    now: () => now,
+    sleep: () => new Promise<void>((resolve) => sleepers.push(resolve)),
+  };
+  let targetPid = 0;
+  try {
+    targetPid = Number((await started).trim());
+    expect(targetPid).toBeGreaterThan(0);
+    const watching = watchEntries([{ pid: child.pid, fd: pipe!.writeFd, delayMs: 150 }], clock);
+    await Bun.sleep(0);
+    expect(sleepers.length).toBeGreaterThan(0);
+    now = 150;
+    while (sleepers.length) sleepers.shift()!();
+    await watching;
+    expect(await holderGone).toBe("");
+  } finally {
+    try { closeSync(pipe!.readFd); } catch {}
+    try { closeSync(pipe!.writeFd); } catch {}
+    if (targetPid > 0) {
+      try { process.kill(-child.pid, "SIGCONT"); } catch {}
+      try { process.kill(-child.pid, "SIGKILL"); } catch {}
+    }
+    try { child.kill("SIGKILL"); } catch {}
+  }
+});
+
+test("kills a detached child still holding stdout open after the command leader exits if the capture caller dies", async () => {
+  const dir = temp.make("hedge-capture-stdout-orphan-");
+  const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+  expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+  const started = Bun.file(ready).text();
+  const holderGone = Bun.file(gone).text();
+  const coderPath = join(import.meta.dir, "coder.ts");
+  const orphanScript = `
+    const child = Bun.spawn(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; sleep 60', "orphan", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], {
+      stdin: "ignore",
+      stdout: "inherit",
+      stderr: "ignore",
+      detached: true,
+    });
+    child.unref();
+    process.exit(0);
+  `;
+  const callerScript = `import { capture } from ${JSON.stringify(coderPath)};
+await capture([process.execPath, "-e", ${JSON.stringify(orphanScript)}], { timeoutMs: 30_000 });`;
+  const caller = Bun.spawn([process.execPath, "-e", callerScript], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  let orphanPid = 0;
+  try {
+    orphanPid = Number((await started).trim());
+    expect(orphanPid).toBeGreaterThan(0);
+    caller.kill("SIGKILL");
+    await caller.exited;
+    expect(await holderGone).toBe("");
+  } finally {
+    caller.kill("SIGKILL");
+    if (orphanPid > 0) {
+      try { process.kill(orphanPid, "SIGKILL"); } catch {}
+    }
+  }
+});
+
+test("captures large environments alongside held box locks without IPC descriptor shifts", async () => {
+  const home = temp.make("hedge-capture-large-env-");
+  const chunk = "x".repeat(40_000);
+  const result = await withBoxLock(home, "box-env-check", { waitMs: 5_000 }, () =>
+    capture(
+      [process.execPath, "-e", 'process.stdout.write(String((process.env.BIG_1?.length ?? 0) + (process.env.BIG_2?.length ?? 0) + (process.env.BIG_3?.length ?? 0) + (process.env.BIG_4?.length ?? 0)))'],
+      { env: { ...process.env, BIG_1: chunk, BIG_2: chunk, BIG_3: chunk, BIG_4: chunk }, timeoutMs: 10_000 },
+    ),
+  );
+  expect(result).toEqual({ code: 0, stdout: String(chunk.length * 4), stderr: "" });
 });
