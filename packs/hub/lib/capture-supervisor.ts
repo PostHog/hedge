@@ -1,9 +1,10 @@
 import { closeSync } from "node:fs";
-import { enableChildSubreaper, killSession, ownTag, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { drainControlFd, enableChildSubreaper, killSession, ownTag, shieldGroupSignals, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
 type StartMessage = { argv: string[]; env?: Record<string, string>; lockCount: number; controlFd?: number };
 
 enableChildSubreaper();
+shieldGroupSignals();
 
 const runTag = ownTag(process.env[tagEnvVar]);
 let target: ReturnType<typeof Bun.spawn> | undefined;
@@ -36,7 +37,7 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
 
 let readingControl = false;
 
-const watchControl = (fd: number) => {
+const watchControl = (fd: number, initialBuf = "") => {
   if (readingControl) return;
   readingControl = true;
   void (async () => {
@@ -44,7 +45,7 @@ const watchControl = (fd: number) => {
     try {
       const reader = Bun.file(fd).stream().getReader();
       const decoder = new TextDecoder();
-      let buf = "";
+      let buf = initialBuf;
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -85,8 +86,19 @@ process.on("message", async (message: unknown) => {
   }
   if (!message || typeof message !== "object" || !Array.isArray((message as StartMessage).argv)) return;
   const { argv, env, lockCount, controlFd } = message as StartMessage;
-  if (typeof controlFd === "number" && Number.isInteger(controlFd) && controlFd >= 3) watchControl(controlFd);
   const lockFds = Array.from({ length: lockCount }, (_, index) => index + 3);
+  if (typeof controlFd === "number" && Number.isInteger(controlFd) && controlFd >= 3) {
+    const drained = drainControlFd(controlFd);
+    if (drained.closed || drained.lines.includes("kill")) {
+      for (const fd of [...lockFds, 1, 2]) {
+        try {
+          closeSync(fd);
+        } catch {}
+      }
+      process.exit(137);
+    }
+    watchControl(controlFd, drained.rest);
+  }
   const stdio: [number, number, number, ...number[]] = [0, 1, 2, ...lockFds];
   try {
     target = Bun.spawn(argv, { ...(env ? { env } : {}), stdio });

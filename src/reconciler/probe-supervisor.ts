@@ -103,6 +103,75 @@ function pollFd(fd: number): number | undefined {
   return ready === 0 ? 0 : view.getInt16(6, true);
 }
 
+const groupShieldSignals: NodeJS.Signals[] = [
+  "SIGUSR1",
+  "SIGUSR2",
+  "SIGALRM",
+  "SIGPIPE",
+  "SIGVTALRM",
+  "SIGPROF",
+  "SIGXCPU",
+  "SIGXFSZ",
+  "SIGTSTP",
+  "SIGTTIN",
+  "SIGTTOU",
+  "SIGWINCH",
+  "SIGURG",
+  "SIGIO",
+  "SIGPWR",
+  "SIGSYS",
+  "SIGTRAP",
+  "SIGABRT",
+];
+
+export function shieldGroupSignals(): void {
+  for (const sig of groupShieldSignals) {
+    try {
+      process.on(sig, () => {});
+    } catch {}
+  }
+}
+
+export function drainControlFd(fd: number): { lines: string[]; rest: string; closed: boolean } {
+  const lines: string[] = [];
+  let rest = "";
+  let closed = false;
+  const chunk = Buffer.allocUnsafe(256);
+  const decoder = new TextDecoder();
+  for (;;) {
+    const revents = pollFd(fd);
+    if (revents === undefined || revents === 0) break;
+    if (revents & 0x0001) {
+      let n = 0;
+      try {
+        n = readSync(fd, chunk, 0, chunk.length, null);
+      } catch {
+        closed = true;
+        break;
+      }
+      if (n <= 0) {
+        closed = true;
+        break;
+      }
+      rest += decoder.decode(chunk.subarray(0, n), { stream: true });
+      for (let nl = rest.indexOf("\n"); nl !== -1; nl = rest.indexOf("\n")) {
+        lines.push(rest.slice(0, nl).trim());
+        rest = rest.slice(nl + 1);
+      }
+    } else if (revents & (0x0010 | 0x0008 | 0x0020)) {
+      closed = true;
+      break;
+    } else {
+      break;
+    }
+  }
+  if (closed && rest.trim()) {
+    lines.push(rest.trim());
+    rest = "";
+  }
+  return { lines, rest, closed };
+}
+
 export function discoverTargetsLinux(sessionId?: number, tag?: string): ProcTargets {
   const self = process.pid;
   const includeDetached = Boolean(tag);
@@ -611,45 +680,15 @@ if (import.meta.main) {
       else process.exit(128);
     });
   }
+  shieldGroupSignals();
   let controlInitialBuf = "";
-  let controlClosed = false;
   if (controlFd !== undefined) {
-    const chunk = Buffer.allocUnsafe(256);
-    const decoder = new TextDecoder();
-    for (;;) {
-      const revents = pollFd(controlFd);
-      if (revents === undefined || revents === 0) break;
-      if (revents & 0x0001) {
-        let n = 0;
-        try {
-          n = readSync(controlFd, chunk, 0, chunk.length, null);
-        } catch {
-          controlClosed = true;
-          break;
-        }
-        if (n <= 0) {
-          controlClosed = true;
-          break;
-        }
-        controlInitialBuf += decoder.decode(chunk.subarray(0, n), { stream: true });
-        for (let nl = controlInitialBuf.indexOf("\n"); nl !== -1; nl = controlInitialBuf.indexOf("\n")) {
-          const line = controlInitialBuf.slice(0, nl).trim() as StopSignal;
-          controlInitialBuf = controlInitialBuf.slice(nl + 1);
-          if (stopSet.has(line)) dispatchStop(line);
-        }
-        if (pendingStops.length > 0) break;
-      } else if (revents & (0x0010 | 0x0008 | 0x0020)) {
-        controlClosed = true;
-        break;
-      } else {
-        break;
-      }
+    const drained = drainControlFd(controlFd);
+    controlInitialBuf = drained.rest;
+    for (const line of drained.lines) {
+      if (stopSet.has(line as StopSignal)) dispatchStop(line as StopSignal);
     }
-    if (controlClosed && pendingStops.length === 0) {
-      const rest = controlInitialBuf.trim() as StopSignal;
-      if (stopSet.has(rest)) dispatchStop(rest);
-      else dispatchStop("SIGTERM");
-    }
+    if (drained.closed && pendingStops.length === 0) dispatchStop("SIGTERM");
   }
   if (pendingStops.length > 0) {
     try {

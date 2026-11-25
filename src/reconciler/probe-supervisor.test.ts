@@ -718,5 +718,31 @@ await Bun.sleep(30_000);`;
         closeSync(aliveFd);
       } catch {}
     }
+
+    const usr1Res = await humanStepsLeft(
+      {
+        machine: { schema: 1, role: "linux" },
+        os: "linux",
+        ai: "both",
+        packs: [],
+        workflows: [],
+        files: [],
+        config: [],
+        owners: {},
+        jobs: [],
+        human: [{ id: "usr1", pack: "team", say: "USR1.", probe: [shBin, "-c", "trap 'exit 0' USR1; kill -USR1 0"] }],
+        steps: [],
+        checks: [],
+        commands: {},
+        handlers: {},
+        models: [],
+        settings: {},
+        unanswered: [],
+        ask: [],
+        dropped: [],
+      },
+      { home: dir, giveUp: new Promise<void>(() => {}) },
+    );
+    expect(usr1Res).toEqual({ failing: [], unchecked: [] });
   });
 });

@@ -598,8 +598,20 @@ test("preserves command arguments and stdin under seven nested box locks without
 });
 
 test("returns the command's own exit code when it signals its own process group", async () => {
-  const result = await capture(["sh", "-c", 'trap "exit 42" TERM; kill -TERM 0'], { timeoutMs: 10_000 });
-  expect(result).toEqual({ code: 42, stdout: "", stderr: "" });
+  expect(await capture(["sh", "-c", 'trap "exit 42" TERM; kill -TERM 0'], { timeoutMs: 10_000 })).toEqual({ code: 42, stdout: "", stderr: "" });
+  expect(await capture(["sh", "-c", 'trap "exit 42" USR1; kill -USR1 0'], { timeoutMs: 10_000 })).toEqual({ code: 42, stdout: "", stderr: "" });
+});
+
+test("skips running the command when the timer expires immediately", async () => {
+  const dir = temp.make("hedge-sync-expire-");
+  const marker = join(dir, "ran");
+  const immediateCapture = captureWith((_ms, fire) => {
+    fire();
+    return () => {};
+  });
+  const result = await immediateCapture(["sh", "-c", 'echo ran > "$1"', "probe", marker], { timeoutMs: 50 });
+  expect(result.code).toBe(124);
+  expect(await Bun.file(marker).exists()).toBe(false);
 });
 
 test("rejects eight nested box locks cleanly before spawning a supervisor when no multi-digit shell is on PATH", async () => {

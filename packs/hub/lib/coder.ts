@@ -199,11 +199,6 @@ export function captureWith(timer: Timer): Capture {
         if (!targetExited || expired) killGroups();
         settle({ code });
       });
-      if (stopped) {
-        stopChild();
-      } else {
-        live.send({ argv: command, env: targetEnv, lockCount: locks.length, controlFd: 3 + locks.length });
-      }
       let forceExpired = false;
       cancel = timer(timeoutMs, () => {
         expired = true;
@@ -219,6 +214,11 @@ export function captureWith(timer: Timer): Capture {
           stopStream.abort();
         });
       });
+      if (stopped || expired) {
+        stopChild();
+      } else {
+        live.send({ argv: command, env: targetEnv, lockCount: locks.length, controlFd: 3 + locks.length });
+      }
       let stdout: string;
       let stderr: string;
       let status: { code?: number; error?: string; errCode?: string };
