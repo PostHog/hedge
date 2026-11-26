@@ -228,70 +228,95 @@ const probeTimeoutMs = 5_000;
 
 export async function humanStepsLeft(
   plan: Plan,
-  options: { home: string; run?: Runner; timeoutMs?: number },
+  options: { home: string; run?: Runner; timeoutMs?: number; sleep?: (ms: number) => Promise<void> },
 ): Promise<HumanStepsResult> {
   if (!plan.human.length) return { failing: [], unchecked: [] };
   const limitMs = options.timeoutMs ?? probeTimeoutMs;
   const env = withLegacyNames({ ...Bun.env, HOME: options.home, ...(plan.machine.profileDir ? { HEDGE_PROFILE_DIR: plan.machine.profileDir } : {}) });
-  const results = await Promise.all(
-    plan.human.map(async (step): Promise<{ step: Owned<HumanStep>; state: "ok" | "failing" | "unchecked" }> => {
-      const command = engineCommand(step.probe, plan.engineRoot);
-      if (options.run) {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        try {
-          const outcome = await Promise.race([
-            options.run(command).then((code) => ({ timedOut: false as const, code })),
-            new Promise<{ timedOut: true }>((resolve) => {
-              timer = setTimeout(() => resolve({ timedOut: true }), limitMs);
-            }),
-          ]);
-          if (outcome.timedOut) return { step, state: "unchecked" };
-          return { step, state: outcome.code === 0 ? "ok" : "failing" };
-        } catch {
-          return { step, state: "failing" };
-        } finally {
-          if (timer !== undefined) clearTimeout(timer);
-        }
-      }
-      if (!command.length) return { step, state: "failing" };
-      const state = await new Promise<"ok" | "failing" | "unchecked">((resolve) => {
-        let settled = false;
-        let child: ReturnType<typeof spawn> | undefined;
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const finish = (outcome: "ok" | "failing" | "unchecked") => {
-          if (settled) return;
-          settled = true;
-          if (timer !== undefined) clearTimeout(timer);
-          resolve(outcome);
-        };
-        try {
-          child = spawn(command[0]!, command.slice(1), { stdio: "ignore", env, detached: process.platform !== "win32" });
-        } catch {
-          finish("failing");
-          return;
-        }
-        timer = setTimeout(() => {
-          if (child?.pid !== undefined) {
-            try {
-              process.kill(process.platform === "win32" ? child.pid : -child.pid, "SIGKILL");
-            } catch {}
-          }
-          try {
-            child?.kill("SIGKILL");
-          } catch {}
-          child?.unref();
-          finish("unchecked");
-        }, limitMs);
-        child.once("error", () => finish("failing"));
-        child.once("exit", (code) => finish(code === 0 ? "ok" : "failing"));
-      });
-      return { step, state };
-    }),
-  );
-  return {
-    failing: results.filter((item) => item.state === "failing").map((item) => item.step),
-    unchecked: results.filter((item) => item.state === "unchecked").map((item) => item.step),
+  const active = new Set<() => void>();
+  const onSignal = (signal: NodeJS.Signals) => {
+    for (const stop of active) stop();
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+    process.kill(process.pid, signal);
   };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  try {
+    const results = await Promise.all(
+      plan.human.map(async (step): Promise<{ step: Owned<HumanStep>; state: "ok" | "failing" | "unchecked" }> => {
+        const command = engineCommand(step.probe, plan.engineRoot);
+        if (options.run) {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            const deadline = options.sleep
+              ? options.sleep(limitMs).then(() => ({ timedOut: true as const }))
+              : new Promise<{ timedOut: true }>((resolve) => {
+                  timer = setTimeout(() => resolve({ timedOut: true }), limitMs);
+                });
+            const outcome = await Promise.race([
+              options.run(command).then((code) => ({ timedOut: false as const, code })),
+              deadline,
+            ]);
+            if (outcome.timedOut) return { step, state: "unchecked" };
+            return { step, state: outcome.code === 0 ? "ok" : "failing" };
+          } catch {
+            return { step, state: "failing" };
+          } finally {
+            if (timer !== undefined) clearTimeout(timer);
+          }
+        }
+        if (!command.length) return { step, state: "failing" };
+        const state = await new Promise<"ok" | "failing" | "unchecked">((resolve) => {
+          let settled = false;
+          let child: ReturnType<typeof spawn> | undefined;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const stop = () => {
+            if (child?.pid !== undefined) {
+              try {
+                process.kill(process.platform === "win32" ? child.pid : -child.pid, "SIGKILL");
+              } catch {}
+            }
+            try {
+              child?.kill("SIGKILL");
+            } catch {}
+            child?.unref();
+          };
+          const finish = (outcome: "ok" | "failing" | "unchecked") => {
+            if (settled) return;
+            settled = true;
+            active.delete(stop);
+            if (timer !== undefined) clearTimeout(timer);
+            resolve(outcome);
+          };
+          try {
+            child = spawn(command[0]!, command.slice(1), { stdio: "ignore", env, detached: process.platform !== "win32" });
+          } catch {
+            finish("failing");
+            return;
+          }
+          active.add(stop);
+          const onTimeout = () => {
+            if (settled) return;
+            stop();
+            finish("unchecked");
+          };
+          if (options.sleep) void options.sleep(limitMs).then(onTimeout);
+          else timer = setTimeout(onTimeout, limitMs);
+          child.once("error", () => finish("failing"));
+          child.once("exit", (code) => finish(code === 0 ? "ok" : "failing"));
+        });
+        return { step, state };
+      }),
+    );
+    return {
+      failing: results.filter((item) => item.state === "failing").map((item) => item.step),
+      unchecked: results.filter((item) => item.state === "unchecked").map((item) => item.step),
+    };
+  } finally {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+  }
 }
 
 export async function check(plan: Plan, options: { home: string; adapters?: Adapter[]; run?: Runner }): Promise<Report> {

@@ -243,7 +243,7 @@ async function change(command: keyof typeof changes | "hub", args: string[], opt
     machine: { ...realMachine, ...options.setup?.machine },
     print: options.print,
     apply: () => applyProfile(profileDir, options),
-    humanLeft: () => humanStepsLeft(plan, { home: options.home, run: options.run }),
+    humanLeft: () => humanStepsLeft(plan, { home: options.home, run: options.run, sleep: options.clock?.sleep }),
   };
   try {
     return await (command === "hub" ? hubCommand(args, { ...context, home: options.home }) : changes[command](args, context));
