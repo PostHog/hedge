@@ -399,6 +399,42 @@ describe("hedge triage", () => {
     expect(issue.input).toContain("failed cloning <team source>");
     expect(issue.input).toContain("Note: The pack source <private source> is not pinned to a commit SHA.");
   });
+
+  test("scrubs private unpinned source names even when the machine hostname matches words in the advisory wording", async () => {
+    const home = temp.make("home-source-host-");
+    const profileDir = join(home, "profile");
+    mkdirSync(profileDir, { recursive: true });
+    writeFileSync(
+      join(profileDir, "hedge.json"),
+      JSON.stringify({
+        schema: 1,
+        engine: { repo: "PostHog/hedge", ref: "v1", channel: "release" },
+        sources: [{ name: "secret-team", repo: "acme/private-packs", ref: "main" }],
+        packs: [],
+        plan: "both",
+        settings: {},
+        workflows: {},
+      }),
+    );
+    mkdirSync(join(home, ".config/hedge"), { recursive: true });
+    writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "mac", name: "source", profileDir }));
+    const sent: Sent[] = [];
+    const io = scripted([]);
+    const code = await main(["triage", "--send", "--note", "doctor advisory check"], {
+      home,
+      engineRoot,
+      platform: "darwin",
+      env: {},
+      print: io.terminal.print,
+      terminal: io.terminal,
+      capture: capture(sent),
+      hostname: () => "source.local",
+      run: async () => 0,
+    });
+    expect(code).toBe(0);
+    const issue = sent.find((call) => call.command[1] === "issue")!;
+    expect(issue.input).not.toContain("secret-team");
+  });
 });
 
 describe("hedge setup and triage", () => {

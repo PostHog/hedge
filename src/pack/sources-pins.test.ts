@@ -1510,9 +1510,71 @@ esac
     if ("error" in toSha256) throw new Error(toSha256.error);
     expect([toSha256.packs[0]?.manifest.summary, toSha256.stale]).toEqual(["SHA-256 pack.", undefined]);
 
-    const backToSha1 = await fetchSource({ name: "team", repo: sha1Repo, ref: sha1Commit }, cache);
-    if ("error" in backToSha1) throw new Error(backToSha1.error);
-    expect([backToSha1.packs[0]?.manifest.summary, backToSha1.stale]).toEqual(["SHA-1 pack.", undefined]);
+    const localNotes = join(cache, "team", "local-notes.txt");
+    writeFileSync(localNotes, "keep my notes\n");
+
+    const pathFailRepo = temp.make("switch-path-fail-sha1-");
+    await initRepo(pathFailRepo);
+    writePack(pathFailRepo, "Path-dependent SHA-1.");
+    writeFileSync(
+      join(pathFailRepo, "packs/team/pack.ts"),
+      `if (import.meta.dir.endsWith("/team/packs/team")) throw new Error("failed at final path");\nexport default {};\n`,
+    );
+    await spawnGit(pathFailRepo, "add", ".");
+    await spawnGit(pathFailRepo, "commit", "-qm", "path-fail");
+    const pathFailCommit = await spawnGit(pathFailRepo, "rev-parse", "HEAD");
+    const failedPathSwitch = await fetchSource({ name: "team", repo: pathFailRepo, ref: pathFailCommit }, cache);
+    expect("error" in failedPathSwitch).toBe(true);
+    expect(readFileSync(localNotes, "utf8")).toBe("keep my notes\n");
+    const stillSha256 = await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, cache);
+    if ("error" in stillSha256) throw new Error(stillSha256.error);
+    expect([stillSha256.packs[0]?.manifest.summary, stillSha256.stale]).toEqual(["SHA-256 pack.", undefined]);
+
+    rmSync(sha1Repo, { recursive: true, force: true });
+    const offlineBackToSha1 = await fetchSource({ name: "team", repo: sha1Repo, ref: sha1Commit }, cache);
+    if ("error" in offlineBackToSha1) throw new Error(offlineBackToSha1.error);
+    expect([offlineBackToSha1.packs[0]?.manifest.summary, offlineBackToSha1.stale]).toEqual(["SHA-1 pack.", undefined]);
+    expect(readFileSync(localNotes, "utf8")).toBe("keep my notes\n");
+
+    await spawnGit(join(cache, "team"), "remote", "add", "origin", sha256Repo);
+    const viaOrigin = await fetchSource({ name: "team", repo: "origin", ref: sha256Commit }, cache);
+    if ("error" in viaOrigin) throw new Error(viaOrigin.error);
+    expect([viaOrigin.packs[0]?.manifest.summary, viaOrigin.stale]).toEqual(["SHA-256 pack.", undefined]);
+  });
+
+  test("rejects a non-directory refs file in Git dir detection and recovers an offline implicit .git pin after switching repos", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("refs-file-implicit-offline-");
+    const fakeDir = join(root, "packs");
+    const realSibling = join(root, "packs.git");
+    const otherRepo = join(root, "other");
+    mkdirSync(join(fakeDir, "objects"), { recursive: true });
+    writeFileSync(join(fakeDir, "HEAD"), "ref: refs/heads/main\n");
+    writeFileSync(join(fakeDir, "refs"), "not a directory\n");
+    await initRepo(realSibling);
+    const siblingSha = await commitPack(realSibling, "team", "Implicit sibling.");
+    await initRepo(otherRepo);
+    const otherSha = await commitPack(otherRepo, "team", "Other repo.");
+
+    const cache = temp.make("cache-refs-file-implicit-");
+    const first = await fetchSource({ name: "team", repo: fakeDir, ref: siblingSha }, cache);
+    if ("error" in first) throw new Error(first.error);
+    expect([first.packs[0]?.manifest.summary, first.stale]).toEqual(["Implicit sibling.", undefined]);
+
+    const switched = await fetchSource({ name: "team", repo: otherRepo, ref: otherSha }, cache);
+    if ("error" in switched) throw new Error(switched.error);
+    expect([switched.packs[0]?.manifest.summary, switched.stale]).toEqual(["Other repo.", undefined]);
+
+    rmSync(realSibling, { recursive: true, force: true });
+    const recoveredOffline = await fetchSource({ name: "team", repo: fakeDir, ref: siblingSha }, cache);
+    if ("error" in recoveredOffline) throw new Error(recoveredOffline.error);
+    expect([recoveredOffline.packs[0]?.manifest.summary, recoveredOffline.stale]).toEqual(["Implicit sibling.", undefined]);
+
+    rmSync(fakeDir, { recursive: true, force: true });
+    await initRepo(fakeDir);
+    await commitPack(fakeDir, "team", "Real replacement.");
+    const replacementCheck = await fetchSource({ name: "team", repo: fakeDir, ref: siblingSha }, cache);
+    expect("error" in replacementCheck).toBe(true);
   });
 
 });

@@ -78,7 +78,7 @@ export async function triageReport(context: TriageContext, note?: string): Promi
   const clean = (text: string) => redact(text, context.home, known);
   const described = note?.trim() ? clean(note.trim()) : "Not described.";
   const facts = clean([...setupLines(machine, failure, timings), "", "## Versions", "", ...versions].join("\n"));
-  const checked = clean(doctor.join("\n")).split("\n").map(scrubUnpinnedAdvisory);
+  const checked = clean(doctor.map(scrubUnpinnedAdvisory).join("\n")).split("\n");
   const head = ["## What happened", "", described, "", "## Setup", "", facts, "", "## hedge doctor", "", fence(checked), "", ""].join("\n");
   const ending = "\n\nMade by `hedge triage`.";
   const transcript = transcriptTail(context.home, transcriptLines);
@@ -156,7 +156,7 @@ const publicSourceNames = new Set(defaultSources.map((source) => source.name));
 
 function scrubUnpinnedAdvisory(line: string): string {
   return line.replace(
-    /^(Note: The pack source )(.+)( is not pinned to a commit SHA\. Pin its ref in hedge\.json, so each apply loads the same packs, even offline\.)$/,
+    /^(Note: The pack source )([a-z0-9][a-z0-9-]*)( is not pinned to a commit SHA\. Pin its ref in hedge\.json, so each apply loads the same packs, even offline\.)$/,
     (match, prefix, name, suffix) => (publicSourceNames.has(name) ? match : `${prefix}<private source>${suffix}`),
   );
 }
