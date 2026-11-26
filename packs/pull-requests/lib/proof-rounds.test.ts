@@ -90,6 +90,9 @@ test("a refused newer answer with the same words shows its reason next to the us
   pr.choose("Run one more round", "Run one more review round? [example/product#42](https://github.com/example/product/pull/42): one more read.");
   await expect(override()).rejects.toThrow(`Ask the user again. A newer answer with these words was refused: "Run one more round" answers another question ("Run one more review round? [example/product#42](https://github.com/example/product/pull/42): one more read."). Ask the question that hedge proof printed, which starts "Run one more review round? example/product#42:", with the PR as plain owner/repo#n, not a Markdown link`);
 
+  pr.choose("Run one more round", "One more review round? example/product#42: see [the findings](https://example.com/findings).");
+  await expect(override()).rejects.toThrow(/which starts "Run one more review round\? example\/product#42:"$/);
+
   pr.choose("Run one more round");
   expect((await override()).code).toBe(0);
   expect(existsSync(join(pr.pullRequest, "reviews/4/round.json"))).toBe(true);
