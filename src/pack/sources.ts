@@ -178,6 +178,28 @@ function isDirectoryBytes(pathBuf: Buffer): boolean {
   }
 }
 
+function dirnamePosixBytes(buf: Buffer): Buffer {
+  const last = buf.lastIndexOf(slashByte);
+  return last <= 0 ? slashBuf : buf.subarray(0, last);
+}
+
+function parseGitDirFileBytes(fileBuf: Buffer, baseDir: Buffer): Buffer | undefined {
+  try {
+    if (!statSync(fileBuf).isFile()) return undefined;
+    const raw = readFileSync(fileBuf);
+    if (raw.length < gitdirPrefixBuf.length || !raw.subarray(0, gitdirPrefixBuf.length).equals(gitdirPrefixBuf)) return undefined;
+    let start = gitdirPrefixBuf.length;
+    let end = raw.indexOf(0x0a, start);
+    if (end === -1) end = raw.length;
+    while (start < end && (raw[start] === 0x20 || raw[start] === 0x09)) start++;
+    if (end > start && raw[end - 1] === 0x0d) end--;
+    if (end <= start) return undefined;
+    return resolvePosixPathBytes(baseDir, raw.subarray(start, end));
+  } catch {
+    return undefined;
+  }
+}
+
 function resolvedCommonDirBytes(dirBuf: Buffer): Buffer | undefined {
   try {
     if (!statSync(dirBuf).isDirectory()) return undefined;
@@ -193,7 +215,7 @@ function resolvedCommonDirBytes(dirBuf: Buffer): Buffer | undefined {
         const raw = readFileSync(commonPath);
         let end = raw.indexOf(0x0a);
         if (end === -1) end = raw.length;
-        while (end > 0 && (raw[end - 1] === 0x0d || raw[end - 1] === 0x20 || raw[end - 1] === 0x09)) end--;
+        if (end > 0 && raw[end - 1] === 0x0d) end--;
         if (end > 0) commonDir = resolvePosixPathBytes(dirBuf, raw.subarray(0, end));
       }
     } catch {}
@@ -210,11 +232,6 @@ function isBareGitDirBytes(dirBuf: Buffer): boolean {
 }
 
 function resolveGitIdentityBytes(pathBuf: Buffer): { identity: Buffer; isStandardChild: boolean } | undefined {
-  const bareCommon = resolvedCommonDirBytes(pathBuf);
-  if (bareCommon) {
-    const identity = bareCommon.equals(pathBuf) ? pathBuf : Buffer.concat([pathBuf, zeroByteBuf, bareCommon]);
-    return { identity, isStandardChild: false };
-  }
   const dotGit = Buffer.concat([pathBuf, slashDotGitBuf]);
   try {
     const linkInfo = lstatSync(dotGit);
@@ -222,31 +239,39 @@ function resolveGitIdentityBytes(pathBuf: Buffer): { identity: Buffer; isStandar
     const info = statSync(resolvedDotGit);
     if (info.isDirectory()) {
       const commonDir = resolvedCommonDirBytes(resolvedDotGit);
-      if (!commonDir) return undefined;
-      const isStandardChild = !linkInfo.isSymbolicLink() && resolvedDotGit.equals(dotGit) && commonDir.equals(resolvedDotGit);
-      const identity = isStandardChild
-        ? pathBuf
-        : commonDir.equals(resolvedDotGit)
-          ? resolvedDotGit
-          : Buffer.concat([resolvedDotGit, zeroByteBuf, commonDir]);
-      return { identity, isStandardChild };
-    }
-    if (info.isFile()) {
-      const raw = readFileSync(resolvedDotGit);
-      if (raw.length < gitdirPrefixBuf.length || !raw.subarray(0, gitdirPrefixBuf.length).equals(gitdirPrefixBuf)) return undefined;
-      let start = gitdirPrefixBuf.length;
-      let end = raw.indexOf(0x0a, start);
-      if (end === -1) end = raw.length;
-      while (start < end && (raw[start] === 0x20 || raw[start] === 0x09)) start++;
-      while (end > start && (raw[end - 1] === 0x0d || raw[end - 1] === 0x20 || raw[end - 1] === 0x09)) end--;
-      if (end <= start) return undefined;
-      const target = resolvePosixPathBytes(pathBuf, raw.subarray(start, end));
-      const commonDir = resolvedCommonDirBytes(target);
-      if (!commonDir) return undefined;
-      const identity = commonDir.equals(target) ? target : Buffer.concat([target, zeroByteBuf, commonDir]);
-      return { identity, isStandardChild: false };
+      if (commonDir) {
+        const isStandardChild = !linkInfo.isSymbolicLink() && resolvedDotGit.equals(dotGit) && commonDir.equals(resolvedDotGit);
+        const identity = isStandardChild
+          ? pathBuf
+          : commonDir.equals(resolvedDotGit)
+            ? resolvedDotGit
+            : Buffer.concat([resolvedDotGit, zeroByteBuf, commonDir]);
+        return { identity, isStandardChild };
+      }
+    } else if (info.isFile()) {
+      const target = parseGitDirFileBytes(resolvedDotGit, pathBuf);
+      if (target) {
+        const commonDir = resolvedCommonDirBytes(target);
+        if (commonDir) {
+          const identity = commonDir.equals(target) ? target : Buffer.concat([target, zeroByteBuf, commonDir]);
+          return { identity, isStandardChild: false };
+        }
+      }
     }
   } catch {}
+  const directTarget = parseGitDirFileBytes(pathBuf, dirnamePosixBytes(pathBuf));
+  if (directTarget) {
+    const commonDir = resolvedCommonDirBytes(directTarget);
+    if (commonDir) {
+      const identity = commonDir.equals(directTarget) ? directTarget : Buffer.concat([directTarget, zeroByteBuf, commonDir]);
+      return { identity, isStandardChild: false };
+    }
+  }
+  const bareCommon = resolvedCommonDirBytes(pathBuf);
+  if (bareCommon) {
+    const identity = bareCommon.equals(pathBuf) ? pathBuf : Buffer.concat([pathBuf, zeroByteBuf, bareCommon]);
+    return { identity, isStandardChild: false };
+  }
   return undefined;
 }
 
@@ -554,6 +579,7 @@ async function legacyFallbackMatches(dir: string, good: Good, rawEffectiveRepo: 
 }
 
 async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Promise<FetchedSource> {
+  await recoverInterruptedSwap(dir);
   const repo = repoUrl(ref.repo);
   const edits = await localEdits(dir);
   if (edits.length) return keepEdits(ref, dir, edits, loadLimitMs);
@@ -1203,6 +1229,84 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string, cac
 }
 
 const altGitDirPath = (dir: string, format: "sha1" | "sha256") => join(dirname(dir), `.${basename(dir)}.git-${format}`);
+const swapMarkerPath = (dir: string) => join(dirname(dir), `.${basename(dir)}.git-swap`);
+
+type SwapMarker = {
+  stashOldGit: string;
+  prevStashBackup?: string;
+  targetGit: string;
+  targetCommit: string;
+  removeTargetOnRollback: boolean;
+  before?: CheckoutState;
+};
+
+async function recoverInterruptedSwap(dir: string): Promise<void> {
+  const liveGit = join(dir, ".git");
+  const markerPath = swapMarkerPath(dir);
+  const hasLive = existsSync(liveGit);
+  if (hasLive && !existsSync(markerPath)) return;
+  if (existsSync(markerPath)) {
+    let marker: SwapMarker | undefined;
+    try {
+      const parsed = JSON.parse(await readFile(markerPath, "utf8")) as Partial<SwapMarker>;
+      if (parsed && typeof parsed.stashOldGit === "string" && typeof parsed.targetGit === "string" && typeof parsed.targetCommit === "string") {
+        marker = {
+          stashOldGit: parsed.stashOldGit,
+          targetGit: parsed.targetGit,
+          targetCommit: parsed.targetCommit,
+          removeTargetOnRollback: parsed.removeTargetOnRollback === true,
+          ...(typeof parsed.prevStashBackup === "string" ? { prevStashBackup: parsed.prevStashBackup } : {}),
+          ...(parsed.before && typeof parsed.before.commit === "string" ? { before: parsed.before } : {}),
+        };
+      }
+    } catch {}
+    if (marker) {
+      if (existsSync(liveGit) && existsSync(marker.stashOldGit)) {
+        const targetFiles = await listTreeFiles(dir, liveGit, marker.targetCommit);
+        if (targetFiles?.length) await removeTrackedFiles(dir, targetFiles, false);
+        if (marker.removeTargetOnRollback) {
+          await rm(liveGit, { recursive: true, force: true }).catch(() => {});
+        } else if (!existsSync(marker.targetGit)) {
+          await rename(liveGit, marker.targetGit).catch(() => {});
+        } else {
+          await rm(liveGit, { recursive: true, force: true }).catch(() => {});
+        }
+        if (!existsSync(liveGit)) await rename(marker.stashOldGit, liveGit).catch(() => {});
+        if (marker.prevStashBackup && existsSync(marker.prevStashBackup) && !existsSync(marker.stashOldGit)) {
+          await rename(marker.prevStashBackup, marker.stashOldGit).catch(() => {});
+        }
+        if (marker.before && existsSync(liveGit)) {
+          const restored = await checkoutFromEmptyTree(dir, marker.before.commit, marker.before.branch);
+          if (!restored.ok) await forceRestoreCheckout(dir, marker.before);
+        }
+      } else if (!existsSync(liveGit) && existsSync(marker.stashOldGit)) {
+        await rename(marker.stashOldGit, liveGit).catch(() => {});
+        if (marker.prevStashBackup && existsSync(marker.prevStashBackup) && !existsSync(marker.stashOldGit)) {
+          await rename(marker.prevStashBackup, marker.stashOldGit).catch(() => {});
+        }
+      }
+    }
+    await rm(markerPath, { force: true }).catch(() => {});
+    if (existsSync(liveGit)) return;
+  }
+  if (!existsSync(liveGit) && existsSync(dir)) {
+    const candidates: Array<{ path: string; mtimeMs: number }> = [];
+    for (const fmt of ["sha1", "sha256"] as const) {
+      const alt = altGitDirPath(dir, fmt);
+      if (!existsSync(alt)) continue;
+      if (process.platform !== "win32" && !isBareGitDirBytes(Buffer.from(alt, "utf8"))) continue;
+      let mtimeMs = 0;
+      try {
+        mtimeMs = statSync(join(alt, "hedge-source.json")).mtimeMs;
+      } catch {}
+      candidates.push({ path: alt, mtimeMs });
+    }
+    candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    if (candidates[0]) {
+      await rename(candidates[0].path, liveGit).catch(() => {});
+    }
+  }
+}
 
 async function gitConfigFile(...args: string[]) {
   const proc = Bun.spawn(["git", "config", ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: gitEnv(), timeout: fetchTimeoutMs });
@@ -1400,7 +1504,7 @@ async function checkUntrackedCollisions(dir: string, oldTracked: Set<string>, ne
   return undefined;
 }
 
-async function removeTrackedFiles(dir: string, files: Buffer[]): Promise<void> {
+async function removeTrackedFiles(dir: string, files: Buffer[], strict = false): Promise<void> {
   if (process.platform === "win32") {
     const dirs = new Set<string>();
     const root = resolve(dir);
@@ -1408,7 +1512,8 @@ async function removeTrackedFiles(dir: string, files: Buffer[]): Promise<void> {
       const rel = decodeTrackedPathWin(relBuf);
       if (rel === undefined) continue;
       const full = join(dir, rel);
-      await rm(full, { force: true }).catch(() => {});
+      if (strict) await rm(full, { force: true });
+      else await rm(full, { force: true }).catch(() => {});
       let parent = dirname(full);
       while (resolve(parent) !== root && resolve(parent).startsWith(root + sep)) {
         dirs.add(parent);
@@ -1423,7 +1528,8 @@ async function removeTrackedFiles(dir: string, files: Buffer[]): Promise<void> {
   const rootBuf = Buffer.from(resolve(dir), "utf8");
   const parentDirs = new Map<string, Buffer>();
   for (const relBuf of files) {
-    await rm(joinPosixFile(rootBuf, relBuf), { force: true }).catch(() => {});
+    if (strict) await rm(joinPosixFile(rootBuf, relBuf), { force: true });
+    else await rm(joinPosixFile(rootBuf, relBuf), { force: true }).catch(() => {});
     let slash = relBuf.lastIndexOf(slashByte);
     while (slash > 0) {
       const parent = relBuf.subarray(0, slash);
@@ -1474,6 +1580,7 @@ async function activateSwappedGit(
   if (collision) return { error: collision };
   const liveGit = join(dir, ".git");
   const stashOldGit = altGitDirPath(dir, oldFormat);
+  const markerPath = swapMarkerPath(dir);
   let prevStashBackup: string | undefined;
   if (existsSync(stashOldGit)) {
     prevStashBackup = `${stashOldGit}.old-${crypto.randomUUID()}`;
@@ -1486,7 +1593,7 @@ async function activateSwappedGit(
   const rollback = async () => {
     if (movedNew) {
       if (startedNewCheckout) {
-        await removeTrackedFiles(dir, newFiles);
+        await removeTrackedFiles(dir, newFiles, false);
       }
       if (removeTargetOnRollback) {
         await rm(liveGit, { recursive: true, force: true }).catch(() => {});
@@ -1501,15 +1608,25 @@ async function activateSwappedGit(
       const restored = await checkoutFromEmptyTree(dir, before.commit, before.branch);
       if (!restored.ok) await forceRestoreCheckout(dir, before);
     }
+    await rm(markerPath, { force: true }).catch(() => {});
     clearLoadedModules(dir);
   };
   try {
+    const marker: SwapMarker = {
+      stashOldGit,
+      targetGit,
+      targetCommit,
+      removeTargetOnRollback,
+      ...(prevStashBackup ? { prevStashBackup } : {}),
+      ...(before ? { before } : {}),
+    };
+    await writeAtomic(markerPath, JSON.stringify(marker) + "\n");
     await rename(liveGit, stashOldGit);
     movedOld = true;
     await rename(targetGit, liveGit);
     movedNew = true;
-    await removeTrackedFiles(dir, oldTracked);
     removedOldTracked = true;
+    await removeTrackedFiles(dir, oldTracked, true);
     startedNewCheckout = true;
     const moved = await checkoutFromEmptyTree(dir, targetCommit);
     if (!moved.ok) {
@@ -1524,6 +1641,7 @@ async function activateSwappedGit(
     clearLoadedModules(dir);
     const commitSwap = async () => {
       if (prevStashBackup) await rm(prevStashBackup, { recursive: true, force: true }).catch(() => {});
+      await rm(markerPath, { force: true }).catch(() => {});
     };
     return { commit: targetCommit, rollback, commitSwap };
   } catch (error) {
@@ -1882,8 +2000,11 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
   }
   if (!isBranch) return false;
   if (isCommitPin(branch, hashLen) && matchedExplicitHead && !hasExplicitHead(ref.ref) && existsSync(join(dir, ".git"))) {
-    const obj = await git(dir, "cat-file", "-t", branch);
-    if (obj.ok && obj.stdout === "commit") return false;
+    const goodDigest = goodResolvedDigest(good);
+    const effectiveDigest = repoDigest(await resolvedRepoUrl(dir, repo, goodDigest));
+    const sameRepo = good.repo === repo && (goodDigest === undefined || goodDigest === effectiveDigest);
+    const matchesVerifiedGood = sameRepo && verifiedGoodCommit(good)?.commit === branch.toLowerCase();
+    if (matchesVerifiedGood || (await pinTarget(dir, effectiveDigest, branch)) !== undefined) return false;
   }
   const hasPlusPrefix = (value: unknown) => typeof value === "string" && value.startsWith("+");
   const needsRepoCheck =
@@ -1935,6 +2056,7 @@ export async function advanceSource(ref: SourceRef, cacheRoot: string, from: str
 }
 
 async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimitMs: number): Promise<Advance> {
+  await recoverInterruptedSwap(dir);
   const repo = repoUrl(ref.repo);
   const branch = branchName(ref.ref);
   const head = branch ? `refs/heads/${branch}` : "";

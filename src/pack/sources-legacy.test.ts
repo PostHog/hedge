@@ -716,7 +716,7 @@ export default { sdk: 1, name: "team", summary: "Mutating.", register() {} };
     expect(await spawnGit(join(mutateCache, "team"), "rev-parse", "HEAD")).toBe(cleanSha);
   });
 
-  test("falls back cleanly when git fetch does not support --porcelain even with localized errors, verifies branch rollback commits, and omits raw resolved insteadOf URLs from metadata", async () => {
+  test("falls back cleanly when git fetch does not support --porcelain even with localized errors", async () => {
     const repo = await packRepo("Older git packs.");
     const sha = await spawnGit(repo, "rev-parse", "HEAD");
     const realGit = Bun.which("git")!;
@@ -749,7 +749,9 @@ exec "${realGit}" "$@"
     } finally {
       process.env.PATH = savedPath;
     }
+  });
 
+  test("restores the prior commit when a broken pack moves the local branch before failing", async () => {
     const moveRepo = await packRepo("Original good pack.");
     const goodCommit = await spawnGit(moveRepo, "rev-parse", "HEAD");
     writePack(moveRepo, "Moved branch pack.");
@@ -776,7 +778,9 @@ throw new Error("broken pack");
     if ("error" in rolled) throw new Error(rolled.error);
     expect(rolled.packs[0]?.manifest.summary).toBe("Original good pack.");
     expect(await spawnGit(moveDir, "rev-parse", "HEAD")).toBe(goodCommit);
+  });
 
+  test("omits raw resolved insteadOf URLs from persisted metadata while still working offline", async () => {
     const secretParent = temp.make("secret-mirror-");
     const secretMirror = join(secretParent, "cred-token-987654321");
     const mirrorSha = await initPackRepo(secretMirror, "Rewritten mirror packs.");
@@ -796,7 +800,9 @@ throw new Error("broken pack");
     if ("error" in mirrorOffline) throw new Error(mirrorOffline.error);
     expect(mirrorOffline.packs[0]?.manifest.summary).toBe("Rewritten mirror packs.");
     expect(mirrorOffline.stale).toBeUndefined();
+  });
 
+  test("defers branch classification when FETCH_HEAD is temporarily unreadable and resolves once readable", async () => {
     const woRepo = await packRepo("Write-only FH packs.");
     const woCache = temp.make("cache-wo-fh-");
     const woDir = join(woCache, "team");
@@ -814,7 +820,9 @@ throw new Error("broken pack");
       chmodSync(woFh, 0o600);
     }
     expect(await followsBranch({ name: "team", repo: woRepo, ref: "main" }, woCache)).toBe(true);
+  });
 
+  test("falls back as stale offline for a legacy annotated tag pin after git gc prunes the tag object", async () => {
     const gcTagRepo = await packRepo("GC tag packs.");
     await spawnGit(gcTagRepo, "tag", "-a", "v2-ann", "-m", "annotated");
     const gcTagSha = await spawnGit(gcTagRepo, "rev-parse", "v2-ann");
@@ -832,7 +840,9 @@ throw new Error("broken pack");
     if ("error" in gcTagOffline) throw new Error(gcTagOffline.error);
     expect(gcTagOffline.packs[0]?.manifest.summary).toBe("GC tag packs.");
     expect(gcTagOffline.stale).toContain(`could not fetch ${gcTagSha}`);
+  });
 
+  test("handles trailing-colon and empty HEAD refspecs and ignores malformed commit metadata in followsBranch", async () => {
     const colonRepo = await packRepo("Empty dest refspec.");
     const colonCache = temp.make("cache-colon-refspec-");
     const colonRes = await fetchSource({ name: "team", repo: colonRepo, ref: "main:" }, colonCache);
@@ -846,6 +856,16 @@ throw new Error("broken pack");
     writeFileSync(join(badCommitDir, ".git", "hedge-source.json"), JSON.stringify({ repo: colonRepo, ref: "main", commit: 42, branch: true }) + "\n");
     expect(await followsBranch({ name: "team", repo: colonRepo, ref: "main" }, badCommitCache)).toBe(false);
 
+    const emptyRefRepo = await packRepo("Default HEAD packs.");
+    for (const emptyRef of ["", ":", "+", "+:"]) {
+      const emptyRefCache = temp.make("cache-empty-ref-");
+      const emptyRefRes = await fetchSource({ name: "team", repo: emptyRefRepo, ref: emptyRef }, emptyRefCache);
+      if ("error" in emptyRefRes) throw new Error(emptyRefRes.error);
+      expect(emptyRefRes.packs[0]?.manifest.summary).toBe("Default HEAD packs.");
+    }
+  });
+
+  test("keeps refreshed intermediate commits available offline after a subsequent branch reapply", async () => {
     const midRepo = await packRepo("Branch c1.");
     const c1 = await spawnGit(midRepo, "rev-parse", "HEAD");
     const midCache = temp.make("cache-mid-reapply-");
@@ -862,15 +882,9 @@ throw new Error("broken pack");
     if ("error" in midOffline) throw new Error(midOffline.error);
     expect(midOffline.packs[0]?.manifest.summary).toBe("Branch c2.");
     expect(midOffline.stale).toBeUndefined();
+  });
 
-    const emptyRefRepo = await packRepo("Default HEAD packs.");
-    for (const emptyRef of ["", ":", "+", "+:"]) {
-      const emptyRefCache = temp.make("cache-empty-ref-");
-      const emptyRefRes = await fetchSource({ name: "team", repo: emptyRefRepo, ref: emptyRef }, emptyRefCache);
-      if ("error" in emptyRefRes) throw new Error(emptyRefRes.error);
-      expect(emptyRefRes.packs[0]?.manifest.summary).toBe("Default HEAD packs.");
-    }
-
+  test("applies an orphan force-pushed branch and tolerates a local branch named after the incoming commit SHA", async () => {
     const forceRepo = await packRepo("Before force.");
     const forceCache = temp.make("cache-force-depth-");
     expect("error" in (await fetchSource({ name: "team", repo: forceRepo, ref: "main" }, forceCache))).toBe(false);
@@ -896,7 +910,9 @@ throw new Error("broken pack");
     if ("error" in shaBranchRes) throw new Error(shaBranchRes.error);
     expect(shaBranchRes.packs[0]?.manifest.summary).toBe("SHA branch c2.");
     expect(shaBranchRes.stale).toBeUndefined();
+  });
 
+  test("falls back as stale offline for a legacy bare hex-branch record with empty FETCH_HEAD", async () => {
     const hexBranchRepo = await packRepo("Legacy hex branch v1.");
     const hexBranchName = await spawnGit(hexBranchRepo, "rev-parse", "HEAD");
     await spawnGit(hexBranchRepo, "checkout", "-q", "-b", hexBranchName);
