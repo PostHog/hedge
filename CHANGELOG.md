@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### The merge gate says when it could not read a comment, and reads `$(cat file)`
+
+- A comment whose body the merge-gate hook cannot read, such as a file named
+  by a shell variable (`--body-file $R`), still counts as a `/trunk merge`
+  enqueue. Its refusal now starts by saying so, and tells the agent to give
+  the body by its literal file path, as `--body` text, or in a quoted
+  heredoc. Before, it read like a refusal of a merge: an end-of-run report
+  that names a pending merge looked like the cause, and the comment was not
+  posted.
+- A body built with `$(cat <file>)` or `$(cat <<'EOF' … EOF)` is read from
+  that file or heredoc. Any other body built at run time, such as another
+  command's output, a shell variable, or an unquoted heredoc that expands
+  one, counts as unread. Before, such a body could post `/trunk merge` past
+  the gate when the command line did not spell it out.
+
 ### A check that a person passes no longer turns into a ci gap
 
 - A new setting, `pull-requests.personChecks`, lists the required checks that

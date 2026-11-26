@@ -9,7 +9,7 @@ import { gateRunDirectory, startGateRun, writeJson } from "../pull-requests/lib/
 import { git } from "../../src/testing/git.ts";
 import { mergeGate } from "./hooks/merge-gate.ts";
 import {
-  beforeDeadline, cliReason, exemptList, ghAliases, ghBaseRepo, graphqlReason, mergeGateDeadlineMs, readPayload, realIntentIO, mergeGateRisk, mergeIntent, otherEndpointReason, rawReason, shellAliasReason, splitStringReason,
+  beforeDeadline, cliReason, exemptList, ghAliases, ghBaseRepo, graphqlReason, mergeGateDeadlineMs, readPayload, realIntentIO, mergeGateRisk, mergeIntent, otherEndpointReason, rawReason, shellAliasReason, splitStringReason, unreadBodyNote,
   type GateIO, type IntentIO, type MergeIntent, type Pull,
 } from "./lib/merge-gate.ts";
 
@@ -757,6 +757,101 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     await later({ code: 0, reason: "pass" });
     expect(await hook("gh pr merge 9 --repo example/product")).toBeUndefined();
   });
+
+  const report = [
+    "## End-of-run report: example/product#9, example/product#10", "", "### Still yours",
+    "- Merge example/product#9: its proofs pass, and it waits on your merge word.",
+    "- Merge example/product#10: its proofs pass, and it waits on your merge word.", "",
+    "### Merged under the narrow grant", "None.", "", "### Decisions",
+    "- 🤖 **Accept the live-run gap? example/product#9: no sandbox costs $5 a run** Accept the gap Rejected: Keep the gap open. (agent, proof-gap) [d-agent]", "",
+  ].join("\n");
+  const heldGap: LedgerEvent = {
+    type: "decide", decision: {
+      id: "d-agent", at: "2026-11-16T08:00:00Z", class: "proof-gap", mark: "🤖", question: "Accept the live-run gap? example/product#9: no sandbox", answer: "Accept the gap", rejected: "Keep the gap open", reason: "x",
+      scope: { prs: ["example/product#9"], kinds: ["live-run"] }, effect: "accept", where: { thread: "t", machine: "hub" },
+    },
+  };
+  const reportDir = () => {
+    const dir = temp.make("report-");
+    writeFileSync(join(dir, "report.md"), report);
+    writeFileSync(join(dir, "enqueue.md"), `${report}\n/trunk merge\n`);
+    writeFileSync(join(dir, "-"), report);
+    return dir;
+  };
+
+  test.each([
+    ["gh pr comment 9 --repo example/product --body-file report.md"],
+    ["gh pr comment 9 --repo example/product --body-file ./report.md"],
+    ["gh pr comment 9 --repo example/product --body \"$(cat report.md)\""],
+    ["gh pr comment 9 --repo example/product --body \"$(cat report.md) Posted once.\""],
+    ["gh pr comment 9 --repo example/product --body \"$(cat <<'EOF'\n" + report + "\nEOF\n)\""],
+    ["gh pr comment 9 --repo example/product -F - <<'EOF'\n" + report + "\nEOF"],
+    ["gh issue comment 9 --repo example/product --body-file report.md"],
+    ["gh api repos/example/product/issues/9/comments -F body=@report.md"],
+    ["gh api repos/example/product/issues/9/comments -f body=\"$(cat report.md)\""],
+  ])("a decision report that names a pending merge is no merge, and posts without a gate read on a PR with a held gap: %s", async (command) => {
+    const hook = machine({}, [heldGap]);
+    expect(await hook(command, reportDir())).toBeUndefined();
+  });
+
+  test("a report named by a shell variable is checked as an enqueue, and the refusal leads with the unread body and how to send it", async () => {
+    const dir = reportDir();
+    const held = machine({ "repos/example/product/pulls/9": pull(head) }, [heldGap, pass("example/product", 9, head)]);
+    const refusal = await held(`R=${dir}/report.md; grep -c Merge $R; gh pr comment 9 --repo example/product --body-file $R > post.log 2>&1; echo post=$?`, dir);
+    expect(refusal).toStartWith("The merge gate could not read the body of this comment");
+    expect(refusal).toContain("give the body by its literal file path");
+    expect(refusal).toContain("an agent accepted proof gaps of example/product#9");
+    expect(await held(`gh pr comment 9 --repo example/product --body-file ${dir}/report.md`, dir)).toBeUndefined();
+    const unpassed = machine({ "repos/example/product/pulls/9": pull(head) });
+    for (const command of ["gh pr comment 9 --repo example/product --body-file missing.md", "cat report.md | gh pr comment 9 --repo example/product -F -"]) {
+      const reason = await unpassed(command, dir);
+      expect(reason).toStartWith("The merge gate could not read the body of this comment");
+      expect(reason).toContain("has not passed at the head of example/product#9");
+    }
+    expect(await unpassed("gh pr comment 9 --repo example/product --body-file enqueue.md", dir)).toStartWith("Hedge blocked this merge");
+    expect(await unpassed("gh pr merge 9 --repo example/product", dir)).toStartWith("Hedge blocked this merge");
+  });
+
+  test.each([
+    ["gh pr comment 9 --repo example/product --body-file enqueue.md"],
+    ["gh pr comment 9 --repo example/product --body \"$(cat enqueue.md)\""],
+    ["gh pr comment 9 --repo example/product --body \"$(cat report.md enqueue.md)\""],
+    ["gh pr comment 9 --repo example/product --body \"`cat enqueue.md`\""],
+    ["gh pr comment 9 --repo example/product --body \"$(< enqueue.md)\""],
+    ["gh pr comment 9 --repo example/product --body \"$(cat < enqueue.md)\""],
+    ["gh pr comment 9 --repo example/product --body \"$(cat -- enqueue.md)\""],
+    ["cat enqueue.md | gh pr comment 9 --repo example/product --body \"$(cat -)\""],
+    ["gh pr comment 9 --repo example/product --body \"$(cat enqueue.md | cat)\""],
+    ["gh pr comment 9 --repo example/product --body \"$(cat \"$(echo enqueue.md)\")\""],
+    ["gh pr comment 9 --repo example/product --body \"$(cat $F)\""],
+    ["gh pr comment 9 --repo example/product --body \"$(cat ~/enqueue.md)\""],
+    ["gh pr comment 9 --repo example/product --body \"$(cat <<EOF\n$(cat enqueue.md)\nEOF\n)\""],
+    ["gh pr comment 9 --repo example/product --body \"$(cat <<EOF\n$B\nEOF\n)\""],
+    ["B=$(cat enqueue.md); gh pr comment 9 --repo example/product --body \"$B\""],
+    ["B=$(cat enqueue.md); gh pr comment 9 --repo example/product --body \"${B}\""],
+    ["B=$(cat enqueue.md) gh pr comment 9 --repo example/product --body \"$B\""],
+    ["B=$(cat enqueue.md); gh pr comment 9 --repo example/product --body-file - <<EOF\n$B\nEOF"],
+    ["gh pr comment 9 --repo example/product --body-file - <<EOF\n$(cat enqueue.md)\nEOF"],
+    ["B=$(cat enqueue.md); gh pr comment 9 --repo example/product --body-file - <<< \"$B\""],
+    ["R=enqueue.md; gh pr comment 9 --repo example/product --body-file $R"],
+    ["R=report.md; true || R=enqueue.md; gh pr comment 9 --repo example/product --body-file \"$R\""],
+    ["cat enqueue.md | gh pr comment 9 --repo example/product -F -"],
+    ["gh pr comment 9 --repo example/product --body-file <(cat enqueue.md)"],
+    ["gh api repos/example/product/issues/9/comments -f body=\"$(cat enqueue.md)\""],
+    ["B=$(cat enqueue.md); gh api repos/example/product/issues/9/comments -f body=\"$B\""],
+  ])("a comment that may post /trunk merge from a file or a run-time value is still checked as an enqueue: %s", async (command) => {
+    const hook = machine({ "repos/example/product/pulls/9": pull(head) });
+    expect(await hook(command, reportDir())).toContain("has not passed at the head of example/product#9");
+  });
+
+  test.each([
+    ["gh pr review 9 --repo example/product --comment --body \"$(cat enqueue.md)\""],
+    ["gh api -X PATCH repos/example/product/issues/comments/1 -f body=\"$(cat enqueue.md)\""],
+    ["B=$(cat enqueue.md); gh api -X PATCH repos/example/product/pulls/9 -f body=\"$B\""],
+  ])("a review or edit that may write /trunk merge from a file or a run-time value is still refused: %s", async (command) => {
+    const hook = machine({ "repos/example/product/pulls/9": pull(head) });
+    expect(await hook(command, reportDir())).toBeDefined();
+  });
 });
 
 test("the installed hook reads gh's aliases from GH_CONFIG_DIR, and a FIFO as a payload cannot stall it", async () => {
@@ -801,7 +896,7 @@ describe("a piped comment body", () => {
   test("needs a gate pass, and the refusal says why", async () => {
     const piped = bash("cat notes.md | gh pr comment 9 -R example/product -F -");
     expect(piped).toEqual({ targets: [target("example/product", 9)] });
-    expect(await risk(piped, gate())).toContain("A piped body cannot be read");
-    expect(await risk(bash("gh pr merge 9 -R example/product"), gate())).not.toContain("piped body");
+    expect(await risk(piped, gate())).toStartWith(unreadBodyNote);
+    expect(await risk(bash("gh pr merge 9 -R example/product"), gate())).not.toContain(unreadBodyNote);
   });
 });
