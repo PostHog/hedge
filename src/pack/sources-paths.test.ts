@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
 import { advanceSource, fetchSource, followsBranch, unpinnedSources } from "./sources.ts";
@@ -1124,5 +1124,59 @@ describe("fetchSource local path resolution and object formats", () => {
     await spawnGit(badPackSrc, "commit", "-qm", "bad schema");
     expect("error" in (await fetchSource({ name: "team", repo: badPackSrc, ref: "main" }, join(enclosingRepo, "caches")))).toBe(true);
     expect(readFileSync(trackedInParent, "utf8")).toBe("parent tracked file\n");
+
+    const originUpstream = join(root, "origin-upstream");
+    await initRepo(originUpstream);
+    const o1 = await commitPack(originUpstream, "team", "Origin v1.");
+    const originCache = temp.make("cache-origin-refmap-");
+    const originDir = join(originCache, "team");
+    await spawnGit(root, "clone", "-q", originUpstream, originDir);
+    expect("error" in (await fetchSource({ name: "team", repo: "origin", ref: "main" }, originCache))).toBe(false);
+    const remoteBefore = await spawnGit(originDir, "rev-parse", "refs/remotes/origin/main");
+    mkdirSync(join(originUpstream, "packs", "team"), { recursive: true });
+    writeFileSync(join(originUpstream, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Origin broken." }));
+    await spawnGit(originUpstream, "commit", "-qam", "broken origin v2");
+    const failedOrigin = await advanceSource({ name: "team", repo: "origin", ref: "main" }, originCache, o1);
+    expect(failedOrigin.state).toBe("failed");
+    expect(await spawnGit(originDir, "rev-parse", "refs/remotes/origin/main")).toBe(remoteBefore);
+    await spawnGit(originDir, "fsck", "--full");
+
+    const roRepo = join(root, "readonly-stage");
+    await initRepo(roRepo);
+    const ro1 = await commitPack(roRepo, "team", "RO v1.");
+    const roCache = temp.make("cache-ro-stage-");
+    expect("error" in (await fetchSource({ name: "team", repo: roRepo, ref: "main" }, roCache))).toBe(false);
+    await commitPack(roRepo, "team", "RO v2.");
+    const roObjects = join(roCache, "team", ".git", "objects");
+    chmodSync(roObjects, 0o555);
+    try {
+      const roFailed = await advanceSource({ name: "team", repo: roRepo, ref: "main" }, roCache, ro1);
+      expect(roFailed.state).toBe("failed");
+    } finally {
+      chmodSync(roObjects, 0o755);
+    }
+
+    const customBranchRepo = join(root, "refs-custom-branch");
+    await initRepo(customBranchRepo);
+    await spawnGit(customBranchRepo, "checkout", "-q", "-b", "refs/custom/release");
+    const cb1 = await commitPack(customBranchRepo, "team", "Custom branch v1.");
+    const cbCache = temp.make("cache-refs-custom-");
+    expect("error" in (await fetchSource({ name: "team", repo: customBranchRepo, ref: "refs/custom/release" }, cbCache))).toBe(false);
+    expect(await followsBranch({ name: "team", repo: customBranchRepo, ref: "refs/custom/release" }, cbCache)).toBe(true);
+    const cb2 = await commitPack(customBranchRepo, "team", "Custom branch v2.");
+    const cbMoved = await advanceSource({ name: "team", repo: customBranchRepo, ref: "refs/custom/release" }, cbCache, cb1);
+    expect(cbMoved).toMatchObject({ state: "moved", commit: cb2 });
+
+    const symObjRepo = join(root, "symlink-objects");
+    await initRepo(symObjRepo);
+    const so1 = await commitPack(symObjRepo, "team", "Symlink objects v1.");
+    const symObjCache = temp.make("cache-sym-obj-");
+    expect("error" in (await fetchSource({ name: "team", repo: symObjRepo, ref: "main" }, symObjCache))).toBe(false);
+    const extObjects = join(root, "external-objects");
+    renameSync(join(symObjCache, "team", ".git", "objects"), extObjects);
+    symlinkSync(extObjects, join(symObjCache, "team", ".git", "objects"));
+    const so2 = await commitPack(symObjRepo, "team", "Symlink objects v2.");
+    const soMoved = await advanceSource({ name: "team", repo: symObjRepo, ref: "main" }, symObjCache, so1);
+    expect(soMoved).toMatchObject({ state: "moved", commit: so2 });
   });
 });
