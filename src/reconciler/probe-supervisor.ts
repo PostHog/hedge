@@ -308,7 +308,7 @@ type PosixLib = {
   poll: (fds: ReturnType<typeof ptr>, nfds: number, timeout: number) => number;
   pipe: (fds: ReturnType<typeof ptr>) => number;
   socketpair: (domain: number, type: number, protocol: number, fds: ReturnType<typeof ptr>) => number;
-  fcntl: (fd: number, cmd: number, arg: number) => number;
+  ioctl: (fd: number, request: number) => number;
   dup: (oldfd: number) => number;
   dup2: (oldfd: number, newfd: number) => number;
   posix_spawn: (
@@ -341,7 +341,7 @@ function getPosixLib(): PosixLib | null {
         poll: { args: [FFIType.pointer, nfdsType, FFIType.i32], returns: FFIType.i32 },
         pipe: { args: [FFIType.pointer], returns: FFIType.i32 },
         socketpair: { args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.pointer], returns: FFIType.i32 },
-        fcntl: { args: [FFIType.i32, FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+        ioctl: { args: [FFIType.i32, FFIType.u64], returns: FFIType.i32 },
         dup: { args: [FFIType.i32], returns: FFIType.i32 },
         dup2: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
         posix_spawn: {
@@ -361,7 +361,7 @@ function getPosixLib(): PosixLib | null {
         poll: (fds, nfds, timeout) => lib.symbols.poll(fds, nfds, timeout),
         pipe: (fds) => lib.symbols.pipe(fds),
         socketpair: (domain, type, protocol, fds) => lib.symbols.socketpair(domain, type, protocol, fds),
-        fcntl: (fd, cmd, arg) => lib.symbols.fcntl(fd, cmd, arg),
+        ioctl: (fd, request) => lib.symbols.ioctl(fd, request),
         dup: (oldfd) => lib.symbols.dup(oldfd),
         dup2: (oldfd, newfd) => lib.symbols.dup2(oldfd, newfd),
         posix_spawn: (pid, path, fileActions, attr, argv, envp) => lib.symbols.posix_spawn(pid, path, fileActions, attr, argv, envp),
@@ -424,9 +424,14 @@ export function spawnInOwnGroup(argv: string[], env?: Record<string, string>): O
       throw err;
     }
   }
+  if (!argv.length) {
+    const err = new TypeError("cmd must not be empty") as NodeJS.ErrnoException;
+    err.code = "ERR_INVALID_ARG_TYPE";
+    throw err;
+  }
   const cmd = argv[0];
   if (!cmd) {
-    const err = new Error(`Executable not found: ${JSON.stringify(cmd ?? "")}`) as NodeJS.ErrnoException;
+    const err = new Error(`Executable not found in $PATH: ${JSON.stringify(cmd ?? "")}`) as NodeJS.ErrnoException;
     err.code = "ENOENT";
     throw err;
   }
@@ -608,11 +613,14 @@ export function createSocketPair(): { parentFd: number; childFd: number } | unde
   return { parentFd: fds[0]!, childFd: fds[1]! };
 }
 
+const fioclex = process.platform === "darwin" ? 0x20006601 : 0x5451;
+const fionclex = process.platform === "darwin" ? 0x20006602 : 0x5450;
+
 export function setCloexec(fd: number, enabled: boolean): void {
   const lib = getPosixLib();
   if (!lib) return;
   try {
-    lib.fcntl(fd, 2, enabled ? 1 : 0);
+    lib.ioctl(fd, enabled ? fioclex : fionclex);
   } catch {}
 }
 
@@ -1438,19 +1446,35 @@ export function killSession(
       : { pids: [], groups: [], orphanPids: [] };
     const lib = getDarwinLib();
     if (!ownGroupOnly && remembered && lib) {
+      const spared = resolveSpareInput(spareInput);
+      const isSparedPid = (pid: number) => {
+        if (spared.pids.has(pid)) return true;
+        const sid = sessionIdDarwin(pid);
+        return sid !== undefined && sid > 0 && sid !== sessionId && sid !== process.pid && spared.sids.has(sid);
+      };
       for (const pid of targets.pids) {
+        if (isSparedPid(pid)) continue;
         const pgid = lib.getpgid(pid);
         if (pgid > 0 && pgid !== sessionId && pgid !== process.pid) remembered.set(pid, pgid);
       }
       const seenGroups = new Set(targets.groups);
       const seenOrphans = new Set(targets.orphanPids);
+      const sparedPgid = (pgid: number) => {
+        if (pgid !== sessionId && pgid !== process.pid && spared.sids.has(pgid)) return true;
+        for (const sp of spared.pids) if (lib.getpgid(sp) === pgid) return true;
+        return false;
+      };
       for (const [pid, savedPgid] of remembered) {
+        if (isSparedPid(pid)) {
+          remembered.delete(pid);
+          continue;
+        }
         const currentPgid = lib.getpgid(pid);
         if (currentPgid !== savedPgid) {
           remembered.delete(pid);
           continue;
         }
-        if (sessionId === undefined) {
+        if (sessionId === undefined || sparedPgid(savedPgid)) {
           if (!seenOrphans.has(pid)) {
             seenOrphans.add(pid);
             targets.orphanPids.push(pid);

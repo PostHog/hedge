@@ -987,6 +987,7 @@ test("stops a captured env -i target on caller death and timeout", async () => {
 });
 
 test("rejects NUL bytes in captured arguments or environment and matches Bun.spawn PATH fallback", async () => {
+  await expect(capture([], { timeoutMs: 5_000 })).rejects.toMatchObject({ name: "TypeError", code: "ERR_INVALID_ARG_TYPE" });
   await expect(capture(["printf", "before\u0000after"], { timeoutMs: 5_000 })).rejects.toMatchObject({ code: "ERR_INVALID_ARG_VALUE" });
   await expect(capture(["printf", "ok"], { env: { ...process.env, BAD: "a\u0000b" }, timeoutMs: 5_000 })).rejects.toMatchObject({ code: "ERR_INVALID_ARG_VALUE" });
   expect(await capture(["printf", "ok"], { env: { PATH: "" }, timeoutMs: 5_000 })).toEqual({ code: 0, stdout: "ok", stderr: "" });

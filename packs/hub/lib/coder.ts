@@ -644,7 +644,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       if (!supervisorReaped) live.unref();
       if (tagSweep) await tagSweep;
       if (status.error !== undefined) {
-        const err = (status.errCode === "ERR_INVALID_ARG_VALUE" ? new TypeError(status.error) : new Error(status.error)) as NodeJS.ErrnoException;
+        const err = (status.errCode === "ERR_INVALID_ARG_VALUE" || status.errCode === "ERR_INVALID_ARG_TYPE" ? new TypeError(status.error) : new Error(status.error)) as NodeJS.ErrnoException;
         if (status.errCode) err.code = status.errCode;
         throw err;
       }

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { chmod, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -157,18 +157,42 @@ async function trusted(hub: HttpsHub): Promise<number> {
   if (!certificatePattern.test(certificate)) return hub.print(`${hub.alias} gave no public root certificate: ${(answer.stderr || answer.stdout).trim()}`), 1;
   let folder: string | undefined;
   let stopped: NodeJS.Signals | undefined;
-  const remove = () => {
-    if (folder) rmSync(folder, { recursive: true, force: true });
+  let removePromise: Promise<void> | undefined;
+  const removeAsync = () => {
+    if (!folder) return Promise.resolve();
+    if (!removePromise) {
+      const target = folder;
+      removePromise = rm(target, { recursive: true, force: true }).catch(() => {});
+    }
+    return removePromise;
+  };
+  const waitRemove = (limitMs: number) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    return Promise.race([
+      removeAsync(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, limitMs);
+        if (typeof timer === "object" && timer && "unref" in timer && typeof timer.unref === "function") timer.unref();
+      }),
+    ]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
   };
   const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
   const release = () => {
     for (const name of stopSignals) process.off(name, interrupted);
   };
-  const interrupted = (signal: NodeJS.Signals) => {
-    stopped = signal;
-    remove();
+  const reRaise = (signal: NodeJS.Signals) => {
     release();
-    if (!process.listenerCount(signal)) process.kill(process.pid, signal);
+    if (!process.listenerCount(signal)) {
+      if (signal === "SIGQUIT") process.exit(131);
+      process.kill(process.pid, signal);
+    }
+  };
+  const interrupted = (signal: NodeJS.Signals) => {
+    if (stopped) return;
+    stopped = signal;
+    void waitRemove(200).finally(() => reRaise(signal));
   };
   for (const name of stopSignals) process.on(name, interrupted);
   try {
@@ -178,7 +202,8 @@ async function trusted(hub: HttpsHub): Promise<number> {
     await writePrivateFile(path, certificate);
     return (await hub.run(["security", "verify-cert", "-l", "-L", "-p", "ssl", "-c", path], { timeoutMs: trustProbeLimitMs })).code === 0 ? 0 : 1;
   } finally {
-    release();
-    remove();
+    await waitRemove(stopped ? 200 : 5_000);
+    if (stopped) reRaise(stopped);
+    else release();
   }
 }
