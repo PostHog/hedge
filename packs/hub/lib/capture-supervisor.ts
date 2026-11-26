@@ -181,7 +181,7 @@ const markInnerDone = () => {
 const inlineConfigRaw = process.env.HEDGE_CAPTURE_CONFIG;
 delete process.env.HEDGE_CAPTURE_CONFIG;
 
-const inProbe = (process.env[tagEnvVar] ?? "").split(",").some((part) => part.trim().startsWith("probe-"));
+const inProbe = (process.env[tagEnvVar] ?? "").split(",").some((part) => part.trim().startsWith("probe-")) || Boolean(process.env[probeGraceEnvVar]);
 const inheritedSpare = process.env[spareEnvVar] || undefined;
 const stopSignalsSet = new Set<StopSignal>(["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"]);
 const rawProbeGrace = Number(process.env[probeGraceEnvVar]);
@@ -189,6 +189,7 @@ const probeGraceMs = Number.isFinite(rawProbeGrace) && rawProbeGrace >= 0 ? rawP
 const localSpared = emptySpared();
 let target: ReturnType<typeof Bun.spawn> | undefined;
 let targetPid: number | undefined;
+let targetIdentity: PidIdentity | undefined;
 let targetDetached = true;
 let targetReaped = false;
 let targetCode: number | undefined;
@@ -219,6 +220,7 @@ const writeResult = (
     | { targetPid: number; targetStartTime?: string }
     | { code: number }
     | { error: string; code?: string }
+    | { killed: true }
     | { saved: true }
     | { spareError: string; code?: string },
 ) => {
@@ -305,7 +307,13 @@ const applyMergedSignal = (
   addTargets(selfTargets);
   if (targetPid !== undefined && !targetReaped) {
     groups.add(targetPid);
-    groupMembers.delete(targetPid);
+    const id = targetIdentity ?? pidIdentityNow(targetPid);
+    if (id) {
+      const list = groupMembers.get(targetPid);
+      const entry = { pid: targetPid, startTime: id.startTime, pgid: targetPid };
+      if (list) list.push(entry);
+      else groupMembers.set(targetPid, [entry]);
+    }
   }
   signalTargets({ pids: [], groups: [...groups], orphanPids: [...orphanPids], groupMembers, pidIdentities }, sig, undefined, runTag, localSpared);
 };
@@ -363,6 +371,7 @@ const killAll = () => {
         target.kill("SIGKILL");
       } catch {}
     }
+    writeResult(ipcFd, { killed: true });
     markInnerDone();
     process.exit(137);
   };
@@ -513,6 +522,7 @@ if (drained.closed || drained.lines.includes("kill") || drained.lines.some((line
   for (const fd of [...lockFds, ...(configFd !== undefined ? [configFd] : [])]) closeQuiet(fd);
   redirectStdioOutputsToNull();
   spareServer?.close();
+  writeResult(ipcFd, { killed: true });
   markInnerDone();
   process.exit(137);
 }
@@ -604,7 +614,7 @@ if (!parsed || killing || gracefulSignal) {
     }
     targetDetached = true;
     targetPid = target.pid;
-    const targetIdentity = pidIdentityNow(targetPid);
+    targetIdentity = pidIdentityNow(targetPid);
     const targetInfo = { targetPid, ...(targetIdentity ? { targetStartTime: targetIdentity.startTime } : {}) };
     writeResult(ipcFd, targetInfo);
     if (innerMetaFd !== undefined && !innerDoneMarked) writeResult(innerMetaFd, targetInfo);

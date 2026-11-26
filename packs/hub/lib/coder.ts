@@ -189,7 +189,10 @@ function minimalSupervisorEnv(fullTag: string, inheritedSpare?: string, compact 
   for (const [key, value] of Object.entries(process.env)) {
     if (value === undefined || key === "BUN_OPTIONS" || key === "HEDGE_CAPTURE_CONFIG" || key === tagEnvVar || key === spareEnvVar) continue;
     if (minimalSupEnvKeys.has(key) || key.startsWith("LC_")) {
-      if (compact && key !== "PATH" && value.length > 4096) continue;
+      if (compact && value.length > 4096) {
+        if (key === "PATH") clean.PATH = "/usr/local/bin:/usr/bin:/bin";
+        continue;
+      }
       clean[key] = value;
     }
   }
@@ -278,7 +281,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     };
     let child: ReturnType<typeof Bun.spawn> | undefined;
     const parentTag = env?.[tagEnvVar] ?? process.env[tagEnvVar];
-    const inProbe = (parentTag ?? "").split(",").some((part) => part.trim().startsWith("probe-"));
+    const inProbe = (parentTag ?? "").split(",").some((part) => part.trim().startsWith("probe-")) || Boolean(env?.[probeGraceEnvVar] ?? process.env[probeGraceEnvVar]);
     const keepAliveOnSignal = locks.length > 0 && !inProbe;
     const tag = inProbe ? `probe-${crypto.randomUUID()}` : crypto.randomUUID();
     const inheritedSpare = env?.[spareEnvVar] || process.env[spareEnvVar] || undefined;
@@ -286,6 +289,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     let stopped = false;
     let wakePendingSlot: (() => void) | undefined;
     let supervisorReaped = false;
+    let supervisorKilledCleanly = false;
     let confirmedDone = false;
     let targetPid: number | undefined;
     let targetStartTime: string | undefined;
@@ -296,6 +300,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     let resultRead: Promise<{ code?: number; error?: string; errCode?: string } | undefined> | undefined;
     let resultReader: ReturnType<typeof createResultReader> | undefined;
     const stopStream = new AbortController();
+    const resultAbort = new AbortController();
     const runOutOfProcessSweep = async (): Promise<void> => {
       if (!child) return;
       const pid = child.pid;
@@ -480,7 +485,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       const command = holdingLocks(argv, locks, timeoutMs, env?.PATH || process.env.PATH || "");
       const childEnv = env ?? process.env;
       const fullTag = keepAliveOnSignal ? tag : appendTag(childEnv[tagEnvVar] ?? process.env[tagEnvVar], tag);
-      const preserveEmptyEnv = !inProbe && !inheritedSpare && env !== undefined && Object.keys(env).length === 0;
+      const preserveEmptyEnv = env !== undefined && Object.values(env).every((v) => v === undefined);
       const envEntries: Array<[string, string]> = [];
       for (const [k, v] of Object.entries(childEnv)) {
         if (v !== undefined && k !== tagEnvVar && k !== spareEnvVar) envEntries.push([k, v]);
@@ -628,6 +633,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         hardKill = setTimeout(() => {
           forceExpired = true;
           stopStream.abort();
+          resultAbort.abort();
           settle({ code: timedOut });
         }, supervisorGraceMs);
         void live.exited.finally(() => {
@@ -652,7 +658,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           }
         })();
       }
-      const reader = createResultReader(ipcPair!.parentFd, stopStream.signal);
+      const reader = createResultReader(ipcPair!.parentFd, resultAbort.signal);
       resultReader = reader;
       resultRead = (async () => {
         for (;;) {
@@ -664,6 +670,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
               spare?: { pids?: unknown; sids?: unknown };
               targetPid?: unknown;
               targetStartTime?: unknown;
+              killed?: unknown;
               code?: unknown;
               error?: unknown;
             };
@@ -676,6 +683,10 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
               const pids = Array.isArray(record.spare.pids) ? record.spare.pids.filter((n): n is number => typeof n === "number") : [];
               const sids = Array.isArray(record.spare.sids) ? record.spare.sids.filter((n): n is number => typeof n === "number") : [];
               mergeSpared(spared, pids, sids);
+              continue;
+            }
+            if (record.killed === true) {
+              supervisorKilledCleanly = true;
               continue;
             }
             if (typeof record.error === "string") {
@@ -710,6 +721,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         ]);
       } catch (error) {
         stopStream.abort();
+        resultAbort.abort();
         stopChild();
         throw error;
       }
@@ -717,8 +729,13 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         if (!supervisorReaped && !forceExpired) {
           await waitUpTo(live.exited, supervisorGraceMs);
         }
-        if (tagSweep) await tagSweep;
-        else await runOutOfProcessSweep();
+        if (resultRead) await waitUpTo(resultRead, 50);
+        resultAbort.abort();
+        if (tagSweep) {
+          await tagSweep;
+        } else if (!supervisorReaped || !supervisorKilledCleanly) {
+          await runOutOfProcessSweep();
+        }
         if (!supervisorReaped) await waitUpTo(live.exited, 50);
         return timeoutResult(timeoutMs, stdout);
       }
@@ -740,6 +757,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           const remaining = ackDeadline - performance.now();
           if (remaining <= 0) {
             stopStream.abort();
+            resultAbort.abort();
             if (!tagSweep) tagSweep = runOutOfProcessSweep();
             await tagSweep;
             throw new Error("timed out confirming spare-file persistence");
@@ -754,6 +772,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           if (ackTimer !== undefined) clearTimeout(ackTimer);
           if (spareAck.timedOut) {
             stopStream.abort();
+            resultAbort.abort();
             if (!tagSweep) tagSweep = runOutOfProcessSweep();
             await tagSweep;
             throw new Error("timed out confirming spare-file persistence");

@@ -3,7 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
 import { dirname, join } from "node:path";
 import { tempDirs } from "../../../src/testing/git.ts";
 import { withBoxLock } from "./box-lock.ts";
-import { capture, captureWith, Coder, grant, reap, type Box, type Capture, type Timer } from "./coder.ts";
+import { capture, captureWith, Coder, grant, reap, timedOut, type Box, type Capture, type Timer } from "./coder.ts";
 import { appeared } from "./testing.ts";
 
 const temp = tempDirs();
@@ -1174,65 +1174,101 @@ process.exit(failed ? 0 : 1);`;
   expect(code).toBe(0);
 });
 
-test("cleans up an adopted detached env -i worker on Linux when its adopting parent is killed", async () => {
+test("cleans up an adopted detached env -i worker on Linux when the capture caller times out or is killed", async () => {
   if (process.platform !== "linux") return;
   const envBin = Bun.which("env") ?? "/usr/bin/env";
   const shBin = Bun.which("sh") ?? "/bin/sh";
   const coderPath = join(import.meta.dir, "coder.ts");
-  const dir = temp.make("hedge-capture-adopted-kill-");
-  const [workerReady, launcherDone, workerGone, resultFile] = [
-    join(dir, "w-ready"),
-    join(dir, "l-done"),
-    join(dir, "w-gone"),
-    join(dir, "result.json"),
-  ];
-  expect(Bun.spawnSync(["mkfifo", workerReady, launcherDone, workerGone]).exitCode).toBe(0);
-  const workerStarted = Bun.file(workerReady).text();
-  const workerClosed = Bun.file(workerGone).text();
-  const launcherScript = `const w = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; read _ < "$2"; echo $$ > "$3"; exec sleep 30', "worker", ${JSON.stringify(workerGone)}, ${JSON.stringify(launcherDone)}, ${JSON.stringify(workerReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  for (const mode of ["timeout", "sigkill"] as const) {
+    const dir = temp.make(`hedge-capture-adopted-${mode}-`);
+    const [workerReady, launcherDone, workerGone, resultFile] = [
+      join(dir, "w-ready"),
+      join(dir, "l-done"),
+      join(dir, "w-gone"),
+      join(dir, "result.json"),
+    ];
+    expect(Bun.spawnSync(["mkfifo", workerReady, launcherDone, workerGone]).exitCode).toBe(0);
+    const workerStarted = Bun.file(workerReady).text();
+    const workerClosed = Bun.file(workerGone).text();
+    const launcherScript = `const w = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; read _ < "$2"; echo $$ > "$3"; exec sleep 30', "worker", ${JSON.stringify(workerGone)}, ${JSON.stringify(launcherDone)}, ${JSON.stringify(workerReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 w.unref();
 process.exit(0);`;
-  const targetScript = `import { writeFileSync } from "node:fs";
+    const targetScript = `import { writeFileSync } from "node:fs";
 const h = Bun.spawn([process.execPath, "-e", ${JSON.stringify(launcherScript)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 await h.exited;
 writeFileSync(${JSON.stringify(launcherDone)}, "reaped\\n");
 await Bun.sleep(30_000);`;
-  const runnerScript = `import { capture } from ${JSON.stringify(coderPath)};
+    let workerPid = 0;
+    if (mode === "timeout") {
+      let fireTimeout!: () => void;
+      const runCapture = captureWith((_ms, fire) => {
+        fireTimeout = fire;
+        return () => {};
+      }, 0);
+      try {
+        const pending = runCapture([process.execPath, "-e", targetScript], { timeoutMs: 30_000 });
+        workerPid = Number((await workerStarted).trim());
+        expect(workerPid).toBeGreaterThan(0);
+        fireTimeout();
+        const res = await pending;
+        expect(res.code).toBe(timedOut);
+        expect(await workerClosed).toBe("");
+      } finally {
+        if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
+      }
+    } else {
+      const runnerScript = `import { capture } from ${JSON.stringify(coderPath)};
 const res = await capture([process.execPath, "-e", ${JSON.stringify(targetScript)}], { timeoutMs: 30_000 });
 await Bun.write(${JSON.stringify(resultFile)}, JSON.stringify(res));`;
-  const runner = Bun.spawn([process.execPath, "-e", runnerScript], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-  const isDescendantOf = (pid: number, ancestor: number): boolean => {
-    let cur = pid;
-    for (let depth = 0; depth < 8 && cur > 1; depth++) {
-      if (cur === ancestor) return true;
-      const ppid = Number(Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(cur)]).stdout.toString().trim());
-      if (!Number.isFinite(ppid) || ppid <= 1 || ppid === cur) return false;
-      cur = ppid;
+      const runner = Bun.spawn([process.execPath, "-e", runnerScript], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+      try {
+        workerPid = Number((await workerStarted).trim());
+        expect(workerPid).toBeGreaterThan(0);
+        runner.kill("SIGKILL");
+        expect(await runner.exited).not.toBe(0);
+        expect(await workerClosed).toBe("");
+      } finally {
+        runner.kill("SIGKILL");
+        await runner.exited.catch(() => {});
+        if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
+      }
     }
-    return false;
-  };
-  let workerPid = 0;
-  try {
-    workerPid = Number((await workerStarted).trim());
-    expect(workerPid).toBeGreaterThan(0);
-    const adopterPid = Number(Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(workerPid)]).stdout.toString().trim());
-    expect(adopterPid).toBeGreaterThan(1);
-    expect(isDescendantOf(adopterPid, runner.pid)).toBe(true);
-    process.kill(adopterPid, "SIGKILL");
-    expect(await runner.exited).toBe(0);
-    const res = JSON.parse(await Bun.file(resultFile).text()) as { code: number };
-    expect(res.code).toBe(137);
-    expect(await workerClosed).toBe("");
-  } finally {
-    runner.kill("SIGKILL");
-    await runner.exited.catch(() => {});
-    if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
   }
 });
 
-test("preserves an empty environment for standalone captures outside probes", async () => {
+test("preserves an empty environment for standalone and nested captures including undefined-only env objects", async () => {
   if (process.platform === "win32") return;
   const envBin = Bun.which("env") ?? "/usr/bin/env";
-  const res = await capture([envBin], { env: {}, timeoutMs: 5_000 });
-  expect(res).toEqual({ code: 0, stdout: "", stderr: "" });
+  const coderPath = join(import.meta.dir, "coder.ts");
+  expect(await capture([envBin], { env: {}, timeoutMs: 5_000 })).toEqual({ code: 0, stdout: "", stderr: "" });
+  expect(await capture([envBin], { env: { FOO: undefined }, timeoutMs: 5_000 })).toEqual({ code: 0, stdout: "", stderr: "" });
+  const nestedScript = `import { capture } from ${JSON.stringify(coderPath)};
+const a = await capture([${JSON.stringify(envBin)}], { env: {}, timeoutMs: 5_000 });
+const b = await capture([${JSON.stringify(envBin)}], { env: { BAR: undefined }, timeoutMs: 5_000 });
+console.log(JSON.stringify([a, b]));`;
+  const outer = await capture([process.execPath, "-e", nestedScript], { timeoutMs: 10_000 });
+  expect(outer.code).toBe(0);
+  expect(JSON.parse(outer.stdout.trim())).toEqual([
+    { code: 0, stdout: "", stderr: "" },
+    { code: 0, stdout: "", stderr: "" },
+  ]);
+});
+
+test("captures a command with a short explicit PATH even when ambient PATH exceeds ARG_MAX on Linux", async () => {
+  if (process.platform !== "linux") return;
+  const trueBin = Bun.which("true") ?? "/bin/true";
+  const coderPath = join(import.meta.dir, "coder.ts");
+  const script = `import { capture } from ${JSON.stringify(coderPath)};
+process.env.PATH = "/usr/bin:" + "x".repeat(132_000);
+const res = await capture([${JSON.stringify(trueBin)}], { env: { PATH: "/usr/bin:/bin" }, timeoutMs: 5_000 });
+process.exit(res.code === 0 ? 0 : 1);`;
+  const proc = Bun.spawn(["sh", "-c", 'ulimit -s 256 && exec "$1" -e "$2"', "huge-path", process.execPath, script], {
+    env: { PATH: "/usr/bin:/bin", HOME: process.env.HOME ?? "/tmp" },
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+  expect(stderr).toBe("");
+  expect(code).toBe(0);
 });

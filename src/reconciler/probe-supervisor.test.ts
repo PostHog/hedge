@@ -2028,4 +2028,38 @@ process.exit(res.failing.length === 0 && res.unchecked.length === 0 ? 0 : 1);`;
     expect(stderr).toBe("");
     expect(code).toBe(0);
   });
+
+  test("refuses to signal an unverified process group or PID whose member identity was missing", async () => {
+    if (process.platform === "win32") return;
+    const { signalDeadTargets, signalTargets } = await import("./probe-supervisor.ts");
+    const shBin = Bun.which("sh") ?? "/bin/sh";
+    const dir = temp.make("sup-unverified-pgrp-");
+    const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+    mkfifo(ready, gone);
+    const started = fifoRead(ready);
+    const closed = fifoRead(gone);
+    const unrelated = Bun.spawn(
+      [shBin, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "unrelated", gone, ready],
+      { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+    );
+    try {
+      const pid = Number((await started).trim());
+      expect(pid).toBe(unrelated.pid);
+      const unverified = {
+        pids: [pid],
+        groups: [pid],
+        orphanPids: [pid],
+        hasSessionGroup: true,
+        groupMembers: new Map(),
+        pidIdentities: new Map(),
+      };
+      signalTargets(unverified, "SIGKILL", undefined, undefined);
+      signalDeadTargets(unverified, pid, undefined, undefined);
+      expect(() => process.kill(pid, 0)).not.toThrow();
+    } finally {
+      unrelated.kill("SIGKILL");
+      await unrelated.exited.catch(() => {});
+      await closed.catch(() => {});
+    }
+  });
 });

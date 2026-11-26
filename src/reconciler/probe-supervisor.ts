@@ -266,6 +266,10 @@ export function watchdogEnv(): Record<string, string> {
   const clean: Record<string, string> = Object.create(null);
   for (const [key, value] of Object.entries(process.env)) {
     if (key === "BUN_OPTIONS" || value === undefined) continue;
+    if (key === "PATH" && value.length > 4096) {
+      clean.PATH = "/usr/local/bin:/usr/bin:/bin";
+      continue;
+    }
     clean[key] = value;
   }
   return clean;
@@ -869,16 +873,17 @@ export function discoverTargetsLinux(
     if (!matched.has(row.pid) || row.pid === self || row.pid === sessionId) continue;
     pids.push(row.pid);
     const identity = row.startTime ? { pid: row.pid, startTime: row.startTime, pgid: row.pgrp } : undefined;
-    if (identity) pidIdentities.set(row.pid, identity);
     if (row.sid > 0 && row.sid !== sessionId && row.sid !== self) sids.add(row.sid);
+    if (!identity) continue;
+    pidIdentities.set(row.pid, identity);
     if (sessionId === undefined) {
       orphanPids.push(row.pid);
     } else if (row.pgrp > 0 && row.pgrp !== sessionId && row.pgrp !== self) {
       groups.add(row.pgrp);
-      if (identity) addGroupMember(row.pgrp, identity);
+      addGroupMember(row.pgrp, identity);
     } else if (row.pgrp === sessionId) {
       hasSessionGroup = true;
-      if (identity) addGroupMember(sessionId, identity);
+      addGroupMember(sessionId, identity);
     } else {
       orphanPids.push(row.pid);
     }
@@ -1104,15 +1109,16 @@ function buildTargetsFromPs(
     const pgid = pgidByPid.get(pid);
     const startTime = lib ? startTimeDarwin(lib, pid) : undefined;
     const identity = startTime && pgid !== undefined ? { pid, startTime, pgid } : undefined;
-    if (identity) pidIdentities.set(pid, identity);
+    if (!identity) continue;
+    pidIdentities.set(pid, identity);
     if (sessionId === undefined) {
       orphanPids.push(pid);
     } else if (pgid !== undefined && pgid > 0 && pgid !== sessionId && pgid !== self) {
       groups.add(pgid);
-      if (identity) addGroupMember(pgid, identity);
+      addGroupMember(pgid, identity);
     } else if (pgid === sessionId) {
       hasSessionGroup = true;
-      if (identity) addGroupMember(sessionId, identity);
+      addGroupMember(sessionId, identity);
     } else {
       orphanPids.push(pid);
     }
@@ -1286,16 +1292,17 @@ export function discoverTargetsSync(
     pids.push(row.pid);
     const startTime = startTimeDarwin(lib, row.pid);
     const identity = startTime ? { pid: row.pid, startTime, pgid: row.pgid } : undefined;
-    if (identity) pidIdentities.set(row.pid, identity);
     if (row.sid > 0 && row.sid !== effectiveSessionId && row.sid !== self) sids.add(row.sid);
+    if (!identity) continue;
+    pidIdentities.set(row.pid, identity);
     if (effectiveSessionId === undefined) {
       orphanPids.push(row.pid);
     } else if (row.pgid > 0 && row.pgid !== effectiveSessionId && row.pgid !== self) {
       groups.add(row.pgid);
-      if (identity) addGroupMember(row.pgid, identity);
+      addGroupMember(row.pgid, identity);
     } else if (row.pgid === effectiveSessionId) {
       hasSessionGroup = true;
-      if (identity) addGroupMember(effectiveSessionId, identity);
+      addGroupMember(effectiveSessionId, identity);
     } else {
       orphanPids.push(row.pid);
     }
@@ -1417,6 +1424,8 @@ function hasOwnedGroupMember(
   if (sessionId === undefined && !tag) return false;
   const found = discoverTargetsSync(sessionId, tag, undefined, spared);
   if (!found) return false;
+  const members = found.groupMembers?.get(pgrp);
+  if (!members || !members.length) return false;
   return found.groups.includes(pgrp) || (sessionId === pgrp && found.hasSessionGroup === true);
 }
 
@@ -1427,16 +1436,17 @@ function groupStillLive(
   tag?: string,
   spared?: SparedSet,
 ): boolean {
-  if (!members || !members.length) return true;
-  for (const member of members) {
-    const now = pidIdentityNow(member.pid);
-    if (now && now.startTime === member.startTime && now.pgid === pgrp) return true;
+  if (members && members.length) {
+    for (const member of members) {
+      const now = pidIdentityNow(member.pid);
+      if (now && now.startTime === member.startTime && now.pgid === pgrp) return true;
+    }
   }
   return hasOwnedGroupMember(pgrp, sessionId, tag, spared);
 }
 
 function pidStillLive(pid: number, expected: PidIdentity | undefined): boolean {
-  if (!expected) return true;
+  if (!expected) return false;
   const now = pidIdentityNow(pid);
   return now !== undefined && now.startTime === expected.startTime;
 }
@@ -2277,11 +2287,12 @@ if (import.meta.main) {
   const rememberedDetached = new Map<number, { pgid: number; startTime: string }>();
   await supervise(command, {
     spawn: (argv) => {
-      const stripInjected = (src: Record<string, string> | undefined, keepSpare: boolean) => {
+      const stripInjected = (src: Record<string, string> | undefined, keepGrace: boolean, keepSpare: boolean) => {
         const clean: Record<string, string> = Object.create(null);
         const source = src ?? process.env;
         for (const [k, v] of Object.entries(source)) {
-          if (v === undefined || k === tagEnvVar || k === probeGraceEnvVar) continue;
+          if (v === undefined || k === tagEnvVar) continue;
+          if (!keepGrace && k === probeGraceEnvVar) continue;
           if (!keepSpare && k === spareEnvVar) continue;
           clean[k] = v;
         }
@@ -2290,26 +2301,25 @@ if (import.meta.main) {
       const spawnWithEnv = (envObj: Record<string, string> | undefined) =>
         (reportFd !== 1 ? spawnInOwnGroup(argv, envObj) : undefined) ??
         Bun.spawn(argv, { ...(envObj ? { env: envObj } : {}), stdio: ["ignore", "ignore", "ignore"] });
-      let child: { pid?: number; exited: Promise<number>; kill?: (signal?: NodeJS.Signals) => void };
-      try {
-        child = spawnWithEnv(targetEnv);
-      } catch (spawnError) {
-        if ((spawnError as NodeJS.ErrnoException)?.code === "E2BIG") {
-          try {
-            child = spawnWithEnv(stripInjected(targetEnv, true));
-          } catch (spareError) {
-            if ((spareError as NodeJS.ErrnoException)?.code === "E2BIG") {
-              child = spawnWithEnv(stripInjected(targetEnv, false));
-            } else {
-              throw spareError;
-            }
+      const attempts: Array<Record<string, string> | undefined> = [
+        targetEnv,
+        stripInjected(targetEnv, true, true),
+        stripInjected(targetEnv, true, false),
+        stripInjected(targetEnv, false, false),
+      ];
+      let child: { pid?: number; exited: Promise<number>; kill?: (signal?: NodeJS.Signals) => void } | undefined;
+      for (let i = 0; i < attempts.length; i++) {
+        try {
+          child = spawnWithEnv(attempts[i]);
+          break;
+        } catch (spawnError) {
+          if ((spawnError as NodeJS.ErrnoException)?.code !== "E2BIG" || i === attempts.length - 1) {
+            throw spawnError;
           }
-        } else {
-          throw spawnError;
         }
       }
-      targetHandle = child;
-      return child;
+      targetHandle = child!;
+      return child!;
     },
     killGroup: (signal, includeTagged) =>
       killSession(process.pid, signal, includeTagged ? runTag : undefined, includeTagged ? rememberedDetached : undefined, runnerSpared, !includeTagged),
