@@ -118,6 +118,23 @@ test("a gate pass with a gap the agent accepted holds the merge, own tooling inc
   } finally { rmSync(other, { recursive: true, force: true }); }
 });
 
+test("a Merge answer is the merge word of the thread that asked: it tells that thread to enqueue now, and lifts the hold there and nowhere else", async () => {
+  const { pr, head, id } = await agentAcceptedGap();
+  expect((await pr.hedge("gate")).code).toBe(0);
+  const github = { pull: async () => ({ head, base: "main", defaultBranch: "main", open: true }), pullFor: async () => undefined };
+  const enqueueFrom = async (thread: string) => (await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr comment 42 --repo example/product --body '/trunk merge'" }, cwd: "/" },
+    { home: pr.home, env: { HEDGE_SETTINGS: pr.env.HEDGE_SETTINGS, T3CODE_THREAD_ID: thread }, github }))?.hookSpecificOutput.permissionDecisionReason;
+  pr.choose("Merge", `Merge example/product#42 at ${head}? An agent accepted ${id} for prod-shape.`);
+  const recorded = await pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${head}: merge card`);
+  const word = /\[(d-[0-9a-f]+)\]/.exec(recorded.output)?.[1];
+  expect(recorded.output.split("\n").at(-1)).toBe(`This is the user's merge word for example/product#42 at ${head.slice(0, 12)}, given in this thread: merge or enqueue it from this thread in this turn, once \`hedge proof gate --repo example/product --pr 42 --commit ${head}\` passes. It never passes to another thread, so never hand it on or ask the user to repeat it elsewhere. A new head voids it.`);
+  expect(await enqueueFrom("mcp:thread-1")).toBeUndefined();
+  expect(await enqueueFrom("thread-1")).toBeUndefined();
+  const relayed = await enqueueFrom("mcp:conductor-thread");
+  expect(relayed).toContain(`an agent accepted proof gaps of example/product#42 at ${head.slice(0, 12)} (🤖 ${id} for prod-shape) itself`);
+  expect(relayed).toContain(`Merge answer ${word} for example/product#42 at ${head.slice(0, 12)} was given in thread mcp:thread-1, and a merge word counts only in the thread that asked: merge from there.`);
+});
+
 test("a merge word lifts an agent's gap decision only when its card named every proof kind that decision accepts", async () => {
   const pr: Checkout = await checkout();
   pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.autonomy": "end" });

@@ -42,7 +42,8 @@ lets the merge gate pass that one PR at that head without a hedge proof gate pas
 records it. With --class merge and --condition '<full head sha>: merge card', the user's 👤 choice of "${mergeCardChoice}"
 on a merge card whose question names the PR and that head lifts the hold on each gap an agent accepted whose
 decision the question names as the hook's refusal does, its id with every proof kind it accepts, such as
-d-1a2b3c4d for live-run/prod-shape; any other choice is refused. Each option other than --pr and --kind is taken once.
+d-1a2b3c4d for live-run/prod-shape; any other choice is refused. It lifts the hold only in the T3 thread that asked it, so
+record it there, and merge or enqueue from there in the same turn. Each option other than --pr and --kind is taken once.
 record with 🤖 records the agent's own decision with the option it rejected. Hedge reads each PR's Tier line in its
 merge-risk callout at HEAD: it refuses an ungraded PR, and on a critical PR anything but process (review and status
 asks, judge and post-deploy-watch gaps). On ask it never takes a panel gap: ${panelRefusal}. With pull-requests.autonomy
@@ -170,6 +171,10 @@ function fitsMergeCard(scope: Scope): ((heard: HeardAnswer) => void) | undefined
     if (![mergeCardChoice, `${mergeCardChoice} (Recommended)`].map(normalized).includes(normalized(heard.words))) throw new Error(`The user chose "${heard.words}", not "${mergeCardChoice}". The merge stays held`);
   };
 }
+
+const enqueueHere = (head: string, [{ repository, pr }]: PrRef[]) => `This is the user's merge word for ${repository}#${pr} at ${head.slice(0, 12)}, given in this thread: `
+  + `merge or enqueue it from this thread in this turn, once \`hedge proof gate --repo ${repository} --pr ${pr} --commit ${head}\` passes. `
+  + "It never passes to another thread, so never hand it on or ask the user to repeat it elsewhere. A new head voids it.";
 
 function checkMergeCard(scope: Scope, mark: string) {
   if (!mergeCardHead(scope)) {
@@ -347,6 +352,8 @@ async function record(parsed: Parsed, context: DecisionContext, ledger: Ledger) 
   } else throw new Error("--mark takes 👤 (the user's own answer), 👍 (they accepted the recommended default) or 🤖 (the agent's own decision)");
   await appendDecision(ledger, decision);
   context.print(decisionLine(decision));
+  const head = mergeCardHead(scope);
+  if (head) context.print(enqueueHere(head, scope.prs));
   return 0;
 }
 

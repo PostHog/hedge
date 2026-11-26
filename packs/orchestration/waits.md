@@ -44,6 +44,7 @@ A thread whose title starts with a mark in `orchestration.proseTitles` asks in p
 Every open pull request you open for me, each layer of a stack included, has exactly one **owning thread**: the thread that links it and watches it, from its opening until it merges or closes. The owning thread reacts to comments, CI, and conflicts as `babysit-pr` says, and starts the merge once it is ready and I gave the merge word.
 
 - In a map or loop whose lanes run as `delegate_task` subthreads, the conductor or coordinator owns the pull requests, as `~/.agents/guides/t3.md` says.
+- My "Merge" answer on a merge card is my merge word in the thread that asked it, for that pull request at that head. That thread merges or enqueues it in the same turn, once the gate passes at that head. It never hands the word to another thread, and never asks me to repeat it in another thread. A new head voids it.
 - Keep the watch through handoffs and parks.
 - Hand each open pull request over before the thread settles, archives, or moves, to a thread on the same machine: `hedge pr handover` finds the new thread only in this machine's T3.
   1. Ask the thread that takes it over to link it with `link_pull_request` and watch it with `watch_pull_request`.
