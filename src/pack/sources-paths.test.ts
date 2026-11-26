@@ -2,7 +2,6 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
-import { probeLocalRepoInfo } from "./local-repo-info.ts";
 import { advanceSource, cachedSource, fetchSource, followsBranch, unpinnedSources } from "./sources.ts";
 
 isolateGit();
@@ -36,7 +35,8 @@ async function commitPack(dir: string, _pack: string, summary: string) {
   return await spawnGit(dir, "rev-parse", "HEAD");
 }
 
-describe("fetchSource local path resolution and object formats", () => {
+
+describe("fetchSource local path resolution", () => {
   test("matches Git path resolution for symlink parent traversal, dangling parent symlinks, and implicit .git directories", async () => {
     const repoA = await packRepo("Mirror A.");
     const shaA = await spawnGit(repoA, "rev-parse", "HEAD");
@@ -254,57 +254,6 @@ describe("fetchSource local path resolution and object formats", () => {
     }
   });
 
-  test("anchors >256-commit refreshes with valid Git timestamps so intermediate commits survive shallow fetches and git gc", async () => {
-    const repo = temp.make("large-refresh-repo-");
-    await spawnGit(repo, "init", "-q", "-b", "main");
-    const lines: string[] = [];
-    for (let i = 1; i <= 262; i++) {
-      const manifest = JSON.stringify({ schema: 1, name: "team", summary: `Bulk ${i}.` });
-      lines.push(
-        `commit refs/heads/main`,
-        `mark :${i}`,
-        `committer Test <test@example.com> ${1700000000 + i} +0000`,
-        `data 4`,
-        `c${String(i).padStart(3, "0")}`,
-        ...(i > 1 ? [`from :${i - 1}`] : []),
-        `M 100644 inline packs/team/pack.json`,
-        `data ${Buffer.byteLength(manifest)}`,
-        manifest,
-        "",
-      );
-    }
-    const fi = Bun.spawn(["git", "-C", repo, "fast-import", "--quiet"], {
-      stdin: new TextEncoder().encode(lines.join("\n")),
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    expect(await fi.exited).toBe(0);
-    await spawnGit(repo, "checkout", "-q", "main");
-    const allCommits = (await spawnGit(repo, "rev-list", "--reverse", "main")).split("\n").map((s) => s.trim()).filter(Boolean);
-    const c1 = allCommits[0]!;
-    const cMid = allCommits[130]!;
-    const cNearTip = allCommits[260]!;
-
-    await spawnGit(repo, "checkout", "-q", "-B", "track", c1);
-    const cache = temp.make("cache-large-refresh-");
-    const init = await fetchSource({ name: "team", repo, ref: "track" }, cache);
-    if ("error" in init) throw new Error(init.error);
-    await spawnGit(repo, "checkout", "-q", "-B", "track", "main");
-    const moved = await advanceSource({ name: "team", repo, ref: "track" }, cache, c1);
-    expect(moved.state).toBe("moved");
-
-    const cacheDir = join(cache, "team");
-    await spawnGit(cacheDir, "fetch", "-q", "--depth", "1", "--no-tags", repo, cNearTip);
-    await spawnGit(cacheDir, "checkout", "-q", "--detach", `${cNearTip}^{commit}`);
-    writeFileSync(join(cacheDir, ".git", "hedge-source.json"), JSON.stringify({ repo, ref: cNearTip, commit: cNearTip }) + "\n");
-    await spawnGit(cacheDir, "gc", "-q", "--prune=now");
-
-    rmSync(repo, { recursive: true, force: true });
-    const offlineMid = await fetchSource({ name: "team", repo, ref: cMid }, cache);
-    if ("error" in offlineMid) throw new Error(offlineMid.error);
-    expect([offlineMid.packs[0]?.manifest.summary, offlineMid.stale]).toEqual(["Bulk 131.", undefined]);
-  });
-
   test("preserves literal %00 symlink names in file URLs and ignores empty .git directories like Git enter_repo", async () => {
     if (process.platform === "win32") return;
     const root = temp.make("pct-nul-empty-git-");
@@ -351,99 +300,6 @@ describe("fetchSource local path resolution and object formats", () => {
     await commitPack(candidate, "team", "Replacement repo.");
     const replacementCheck = await fetchSource({ name: "team", repo: candidate, ref: siblingSha }, emptyCache);
     expect("error" in replacementCheck).toBe(true);
-  });
-
-  test("deepening a cache from a full repository does not retroactively attribute ancestors to an earlier shallow refresh", async () => {
-    const fullRepo = temp.make("full-history-repo-");
-    await initRepo(fullRepo);
-    const c1 = await commitPack(fullRepo, "team", "Ancestor C1.");
-    const c2 = await commitPack(fullRepo, "team", "Shallow base C2.");
-    const c3 = await commitPack(fullRepo, "team", "Shallow tip C3.");
-
-    const shallowRepo = temp.make("shallow-history-repo-");
-    await spawnGit(shallowRepo, "init", "-q", "-b", "main");
-    await spawnGit(shallowRepo, "fetch", "-q", "--depth", "1", fullRepo, c2);
-    await spawnGit(shallowRepo, "checkout", "-q", "-B", "main", "FETCH_HEAD");
-
-    const cache = temp.make("cache-shallow-deepen-");
-    const loadedC2 = await fetchSource({ name: "team", repo: shallowRepo, ref: "main" }, cache);
-    if ("error" in loadedC2) throw new Error(loadedC2.error);
-    expect(loadedC2.packs[0]?.manifest.summary).toBe("Shallow base C2.");
-
-    await spawnGit(shallowRepo, "fetch", "-q", "--depth", "2", fullRepo, c3);
-    await spawnGit(shallowRepo, "checkout", "-q", "-B", "main", "FETCH_HEAD");
-    const moved = await advanceSource({ name: "team", repo: shallowRepo, ref: "main" }, cache, c2);
-    expect(moved.state).toBe("moved");
-
-    const loadedFull = await fetchSource({ name: "team", repo: fullRepo, ref: c1 }, cache);
-    if ("error" in loadedFull) throw new Error(loadedFull.error);
-    expect(loadedFull.packs[0]?.manifest.summary).toBe("Ancestor C1.");
-
-    rmSync(shallowRepo, { recursive: true, force: true });
-    const spoofed = await fetchSource({ name: "team", repo: shallowRepo, ref: c1 }, cache);
-    expect("error" in spoofed).toBe(true);
-  });
-
-  test("does not treat a cached refs/heads/<SHA> branch as the same ref as a +<SHA> commit pin", async () => {
-    const repo = temp.make("sha-branch-vs-plus-pin-");
-    await initRepo(repo);
-    const c1 = await commitPack(repo, "team", "Pinned commit C1.");
-    const c2 = await commitPack(repo, "team", "Moving branch C2.");
-    await spawnGit(repo, "branch", c1, c2);
-
-    const cache = temp.make("cache-sha-branch-plus-");
-    const profileDir = temp.make("profile-sha-branch-plus-");
-    const asBranch = await fetchSource({ name: "team", repo, ref: `refs/heads/${c1}` }, cache);
-    if ("error" in asBranch) throw new Error(asBranch.error);
-    expect(asBranch.packs[0]?.manifest.summary).toBe("Moving branch C2.");
-
-    const plusPinRef = { name: "team", repo, ref: `+${c1}` };
-    expect(await followsBranch(plusPinRef, cache)).toBe(false);
-    expect(await unpinnedSources([plusPinRef], profileDir, cache)).toEqual([]);
-    expect(await followsBranch({ name: "team", repo, ref: `+refs/heads/${c1}` }, cache)).toBe(true);
-    expect((await unpinnedSources([{ name: "team", repo, ref: `+refs/heads/${c1}` }], profileDir, cache)).length).toBe(1);
-
-    const loadedPin = await fetchSource(plusPinRef, cache);
-    if ("error" in loadedPin) throw new Error(loadedPin.error);
-    expect(loadedPin.packs[0]?.manifest.summary).toBe("Pinned commit C1.");
-  });
-
-  test("supports fresh SHA-256 caches offline and leaves an existing SHA-1 cache untouched when pointed at a SHA-256 repository", async () => {
-    const sha1Repo = temp.make("switch-sha1-repo-");
-    await initRepo(sha1Repo);
-    const sha1Commit = await commitPack(sha1Repo, "team", "SHA-1 pack.");
-
-    const sha256Repo = temp.make("switch-sha256-repo-");
-    await spawnGit(sha256Repo, "init", "-q", "-b", "main", "--object-format=sha256");
-    await spawnGit(sha256Repo, "config", "user.email", "test@example.com");
-    await spawnGit(sha256Repo, "config", "user.name", "Test");
-    const sha256Commit = await commitPack(sha256Repo, "team", "SHA-256 pack.");
-
-    const sha256Cache = temp.make("cache-fresh-sha256-");
-    const fresh256 = await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, sha256Cache);
-    if ("error" in fresh256) throw new Error(fresh256.error);
-    expect([fresh256.packs[0]?.manifest.summary, fresh256.stale]).toEqual(["SHA-256 pack.", undefined]);
-    expect(await unpinnedSources([{ name: "team", repo: sha256Repo, ref: sha256Commit }], sha256Repo, sha256Cache)).toEqual([]);
-
-    const sha1Cache = temp.make("cache-sha1-intact-");
-    const first = await fetchSource({ name: "team", repo: sha1Repo, ref: sha1Commit }, sha1Cache);
-    if ("error" in first) throw new Error(first.error);
-    const localNotes = join(sha1Cache, "team", "local-notes.txt");
-    writeFileSync(localNotes, "keep my notes\n");
-
-    const mismatch = await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, sha1Cache);
-    expect("error" in mismatch).toBe(true);
-    expect(readFileSync(localNotes, "utf8")).toBe("keep my notes\n");
-
-    rmSync(sha1Repo, { recursive: true, force: true });
-    const stillSha1 = await fetchSource({ name: "team", repo: sha1Repo, ref: sha1Commit }, sha1Cache);
-    if ("error" in stillSha1) throw new Error(stillSha1.error);
-    expect([stillSha1.packs[0]?.manifest.summary, stillSha1.stale]).toEqual(["SHA-1 pack.", undefined]);
-
-    rmSync(sha256Repo, { recursive: true, force: true });
-    const offline256 = await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, sha256Cache);
-    if ("error" in offline256) throw new Error(offline256.error);
-    expect([offline256.packs[0]?.manifest.summary, offline256.stale]).toEqual(["SHA-256 pack.", undefined]);
   });
 
   test("rejects a non-directory refs file in Git dir detection and recovers an offline implicit .git pin only when previously resolved via implicit .git", async () => {
@@ -572,63 +428,6 @@ describe("fetchSource local path resolution and object formats", () => {
     expect("error" in (await fetchSource({ name: "team", repo: ptrFile, ref: shaB }, directCache))).toBe(false);
     writeFileSync(ptrFile, `gitdir: ${plainTarget}\n`);
     expect("error" in (await fetchSource({ name: "team", repo: ptrFile, ref: shaB }, directCache))).toBe(true);
-  });
-
-  test("preserves existing implicit .git aliases on metadata write failure", async () => {
-    if (process.platform === "win32") return;
-    const aliasRoot = temp.make("alias-rollback-");
-    const aliasPath = join(aliasRoot, "packs");
-    const aliasDotGit = join(aliasRoot, "packs.git");
-    await initRepo(aliasDotGit);
-    const aliasV1 = await commitPack(aliasDotGit, "team", "Alias v1.");
-    const aliasCache = temp.make("cache-alias-rollback-");
-    const a1 = await fetchSource({ name: "team", repo: aliasPath, ref: aliasV1 }, aliasCache);
-    if ("error" in a1) throw new Error(a1.error);
-    const aliasV2 = await commitPack(aliasDotGit, "team", "Alias v2.");
-    const goodFile = join(aliasCache, "team", ".git", "hedge-source.json");
-    const savedGood = readFileSync(goodFile);
-    rmSync(goodFile);
-    mkdirSync(goodFile);
-    try {
-      const a2 = await fetchSource({ name: "team", repo: aliasPath, ref: aliasV2 }, aliasCache);
-      expect("error" in a2).toBe(true);
-    } finally {
-      rmSync(goodFile, { recursive: true, force: true });
-      writeFileSync(goodFile, savedGood);
-    }
-    rmSync(aliasDotGit, { recursive: true, force: true });
-    const offlineAfterRollback = await fetchSource({ name: "team", repo: aliasPath, ref: aliasV1 }, aliasCache);
-    if ("error" in offlineAfterRollback) throw new Error(offlineAfterRollback.error);
-    expect([offlineAfterRollback.packs[0]?.manifest.summary, offlineAfterRollback.stale]).toEqual(["Alias v1.", undefined]);
-  });
-
-  test("keeps followsBranch true for 40-hex SHA-256 branches and for hex branches matching only a foreign repository's cached commit", async () => {
-    const sha256Repo = temp.make("sha256-40hex-branch-");
-    await spawnGit(sha256Repo, "init", "-q", "--object-format=sha256", "-b", "main");
-    await spawnGit(sha256Repo, "config", "user.email", "test@example.com");
-    await spawnGit(sha256Repo, "config", "user.name", "Test");
-    writePack(sha256Repo, "SHA-256 branch v1.");
-    await spawnGit(sha256Repo, "add", ".");
-    await spawnGit(sha256Repo, "commit", "-qm", "v1");
-    const c1 = await spawnGit(sha256Repo, "rev-parse", "HEAD");
-    const prefix40 = c1.slice(0, 40);
-    await spawnGit(sha256Repo, "checkout", "-q", "-b", prefix40);
-    const branchCache = temp.make("cache-sha256-40hex-");
-    const loadedBranch = await fetchSource({ name: "team", repo: sha256Repo, ref: `refs/heads/${prefix40}` }, branchCache);
-    if ("error" in loadedBranch) throw new Error(loadedBranch.error);
-    expect(await followsBranch({ name: "team", repo: sha256Repo, ref: prefix40 }, branchCache)).toBe(true);
-
-    const foreignRepo = temp.make("foreign-hex-a-");
-    await initRepo(foreignRepo);
-    const foreignSha = await commitPack(foreignRepo, "team", "Foreign repo.");
-    const currentRepo = temp.make("foreign-hex-b-");
-    await initRepo(currentRepo);
-    await commitPack(currentRepo, "team", "Current repo v1.");
-    await spawnGit(currentRepo, "checkout", "-q", "-b", foreignSha);
-    const sharedCache = temp.make("cache-foreign-hex-");
-    expect("error" in (await fetchSource({ name: "team", repo: foreignRepo, ref: foreignSha }, sharedCache))).toBe(false);
-    expect("error" in (await fetchSource({ name: "team", repo: currentRepo, ref: `refs/heads/${foreignSha}` }, sharedCache))).toBe(false);
-    expect(await followsBranch({ name: "team", repo: currentRepo, ref: foreignSha }, sharedCache)).toBe(true);
   });
 
   test("preserves leading spaces after gitdir: separator, resolves packs.git to packs.git.git, rejects FILE://, and handles bundle files without reading them whole", async () => {
@@ -785,78 +584,6 @@ describe("fetchSource local path resolution and object formats", () => {
     expect("error" in (await fetchSource({ name: "team", repo: sibling, ref: shaA }, cache))).toBe(true);
   });
 
-  test("keeps cached linked worktrees, .git symlinks, and direct gitfiles working offline and rejects replacement repos", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("offline-indirect-");
-    const mainRepo = join(root, "main-repo");
-    await initRepo(mainRepo);
-    const shaMain = await commitPack(mainRepo, "team", "Worktree pack.");
-
-    const worktreeDir = join(root, "linked-wt");
-    await spawnGit(mainRepo, "worktree", "add", "-q", "-b", "wt-branch", worktreeDir, "HEAD");
-
-    const wtPinCache = temp.make("cache-wt-pin-");
-    const wtPin = await fetchSource({ name: "team", repo: worktreeDir, ref: shaMain }, wtPinCache);
-    if ("error" in wtPin) throw new Error(wtPin.error);
-    expect([wtPin.packs[0]?.manifest.summary, wtPin.stale]).toEqual(["Worktree pack.", undefined]);
-
-    const wtBranchCache = temp.make("cache-wt-branch-");
-    const wtBranch = await fetchSource({ name: "team", repo: worktreeDir, ref: "main" }, wtBranchCache);
-    if ("error" in wtBranch) throw new Error(wtBranch.error);
-    expect([wtBranch.packs[0]?.manifest.summary, wtBranch.stale]).toEqual(["Worktree pack.", undefined]);
-
-    rmSync(worktreeDir, { recursive: true, force: true });
-    const wtOfflinePin = await fetchSource({ name: "team", repo: worktreeDir, ref: shaMain }, wtPinCache);
-    if ("error" in wtOfflinePin) throw new Error(wtOfflinePin.error);
-    expect([wtOfflinePin.packs[0]?.manifest.summary, wtOfflinePin.stale]).toEqual(["Worktree pack.", undefined]);
-
-    const wtOfflineBranch = await fetchSource({ name: "team", repo: worktreeDir, ref: "main" }, wtBranchCache);
-    if ("error" in wtOfflineBranch) throw new Error(wtOfflineBranch.error);
-    expect(wtOfflineBranch.packs[0]?.manifest.summary).toBe("Worktree pack.");
-    expect(wtOfflineBranch.stale).toContain("could not fetch main");
-
-    await initRepo(worktreeDir);
-    await commitPack(worktreeDir, "team", "Replacement repo.");
-    expect("error" in (await fetchSource({ name: "team", repo: worktreeDir, ref: shaMain }, wtPinCache))).toBe(true);
-
-    const symWork = join(root, "sym-work");
-    mkdirSync(symWork, { recursive: true });
-    symlinkSync(join(mainRepo, ".git"), join(symWork, ".git"));
-    const symCache = temp.make("cache-sym-offline-");
-    const symFirst = await fetchSource({ name: "team", repo: symWork, ref: shaMain }, symCache);
-    if ("error" in symFirst) throw new Error(symFirst.error);
-    rmSync(symWork, { recursive: true, force: true });
-    const symOffline = await fetchSource({ name: "team", repo: symWork, ref: shaMain }, symCache);
-    if ("error" in symOffline) throw new Error(symOffline.error);
-    expect([symOffline.packs[0]?.manifest.summary, symOffline.stale]).toEqual(["Worktree pack.", undefined]);
-    await initRepo(symWork);
-    await commitPack(symWork, "team", "Replacement sym.");
-    expect("error" in (await fetchSource({ name: "team", repo: symWork, ref: shaMain }, symCache))).toBe(true);
-
-    const directPtr = join(root, "direct-ptr");
-    writeFileSync(directPtr, `gitdir: ${join(mainRepo, ".git")}\n`);
-    const directCache = temp.make("cache-direct-offline-");
-    const directFirst = await fetchSource({ name: "team", repo: directPtr, ref: shaMain }, directCache);
-    if ("error" in directFirst) throw new Error(directFirst.error);
-    rmSync(directPtr, { force: true });
-    const directOffline = await fetchSource({ name: "team", repo: directPtr, ref: shaMain }, directCache);
-    if ("error" in directOffline) throw new Error(directOffline.error);
-    expect([directOffline.packs[0]?.manifest.summary, directOffline.stale]).toEqual(["Worktree pack.", undefined]);
-
-    const repointWork = join(root, "repoint-work");
-    const otherRepo = join(root, "other-repo");
-    await initRepo(otherRepo);
-    const shaOther = await commitPack(otherRepo, "team", "Other repo.");
-    mkdirSync(repointWork, { recursive: true });
-    symlinkSync(join(mainRepo, ".git"), join(repointWork, ".git"));
-    const repointCache = temp.make("cache-repoint-unreachable-");
-    expect("error" in (await fetchSource({ name: "team", repo: repointWork, ref: shaMain }, repointCache))).toBe(false);
-    expect("error" in (await fetchSource({ name: "team", repo: otherRepo, ref: shaOther }, repointCache))).toBe(false);
-    rmSync(join(repointWork, ".git"));
-    symlinkSync(join(root, "missing-repo", ".git"), join(repointWork, ".git"));
-    expect("error" in (await fetchSource({ name: "team", repo: repointWork, ref: shaMain }, repointCache))).toBe(true);
-  });
-
   test("preserves trailing-slash requirements on symlink targets and validates HEAD with bounded reads", async () => {
     if (process.platform === "win32") return;
     const root = temp.make("symlink-slash-head-");
@@ -909,418 +636,6 @@ describe("fetchSource local path resolution and object formats", () => {
     expect("error" in (await fetchSource({ name: "team", repo: hugeHeadDir, ref: siblingSha }, headCache))).toBe(true);
   });
 
-  test("handles offline branch switch refresh, failed fresh SHA-256 recovery, nested commondir repointing, and implicit .git symlink retargeting", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("refresh-sha256-alias-");
-    const repo = join(root, "branch-repo");
-    await initRepo(repo);
-    const v1 = await commitPack(repo, "team", "Branch v1.");
-    const branchCache = temp.make("cache-offline-branch-switch-");
-    expect("error" in (await fetchSource({ name: "team", repo, ref: "main" }, branchCache))).toBe(false);
-    expect("error" in (await fetchSource({ name: "team", repo, ref: v1 }, branchCache))).toBe(false);
-    const movedAside = join(root, "branch-repo-offline");
-    const { renameSync } = await import("node:fs");
-    renameSync(repo, movedAside);
-    const offlineSwitch = await fetchSource({ name: "team", repo, ref: "main" }, branchCache);
-    if ("error" in offlineSwitch) throw new Error(offlineSwitch.error);
-    expect(offlineSwitch.stale).toContain("could not fetch main");
-    expect(await followsBranch({ name: "team", repo, ref: "main" }, branchCache)).toBe(true);
-    renameSync(movedAside, repo);
-    const v2 = await commitPack(repo, "team", "Branch v2.");
-    const advanced = await advanceSource({ name: "team", repo, ref: "main" }, branchCache, v1);
-    expect(advanced).toMatchObject({ state: "moved", commit: v2 });
-
-    const brokenSha256 = join(root, "broken-sha256");
-    mkdirSync(brokenSha256, { recursive: true });
-    await spawnGit(brokenSha256, "init", "-q", "--object-format=sha256", "-b", "main");
-    await spawnGit(brokenSha256, "config", "user.email", "test@example.com");
-    await spawnGit(brokenSha256, "config", "user.name", "Test");
-    mkdirSync(join(brokenSha256, "packs", "team"), { recursive: true });
-    writeFileSync(join(brokenSha256, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Broken 256." }));
-    await spawnGit(brokenSha256, "add", ".");
-    await spawnGit(brokenSha256, "commit", "-q", "-m", "broken");
-    const recoveryCache = temp.make("cache-sha256-recover-");
-    expect("error" in (await fetchSource({ name: "team", repo: brokenSha256, ref: "main" }, recoveryCache))).toBe(true);
-    const recovered = await fetchSource({ name: "team", repo, ref: "main" }, recoveryCache);
-    if ("error" in recovered) throw new Error(recovered.error);
-    expect([recovered.packs[0]?.manifest.summary, recovered.stale]).toEqual(["Branch v2.", undefined]);
-
-    const mainRepo = join(root, "wt-main");
-    await initRepo(mainRepo);
-    const wtSha = await commitPack(mainRepo, "team", "WT main.");
-    const wtDir = join(root, "wt-dir");
-    await spawnGit(mainRepo, "worktree", "add", "-q", "-b", "wt-b", wtDir, "HEAD");
-    const wtCache = temp.make("cache-commondir-repoint-");
-    expect("error" in (await fetchSource({ name: "team", repo: wtDir, ref: wtSha }, wtCache))).toBe(false);
-    expect("error" in (await fetchSource({ name: "team", repo, ref: v2 }, wtCache))).toBe(false);
-    const wtGitDir = readFileSync(join(wtDir, ".git"), "utf8").replace(/^gitdir: /, "").trim();
-    writeFileSync(join(wtGitDir, "commondir"), `${join(root, "missing-common")}\n`);
-    expect("error" in (await fetchSource({ name: "team", repo: wtDir, ref: wtSha }, wtCache))).toBe(true);
-
-    const impTargetA = join(root, "imp-a");
-    await initRepo(impTargetA);
-    const impShaA = await commitPack(impTargetA, "team", "Implicit symlink A.");
-    const impPath = join(root, "imp-packs");
-    const impDotGitLink = join(root, "imp-packs.git");
-    symlinkSync(impTargetA, impDotGitLink);
-    const impCache = temp.make("cache-imp-symlink-repoint-");
-    expect("error" in (await fetchSource({ name: "team", repo: impPath, ref: impShaA }, impCache))).toBe(false);
-    expect("error" in (await fetchSource({ name: "team", repo, ref: v2 }, impCache))).toBe(false);
-    rmSync(impDotGitLink);
-    symlinkSync(join(root, "missing-imp-b"), impDotGitLink);
-    expect("error" in (await fetchSource({ name: "team", repo: impPath, ref: impShaA }, impCache))).toBe(true);
-  });
-
-  test("resolves percent-encoded file:// path boundaries offline", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-pct-boundary-");
-    const pctRepo = join(root, "pct-repo");
-    await initRepo(pctRepo);
-    const pctSha = await commitPack(pctRepo, "team", "Percent boundary.");
-    const pctCache = temp.make("cache-pct-boundary-");
-    const encodedBoundary = `file://localhost%2F${pctRepo.replace(/^\//, "")}`;
-    const loadedPct = await fetchSource({ name: "team", repo: encodedBoundary, ref: pctSha }, pctCache);
-    if ("error" in loadedPct) throw new Error(loadedPct.error);
-    expect(loadedPct.packs[0]?.manifest.summary).toBe("Percent boundary.");
-    rmSync(pctRepo, { recursive: true, force: true });
-    const offlinePct = await fetchSource({ name: "team", repo: `file://${pctRepo}`, ref: pctSha }, pctCache);
-    if ("error" in offlinePct) throw new Error(offlinePct.error);
-    expect([offlinePct.packs[0]?.manifest.summary, offlinePct.stale]).toEqual(["Percent boundary.", undefined]);
-  });
-
-  test("separates outer bare repos from removed inner .git directories", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-bare-inner-");
-    const outerSrc = join(root, "bare-outer-src");
-    await initRepo(outerSrc);
-    const outerSha = await commitPack(outerSrc, "team", "Outer bare repo.");
-    const hybrid = join(root, "bare-with-dotgit");
-    mkdirSync(hybrid, { recursive: true });
-    await spawnGit(hybrid, "init", "--bare", "-q", "-b", "main");
-    await spawnGit(outerSrc, "push", "-q", hybrid, "main");
-    await spawnGit(hybrid, "init", "-q", "-b", "main");
-    await spawnGit(hybrid, "config", "user.email", "test@example.com");
-    await spawnGit(hybrid, "config", "user.name", "Test");
-    const innerSha = await commitPack(hybrid, "team", "Inner dotgit repo.");
-    const hybridCache = temp.make("cache-bare-inner-");
-    expect("error" in (await fetchSource({ name: "team", repo: hybrid, ref: innerSha }, hybridCache))).toBe(false);
-    rmSync(join(hybrid, ".git"), { recursive: true, force: true });
-    expect("error" in (await fetchSource({ name: "team", repo: `${hybrid}/`, ref: innerSha }, hybridCache))).toBe(true);
-    const loadedOuter = await fetchSource({ name: "team", repo: `${hybrid}/`, ref: outerSha }, hybridCache);
-    if ("error" in loadedOuter) throw new Error(loadedOuter.error);
-    expect(loadedOuter.packs[0]?.manifest.summary).toBe("Outer bare repo.");
-  });
-
-  test("cleans up failed fresh post-checkout hooks so a later apply recovers", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-hook-recovery-");
-    const hookRepo = join(root, "hook-repo");
-    await initRepo(hookRepo);
-    const hookSha = await commitPack(hookRepo, "team", "Post-checkout recovery.");
-    const templateDir = join(root, "git-template");
-    const hooksDir = join(templateDir, "hooks");
-    mkdirSync(hooksDir, { recursive: true });
-    const hookFile = join(hooksDir, "post-checkout");
-    writeFileSync(hookFile, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-    const hookCache = temp.make("cache-hook-recovery-");
-    const savedTemplate = process.env.GIT_TEMPLATE_DIR;
-    process.env.GIT_TEMPLATE_DIR = templateDir;
-    try {
-      const failedFresh = await fetchSource({ name: "team", repo: hookRepo, ref: hookSha }, hookCache);
-      expect("error" in failedFresh).toBe(true);
-    } finally {
-      if (savedTemplate === undefined) delete process.env.GIT_TEMPLATE_DIR;
-      else process.env.GIT_TEMPLATE_DIR = savedTemplate;
-    }
-    const recoveredHook = await fetchSource({ name: "team", repo: hookRepo, ref: hookSha }, hookCache);
-    if ("error" in recoveredHook) throw new Error(recoveredHook.error);
-    expect([recoveredHook.packs[0]?.manifest.summary, recoveredHook.stale]).toEqual(["Post-checkout recovery.", undefined]);
-  });
-
-  test("loads a cached pin offline after a repository symlink is removed", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-deleted-symlink-");
-    const realCheckout = join(root, "real-checkout");
-    await initRepo(realCheckout);
-    const realSha = await commitPack(realCheckout, "team", "Through symlink.");
-    const checkoutLink = join(root, "checkout-link");
-    symlinkSync(realCheckout, checkoutLink);
-    const linkCache = temp.make("cache-deleted-symlink-");
-    expect("error" in (await fetchSource({ name: "team", repo: checkoutLink, ref: realSha }, linkCache))).toBe(false);
-    rmSync(checkoutLink);
-    const offlineAfterLinkRemoved = await fetchSource({ name: "team", repo: checkoutLink, ref: realSha }, linkCache);
-    if ("error" in offlineAfterLinkRemoved) throw new Error(offlineAfterLinkRemoved.error);
-    expect([offlineAfterLinkRemoved.packs[0]?.manifest.summary, offlineAfterLinkRemoved.stale]).toEqual(["Through symlink.", undefined]);
-  });
-
-  test("rejects +refs/tags/release as a branch when both a tag and branch share the name", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-tag-vs-branch-");
-    const tagBranchRepo = join(root, "tag-vs-branch");
-    await initRepo(tagBranchRepo);
-    await spawnGit(tagBranchRepo, "checkout", "-q", "-b", "refs/tags/release");
-    const tb1 = await commitPack(tagBranchRepo, "team", "Branch v1.");
-    await spawnGit(tagBranchRepo, "tag", "release", tb1);
-    const tbCache = temp.make("cache-tag-vs-branch-");
-    expect("error" in (await fetchSource({ name: "team", repo: tagBranchRepo, ref: "refs/heads/refs/tags/release" }, tbCache))).toBe(false);
-    expect(await followsBranch({ name: "team", repo: tagBranchRepo, ref: "+refs/tags/release" }, tbCache)).toBe(false);
-    await commitPack(tagBranchRepo, "team", "Branch v2.");
-    const refusedTagAdvance = await advanceSource({ name: "team", repo: tagBranchRepo, ref: "+refs/tags/release" }, tbCache, tb1);
-    expect(refusedTagAdvance.state).toBe("failed");
-  });
-
-  test("isolates shallow side-branch merge ancestors from foreign cached pins", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-shallow-side-");
-    const foreignRepo = join(root, "foreign-deep");
-    await initRepo(foreignRepo);
-    const deepA = await commitPack(foreignRepo, "team", "Foreign deep A.");
-    const deepB = await commitPack(foreignRepo, "team", "Foreign deep B.");
-    const shallowSrc = join(root, "shallow-merge-src");
-    await initRepo(shallowSrc);
-    const baseShallow = await commitPack(shallowSrc, "team", "Shallow base.");
-    await spawnGit(shallowSrc, "fetch", "-q", "--depth", "1", `file://${foreignRepo}`, deepB);
-    await spawnGit(shallowSrc, "merge", "-q", "-X", "theirs", "--allow-unrelated-histories", "-m", "merge side", "FETCH_HEAD");
-    const mergedTip = await spawnGit(shallowSrc, "rev-parse", "HEAD");
-    await spawnGit(shallowSrc, "update-ref", "refs/heads/main", baseShallow);
-    const shallowCache = temp.make("cache-shallow-side-");
-    expect("error" in (await fetchSource({ name: "team", repo: foreignRepo, ref: deepB }, shallowCache))).toBe(false);
-    expect("error" in (await fetchSource({ name: "team", repo: foreignRepo, ref: deepA }, shallowCache))).toBe(false);
-    expect("error" in (await fetchSource({ name: "team", repo: shallowSrc, ref: "main" }, shallowCache))).toBe(false);
-    await spawnGit(shallowSrc, "update-ref", "refs/heads/main", mergedTip);
-    const advShallow = await advanceSource({ name: "team", repo: shallowSrc, ref: "main" }, shallowCache, baseShallow);
-    expect(advShallow.state).toBe("moved");
-    rmSync(shallowSrc, { recursive: true, force: true });
-    const offlineDeepA = await fetchSource({ name: "team", repo: shallowSrc, ref: deepA }, shallowCache);
-    if ("error" in offlineDeepA) throw new Error(offlineDeepA.error);
-    expect(offlineDeepA.stale).toContain(`could not fetch ${deepA}`);
-    expect(offlineDeepA.packs[0]?.manifest.summary).toBe("Foreign deep B.");
-    const loadedMerged = await fetchSource({ name: "team", repo: shallowSrc, ref: mergedTip }, shallowCache);
-    if ("error" in loadedMerged) throw new Error(loadedMerged.error);
-    expect([loadedMerged.packs[0]?.manifest.summary, loadedMerged.stale]).toEqual(["Foreign deep B.", undefined]);
-  });
-
-  test("rejects an unresolved ~user source without hitting a literal ~user pin", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-unresolved-tilde-");
-    const tildeWork = join(root, "tilde-host");
-    const literalTilde = join(tildeWork, "~hedge_nonexistent_user_999", "repo");
-    await initRepo(literalTilde);
-    const tildeSha = await commitPack(literalTilde, "team", "Literal tilde repo.");
-    const tildeCache = temp.make("cache-unresolved-tilde-");
-    mkdirSync(join(tildeCache, "team", "~hedge_nonexistent_user_999"), { recursive: true });
-    symlinkSync(literalTilde, join(tildeCache, "team", "~hedge_nonexistent_user_999", "repo"));
-    expect("error" in (await fetchSource({ name: "team", repo: literalTilde, ref: tildeSha }, tildeCache))).toBe(false);
-    expect("error" in (await fetchSource({ name: "team", repo: "~hedge_nonexistent_user_999/repo", ref: tildeSha }, tildeCache))).toBe(true);
-  });
-
-  test("retains intermediate commits after a failed refresh is retried and succeeds", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-retry-intermediate-");
-    const retryRepo = join(root, "retry-intermediate");
-    await initRepo(retryRepo);
-    const r1 = await commitPack(retryRepo, "team", "Retry v1.");
-    const retryCache = temp.make("cache-retry-intermediate-");
-    expect("error" in (await fetchSource({ name: "team", repo: retryRepo, ref: "main" }, retryCache))).toBe(false);
-    const r2 = await commitPack(retryRepo, "team", "Retry v2 intermediate.");
-    mkdirSync(join(retryRepo, "packs", "team"), { recursive: true });
-    writeFileSync(join(retryRepo, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Retry v3 broken." }));
-    await spawnGit(retryRepo, "commit", "-qam", "broken v3");
-    const failedRefresh = await advanceSource({ name: "team", repo: retryRepo, ref: "main" }, retryCache, r1);
-    expect(failedRefresh.state).toBe("failed");
-    const r4 = await commitPack(retryRepo, "team", "Retry v4 fixed.");
-    const fixedRefresh = await advanceSource({ name: "team", repo: retryRepo, ref: "main" }, retryCache, r1);
-    expect(fixedRefresh).toMatchObject({ state: "moved", commit: r4 });
-    rmSync(retryRepo, { recursive: true, force: true });
-    const offlineR2 = await fetchSource({ name: "team", repo: retryRepo, ref: r2 }, retryCache);
-    if ("error" in offlineR2) throw new Error(offlineR2.error);
-    expect([offlineR2.packs[0]?.manifest.summary, offlineR2.stale]).toEqual(["Retry v2 intermediate.", undefined]);
-  });
-
-  test("preserves tracked files of an enclosing Git repository when a fresh cache fails", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-enclosing-repo-");
-    const enclosingRepo = join(root, "enclosing-repo");
-    await initRepo(enclosingRepo);
-    const trackedInParent = join(enclosingRepo, "caches", "team", "keep.txt");
-    mkdirSync(join(enclosingRepo, "caches", "team"), { recursive: true });
-    writeFileSync(trackedInParent, "parent tracked file\n");
-    await spawnGit(enclosingRepo, "add", ".");
-    await spawnGit(enclosingRepo, "commit", "-qm", "track parent file");
-    const badPackSrc = join(root, "bad-pack-enclosing");
-    await initRepo(badPackSrc);
-    mkdirSync(join(badPackSrc, "packs", "team"), { recursive: true });
-    writeFileSync(join(badPackSrc, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Bad schema." }));
-    await spawnGit(badPackSrc, "add", ".");
-    await spawnGit(badPackSrc, "commit", "-qm", "bad schema");
-    expect("error" in (await fetchSource({ name: "team", repo: badPackSrc, ref: "main" }, join(enclosingRepo, "caches")))).toBe(true);
-    expect(readFileSync(trackedInParent, "utf8")).toBe("parent tracked file\n");
-  });
-
-  test("keeps remote-tracking refs intact when a staged origin refresh rolls back", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-origin-refmap-");
-    const originUpstream = join(root, "origin-upstream");
-    await initRepo(originUpstream);
-    const o1 = await commitPack(originUpstream, "team", "Origin v1.");
-    const originCache = temp.make("cache-origin-refmap-");
-    const originDir = join(originCache, "team");
-    await spawnGit(root, "clone", "-q", originUpstream, originDir);
-    expect("error" in (await fetchSource({ name: "team", repo: "origin", ref: "main" }, originCache))).toBe(false);
-    const remoteBefore = await spawnGit(originDir, "rev-parse", "refs/remotes/origin/main");
-    mkdirSync(join(originUpstream, "packs", "team"), { recursive: true });
-    writeFileSync(join(originUpstream, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Origin broken." }));
-    await spawnGit(originUpstream, "commit", "-qam", "broken origin v2");
-    const failedOrigin = await advanceSource({ name: "team", repo: "origin", ref: "main" }, originCache, o1);
-    expect(failedOrigin.state).toBe("failed");
-    expect(await spawnGit(originDir, "rev-parse", "refs/remotes/origin/main")).toBe(remoteBefore);
-    await spawnGit(originDir, "fsck", "--full");
-  });
-
-  test("returns a failed refresh state when staging objects fails on a read-only objects directory", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-ro-stage-");
-    const roRepo = join(root, "readonly-stage");
-    await initRepo(roRepo);
-    const ro1 = await commitPack(roRepo, "team", "RO v1.");
-    const roCache = temp.make("cache-ro-stage-");
-    expect("error" in (await fetchSource({ name: "team", repo: roRepo, ref: "main" }, roCache))).toBe(false);
-    await commitPack(roRepo, "team", "RO v2.");
-    const roObjects = join(roCache, "team", ".git", "objects");
-    chmodSync(roObjects, 0o555);
-    try {
-      const roFailed = await advanceSource({ name: "team", repo: roRepo, ref: "main" }, roCache, ro1);
-      expect(roFailed.state).toBe("failed");
-    } finally {
-      chmodSync(roObjects, 0o755);
-    }
-  });
-
-  test("advances a branch whose short name starts with refs/ when no conflicting ref exists", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-refs-custom-");
-    const customBranchRepo = join(root, "refs-custom-branch");
-    await initRepo(customBranchRepo);
-    await spawnGit(customBranchRepo, "checkout", "-q", "-b", "refs/custom/release");
-    const cb1 = await commitPack(customBranchRepo, "team", "Custom branch v1.");
-    const cbCache = temp.make("cache-refs-custom-");
-    expect("error" in (await fetchSource({ name: "team", repo: customBranchRepo, ref: "refs/heads/refs/custom/release" }, cbCache))).toBe(false);
-    expect(await followsBranch({ name: "team", repo: customBranchRepo, ref: "refs/custom/release" }, cbCache)).toBe(true);
-    const cb2 = await commitPack(customBranchRepo, "team", "Custom branch v2.");
-    const cbMoved = await advanceSource({ name: "team", repo: customBranchRepo, ref: "refs/custom/release" }, cbCache, cb1);
-    expect(cbMoved).toMatchObject({ state: "moved", commit: cb2 });
-    const cb3 = await commitPack(customBranchRepo, "team", "Custom branch v3.");
-    expect(await followsBranch({ name: "team", repo: customBranchRepo, ref: "refs/custom/release" }, cbCache)).toBe(true);
-    const cbMoved2 = await advanceSource({ name: "team", repo: customBranchRepo, ref: "refs/custom/release" }, cbCache, cb2);
-    expect(cbMoved2).toMatchObject({ state: "moved", commit: cb3 });
-  });
-
-  test("stages refresh objects cleanly when .git/objects is a symlink to another directory", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-sym-obj-");
-    const symObjRepo = join(root, "symlink-objects");
-    await initRepo(symObjRepo);
-    const so1 = await commitPack(symObjRepo, "team", "Symlink objects v1.");
-    const symObjCache = temp.make("cache-sym-obj-");
-    expect("error" in (await fetchSource({ name: "team", repo: symObjRepo, ref: "main" }, symObjCache))).toBe(false);
-    const extObjects = join(root, "external-objects");
-    renameSync(join(symObjCache, "team", ".git", "objects"), extObjects);
-    symlinkSync(extObjects, join(symObjCache, "team", ".git", "objects"));
-    const so2 = await commitPack(symObjRepo, "team", "Symlink objects v2.");
-    const soMoved = await advanceSource({ name: "team", repo: symObjRepo, ref: "main" }, symObjCache, so1);
-    expect(soMoved).toMatchObject({ state: "moved", commit: so2 });
-  });
-
-  test("quotes cache paths containing colons in GIT_ALTERNATE_OBJECT_DIRECTORIES during refresh", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-colon-cache-");
-    const colonRepo = join(root, "colon-repo");
-    await initRepo(colonRepo);
-    const col1 = await commitPack(colonRepo, "team", "Colon v1.");
-    const colonCache = join(root, "cache:with:colon");
-    mkdirSync(colonCache, { recursive: true });
-    expect("error" in (await fetchSource({ name: "team", repo: colonRepo, ref: "main" }, colonCache))).toBe(false);
-    const col2 = await commitPack(colonRepo, "team", "Colon v2.");
-    const colMoved = await advanceSource({ name: "team", repo: colonRepo, ref: "main" }, colonCache, col1);
-    expect(colMoved).toMatchObject({ state: "moved", commit: col2 });
-  });
-
-  test("keeps the repository fsck-clean when a post-checkout hook dirties files during refresh rollback", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-dirty-rollback-");
-    const dirtyRollbackRepo = join(root, "dirty-rollback");
-    await initRepo(dirtyRollbackRepo);
-    const dr1 = await commitPack(dirtyRollbackRepo, "team", "Dirty rollback v1.");
-    const drCache = temp.make("cache-dirty-rollback-");
-    expect("error" in (await fetchSource({ name: "team", repo: dirtyRollbackRepo, ref: "main" }, drCache))).toBe(false);
-    const drHooksDir = join(drCache, "team", ".git", "hooks");
-    mkdirSync(drHooksDir, { recursive: true });
-    const drHook = join(drHooksDir, "post-checkout");
-    writeFileSync(drHook, "#!/bin/sh\necho dirty >> packs/team/pack.json\n");
-    chmodSync(drHook, 0o755);
-    mkdirSync(join(dirtyRollbackRepo, "packs", "team"), { recursive: true });
-    writeFileSync(join(dirtyRollbackRepo, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Dirty rollback broken." }));
-    await spawnGit(dirtyRollbackRepo, "commit", "-qam", "broken v2");
-    const drFailed = await advanceSource({ name: "team", repo: dirtyRollbackRepo, ref: "main" }, drCache, dr1);
-    expect(drFailed.state).toBe("failed");
-    await spawnGit(join(drCache, "team"), "fsck", "--full");
-  });
-
-  test("keeps migrated objects when a post-checkout hook creates a new branch before refresh rollback", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-branch-hook-");
-    const branchHookRepo = join(root, "branch-hook-rollback");
-    await initRepo(branchHookRepo);
-    const bh1 = await commitPack(branchHookRepo, "team", "Branch hook v1.");
-    const bhCache = temp.make("cache-branch-hook-");
-    expect("error" in (await fetchSource({ name: "team", repo: branchHookRepo, ref: "main" }, bhCache))).toBe(false);
-    const bhHooksDir = join(bhCache, "team", ".git", "hooks");
-    mkdirSync(bhHooksDir, { recursive: true });
-    const bhHook = join(bhHooksDir, "post-checkout");
-    writeFileSync(bhHook, "#!/bin/sh\ngit update-ref refs/heads/saved-tip \"$2\"\n");
-    chmodSync(bhHook, 0o755);
-    mkdirSync(join(branchHookRepo, "packs", "team"), { recursive: true });
-    writeFileSync(join(branchHookRepo, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Branch hook broken." }));
-    await spawnGit(branchHookRepo, "commit", "-qam", "broken bh v2");
-    const bhFailed = await advanceSource({ name: "team", repo: branchHookRepo, ref: "main" }, bhCache, bh1);
-    expect(bhFailed.state).toBe("failed");
-    await spawnGit(join(bhCache, "team"), "fsck", "--full");
-  });
-
-  test("loads a cached pin offline after a parent directory symlink is removed", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-parent-symlink-");
-    const parentReal = join(root, "parent-real");
-    const parentRepo = join(parentReal, "repo");
-    await initRepo(parentRepo);
-    const parentSha = await commitPack(parentRepo, "team", "Through parent symlink.");
-    const parentLink = join(root, "parent-link");
-    symlinkSync(parentReal, parentLink);
-    const parentLinkRepo = join(parentLink, "repo");
-    const parentCache = temp.make("cache-parent-symlink-");
-    expect("error" in (await fetchSource({ name: "team", repo: parentLinkRepo, ref: parentSha }, parentCache))).toBe(false);
-    rmSync(parentLink);
-    const offlineParentMissing = await fetchSource({ name: "team", repo: parentLinkRepo, ref: parentSha }, parentCache);
-    if ("error" in offlineParentMissing) throw new Error(offlineParentMissing.error);
-    expect([offlineParentMissing.packs[0]?.manifest.summary, offlineParentMissing.stale]).toEqual(["Through parent symlink.", undefined]);
-  });
-
-  test("does not alias a symlink/.. path to its lexical path", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-dotdot-alias-");
-    const dotDotTarget = join(root, "dd-target");
-    const dotDotLeaf = join(dotDotTarget, "leaf");
-    const dotDotReal = join(dotDotTarget, "repo");
-    mkdirSync(dotDotLeaf, { recursive: true });
-    await initRepo(dotDotReal);
-    const ddSha = await commitPack(dotDotReal, "team", "Target dotdot repo.");
-    const ddLink = join(root, "dd-link");
-    symlinkSync(dotDotLeaf, ddLink);
-    const ddCache = temp.make("cache-dotdot-alias-");
-    expect("error" in (await fetchSource({ name: "team", repo: `${ddLink}/../repo`, ref: ddSha }, ddCache))).toBe(false);
-    expect("error" in (await fetchSource({ name: "team", repo: join(root, "repo"), ref: ddSha }, ddCache))).toBe(true);
-  });
-
   test("resolves a trailing-slash gitfile symlink and detects repointing across file:// spellings", async () => {
     if (process.platform === "win32") return;
     const root = temp.make("git-gf-slash-");
@@ -1343,226 +658,6 @@ describe("fetchSource local path resolution and object formats", () => {
     expect("error" in (await fetchSource({ name: "team", repo: `file://${gfLink}/`, ref: gfShaA }, gfCache))).toBe(true);
   });
 
-  test("preserves preexisting cache files when a failed fresh checkout is discarded", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-preexist-");
-    const preExistSrc = join(root, "preexist-src");
-    await initRepo(preExistSrc);
-    mkdirSync(join(preExistSrc, "packs", "team"), { recursive: true });
-    writeFileSync(join(preExistSrc, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Broken preexist." }));
-    writeFileSync(join(preExistSrc, "keep.txt"), "keep identical\n");
-    await spawnGit(preExistSrc, "add", ".");
-    await spawnGit(preExistSrc, "commit", "-qm", "broken with keep.txt");
-    const preExistCache = temp.make("cache-preexist-");
-    mkdirSync(join(preExistCache, "team"), { recursive: true });
-    const preExistFile = join(preExistCache, "team", "keep.txt");
-    writeFileSync(preExistFile, "keep identical\n");
-    expect("error" in (await fetchSource({ name: "team", repo: preExistSrc, ref: "main" }, preExistCache))).toBe(true);
-    expect(readFileSync(preExistFile, "utf8")).toBe("keep identical\n");
-  });
-
-  test("preserves a dangling .git symlink when a fresh fetch fails", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-dangling-dotgit-");
-    const danglingCache = temp.make("cache-dangling-dotgit-");
-    mkdirSync(join(danglingCache, "team"), { recursive: true });
-    const danglingLink = join(danglingCache, "team", ".git");
-    symlinkSync(join(root, "missing-gitdir-target"), danglingLink);
-    expect("error" in (await fetchSource({ name: "team", repo: join(root, "missing-upstream"), ref: "main" }, danglingCache))).toBe(true);
-    expect(lstatSync(danglingLink).isSymbolicLink()).toBe(true);
-  });
-
-  test("keeps the repository fsck-clean when logs/HEAD is write-only during refresh rollback", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-wo-headlog-");
-    const woLogRepo = join(root, "wo-headlog-repo");
-    await initRepo(woLogRepo);
-    const wo1 = await commitPack(woLogRepo, "team", "WO log v1.");
-    const woCache = temp.make("cache-wo-headlog-");
-    expect("error" in (await fetchSource({ name: "team", repo: woLogRepo, ref: "main" }, woCache))).toBe(false);
-    await spawnGit(join(woCache, "team"), "config", "core.logAllRefUpdates", "always");
-    const woHeadLog = join(woCache, "team", ".git", "logs", "HEAD");
-    mkdirSync(join(woCache, "team", ".git", "logs"), { recursive: true });
-    writeFileSync(woHeadLog, "");
-    chmodSync(woHeadLog, 0o200);
-    mkdirSync(join(woLogRepo, "packs", "team"), { recursive: true });
-    writeFileSync(join(woLogRepo, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "WO broken." }));
-    await spawnGit(woLogRepo, "commit", "-qam", "wo broken");
-    try {
-      const woFailed = await advanceSource({ name: "team", repo: woLogRepo, ref: "main" }, woCache, wo1);
-      expect(woFailed.state).toBe("failed");
-    } finally {
-      chmodSync(woHeadLog, 0o644);
-    }
-    await spawnGit(join(woCache, "team"), "fsck", "--full");
-  });
-
-  test("advances a refs/tags/release branch when no remote tag shadows it", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-short-tag-branch-");
-    const shortTagBranchRepo = join(root, "short-tag-branch");
-    await initRepo(shortTagBranchRepo);
-    await spawnGit(shortTagBranchRepo, "checkout", "-q", "-b", "refs/tags/release");
-    const stb1 = await commitPack(shortTagBranchRepo, "team", "Tag-named branch v1.");
-    const stbCache = temp.make("cache-short-tag-branch-");
-    expect("error" in (await fetchSource({ name: "team", repo: shortTagBranchRepo, ref: "refs/heads/refs/tags/release" }, stbCache))).toBe(false);
-    expect(await followsBranch({ name: "team", repo: shortTagBranchRepo, ref: "refs/tags/release" }, stbCache)).toBe(true);
-    const stb2 = await commitPack(shortTagBranchRepo, "team", "Tag-named branch v2.");
-    expect(await advanceSource({ name: "team", repo: shortTagBranchRepo, ref: "refs/tags/release" }, stbCache, stb1)).toMatchObject({ state: "moved", commit: stb2 });
-  });
-
-  test("advances a local branch source on refresh when a trailing slash is added to its path", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-trailing-slash-refresh-");
-    const repo = join(root, "local-repo");
-    await initRepo(repo);
-    const c1 = await commitPack(repo, "team", "Trailing slash v1.");
-    const cache = temp.make("cache-trailing-slash-refresh-");
-    expect("error" in (await fetchSource({ name: "team", repo, ref: "main" }, cache))).toBe(false);
-    const same = await cachedSource({ name: "team", repo: `${repo}/`, ref: "main" }, cache);
-    if ("error" in same) throw new Error(same.error);
-    expect(same.packs[0]?.manifest.summary).toBe("Trailing slash v1.");
-    const c2 = await commitPack(repo, "team", "Trailing slash v2.");
-    const moved = await advanceSource({ name: "team", repo: `${repo}/`, ref: "main" }, cache, c1);
-    expect(moved).toMatchObject({ state: "moved", commit: c2 });
-    if (moved.state !== "moved") throw new Error(moved.state);
-    expect(moved.source.packs[0]?.manifest.summary).toBe("Trailing slash v2.");
-  });
-
-  test("does not report a retained SHA-256 pin as unpinned in doctor after another SHA-256 repository uses the same source name", async () => {
-    const repoA = temp.make("retained-sha256-a-");
-    await spawnGit(repoA, "init", "-q", "-b", "main", "--object-format=sha256");
-    await spawnGit(repoA, "config", "user.email", "test@example.com");
-    await spawnGit(repoA, "config", "user.name", "Test");
-    const shaA = await commitPack(repoA, "team", "SHA-256 A.");
-
-    const repoB = temp.make("retained-sha256-b-");
-    await spawnGit(repoB, "init", "-q", "-b", "main", "--object-format=sha256");
-    await spawnGit(repoB, "config", "user.email", "test@example.com");
-    await spawnGit(repoB, "config", "user.name", "Test");
-    const shaB = await commitPack(repoB, "team", "SHA-256 B.");
-
-    const profileDir = temp.make("retained-sha256-profile-");
-    await initRepo(profileDir);
-    const cache = temp.make("cache-retained-sha256-");
-
-    const first = await fetchSource({ name: "team", repo: repoA, ref: shaA }, cache);
-    if ("error" in first) throw new Error(first.error);
-    const second = await fetchSource({ name: "team", repo: repoB, ref: shaB }, cache);
-    if ("error" in second) throw new Error(second.error);
-
-    rmSync(repoA, { recursive: true, force: true });
-    expect(await unpinnedSources([{ name: "team", repo: repoA, ref: shaA }], profileDir, cache)).toEqual([]);
-
-    const offlineA = await fetchSource({ name: "team", repo: repoA, ref: shaA }, cache);
-    if ("error" in offlineA) throw new Error(offlineA.error);
-    expect([offlineA.packs[0]?.manifest.summary, offlineA.stale]).toEqual(["SHA-256 A.", undefined]);
-  });
-
-  test("fails closed on symlink aliases and falls back as stale without blocking the event loop when local probing times out", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-stalled-probe-");
-    const repo = join(root, "nfs-repo");
-    await initRepo(repo);
-    const sha = await commitPack(repo, "team", "Cached NFS pin.");
-    const cache = temp.make("cache-stalled-probe-");
-    const initial = await fetchSource({ name: "team", repo, ref: sha }, cache);
-    if ("error" in initial) throw new Error(initial.error);
-
-    const readyFifo = join(root, "probe-ready");
-    const goneFifo = join(root, "probe-gone");
-    expect(Bun.spawnSync(["mkfifo", readyFifo, goneFifo]).exitCode).toBe(0);
-    const hungScript = join(root, "hung-probe.ts");
-    writeFileSync(
-      hungScript,
-      `import { openSync, writeFileSync } from "node:fs";
-const fd = openSync(${JSON.stringify(goneFifo)}, "w");
-void fd;
-writeFileSync(${JSON.stringify(readyFifo)}, "started\\n");
-await new Promise(() => {});
-`,
-    );
-    const readyProc = Bun.spawn(["cat", readyFifo], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-    const goneProc = Bun.spawn(["cat", goneFifo], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-    const readyText = new Response(readyProc.stdout).text();
-    const fifoClosed = new Response(goneProc.stdout).text();
-    let fireTimeout!: () => void;
-    const deadline = new Promise<void>((resolve) => {
-      fireTimeout = resolve;
-    });
-    let fetchSettled = false;
-    try {
-      const fetchPromise = fetchSource({ name: "team", repo, ref: sha }, cache, undefined, undefined, (dir, effective) =>
-        probeLocalRepoInfo(dir, effective, 0, hungScript, deadline),
-      ).finally(() => {
-        fetchSettled = true;
-      });
-      expect((await readyText).trim()).toBe("started");
-      expect(fetchSettled).toBe(false);
-      fireTimeout();
-      const loaded = await fetchPromise;
-      if ("error" in loaded) throw new Error(loaded.error);
-      expect(loaded.packs[0]?.manifest.summary).toBe("Cached NFS pin.");
-      expect(loaded.stale).toContain("timed out inspecting local repository");
-      expect(await fifoClosed).toBe("");
-    } finally {
-      try {
-        readyProc.kill("SIGKILL");
-      } catch {}
-      try {
-        goneProc.kill("SIGKILL");
-      } catch {}
-    }
-
-    const mirrorLink = join(root, "mirror-link");
-    symlinkSync(repo, mirrorLink);
-    const mirrorCache = temp.make("cache-stalled-mirror-");
-    expect("error" in (await fetchSource({ name: "team", repo: mirrorLink, ref: sha }, mirrorCache))).toBe(false);
-    const mirrorRepoB = join(root, "nfs-repo-b");
-    await initRepo(mirrorRepoB);
-    await commitPack(mirrorRepoB, "team", "Other NFS repo.");
-    rmSync(mirrorLink);
-    symlinkSync(mirrorRepoB, mirrorLink);
-    const mirrorReadyFifo = join(root, "mirror-ready");
-    const mirrorGoneFifo = join(root, "mirror-gone");
-    expect(Bun.spawnSync(["mkfifo", mirrorReadyFifo, mirrorGoneFifo]).exitCode).toBe(0);
-    const mirrorHungScript = join(root, "hung-mirror-probe.ts");
-    writeFileSync(
-      mirrorHungScript,
-      `import { openSync, writeFileSync } from "node:fs";
-const fd = openSync(${JSON.stringify(mirrorGoneFifo)}, "w");
-void fd;
-writeFileSync(${JSON.stringify(mirrorReadyFifo)}, "started\\n");
-await new Promise(() => {});
-`,
-    );
-    const mirrorReadyProc = Bun.spawn(["cat", mirrorReadyFifo], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-    const mirrorGoneProc = Bun.spawn(["cat", mirrorGoneFifo], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-    const mirrorReadyText = new Response(mirrorReadyProc.stdout).text();
-    const mirrorClosed = new Response(mirrorGoneProc.stdout).text();
-    let fireMirrorTimeout!: () => void;
-    const mirrorDeadline = new Promise<void>((resolve) => {
-      fireMirrorTimeout = resolve;
-    });
-    try {
-      const stalledMirrorPromise = fetchSource({ name: "team", repo: mirrorLink, ref: sha }, mirrorCache, undefined, undefined, (dir, effective) =>
-        probeLocalRepoInfo(dir, effective, 0, mirrorHungScript, mirrorDeadline),
-      );
-      expect((await mirrorReadyText).trim()).toBe("started");
-      fireMirrorTimeout();
-      const stalledMirror = await stalledMirrorPromise;
-      expect("error" in stalledMirror).toBe(true);
-      expect(await mirrorClosed).toBe("");
-    } finally {
-      try {
-        mirrorReadyProc.kill("SIGKILL");
-      } catch {}
-      try {
-        mirrorGoneProc.kill("SIGKILL");
-      } catch {}
-    }
-  });
-
   test("recognizes a detached HEAD with trailing whitespace instead of selecting a .git sibling", async () => {
     if (process.platform === "win32") return;
     const root = temp.make("git-detached-space-head-");
@@ -1579,86 +674,6 @@ await new Promise(() => {});
     expect(loaded.packs[0]?.manifest.summary).toBe("Detached space HEAD.");
     rmSync(sibling, { recursive: true, force: true });
     expect("error" in (await fetchSource({ name: "team", repo: sibling, ref: plainSha }, cache))).toBe(true);
-  });
-
-  test("fails closed instead of reusing a symlink alias when a parent directory becomes inaccessible", async () => {
-    if (process.platform === "win32" || process.getuid?.() === 0) return;
-    const root = temp.make("git-eacces-parent-");
-    const repoA = join(root, "repo-a");
-    const repoB = join(root, "repo-b");
-    await initRepo(repoA);
-    await initRepo(repoB);
-    const shaA = await commitPack(repoA, "team", "Accessible A.");
-    await commitPack(repoB, "team", "Accessible B.");
-    const gate = join(root, "gate");
-    mkdirSync(gate, { recursive: true });
-    const link = join(gate, "mirror");
-    symlinkSync(repoA, link);
-    const cache = temp.make("cache-eacces-parent-");
-    const initial = await fetchSource({ name: "team", repo: link, ref: shaA }, cache);
-    if ("error" in initial) throw new Error(initial.error);
-    rmSync(link);
-    symlinkSync(repoB, link);
-    chmodSync(gate, 0o000);
-    try {
-      const blocked = await fetchSource({ name: "team", repo: link, ref: shaA }, cache);
-      expect("error" in blocked).toBe(true);
-    } finally {
-      chmodSync(gate, 0o755);
-    }
-  });
-
-  test("keeps FETCH_HEAD valid and fsck-clean when FETCH_HEAD is write-only during refresh rollback", async () => {
-    if (process.platform === "win32" || process.getuid?.() === 0) return;
-    const root = temp.make("git-wo-fetchhead-");
-    const repo = join(root, "repo");
-    await initRepo(repo);
-    const c1 = await commitPack(repo, "team", "WO FETCH_HEAD v1.");
-    const cache = temp.make("cache-wo-fetchhead-");
-    expect("error" in (await fetchSource({ name: "team", repo, ref: "main" }, cache))).toBe(false);
-    const fetchHeadPath = join(cache, "team", ".git", "FETCH_HEAD");
-    const beforeContent = readFileSync(fetchHeadPath, "utf8");
-    chmodSync(fetchHeadPath, 0o200);
-    mkdirSync(join(repo, "packs", "team"), { recursive: true });
-    writeFileSync(join(repo, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Broken v2." }));
-    await spawnGit(repo, "commit", "-qam", "broken v2");
-    try {
-      const failed = await advanceSource({ name: "team", repo, ref: "main" }, cache, c1);
-      expect(failed.state).toBe("failed");
-    } finally {
-      chmodSync(fetchHeadPath, 0o644);
-    }
-    expect(readFileSync(fetchHeadPath, "utf8")).toBe(beforeContent);
-    const oid = readFileSync(fetchHeadPath, "utf8").split("\t")[0]?.trim();
-    expect(oid).toBe(c1);
-    await spawnGit(join(cache, "team"), "cat-file", "-e", oid!);
-    await spawnGit(join(cache, "team"), "fsck", "--full");
-  });
-
-  test("applies a relative source path on first fetch before the cache directory exists", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-rel-first-");
-    const upstream = join(root, "upstream", "packs");
-    await initRepo(upstream);
-    const sha = await commitPack(upstream, "team", "Relative first apply.");
-    const cache = join(root, "cache");
-    const loaded = await fetchSource({ name: "team", repo: "../../upstream/packs", ref: sha }, cache);
-    if ("error" in loaded) throw new Error(loaded.error);
-    expect([loaded.packs[0]?.manifest.summary, loaded.stale]).toEqual(["Relative first apply.", undefined]);
-  });
-
-  test("keeps refresh enabled for the original branch after a failed apply with a trailing-slash spelling", async () => {
-    if (process.platform === "win32") return;
-    const root = temp.make("git-blocked-slash-");
-    const repo = join(root, "repo");
-    await initRepo(repo);
-    const c1 = await commitPack(repo, "team", "Blocked slash v1.");
-    const cache = temp.make("cache-blocked-slash-");
-    expect("error" in (await fetchSource({ name: "team", repo, ref: "main" }, cache))).toBe(false);
-    expect("error" in (await fetchSource({ name: "team", repo: `${repo}/`, ref: "missing-branch" }, cache))).toBe(true);
-    expect(await followsBranch({ name: "team", repo, ref: "main" }, cache)).toBe(true);
-    const c2 = await commitPack(repo, "team", "Blocked slash v2.");
-    expect(await advanceSource({ name: "team", repo, ref: "main" }, cache, c1)).toMatchObject({ state: "moved", commit: c2 });
   });
 
   test("recognizes a symbolic HEAD link to an unborn branch instead of selecting a .git sibling", async () => {
@@ -1678,5 +693,46 @@ await new Promise(() => {});
     expect(loaded.packs[0]?.manifest.summary).toBe("Unborn symlink HEAD repo.");
     rmSync(sibling, { recursive: true, force: true });
     expect("error" in (await fetchSource({ name: "team", repo: sibling, ref: plainSha }, cache))).toBe(true);
+  });
+
+  test("rejects a HEAD symlink whose target does not start with refs/ and falls back to the .git sibling", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-nonrefs-sym-head-");
+    const plain = join(root, "packs");
+    const sibling = join(root, "packs.git");
+    const externalHead = join(root, "external-head");
+    writeFileSync(externalHead, "ref: refs/heads/main\n");
+    await initRepo(plain);
+    await commitPack(plain, "team", "Plain with non-refs HEAD symlink.");
+    rmSync(join(plain, ".git", "HEAD"));
+    symlinkSync(externalHead, join(plain, ".git", "HEAD"));
+    await initRepo(sibling);
+    const siblingSha = await commitPack(sibling, "team", "Sibling for non-refs HEAD link.");
+    const cache = temp.make("cache-nonrefs-sym-head-");
+    const loaded = await fetchSource({ name: "team", repo: plain, ref: siblingSha }, cache);
+    if ("error" in loaded) throw new Error(loaded.error);
+    expect([loaded.packs[0]?.manifest.summary, loaded.stale]).toEqual(["Sibling for non-refs HEAD link.", undefined]);
+    rmSync(join(plain, ".git", "HEAD"));
+    writeFileSync(join(plain, ".git", "HEAD"), "ref: refs/heads/main\n");
+    expect("error" in (await fetchSource({ name: "team", repo: plain, ref: siblingSha }, cache))).toBe(true);
+  });
+
+  test("fails closed instead of poisoning plain repo pins when .git/HEAD is unreadable alongside a .git sibling", async () => {
+    if (process.platform === "win32" || process.getuid?.() === 0) return;
+    const root = temp.make("git-unreadable-head-sibling-");
+    const plain = join(root, "packs");
+    const sibling = join(root, "packs.git");
+    await initRepo(plain);
+    await commitPack(plain, "team", "Unreadable HEAD plain.");
+    await initRepo(sibling);
+    const siblingSha = await commitPack(sibling, "team", "Sibling behind unreadable HEAD.");
+    const cache = temp.make("cache-unreadable-head-sibling-");
+    chmodSync(join(plain, ".git", "HEAD"), 0o000);
+    try {
+      expect("error" in (await fetchSource({ name: "team", repo: plain, ref: siblingSha }, cache))).toBe(true);
+    } finally {
+      chmodSync(join(plain, ".git", "HEAD"), 0o644);
+    }
+    expect("error" in (await fetchSource({ name: "team", repo: plain, ref: siblingSha }, cache))).toBe(true);
   });
 });

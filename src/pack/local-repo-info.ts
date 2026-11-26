@@ -87,7 +87,7 @@ function recordAccessError(error: unknown, access?: AccessState): void {
   if (access && !isMissingPathError(error)) access.inaccessible = true;
 }
 
-function resolvePosixPathBytes(base: Buffer, rawPath: Buffer, followLast = true): Buffer | undefined {
+function resolvePosixPathBytes(base: Buffer, rawPath: Buffer, followLast = true, access?: AccessState): Buffer | undefined {
   const queue = splitPosixBytes(rawPath);
   const trailingSlash = rawPath.length > 1 && rawPath[rawPath.length - 1] === slashByte;
   let requireDir = false;
@@ -107,14 +107,17 @@ function resolvePosixPathBytes(base: Buffer, rawPath: Buffer, followLast = true)
         try {
           if (!statSync(joinPosixBytes(stack)).isDirectory()) return undefined;
         } catch (error) {
-          if (!isMissingPathError(error)) return undefined;
+          if (!isMissingPathError(error)) {
+            recordAccessError(error, access);
+            return undefined;
+          }
         }
       }
       continue;
     }
     if (seg.equals(dotDotBuf)) {
       if (stack.length > 0) {
-        if (!isDirectoryBytes(joinPosixBytes(stack))) return undefined;
+        if (!isDirectoryBytes(joinPosixBytes(stack), access)) return undefined;
         stack.pop();
       }
       continue;
@@ -124,7 +127,10 @@ function resolvePosixPathBytes(base: Buffer, rawPath: Buffer, followLast = true)
       try {
         const info = lstatSync(candidate);
         if (info.isSymbolicLink()) {
-          if (hops >= 40) return undefined;
+          if (hops >= 40) {
+            if (access) access.inaccessible = true;
+            return undefined;
+          }
           hops++;
           const linked = readlinkSync(candidate, "buffer");
           const rest = queue.slice(index);
@@ -136,7 +142,10 @@ function resolvePosixPathBytes(base: Buffer, rawPath: Buffer, followLast = true)
           continue;
         }
       } catch (error) {
-        if (!isMissingPathError(error)) return undefined;
+        if (!isMissingPathError(error)) {
+          recordAccessError(error, access);
+          return undefined;
+        }
       }
     }
     stack.push(seg);
@@ -146,7 +155,10 @@ function resolvePosixPathBytes(base: Buffer, rawPath: Buffer, followLast = true)
     try {
       if (!statSync(out).isDirectory()) return undefined;
     } catch (error) {
-      if (!isMissingPathError(error)) return undefined;
+      if (!isMissingPathError(error)) {
+        recordAccessError(error, access);
+        return undefined;
+      }
     }
   }
   return out;
@@ -283,7 +295,7 @@ function isValidHeadFileBytes(headPath: Buffer, access?: AccessState): boolean {
     const info = lstatSync(headPath);
     if (info.isSymbolicLink()) {
       const target = readlinkSync(headPath, "buffer").toString("latin1");
-      if (target.startsWith("refs/")) return true;
+      return target.startsWith("refs/");
     }
   } catch (error) {
     recordAccessError(error, access);
@@ -613,7 +625,8 @@ export function canonicalLocalRepoInfo(dir: string, effective: string): LocalRep
   }
   const { base, rawPath, asFileUrl } = parsed;
   const hasTrailingSlash = rawPath.length > 1 && rawPath[rawPath.length - 1] === slashByte;
-  const resolved = resolvePosixPathBytes(base, rawPath);
+  const primaryAccess: AccessState = { inaccessible: false };
+  const resolved = resolvePosixPathBytes(base, rawPath, true, primaryAccess);
   const invalidPrimary = decodeRepoBytes(Buffer.concat([Buffer.from(asFileUrl ? "\0invalid-file:" : "\0invalid-local:"), base, zeroByteBuf, rawPath]));
   const primary = resolved ? encodeCanonicalLocal(resolved, asFileUrl) : invalidPrimary;
   const lexicalPrimary = resolved ? (resolvePosixPathBytes(base, rawPath, false) ?? resolved) : undefined;
@@ -627,7 +640,6 @@ export function canonicalLocalRepoInfo(dir: string, effective: string): LocalRep
         : encodeCanonicalLocal(Buffer.concat([lexicalPrimary, zeroByteBuf, resolved]), asFileUrl)
       : invalidPrimary;
   const pointerKey = resolved && lexicalPrimary ? explicitPointerKeyBytes(resolved, lexicalPrimary, asFileUrl) : undefined;
-  const primaryAccess: AccessState = { inaccessible: false };
   const primaryGit = resolved && lexicalPrimary ? resolveGitIdentityBytes(resolved, dirnamePosixBytes(lexicalPrimary), !hasTrailingSlash, primaryAccess) : undefined;
   if (primaryGit) {
     return {
@@ -641,7 +653,7 @@ export function canonicalLocalRepoInfo(dir: string, effective: string): LocalRep
       isLocal: true,
     };
   }
-  if (resolved === undefined || primaryAccess.inaccessible) {
+  if (primaryAccess.inaccessible) {
     return {
       resolved: primary,
       primary,
@@ -656,12 +668,12 @@ export function canonicalLocalRepoInfo(dir: string, effective: string): LocalRep
   }
   const trimmedRaw = stripTrailingSlashBytes(rawPath);
   const dotGitRaw = Buffer.concat([trimmedRaw, dotGitBuf]);
-  const dotGitResolved = resolvePosixPathBytes(base, dotGitRaw);
+  const dotGitAccess: AccessState = { inaccessible: false };
+  const dotGitResolved = resolvePosixPathBytes(base, dotGitRaw, true, dotGitAccess);
   const dotGitLexical = resolvePosixPathBytes(base, dotGitRaw, false) ?? dotGitResolved;
   const dotGitPointerKey = dotGitLexical
     ? implicitDotGitPointerKeyBytes(lexicalPrimary ?? dotGitLexical, dotGitLexical, dotGitResolved, asFileUrl)
     : undefined;
-  const dotGitAccess: AccessState = { inaccessible: false };
   const dotGitInfo = dotGitResolved && dotGitLexical ? resolveGitIdentityBytes(dotGitResolved, dirnamePosixBytes(dotGitLexical), false, dotGitAccess) : undefined;
   if (dotGitResolved && dotGitInfo) {
     return {
@@ -685,7 +697,7 @@ export function canonicalLocalRepoInfo(dir: string, effective: string): LocalRep
     ...(effectivePointerKey ? { pointerKey: effectivePointerKey } : {}),
     hasLiveRepo: false,
     isLocal: true,
-    ...(dotGitResolved === undefined || dotGitAccess.inaccessible ? { skipPinCache: true } : {}),
+    ...(dotGitAccess.inaccessible || (resolved === undefined && dotGitResolved === undefined) ? { skipPinCache: true } : {}),
   };
 }
 

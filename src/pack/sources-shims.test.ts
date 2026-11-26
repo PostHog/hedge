@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
-import { fetchSource, followsBranch } from "./sources.ts";
+import { advanceSource, fetchSource, followsBranch } from "./sources.ts";
 
 isolateGit();
 const temp = tempDirs();
@@ -195,5 +195,45 @@ exec "${realGit}" "$@"
     } finally {
       process.env.PATH = savedPath;
     }
+  });
+
+  test("refuses to overwrite write-only FETCH_HEAD on refresh when git lacks --no-write-fetch-head", async () => {
+    if (process.platform === "win32" || process.getuid?.() === 0) return;
+    const repo = await packRepo("No write fetch head v1.");
+    const c1 = await spawnGit(repo, "rev-parse", "HEAD");
+    const cache = temp.make("cache-no-write-fh-");
+    expect("error" in (await fetchSource({ name: "team", repo, ref: "main" }, cache))).toBe(false);
+    const fetchHeadPath = join(cache, "team", ".git", "FETCH_HEAD");
+    const beforeContent = readFileSync(fetchHeadPath, "utf8");
+    chmodSync(fetchHeadPath, 0o200);
+    writePack(repo, "No write fetch head v2.");
+    await spawnGit(repo, "add", ".");
+    await spawnGit(repo, "commit", "-q", "-m", "v2");
+    const realGit = Bun.which("git")!;
+    const binDir = temp.make("old-git-nowrite-");
+    writeFileSync(
+      join(binDir, "git"),
+      `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--no-write-fetch-head" ]; then
+    echo "error: unknown option 'no-write-fetch-head'" >&2
+    exit 129
+  fi
+done
+exec "${realGit}" "$@"
+`,
+      { mode: 0o755 },
+    );
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${savedPath ?? ""}`;
+    try {
+      const failed = await advanceSource({ name: "team", repo, ref: "main" }, cache, c1);
+      expect(failed.state).toBe("failed");
+    } finally {
+      process.env.PATH = savedPath;
+      chmodSync(fetchHeadPath, 0o644);
+    }
+    expect(readFileSync(fetchHeadPath, "utf8")).toBe(beforeContent);
+    expect(await spawnGit(join(cache, "team"), "rev-parse", "--verify", "FETCH_HEAD")).toBe(c1);
   });
 });
