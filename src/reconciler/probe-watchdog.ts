@@ -6,6 +6,7 @@ export type WatchEntry = {
   fd: number;
   delayMs: number;
   tag?: string;
+  reported?: boolean;
   resultFd?: number;
   spareFile?: string;
   spareFd?: number;
@@ -41,6 +42,9 @@ export async function watchEntries(entries: WatchEntry[], clock: WatchClock = re
   const runnerDead = new Set<WatchEntry>();
   const runnerReported = new Map<WatchEntry, boolean>();
   const resultState = new Map<WatchEntry, "reported" | "closed">();
+  for (const entry of entries) {
+    if (entry.reported) resultState.set(entry, "reported");
+  }
   const resultReported = (entry: WatchEntry): boolean => {
     const known = resultState.get(entry);
     if (known === "reported") return true;
@@ -289,6 +293,7 @@ if (import.meta.main) {
           typeof (item as WatchEntry).pid === "number" &&
           typeof (item as WatchEntry).fd === "number" &&
           typeof (item as WatchEntry).delayMs === "number" &&
+          ((item as WatchEntry).reported === undefined || typeof (item as WatchEntry).reported === "boolean") &&
           ((item as WatchEntry).resultFd === undefined || typeof (item as WatchEntry).resultFd === "number") &&
           ((item as WatchEntry).spareFile === undefined || typeof (item as WatchEntry).spareFile === "string") &&
           ((item as WatchEntry).spareFd === undefined || typeof (item as WatchEntry).spareFd === "number") &&

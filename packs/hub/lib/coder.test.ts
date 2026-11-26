@@ -728,17 +728,53 @@ test("watchdog kills a real stopped process group when its controlled clock reac
   const fastFd = fastSup.stdio[3] as number;
   try {
     expect(await fastSup.exited).toBe(0);
-    let slept = false;
     await watchEntries([{ pid: fastSup.pid, fd: fastFd, delayMs: 60_000 }], {
       now: () => 0,
-      sleep: async () => {
-        slept = true;
-      },
+      sleep: () => new Promise<void>(() => {}),
     });
-    expect(slept).toBe(false);
   } finally {
     try { closeSync(fastFd); } catch {}
     try { fastSup.kill("SIGKILL"); } catch {}
+  }
+});
+
+test("lets a box-locked command finish its work when the caller receives SIGTERM outside a probe", async () => {
+  const lockHome = temp.make("hedge-lock-sigterm-");
+  const dir = temp.make("hedge-lock-sigterm-work-");
+  const [ready, gate, doneFile] = [join(dir, "ready"), join(dir, "gate"), join(dir, "done")];
+  expect(Bun.spawnSync(["mkfifo", ready, gate]).exitCode).toBe(0);
+  const started = Bun.file(ready).text();
+  const boxLockPath = join(import.meta.dir, "box-lock.ts");
+  const coderPath = join(import.meta.dir, "coder.ts");
+  const callerScript = `import { withBoxLock } from ${JSON.stringify(boxLockPath)};
+import { capture } from ${JSON.stringify(coderPath)};
+await withBoxLock(${JSON.stringify(lockHome)}, "box-1", { waitMs: 0 }, () =>
+  capture(["sh", "-c", 'echo $$ > "$1"; cat "$2" >/dev/null; echo finished > "$3"', "locked", ${JSON.stringify(ready)}, ${JSON.stringify(gate)}, ${JSON.stringify(doneFile)}], { timeoutMs: 30_000 }),
+);`;
+  const caller = Bun.spawn([process.execPath, "-e", callerScript], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  let workerPid = 0;
+  try {
+    workerPid = Number((await started).trim());
+    expect(workerPid).toBeGreaterThan(0);
+    caller.kill("SIGTERM");
+    expect(await caller.exited).not.toBe(0);
+    expect(() => process.kill(workerPid, 0)).not.toThrow();
+    await expect(withBoxLock(lockHome, "box-1", { waitMs: 0 }, async () => "free")).rejects.toThrow("is busy");
+    const writer = Bun.spawn(["sh", "-c", 'printf "go\\n" > "$1"', "writer", gate], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    await writer.exited;
+    expect(await withBoxLock(lockHome, "box-1", { waitMs: 5_000 }, async () => "acquired")).toBe("acquired");
+    expect(readFileSync(doneFile, "utf8").trim()).toBe("finished");
+  } finally {
+    caller.kill("SIGKILL");
+    if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
   }
 });
 

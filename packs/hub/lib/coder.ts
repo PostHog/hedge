@@ -3,7 +3,7 @@ import { rm, rmdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { boxPrefix } from "../../../src/hub/names.ts";
-import { appendTag, createPipe, drainControlFd, killDeadSession, killDeadSessionSync, killSession, killSessionSync, parseSpareLine, readFdChunk, setCloexec, spareEnvVar, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
+import { appendTag, createPipe, drainControlFd, killDeadSessionSync, killSessionSync, parseSpareLine, readFdChunk, setCloexec, spareEnvVar, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
 import { bunScript } from "../../../src/runner/bun.ts";
 import { heldLocks } from "./box-lock.ts";
 
@@ -197,6 +197,8 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       try { closeSync(configPipe.writeFd); } catch {}
     };
     let child: ReturnType<typeof Bun.spawn> | undefined;
+    const parentTag = env?.[tagEnvVar] ?? process.env[tagEnvVar];
+    const keepAliveOnSignal = locks.length > 0 && !parentTag;
     const tag = crypto.randomUUID();
     const inheritedSpare = env?.[spareEnvVar] || process.env[spareEnvVar] || undefined;
     const sparePipe = inheritedSpare ? undefined : createPipe();
@@ -245,15 +247,74 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         closeSync(fd);
       } catch {}
     };
-    const killGroups = () => {
+    const runOutOfProcessSweep = async (): Promise<void> => {
       if (!child) return;
+      const pid = child.pid;
       const spare = resolveSpareFile();
-      if (!supervisorReaped) {
-        killSessionSync(child.pid, "SIGKILL", tag, spare);
-        return;
+      let tempPipe: { readFd: number; writeFd: number } | undefined;
+      let fd: number;
+      if (!supervisorReaped && controlFd !== undefined) {
+        fd = controlFd;
+        controlFd = undefined;
+      } else {
+        tempPipe = createPipe();
+        if (!tempPipe) {
+          if (!supervisorReaped) {
+            try {
+              child.kill("SIGKILL");
+            } catch {}
+          }
+          return;
+        }
+        try {
+          closeSync(tempPipe.readFd);
+        } catch {}
+        fd = tempPipe.writeFd;
       }
-      const sweep = killDeadSession(child.pid, tag, true, spare);
-      if (sweep && typeof (sweep as Promise<void>).then === "function") tagSweep = sweep as Promise<void>;
+      setCloexec(fd, false);
+      const extraFds = [fd];
+      let watchdogSpareFd: number | undefined;
+      if (!spare && sparePipe && !spareReadClosed) {
+        watchdogSpareFd = 3 + extraFds.length;
+        extraFds.push(sparePipe.readFd);
+        setCloexec(sparePipe.readFd, false);
+        spareReadClosed = true;
+      }
+      let helper: ReturnType<typeof Bun.spawn> | undefined;
+      try {
+        const payload = JSON.stringify([
+          {
+            pid,
+            tag,
+            ...(spare ? { spareFile: spare } : watchdogSpareFd !== undefined ? { spareFd: watchdogSpareFd } : {}),
+            ...(inheritedSpare ? { keepSpareFile: true } : {}),
+            fd: 3,
+            delayMs: 0,
+          },
+        ]);
+        helper = Bun.spawn(bunScript(probeWatchdog, payload), {
+          env: watchdogEnv(),
+          stdio: ["ignore", "ignore", "ignore", ...extraFds],
+          detached: true,
+        });
+        if (spare || watchdogSpareFd !== undefined) spareHandedOff = true;
+      } catch {
+        if (!supervisorReaped) {
+          try {
+            child.kill("SIGKILL");
+          } catch {}
+        }
+      } finally {
+        for (const extra of extraFds) {
+          try {
+            closeSync(extra);
+          } catch {}
+        }
+      }
+      if (helper) {
+        await waitUpTo(helper.exited, 500);
+        helper.unref();
+      }
     };
     const stopChild = () => {
       stopped = true;
@@ -269,16 +330,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         } catch {}
         return;
       }
-      killGroups();
-    };
-    const killStalled = () => {
-      if (!child) return;
-      killGroups();
-      if (!supervisorReaped) {
-        try {
-          child.kill("SIGKILL");
-        } catch {}
-      }
+      if (!tagSweep) tagSweep = runOutOfProcessSweep();
     };
     const interrupted = (name: NodeJS.Signals) => {
       stopChild();
@@ -356,7 +408,9 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     const release = () => {
       for (const name of stopSignals) process.off(name, interrupted);
     };
-    for (const name of stopSignals) process.on(name, interrupted);
+    if (!keepAliveOnSignal) {
+      for (const name of stopSignals) process.on(name, interrupted);
+    }
     let expired = false;
     let cancel = () => {};
     let hardKill: ReturnType<typeof setTimeout> | undefined;
@@ -432,7 +486,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         closeControl();
         const reported = resultRead ? await resultRead : undefined;
         if (reported) settle(reported);
-        if (!confirmedDone || expired) killGroups();
+        if (!confirmedDone && !expired && !tagSweep) tagSweep = runOutOfProcessSweep();
         settle({ code });
       });
       let forceExpired = false;
@@ -441,7 +495,6 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         stopChild();
         hardKill = setTimeout(() => {
           forceExpired = true;
-          killStalled();
           stopStream.abort();
           settle({ code: timedOut });
         }, supervisorGraceMs);
@@ -490,17 +543,12 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         throw error;
       }
       if (expired) {
-        if (!supervisorReaped) {
-          await waitUpTo(live.exited, forceExpired ? 50 : supervisorGraceMs);
-          if (!supervisorReaped) {
-            killStalled();
-            await waitUpTo(live.exited, 50);
-          }
+        if (!supervisorReaped && !forceExpired) {
+          await waitUpTo(live.exited, supervisorGraceMs);
         }
-        const spare = resolveSpareFile();
         if (tagSweep) await tagSweep;
-        else if (supervisorReaped && forceExpired) await killDeadSession(live.pid, tag, true, spare);
-        else if (!supervisorReaped) await killSession(live.pid, "SIGKILL", tag, undefined, spare);
+        else await runOutOfProcessSweep();
+        if (!supervisorReaped) await waitUpTo(live.exited, 50);
         return timeoutResult(timeoutMs, stdout);
       }
       cancel();

@@ -642,7 +642,7 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
         pid: entry.pid,
         ...(entry.holderPid !== undefined ? { holderPid: entry.holderPid } : {}),
         ...(holderFd !== undefined ? { holderFd } : {}),
-        ...(entry.targetExited ? {} : { tag: entry.tag }),
+        ...(entry.targetExited ? { reported: true } : { tag: entry.tag }),
         ...(entry.spareFile ? { spareFile: entry.spareFile } : {}),
         ...(spareFd !== undefined ? { spareFd } : {}),
         fd,

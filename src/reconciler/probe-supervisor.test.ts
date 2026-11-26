@@ -1827,15 +1827,16 @@ await h.exited;`;
     const envBin = Bun.which("env") ?? "/usr/bin/env";
     const shBin = Bun.which("sh") ?? "/bin/sh";
     const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
-    const [daemonReady, daemonGone, strayReady, strayGone, holdReady, holdGate] = [
+    const [daemonReady, daemonGone, strayReady, strayGone, firstExitGate, holdReady, holdGate] = [
       join(dir, "daemon-ready"),
       join(dir, "daemon-gone"),
       join(dir, "stray-ready"),
       join(dir, "stray-gone"),
+      join(dir, "first-exit-gate"),
       join(dir, "hold-ready"),
       join(dir, "hold-gate"),
     ];
-    mkfifo(daemonReady, daemonGone, strayReady, strayGone, holdReady, holdGate);
+    mkfifo(daemonReady, daemonGone, strayReady, strayGone, firstExitGate, holdReady, holdGate);
     const daemonStarted = fifoRead(daemonReady);
     const daemonClosed = fifoRead(daemonGone);
     const strayStarted = fifoRead(strayReady);
@@ -1849,6 +1850,7 @@ const res = await capture([process.execPath, "-e", ${JSON.stringify(daemonScript
 if (res.code !== 0) process.exit(2);
 const s = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'trap "" HUP TERM; exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "stray", ${JSON.stringify(strayGone)}, ${JSON.stringify(strayReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 s.unref();
+await Bun.file(${JSON.stringify(firstExitGate)}).text();
 process.exit(0);`;
     const holdProbe = `${shBin} -c 'echo $$ > "$1"; cat "$2" >/dev/null' hold ${JSON.stringify(holdReady)} ${JSON.stringify(holdGate)}`;
     const prevTmp = process.env.TMPDIR;
@@ -1866,14 +1868,21 @@ process.exit(0);`;
       };
       const pending = humanStepsLeft(plan, { home: dir, giveUp: new Promise<void>(() => {}), graceMs: 0 });
       [daemonPid, strayPid, holdPid] = (await Promise.all([daemonStarted, strayStarted, holdStarted])).map((s) => Number(s.trim())) as [number, number, number];
+      await fifoWrite(firstExitGate, "go\n");
       expect(await strayClosed).toBe("");
       await fifoWrite(holdGate, "go\n");
       expect(await pending).toEqual({ failing: [], unchecked: [] });
       expect(() => process.kill(daemonPid, 0)).not.toThrow();
-      const uid = typeof process.getuid === "function" ? String(process.getuid()) : "u";
-      const supDir = join(tmp, `hedge-sup-${uid}`);
-      const left = existsSync(supDir) ? readdirSync(supDir) : [];
-      expect(left).toEqual([]);
+      const collect = (root: string): string[] => {
+        const entries: string[] = [];
+        for (const entry of readdirSync(root, { withFileTypes: true })) {
+          const full = join(root, entry.name);
+          entries.push(full);
+          if (entry.isDirectory()) entries.push(...collect(full));
+        }
+        return entries;
+      };
+      expect(collect(tmp)).toEqual([]);
     } finally {
       if (prevTmp === undefined) delete process.env.TMPDIR;
       else process.env.TMPDIR = prevTmp;
@@ -1884,19 +1893,81 @@ process.exit(0);`;
     }
   });
 
-  test("does not invoke an injected probe runner when giveUp is already resolved", async () => {
-    const dir = temp.make("sup-injected-resolved-");
-    let called = 0;
-    const res = await humanStepsLeft(probePlan("already-late", ["true"]), {
-      home: dir,
-      giveUp: Promise.resolve(),
-      run: async () => {
-        called++;
-        return 0;
-      },
-    });
-    expect(called).toBe(0);
+  test("preserves a separate-group helper when SIGINT hands a completed probe off to the watchdog", async () => {
+    const dir = temp.make("sup-watchdog-separate-pgid-");
+    const shBin = Bun.which("sh") ?? "/bin/sh";
+    const [helperReady, helperGone, strayReady, strayGone, straySawTerm, exitGate, holdReady] = [
+      join(dir, "helper-ready"),
+      join(dir, "helper-gone"),
+      join(dir, "stray-ready"),
+      join(dir, "stray-gone"),
+      join(dir, "stray-saw-term"),
+      join(dir, "exit-gate"),
+      join(dir, "hold-ready"),
+    ];
+    mkfifo(helperReady, helperGone, strayReady, strayGone, straySawTerm, exitGate, holdReady);
+    const helperStarted = fifoRead(helperReady);
+    const helperClosed = fifoRead(helperGone);
+    const strayStarted = fifoRead(strayReady);
+    const strayClosed = fifoRead(strayGone);
+    const sawTerm = fifoRead(straySawTerm);
+    const holdStarted = fifoRead(holdReady);
+    const helperScript = `import { dlopen, FFIType } from "bun:ffi";
+const lib = dlopen(process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6", { setpgid: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
+if (lib.symbols.setpgid(0, 0) !== 0) process.exit(2);
+const c = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "helper", ${JSON.stringify(helperGone)}, ${JSON.stringify(helperReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await c.exited;`;
+    const strayCmd = 'trap \'echo term > "$3"\' TERM; trap "" INT; exec 3>"$1"; echo $$ > "$2"; while true; do sleep 30 3>&- & wait; done';
+    const probeScript = `const h = Bun.spawn([process.execPath, "-e", ${JSON.stringify(helperScript)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+h.unref();
+const s = Bun.spawn([${JSON.stringify(shBin)}, "-c", ${JSON.stringify(strayCmd)}, "stray", ${JSON.stringify(strayGone)}, ${JSON.stringify(strayReady)}, ${JSON.stringify(straySawTerm)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+s.unref();
+await Bun.file(${JSON.stringify(exitGate)}).text();
+process.exit(0);`;
+    const runnerScript = `import { humanStepsLeft } from ${JSON.stringify(applyPath)};
+await humanStepsLeft({
+  machine: { schema: 1, role: "linux" },
+  os: process.platform === "darwin" ? "darwin" : "linux",
+  ai: "both",
+  packs: [], workflows: [], files: [], config: [], owners: {}, jobs: [],
+  human: [
+    { id: "fast", pack: "team", say: "Fast.", probe: [process.execPath, "-e", ${JSON.stringify(probeScript)}] },
+    { id: "hold", pack: "team", say: "Hold.", probe: [${JSON.stringify(shBin)}, "-c", 'echo $$ > "$1"; exec sleep 30', "hold", ${JSON.stringify(holdReady)}] },
+  ],
+  steps: [], checks: [], commands: {}, handlers: {}, models: [], settings: {}, unanswered: [], ask: [], dropped: [],
+}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}), graceMs: 0 });`;
+    const runner = Bun.spawn([process.execPath, "-e", runnerScript], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    let helperPid = 0;
+    let strayPid = 0;
+    let holdPid = 0;
+    try {
+      [helperPid, strayPid, holdPid] = (await Promise.all([helperStarted, strayStarted, holdStarted])).map((s) => Number(s.trim())) as [number, number, number];
+      await fifoWrite(exitGate, "go\n");
+      expect((await sawTerm).trim()).toBe("term");
+      runner.kill("SIGINT");
+      await runner.exited;
+      expect(await strayClosed).toBe("");
+      expect(() => process.kill(helperPid, 0)).not.toThrow();
+    } finally {
+      if (helperPid > 0) try { process.kill(helperPid, "SIGKILL"); } catch {}
+      if (strayPid > 0) try { process.kill(strayPid, "SIGKILL"); } catch {}
+      if (holdPid > 0) try { process.kill(holdPid, "SIGKILL"); } catch {}
+      runner.kill("SIGKILL");
+      await runner.exited.catch(() => {});
+      await helperClosed.catch(() => {});
+    }
+  });
+
+  test("skips running a real probe when giveUp is already resolved", async () => {
+    const dir = temp.make("sup-already-resolved-");
+    const shBin = Bun.which("sh") ?? "/bin/sh";
+    const marker = join(dir, "ran");
+    const res = await humanStepsLeft(
+      probePlan("already-late", [shBin, "-c", `echo ran > ${JSON.stringify(marker)}`]),
+      { home: dir, giveUp: Promise.resolve() },
+    );
     expect(res.failing).toEqual([]);
     expect(res.unchecked.map((s) => s.id)).toEqual(["already-late"]);
+    expect(existsSync(marker)).toBe(false);
   });
 });

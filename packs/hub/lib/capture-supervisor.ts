@@ -122,7 +122,10 @@ const watchControl = (fd: number, initialBuf = "") => {
     } catch {}
     if (!killing) {
       if (confirmedDone) exitDone();
-      if (lockCount > 0 && !targetReaped && !hasParentTag) process.exit(0);
+      if (lockCount > 0 && !targetReaped && !hasParentTag) {
+        if (!inheritedSpare && sparePath) removeSpareFile(sparePath);
+        process.exit(0);
+      }
       killAll(true);
     }
   })();
