@@ -188,7 +188,8 @@ const forwardGraceful = (sig: StopSignal) => {
 
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
   process.on(sig, () => {
-    receivedSignals.add(sig);
+    if (inProbe) forwardGraceful(sig);
+    else receivedSignals.add(sig);
   });
 }
 
@@ -200,7 +201,7 @@ const closeQuiet = (fd: number) => {
 
 const writeResult = (
   fd: number,
-  payload: { spareFile: string } | { targetPid: number } | { code: number } | { error: string; code?: string } | { saved: true } | { spareError: string; code?: string },
+  payload: { spareFile: string } | { code: number } | { error: string; code?: string } | { saved: true } | { spareError: string; code?: string },
 ) => {
   const bytes = new TextEncoder().encode(JSON.stringify(payload) + "\n");
   try {
@@ -346,7 +347,6 @@ if (!parsed || killing || gracefulSignal) {
   try {
     target = Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio, detached: true });
     targetPid = target.pid;
-    writeResult(ipcFd, { targetPid });
   } catch (error) {
     for (const fd of lockFds) closeQuiet(fd);
     redirectStdioOutputsToNull();

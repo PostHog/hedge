@@ -64,23 +64,20 @@ function mkfifo(...paths: string[]) {
 }
 
 describe("probe supervisor", () => {
-  test("supervise escalates SIGINT and SIGQUIT through SIGTERM to SIGKILL on a real subprocess", async () => {
-    const { bunScript } = await import("../runner/bun.ts");
-    const supervisorScript = join(import.meta.dir, "probe-supervisor.ts");
-    const shBin = Bun.which("sh") ?? "/bin/sh";
-    for (const [sig, trapName] of [
-      ["SIGINT", "INT"],
-      ["SIGQUIT", "QUIT"],
-    ] as const) {
-      const dir = temp.make(`sup-escalate-${trapName.toLowerCase()}-`);
+  for (const [sig, trapName] of [
+    ["SIGINT", "INT"],
+    ["SIGQUIT", "QUIT"],
+  ] as const) {
+    test(`escalates real ${sig} through SIGTERM to SIGKILL on a probe that stays alive on ${sig} and SIGTERM`, async () => {
+      const dir = temp.make(`sup-esc-${trapName.toLowerCase()}-`);
       const [ready, sawStop, sawTerm, gone] = [join(dir, "ready"), join(dir, "stop"), join(dir, "term"), join(dir, "gone")];
       mkfifo(ready, sawStop, sawTerm, gone);
       const started = fifoRead(ready);
       const gotStop = fifoRead(sawStop);
       const gotTerm = fifoRead(sawTerm);
-      const closed = fifoRead(gone);
-      const cmd = [
-        shBin,
+      const holderGone = fifoRead(gone);
+      const probeCmd = [
+        "sh",
         "-c",
         `trap 'echo stop > "$3"' ${trapName}; trap 'echo term > "$4"' TERM; exec 3>"$1"; echo $$ > "$2"; while :; do sleep 30 3>&- & wait; done`,
         "probe",
@@ -89,49 +86,8 @@ describe("probe supervisor", () => {
         sawStop,
         sawTerm,
       ];
-      const payload = JSON.stringify({ command: cmd, graceMs: 150, interruptGraceMs: 250 });
-      const sup = Bun.spawn(bunScript(supervisorScript), {
-        stdin: new TextEncoder().encode(payload),
-        stdout: "pipe",
-        stderr: "ignore",
-        detached: true,
-      });
-      let childPid = 0;
-      try {
-        childPid = Number((await started).trim());
-        expect(childPid).toBeGreaterThan(0);
-        process.kill(sup.pid, sig);
-        expect((await gotStop).trim()).toBe("stop");
-        expect((await gotTerm).trim()).toBe("term");
-        expect(await closed).toBe("");
-        const exitCode = await sup.exited;
-        expect(exitCode).not.toBe(0);
-        expect(sup.signalCode === "SIGKILL" || exitCode === 137 || exitCode === 143).toBe(true);
-      } finally {
-        try { process.kill(-sup.pid, "SIGKILL"); } catch {}
-        if (childPid > 0) try { process.kill(-childPid, "SIGKILL"); } catch {}
-        await sup.exited.catch(() => {});
-      }
-    }
-  });
-
-  for (const sig of ["SIGINT", "SIGQUIT"] as const) {
-    test(`escalates real ${sig} through SIGTERM to SIGKILL on a probe that stays alive on ${sig} and SIGTERM`, async () => {
-      const dir = temp.make("sup-esc-");
-      const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
-      mkfifo(ready, gone);
-      const started = fifoRead(ready);
-      const holderGone = fifoRead(gone);
-      const probeCmd = [
-        "sh",
-        "-c",
-        'trap "" INT QUIT TERM; exec 3>"$1"; echo $$ > "$2"; exec sleep 30',
-        "probe",
-        gone,
-        ready,
-      ];
       const runnerScript = `import { humanStepsLeft } from ${JSON.stringify(applyPath)};
-await humanStepsLeft(${JSON.stringify(probePlan("esc", probeCmd))}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}), graceMs: 0, interruptGraceMs: 0 });`;
+await humanStepsLeft(${JSON.stringify(probePlan("esc", probeCmd))}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}), graceMs: 250, interruptGraceMs: 250 });`;
       const runner = Bun.spawn([process.execPath, "-e", runnerScript], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
       let pid = 0;
       try {
@@ -139,6 +95,8 @@ await humanStepsLeft(${JSON.stringify(probePlan("esc", probeCmd))}, { home: ${JS
         expect(pid).toBeGreaterThan(0);
 
         runner.kill(sig);
+        expect((await gotStop).trim()).toBe("stop");
+        expect((await gotTerm).trim()).toBe("term");
         expect(await holderGone).toBe("");
         expect(await runner.exited).not.toBe(0);
       } finally {
@@ -1942,7 +1900,7 @@ await Bun.sleep(30_000);`;
     let daemonPid = 0;
     let jobPid = 0;
     try {
-      const daemonHelper = `const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+      const daemonHelper = `const d = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 d.unref();`;
       const jobScript = `import { dlopen, FFIType } from "bun:ffi";
 const lib = dlopen(process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6", { setpgid: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } });

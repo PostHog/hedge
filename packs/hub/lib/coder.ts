@@ -266,7 +266,6 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     const tag = inProbe ? `probe-${crypto.randomUUID()}` : crypto.randomUUID();
     const inheritedSpare = env?.[spareEnvVar] || process.env[spareEnvVar] || undefined;
     let spareFile: string | undefined = inheritedSpare;
-    let targetPid: number | undefined;
     let spareHandedOff = Boolean(inheritedSpare);
     let stopped = false;
     let supervisorReaped = false;
@@ -318,7 +317,6 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           {
             pid,
             tag,
-            ...(targetPid !== undefined ? { targetPid } : {}),
             ...(spare ? { spareFile: spare } : {}),
             ...(inheritedSpare ? { keepSpareFile: true } : {}),
             fd: 3,
@@ -395,7 +393,6 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
             {
               pid: child.pid,
               tag,
-              ...(targetPid !== undefined ? { targetPid } : {}),
               ...(spare ? { spareFile: spare } : {}),
               ...(inheritedSpare ? { keepSpareFile: true } : {}),
               fd: 3,
@@ -516,23 +513,17 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           const line = raw.trim();
           if (!line) return undefined;
           try {
-            const record = JSON.parse(line) as { spareFile?: unknown; targetPid?: unknown; code?: unknown; error?: unknown };
+            const record = JSON.parse(line) as { spareFile?: unknown; code?: unknown; error?: unknown };
             if (typeof record.spareFile === "string" && record.spareFile.length > 0) {
               if (!spareFile) spareFile = record.spareFile;
               continue;
             }
-            if (typeof record.targetPid === "number" && Number.isInteger(record.targetPid) && record.targetPid > 0) {
-              targetPid = record.targetPid;
-              continue;
-            }
             if (typeof record.error === "string") {
-              targetPid = undefined;
               const status = { error: record.error, ...(typeof record.code === "string" ? { errCode: record.code } : {}) };
               settle(status);
               return status;
             }
             if (typeof record.code === "number") {
-              targetPid = undefined;
               const status = { code: record.code };
               settle(status);
               return status;

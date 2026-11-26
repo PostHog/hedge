@@ -859,18 +859,35 @@ test("kills the direct target on timeout when the inherited spare file is unread
   }
 });
 
-test("delivers a single SIGTERM to the captured command when the caller receives one SIGTERM inside a probe", async () => {
+test("delivers a single SIGTERM to the captured command when an enclosing human probe receives SIGTERM", async () => {
   const dir = temp.make("hedge-capture-single-term-");
-  const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+  const [ready, sawTerm, gate, gone] = [join(dir, "ready"), join(dir, "saw-term"), join(dir, "gate"), join(dir, "gone")];
   const logFile = join(dir, "term.log");
-  expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+  expect(Bun.spawnSync(["mkfifo", ready, sawTerm, gate, gone]).exitCode).toBe(0);
   const started = Bun.file(ready).text();
+  const gotTerm = Bun.file(sawTerm).text();
   const closed = Bun.file(gone).text();
   const coderPath = join(import.meta.dir, "coder.ts");
-  const callerScript = `import { capture } from ${JSON.stringify(coderPath)};
-await capture(["sh", "-c", 'trap "echo term >> \\"$3\\"; exit 0" TERM; exec 3>"$1"; echo $$ > "$2"; while :; do sleep 30 3>&- & wait; done', "target", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}, ${JSON.stringify(logFile)}], { timeoutMs: 10_000 });`;
-  const caller = Bun.spawn([process.execPath, "-e", callerScript], {
-    env: { ...process.env, HEDGE_SUPERVISOR_TAG: `probe-${crypto.randomUUID()}` },
+  const applyPath = join(import.meta.dir, "../../../src/reconciler/apply.ts");
+  const probeScript = `import { capture } from ${JSON.stringify(coderPath)};
+await capture(["sh", "-c", 'trap "echo term >> \\"$3\\"; echo hit > \\"$4\\"" TERM; exec 3>"$1"; echo $$ > "$2"; (trap "" TERM; cat "$5" >/dev/null) 3>&- & w=$!; while kill -0 "$w" 2>/dev/null; do wait "$w"; done', "target", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}, ${JSON.stringify(logFile)}, ${JSON.stringify(sawTerm)}, ${JSON.stringify(gate)}], { timeoutMs: 10_000 });`;
+  const plan = {
+    schema: 1,
+    engine: { repo: "PostHog/hedge", ref: "main", channel: "track" },
+    machine: { role: "linux", profileDir: dir },
+    packs: [{ name: "team", summary: "Team.", available: true, workflows: [] }],
+    files: [],
+    config: [],
+    steps: [],
+    checks: [],
+    human: [{ id: "nested", pack: "team", say: "Nested.", probe: [process.execPath, "-e", probeScript] }],
+    jobs: [],
+    settings: {},
+    dropped: [],
+  };
+  const runnerScript = `import { humanStepsLeft } from ${JSON.stringify(applyPath)};
+await humanStepsLeft(${JSON.stringify(plan)}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}), graceMs: 1_500 });`;
+  const runner = Bun.spawn([process.execPath, "-e", runnerScript], {
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",
@@ -879,12 +896,15 @@ await capture(["sh", "-c", 'trap "echo term >> \\"$3\\"; exit 0" TERM; exec 3>"$
   try {
     targetPid = Number((await started).trim());
     expect(targetPid).toBeGreaterThan(0);
-    caller.kill("SIGTERM");
+    runner.kill("SIGTERM");
+    expect((await gotTerm).trim()).toBe("hit");
+    const release = Bun.spawn(["sh", "-c", 'printf "go\\n" > "$1"', "writer", gate], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    await release.exited;
     expect(await closed).toBe("");
-    await caller.exited;
+    await runner.exited;
     expect(readFileSync(logFile, "utf8").trim().split("\n")).toEqual(["term"]);
   } finally {
-    caller.kill("SIGKILL");
+    runner.kill("SIGKILL");
     if (targetPid > 0) try { process.kill(targetPid, "SIGKILL"); } catch {}
   }
 });

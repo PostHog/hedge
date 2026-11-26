@@ -16,7 +16,6 @@ export type WatchEntry = {
   keepSpareFile?: boolean;
   holderPid?: number;
   holderFd?: number;
-  targetPid?: number;
 };
 export type WatchClock = { now: () => number; sleep: (ms: number) => Promise<void> };
 
@@ -340,17 +339,7 @@ export async function watchEntries(
                 const skipDetached = spared === undefined;
                 const initialTag = skipDetached ? undefined : entry.tag;
                 const targets = await discoverTargets(entry.pid, initialTag, spared, false, skipDetached);
-                const extraTargets =
-                  entry.targetPid !== undefined && entry.targetPid !== entry.pid
-                    ? await discoverTargets(entry.targetPid, undefined, spared, false, skipDetached)
-                    : undefined;
                 if (alive(entry.fd) && !resultReported(entry)) {
-                  if (extraTargets && entry.targetPid !== undefined) {
-                    signalTargets(extraTargets, "SIGKILL", entry.targetPid);
-                    try {
-                      process.kill(entry.targetPid, "SIGKILL");
-                    } catch {}
-                  }
                   signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.pid);
                   try {
                     process.kill(entry.pid, "SIGKILL");
@@ -358,10 +347,20 @@ export async function watchEntries(
                   sweptDead = true;
                   await sweepDead(entry, resultReported(entry), true);
                 } else {
+                  if (alive(entry.fd)) {
+                    try {
+                      process.kill(entry.pid, "SIGKILL");
+                    } catch {}
+                  }
                   sweptDead = true;
                   await sweepDead(entry, resultReported(entry), true);
                 }
               } else {
+                if (alive(entry.fd)) {
+                  try {
+                    process.kill(entry.pid, "SIGKILL");
+                  } catch {}
+                }
                 sweptDead = true;
                 await sweepDead(entry, true, true);
               }
@@ -407,8 +406,7 @@ if (import.meta.main) {
           ((item as WatchEntry).spareFd === undefined || typeof (item as WatchEntry).spareFd === "number") &&
           ((item as WatchEntry).keepSpareFile === undefined || typeof (item as WatchEntry).keepSpareFile === "boolean") &&
           ((item as WatchEntry).holderPid === undefined || typeof (item as WatchEntry).holderPid === "number") &&
-          ((item as WatchEntry).holderFd === undefined || typeof (item as WatchEntry).holderFd === "number") &&
-          ((item as WatchEntry).targetPid === undefined || typeof (item as WatchEntry).targetPid === "number"),
+          ((item as WatchEntry).holderFd === undefined || typeof (item as WatchEntry).holderFd === "number"),
       );
     }
   } catch {}
