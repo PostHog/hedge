@@ -743,8 +743,9 @@ describe("hedge triage", () => {
     expect(issue.input).not.toContain("secret/internal-release");
     expect(issue.input).not.toContain("secret/old-branch");
     expect(issue.input).not.toContain("secret/refresh-branch");
-    expect(issue.input).toContain("could not record <ref> from <team source>: could not record pinned commit; using <ref> instead");
-    expect(issue.input).toContain("could not record <ref> of <team source> at 0123456789ab: could not record pinned commit");
+    expect(issue.input).not.toContain("<team source>");
+    expect(issue.input).toContain("could not record <ref> from <private repo>; using <ref> instead");
+    expect(issue.input).toContain("could not record <ref> of <private repo>");
   });
 
   test("redacts Unicode whitespace branches, 40-hex branch names, and unconfigured private repos in could-not-record diagnostics", async () => {
@@ -790,13 +791,13 @@ describe("hedge triage", () => {
     expect(issue.input).not.toContain("secret\u00a0refresh");
     expect(issue.input).not.toContain("acme/unlisted-packs");
     expect(issue.input).not.toContain(hexBranch);
-    expect(issue.input).toContain("could not record <ref> from <private repo>: could not record pinned commit; using <ref> instead");
-    expect(issue.input).toContain("The ops pack is not applied: could not record <ref> from <private repo>: could not record pinned commit");
-    expect(issue.input).toContain("could not record <ref> of <private repo> at 0123456789ab: could not record pinned commit");
+    expect(issue.input).toContain("could not record <ref> from <private repo>; using <ref> instead");
+    expect(issue.input).toContain("The ops pack is not applied: could not record <ref> from <private repo>");
+    expect(issue.input).toContain("could not record <ref> of <private repo>");
     expect(issue.input).toContain("could not record <ref> of Silthus/agent-skills at 0123456789ab: could not record pinned commit");
   });
 
-  test("preserves complete redaction when a configured or unlisted local repo path in could-not-record contains ': '", async () => {
+  test("scrubs private source names and repo paths containing ': error: ' in could-not-record diagnostics", async () => {
     const home = temp.make("home-record-colon-path-");
     const profileDir = join(home, "profile");
     const configuredRepo = "/mnt/confidential: project/private-packs";
@@ -806,7 +807,7 @@ describe("hedge triage", () => {
       JSON.stringify({
         schema: 1,
         engine: { repo: "PostHog/hedge", ref: "v1", channel: "release" },
-        sources: [{ name: "team", repo: configuredRepo, ref: "main" }],
+        sources: [{ name: "secret-team", repo: configuredRepo, ref: "main" }],
         packs: ["ops"],
         plan: "both",
         settings: {},
@@ -821,7 +822,7 @@ describe("hedge triage", () => {
       join(logs, "setup.log"),
       [
         `Note: The ops pack uses its last fetched files: could not record secret/branch from ${configuredRepo}: could not record pinned commit; using secret/old instead`,
-        "Note: The ops pack is not applied: could not record secret/branch from /mnt/unlisted: secret/other-packs: could not record pinned commit",
+        "Note: The ops pack is not applied: could not record secret/branch from /mnt/demo: error: example/hidden-folder: could not record pinned commit",
       ].join("\n") + "\n",
     );
     const sent: Sent[] = [];
@@ -848,12 +849,13 @@ describe("hedge triage", () => {
     });
     expect(code).toBe(0);
     const issue = sent.find((call) => call.command[1] === "issue")!;
+    expect(issue.input).not.toContain("secret-team");
     expect(issue.input).not.toContain("confidential");
     expect(issue.input).not.toContain("project/private-packs");
-    expect(issue.input).not.toContain("unlisted");
-    expect(issue.input).not.toContain("secret/other-packs");
-    expect(issue.input).toContain("could not record <ref> from <team source>: could not record pinned commit; using <ref> instead");
-    expect(issue.input).toContain("could not record <ref> from <private repo>: could not record pinned commit");
+    expect(issue.input).not.toContain("hidden-folder");
+    expect(issue.input).not.toContain("/mnt/demo");
+    expect(issue.input).toContain("could not record <ref> from <private repo>; using <ref> instead");
+    expect(issue.input).toContain("The ops pack is not applied: could not record <ref> from <private repo>");
   });
 });
 

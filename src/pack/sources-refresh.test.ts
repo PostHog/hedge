@@ -858,6 +858,75 @@ describe("fetchSource staged refresh and rollback", () => {
     expect(movedMulti).toMatchObject({ state: "moved", commit: m4 });
     expect(await spawnGit(multiDir, "rev-parse", "refs/remotes/origin/main")).toBe(m4);
     expect(await spawnGit(multiDir, "rev-parse", nbspDest)).toBe(m4);
+
+    await spawnGit(multiDir, "remote", "add", "mirror=one", upstream);
+    await spawnGit(multiDir, "config", "--replace-all", "remote.mirror=one.fetch", "+refs/heads/main:refs/remotes/mirror=one/main");
+    await spawnGit(multiDir, "config", "protocol.file.allow", "never");
+    expect("error" in (await fetchSource({ name: "team", repo: "origin", ref: "main" }, multiCache))).toBe(false);
+    const m5 = await commitPack(upstream, "team", "Main v5.");
+    await spawnGit(multiDir, "config", "--unset", "protocol.file.allow");
+    const movedProtoCache = temp.make("cache-proto-file-never-");
+    const movedProtoDir = join(movedProtoCache, "team");
+    await spawnGit(root, "clone", "-q", "-b", "main", upstream, movedProtoDir);
+    await spawnGit(movedProtoDir, "remote", "add", "mirror=one", upstream);
+    await spawnGit(movedProtoDir, "config", "--replace-all", "remote.mirror=one.fetch", "+refs/heads/main:refs/remotes/mirror=one/main");
+    expect("error" in (await fetchSource({ name: "team", repo: "mirror=one", ref: "main" }, movedProtoCache))).toBe(false);
+    const m6 = await commitPack(upstream, "team", "Main v6.");
+    const movedEq = await advanceSource({ name: "team", repo: "mirror=one", ref: "main" }, movedProtoCache, m5);
+    expect(movedEq).toMatchObject({ state: "moved", commit: m6 });
+    expect(await spawnGit(movedProtoDir, "rev-parse", "refs/remotes/mirror=one/main")).toBe(m6);
+
+    const server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        const cgi = Bun.spawn(["git", "http-backend"], {
+          env: {
+            ...process.env,
+            GIT_PROJECT_ROOT: root,
+            GIT_HTTP_EXPORT_ALL: "1",
+            PATH_INFO: url.pathname,
+            QUERY_STRING: url.search.slice(1),
+            REQUEST_METHOD: req.method,
+            CONTENT_TYPE: req.headers.get("content-type") ?? "",
+          },
+          stdin: req.body ? new Uint8Array(await req.arrayBuffer()) : "ignore",
+          stdout: "pipe",
+          stderr: "ignore",
+        });
+        const raw = Buffer.from(await new Response(cgi.stdout).arrayBuffer());
+        await cgi.exited;
+        const sep = raw.indexOf("\r\n\r\n");
+        if (sep === -1) return new Response("bad cgi", { status: 500 });
+        const headText = raw.subarray(0, sep).toString("latin1");
+        const body = raw.subarray(sep + 4);
+        const headers = new Headers();
+        let status = 200;
+        for (const line of headText.split("\r\n")) {
+          const idx = line.indexOf(":");
+          if (idx <= 0) continue;
+          const k = line.slice(0, idx).trim();
+          const v = line.slice(idx + 1).trim();
+          if (k.toLowerCase() === "status") status = Number.parseInt(v, 10) || 200;
+          else headers.set(k, v);
+        }
+        return new Response(body, { status, headers });
+      },
+    });
+    try {
+      const httpUrl = `http://127.0.0.1:${server.port}/upstream`;
+      const httpCache = temp.make("cache-http-proto-never-");
+      const httpDir = join(httpCache, "team");
+      await spawnGit(root, "clone", "-q", "-b", "main", httpUrl, httpDir);
+      await spawnGit(httpDir, "config", "protocol.file.allow", "never");
+      expect("error" in (await fetchSource({ name: "team", repo: "origin", ref: "main" }, httpCache))).toBe(false);
+      const m7 = await commitPack(upstream, "team", "Main v7.");
+      const movedHttp = await advanceSource({ name: "team", repo: "origin", ref: "main" }, httpCache, m6);
+      expect(movedHttp).toMatchObject({ state: "moved", commit: m7 });
+      expect(await spawnGit(httpDir, "rev-parse", "refs/remotes/origin/main")).toBe(m7);
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("refuses to advance an unqualified or +prefixed ref on refresh when a same-named tag also exists", async () => {
@@ -876,6 +945,27 @@ describe("fetchSource staged refresh and rollback", () => {
     expect(blockedPlain.state).toBe("failed");
     const movedExplicit = await advanceSource({ name: "team", repo, ref: "refs/heads/main" }, cache, c1);
     expect(movedExplicit).toMatchObject({ state: "moved", commit: c2 });
+  });
+
+  test("preserves edits saved after checkout when a failed first apply discards the fresh cache", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-fresh-edit-preserve-");
+    const repo = join(root, "repo");
+    await initRepo(repo);
+    const cache = temp.make("cache-fresh-edit-preserve-");
+    const editedFile = join(cache, "team", "notes.txt");
+    writeFileSync(join(repo, "notes.txt"), "initial\n");
+    mkdirSync(join(repo, "packs", "team"), { recursive: true });
+    writeFileSync(
+      join(repo, "packs", "team", "pack.ts"),
+      `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(editedFile)}, "saved after checkout\\n");\nthrow new Error("fresh load failed");\n`,
+    );
+    await spawnGit(repo, "add", "-A");
+    await spawnGit(repo, "commit", "-qm", "fresh broken pack");
+    const res = await fetchSource({ name: "team", repo, ref: "main" }, cache);
+    expect("error" in res).toBe(true);
+    expect(existsSync(join(cache, "team", ".git"))).toBe(false);
+    expect(readFileSync(editedFile, "utf8")).toBe("saved after checkout\n");
   });
 
   test("records intermediate commits in verified pin history when a retry reuses objects retained after a write-only FETCH_HEAD rollback", async () => {

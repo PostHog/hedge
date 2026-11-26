@@ -1361,12 +1361,18 @@ async function discardFreshCache(dir: string, preexisting?: Map<string, Preexist
   const gitDir = join(dir, ".git");
   if (!existsSync(gitDir)) return;
   const listed = await git(dir, "--git-dir", gitDir, "--work-tree", dir, "ls-files", "-z").catch(() => ({ ok: false, rawStdout: "", rawBytes: new Uint8Array(0) }));
+  let modified = await git(dir, "--git-dir", gitDir, "--work-tree", dir, "diff", "--name-only", "-z", "HEAD", "--").catch(() => ({ ok: false, rawStdout: "", rawBytes: new Uint8Array(0) }));
+  if (!modified.ok) {
+    modified = await git(dir, "--git-dir", gitDir, "--work-tree", dir, "diff", "--name-only", "-z", "--").catch(() => ({ ok: false, rawStdout: "", rawBytes: new Uint8Array(0) }));
+  }
   await rm(gitDir, { recursive: true, force: true }).catch(() => {});
   if (!listed.ok) return;
   if (process.platform === "win32") {
+    const modifiedSet = new Set(modified.ok ? modified.rawStdout.split("\0").filter(Boolean) : []);
     const tracked = listed.rawStdout.split("\0").filter(Boolean);
     const dirsToPrune = new Set<string>();
     for (const rel of tracked) {
+      if (modifiedSet.has(rel)) continue;
       const prior = preexisting?.get(rel);
       const abs = join(dir, rel);
       if (prior) {
@@ -1390,11 +1396,13 @@ async function discardFreshCache(dir: string, preexisting?: Map<string, Preexist
     }
     return;
   }
+  const modifiedSet = new Set(modified.ok ? splitNulBytes(modified.rawBytes).map((b) => b.toString("hex")) : []);
   const dirBuf = Buffer.from(dir, "utf8");
   const tracked = splitNulBytes(listed.rawBytes);
   const dirsToPrune = new Map<string, Buffer>();
   for (const relBuf of tracked) {
     const key = relBuf.toString("hex");
+    if (modifiedSet.has(key)) continue;
     const prior = preexisting?.get(key);
     const abs = Buffer.concat([dirBuf, slashBuf, relBuf]);
     if (prior) {
@@ -1856,7 +1864,7 @@ function formatAlternatesPath(path: string): string {
 }
 
 async function syncRemoteTrackingRefs(dir: string, repo: string, headRef: string, tip: string, stageDir: string, targetObjectsDir: string): Promise<void> {
-  if (!repo || repo.startsWith("-") || /[\0\r\n=]/.test(repo)) return;
+  if (!repo || repo.startsWith("-") || /[\0\r\n]/.test(repo)) return;
   const configured = await git(dir, "config", "-z", "--get-all", `remote.${repo}.fetch`);
   if (!configured.ok || !configured.rawStdout) return;
   const specs = configured.rawStdout.split("\0").slice(0, -1).filter((s) => s.length > 0);
@@ -1875,6 +1883,7 @@ async function syncRemoteTrackingRefs(dir: string, repo: string, headRef: string
       "-c", "gc.auto=0",
       "-c", "maintenance.auto=false",
       "-c", "fetch.writeCommitGraph=false",
+      "-c", "protocol.file.allow=always",
       "-c", `remote.${syncRemote}.url=${syncDir}`,
       ...specs.flatMap((spec) => ["-c", `remote.${syncRemote}.fetch=${spec}`]),
     ];

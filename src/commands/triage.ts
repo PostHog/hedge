@@ -193,20 +193,12 @@ function scrubUnreachableSources(line: string, nextToken: () => string, saved: M
 }
 
 const publicBranchNames = new Set(["main", "master", "HEAD"]);
-const recordErrorBoundary = /: (?:could not |fatal:|error:|E[A-Z]+:)/;
 
 function scrubRecordFallback(line: string, clean: (text: string) => string, nextToken: () => string, saved: Map<string, string>): string {
   const maskRef = (ref: string) => {
     if (publicBranchNames.has(ref)) return ref;
     const token = nextToken();
     saved.set(token, "<ref>");
-    return token;
-  };
-  const maskRepo = (repo: string) => {
-    if (publicRepoSpecs.has(repo)) return repo;
-    const cleanedRepo = clean(repo);
-    const token = nextToken();
-    saved.set(token, /^<[^>]+>$/.test(cleanedRepo) ? cleanedRepo : "<private repo>");
     return token;
   };
   const packMatch = line.match(/^(\s*(?:(?:Note|Fix|To do):\s+)?The [a-z0-9][a-z0-9-]* pack (?:uses its last fetched files|is not applied): could not record )([\s\S]+)$/);
@@ -224,19 +216,11 @@ function scrubRecordFallback(line: string, clean: (text: string) => string, next
     if (fromIdx > 0) {
       const ref = body.slice(0, fromIdx);
       const afterFrom = body.slice(fromIdx + " from ".length);
-      const cleanedAfterFrom = clean(afterFrom);
-      const firstColon = cleanedAfterFrom.indexOf(": ");
-      const leadRepo = firstColon > 0 ? cleanedAfterFrom.slice(0, firstColon) : cleanedAfterFrom;
-      let maskedAfterFrom: string;
-      if (publicRepoSpecs.has(leadRepo) || /^<[^>]+>$/.test(leadRepo)) {
-        maskedAfterFrom = cleanedAfterFrom;
-      } else {
-        const boundary = cleanedAfterFrom.match(recordErrorBoundary)?.index;
-        const splitIdx = boundary !== undefined && boundary > 0 ? boundary : cleanedAfterFrom.lastIndexOf(": ");
-        maskedAfterFrom = splitIdx > 0 ? `<private repo>${cleanedAfterFrom.slice(splitIdx)}` : "<private repo>";
-      }
+      const firstColon = afterFrom.indexOf(": ");
+      const leadRepo = firstColon > 0 ? afterFrom.slice(0, firstColon) : afterFrom;
+      const tailText = publicRepoSpecs.has(leadRepo) ? clean(afterFrom) : "<private repo>";
       const tailToken = nextToken();
-      saved.set(tailToken, maskedAfterFrom);
+      saved.set(tailToken, tailText);
       return `${prefix}${maskRef(ref)} from ${tailToken}${usingSuffix}`;
     }
   }
@@ -247,7 +231,13 @@ function scrubRecordFallback(line: string, clean: (text: string) => string, next
     if (ofIdx > 0 && ofIdx + " of ".length < mid!.length) {
       const branch = mid!.slice(0, ofIdx);
       const repo = mid!.slice(ofIdx + " of ".length);
-      return `${prefix}${maskRef(branch)} of ${maskRepo(repo)}${suffix}`;
+      const token = nextToken();
+      if (publicRepoSpecs.has(repo)) {
+        saved.set(token, `${repo}${clean(suffix!)}`);
+      } else {
+        saved.set(token, "<private repo>");
+      }
+      return `${prefix}${maskRef(branch)} of ${token}`;
     }
   }
   return line;
