@@ -175,12 +175,14 @@ function scrubUnpinnedAdvisory(line: string): string {
 
 const encodeToken = (id: number) => `\0\x01${id.toString(2).replace(/0/g, "\x02").replace(/1/g, "\x03")}\x01\0`;
 
-function scrubUnreachableSources(line: string): string {
+function scrubUnreachableSources(line: string, nextToken: () => string, saved: Map<string, string>): string {
   return line.replace(
-    /^(\s*(?:(?:Note|Fix|To do):\s+)?The [a-z0-9][a-z0-9-]* pack is not applied: not found; unreachable sources: )([a-z0-9][a-z0-9-]*(?:,\s*[a-z0-9][a-z0-9-]*)*)$/,
-    (_match, prefix, list: string) => {
+    /^(\s*(?:(?:Note|Fix|To do):\s+)?The [a-z0-9][a-z0-9-]* pack is not applied: not found; )(unreachable sources: )([a-z0-9][a-z0-9-]*(?:,\s*[a-z0-9][a-z0-9-]*)*)$/,
+    (_match, prefix, label, list: string) => {
       const names = list.split(/,\s*/).map((name) => (publicSourceNames.has(name) ? name : "<private source>"));
-      return `${prefix}${names.join(", ")}`;
+      const token = nextToken();
+      saved.set(token, `${label}${names.join(", ")}`);
+      return `${prefix}${token}`;
     },
   );
 }
@@ -196,17 +198,11 @@ function cleanWithAdvisories(lines: string[], clean: (text: string) => string): 
       saved.set(token, scrubbed);
       return token;
     }
-    const unreachable = scrubUnreachableSources(line);
-    if (unreachable !== line) {
-      const token = nextToken();
-      saved.set(token, unreachable);
-      return token;
-    }
-    return line;
+    return scrubUnreachableSources(line, nextToken, saved);
   });
   const cleaned = clean(tagged.join("\n")).split("\n");
   if (!saved.size) return cleaned;
-  return cleaned.map((line) => saved.get(line) ?? line);
+  return cleaned.map((line) => line.replace(/\0\x01[\x02\x03]+\x01\0/g, (token) => saved.get(token) ?? token));
 }
 
 function knownNames(hostname: string, machine: MachineFile | undefined, profile: Profile | undefined, gitName: string | undefined, origin: string | undefined): KnownName[] {

@@ -691,4 +691,51 @@ describe("fetchSource staged refresh and rollback", () => {
     }
   });
 
+  test("preserves tracked edits to a shared file saved after checkout and before a malformed pack triggers rollback", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-post-checkout-user-edit-");
+    const repo = join(root, "repo");
+    await initRepo(repo);
+    writeFileSync(join(repo, "shared.txt"), "original shared\n");
+    const c1 = await commitPack(repo, "team", "Good v1.");
+    const cache = temp.make("cache-post-checkout-user-edit-");
+    expect("error" in (await fetchSource({ name: "team", repo, ref: c1 }, cache))).toBe(false);
+
+    const sharedInCache = join(cache, "team", "shared.txt");
+    rmSync(join(repo, "packs", "team", "pack.json"));
+    writeFileSync(
+      join(repo, "packs", "team", "pack.ts"),
+      `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(sharedInCache)}, "user edit during load\\n");\nthrow new Error("malformed v2");\n`,
+    );
+    await spawnGit(repo, "add", "-A");
+    await spawnGit(repo, "commit", "-q", "-m", "broken v2");
+    const c2 = await spawnGit(repo, "rev-parse", "HEAD");
+
+    const applied = await fetchSource({ name: "team", repo, ref: c2 }, cache);
+    if ("error" in applied) throw new Error(applied.error);
+    expect(applied.packs[0]?.manifest.summary).toBe("Good v1.");
+    expect(await spawnGit(join(cache, "team"), "rev-parse", "HEAD")).toBe(c1);
+    expect(readFileSync(sharedInCache, "utf8")).toBe("user edit during load\n");
+
+    const refreshCache = temp.make("cache-refresh-post-checkout-user-edit-");
+    const refreshRepo = join(root, "refresh-repo");
+    await initRepo(refreshRepo);
+    writeFileSync(join(refreshRepo, "shared.txt"), "refresh original\n");
+    const r1 = await commitPack(refreshRepo, "team", "Refresh good v1.");
+    expect("error" in (await fetchSource({ name: "team", repo: refreshRepo, ref: "main" }, refreshCache))).toBe(false);
+    const refreshShared = join(refreshCache, "team", "shared.txt");
+    rmSync(join(refreshRepo, "packs", "team", "pack.json"));
+    writeFileSync(
+      join(refreshRepo, "packs", "team", "pack.ts"),
+      `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(refreshShared)}, "refresh user edit during load\\n");\nthrow new Error("malformed refresh v2");\n`,
+    );
+    await spawnGit(refreshRepo, "add", "-A");
+    await spawnGit(refreshRepo, "commit", "-q", "-m", "broken refresh v2");
+
+    const refreshed = await advanceSource({ name: "team", repo: refreshRepo, ref: "main" }, refreshCache, r1);
+    expect(refreshed.state).toBe("failed");
+    expect(await spawnGit(join(refreshCache, "team"), "rev-parse", "HEAD")).toBe(r1);
+    expect(readFileSync(refreshShared, "utf8")).toBe("refresh user edit during load\n");
+  });
+
 });

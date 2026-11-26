@@ -641,6 +641,53 @@ describe("hedge triage", () => {
     expect(issue.input).not.toContain("team-alpha");
     expect(issue.input).toContain("failed cloning <team source>");
   });
+
+  test("redacts a known hostname in the pack prefix of unreachable-source diagnostics while scrubbing private source names", async () => {
+    const home = temp.make("home-host-pack-unreachable-");
+    const profileDir = join(home, "profile");
+    mkdirSync(profileDir, { recursive: true });
+    writeFileSync(
+      join(profileDir, "hedge.json"),
+      JSON.stringify({
+        schema: 1,
+        engine: { repo: "PostHog/hedge", ref: "v1", channel: "release" },
+        sources: [{ name: "confidential-packs", repo: join(home, "missing-repo"), ref: "0123456789abcdef0123456789abcdef01234567" }],
+        packs: ["private-box"],
+        plan: "both",
+        settings: {},
+        workflows: {},
+      }),
+    );
+    mkdirSync(join(home, ".config/hedge"), { recursive: true });
+    writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "linux", name: "private-box", profileDir }));
+    const sent: Sent[] = [];
+    const io = scripted([]);
+    const ghOnly = capture(sent);
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      if (command[0] === "git") {
+        const proc = Bun.spawn(command, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+        const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+        return { code, stdout, stderr };
+      }
+      return ghOnly(command, options);
+    };
+    const code = await main(["triage", "--send", "--note", "hostname pack check"], {
+      home,
+      engineRoot,
+      platform: "linux",
+      env: {},
+      print: io.terminal.print,
+      terminal: io.terminal,
+      capture: runRealGit,
+      hostname: () => "private-box.local",
+      run: async () => 0,
+    });
+    expect(code).toBe(0);
+    const issue = sent.find((call) => call.command[1] === "issue")!;
+    expect(issue.input).not.toContain("private-box");
+    expect(issue.input).not.toContain("confidential-packs");
+    expect(issue.input).toContain("The <this machine> pack is not applied: not found; unreachable sources: <private source>");
+  });
 });
 
 describe("hedge setup and triage", () => {
