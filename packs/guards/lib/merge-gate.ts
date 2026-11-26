@@ -133,13 +133,14 @@ function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline
 
 type Body = { text: string; programs: string[]; parameters: boolean };
 
-const carriers = (found: Command, value: string) => found.args.flatMap((arg, index) => arg === value || arg.endsWith(`=${value}`) || (/^-\w/.test(arg) && arg.slice(2) === value) ? [index] : []);
+const carriers = (found: Command, value: string) => found.args.flatMap((arg, index) => arg === value || arg.endsWith(`=${value}`) || (arg.endsWith(value) && /^-[A-Za-z]+$/.test(arg.slice(0, arg.length - value.length))) ? [index] : []);
 const builtPath = (found: Command, path: string) => carriers(found, path).some((index) => found.argParameters[index] || found.argSubstitutions[index]?.length);
 
 function bodiesOf(found: Command, inline: string[]): Body[] {
   const words = inline.map((value) => {
-    const indexes = carriers(found, value);
-    return { text: value, programs: indexes.flatMap((index) => found.argSubstitutions[index] ?? []), parameters: indexes.some((index) => found.argParameters[index]) };
+    const [first, ...others] = carriers(found, value).map((index) => ({ programs: found.argSubstitutions[index] ?? [], parameters: found.argParameters[index] === true }));
+    const differ = others.some((other) => other.parameters !== first?.parameters || other.programs.join("\0") !== first.programs.join("\0"));
+    return { text: value, programs: first?.programs ?? [], parameters: differ || first?.parameters === true };
   });
   return found.stdin ? [...words, { text: found.stdin.body, programs: found.stdin.substitutions, parameters: found.stdin.parameters === true }] : words;
 }
@@ -268,9 +269,10 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const fields = values(gh, "-f", "--raw-field", "-F", "--field");
   const inline = [...fields, ...fields.map((field) => field.replace(/^[^=]*=/, ""))];
   const fieldFiles = values(gh, "-F", "--field").flatMap((field) => field.match(/^[^=]*=@(.+)$/s)?.[1] ?? []);
-  const bodies = fields.flatMap((field) => field.match(/^(?:body|query)=(.*)$/s)?.[1] ?? []);
-  const sent = sentTexts(found, cwd, io, inline, [...values(gh, "--input"), ...fieldFiles], bodies);
   let endpoint = endpointOf(gh).replace(/[?#].*$/s, "").replace(/\/$/, "");
+  const readQuery = endpoint === "graphql" && fields.some((field) => /^query=\s*(?:query\b|\{)/.test(field));
+  const bodies = endpoint === "graphql" && !readQuery ? inline : fields.flatMap((field) => field.match(/^(?:body|query)=(.*)$/s)?.[1] ?? []);
+  const sent = sentTexts(found, cwd, io, inline, [...values(gh, "--input"), ...fieldFiles], bodies);
   if (endpoint === "graphql") return sent.piped || sent.unread || sent.texts.some((text) => mentionsEnqueue.test(text) || graphqlMerge.test(text)) || mentionsEnqueue.test(raw) ? { targets: [], refusal: graphqlReason } : { targets: [] };
   if (/\{owner\}|\{repo\}|:owner|:repo/.test(endpoint)) {
     const [owner, repo] = (repositoryOf(gh, found, cwd, io) ?? "/").split("/");
@@ -369,7 +371,7 @@ export function mergeIntent(call: ToolCall, command: string, exempt: string[], i
       }
       const one = commandIntent(found, command, cwdIn(found.scope), unwritten);
       for (const target of [...found.outputs, ...found.writes]) {
-        if (/[$`*?[{]/.test(target)) writtenUnknown = true;
+        if (/[$`]/.test(target)) writtenUnknown = true;
         written.add(resolve(cwdIn(found.scope) ?? ".", home(target)));
       }
       intent = { targets: [...intent.targets, ...one.targets], refusal: intent.refusal ?? one.refusal };

@@ -20,9 +20,10 @@
   command line did not spell it out.
 - Only the words that carry a body or a GraphQL query count. A shell
   variable in a redirect, an environment prefix, the repo name, a GraphQL
-  variable, or a label does not make a call unread. A review, a comment or
-  PR body edit, or a GraphQL query built at run time is refused, as for a
-  file the gate cannot read.
+  variable of a read-only query, or a label does not make a call unread. A
+  review, a comment or PR body edit through `gh api`, or a GraphQL mutation
+  with a value built at run time is refused, as for a file the gate cannot
+  read.
 
 ### A check that a person passes no longer turns into a ci gap
 

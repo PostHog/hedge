@@ -780,6 +780,7 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     writeFileSync(join(dir, "open.md"), "See");
     writeFileSync(join(dir, "$R"), report);
     writeFileSync(join(dir, "$F"), report);
+    writeFileSync(join(dir, "mutation.graphql"), "mutation($b:String!){ addComment(input:{subjectId:\"X\", body:$b}){ clientMutationId } }");
     mkdirSync(join(dir, "sub"));
     writeFileSync(join(dir, "sub/enqueue.md"), report);
     writeFileSync(join(dir, "sub/report.md"), `${report}\n/trunk merge\n`);
@@ -789,6 +790,8 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
   test.each([
     ["gh pr comment 9 --repo example/product --body-file report.md"],
     ["gh pr comment 9 --repo example/product --body-file ./report.md"],
+    ["gh pr comment 9 --repo example/product -b \"$(cat report.md)\" --body \"$(cat report.md)\""],
+    ["make > 'build[1].log'; gh pr comment 9 --repo example/product --body-file report.md"],
     ["gh pr comment 9 --repo example/product --body \"$(cat report.md)\""],
     ["gh pr comment 9 --repo example/product --body \"$(cat report.md) Posted once.\""],
     ["gh pr comment 9 --repo example/product --body \"$(cat <<'EOF'\n" + report + "\nEOF\n)\""],
@@ -871,6 +874,7 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     ["gh api repos/example/product/issues/9/comments -f body=\"$(cat enqueue.md)\""],
     ["B=$(cat enqueue.md); gh api repos/example/product/issues/9/comments -f body=\"$B\""],
     ["gh pr comment 9 --repo example/product --body \"$(env -C sub cat report.md)\""],
+    ["gh pr comment 9 --repo example/product -b '$(cat enqueue.md)' --body \"$(cat enqueue.md)\""],
     ["gh pr comment 9 --repo example/product --body \"$(cat open.md)\n$(cat oneline.md)\""],
     ["printf '/trunk merge\\n' > report.md; gh pr comment 9 --repo example/product --body-file report.md"],
     ["R=enqueue.md; gh pr comment 9 --repo example/product --body-file \"$R\""],
@@ -894,6 +898,9 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     ["gh pr review 9 --repo example/product --approve --body \"Proofs pass at $SHA\""],
     ["Q=$(cat mutation.graphql); gh api graphql -f query=\"$Q\""],
     ["gh api graphql -F pr=9 -f query=\"$(cat mutation.graphql | cat)\""],
+    ["gh api graphql -f query='mutation($b:String!){ addComment(input:{subjectId:\"X\", body:$b}){ clientMutationId } }' -F b=\"$B\""],
+    ["gh api graphql -F query=@mutation.graphql -F b=\"$B\""],
+    ["B=$(cat enqueue.md); gh pr review 9 --repo example/product -cb\"$B\""],
   ])("a review or edit that may write /trunk merge from a file or a run-time value is still refused: %s", async (command) => {
     const hook = machine({ "repos/example/product/pulls/9": pull(head) });
     expect(await hook(command, reportDir())).toBeDefined();
