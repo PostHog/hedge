@@ -11,7 +11,7 @@ import { hublessReason, listedPack } from "./resolve.ts";
 import { wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
 import { withLegacyNames } from "../legacy.ts";
 import { bunScript } from "../runner/bun.ts";
-import { appendTag, createPipe, drainControlFd, graceMs, interruptGraceMs, killDeadSession, killDeadSessionSync, killSessionSync, parseSpareLine, probeResultReported, setCloexec, supervisorEnv, tagEnvVar, waitForFdClosed, watchdogEnv } from "./probe-supervisor.ts";
+import { appendTag, createPipe, discoverTargetsSync, drainControlFd, graceMs, interruptGraceMs, killDeadSession, killDeadSessionSync, killSessionSync, parseSpareLine, probeResultReported, setCloexec, signalTargets, supervisorEnv, tagEnvVar, waitForFdClosed, watchdogEnv } from "./probe-supervisor.ts";
 
 export type AdapterContext = { home: string; dryRun: boolean; adopt: string[]; adoptFrom?: string[] };
 export type AdapterResult = { actions: Action[]; findings: Finding[]; blocked?: boolean; failed?: boolean };
@@ -257,7 +257,7 @@ export type HumanStepsLeft = { failing: Array<Owned<HumanStep>>; unchecked: Arra
 const probeConcurrency = 8;
 const supervisorSpawnFailed = -1;
 
-export async function humanStepsLeft(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void>; graceMs?: number }): Promise<HumanStepsLeft> {
+export async function humanStepsLeft(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void>; graceMs?: number; interruptGraceMs?: number }): Promise<HumanStepsLeft> {
   const reported = new WeakMap<AbortSignal, number>();
   const waiters = new WeakMap<AbortSignal, (code: number) => void>();
   const probeBySignal = new WeakMap<AbortSignal, LiveProbe>();
@@ -279,6 +279,7 @@ export async function humanStepsLeft(plan: Plan, options: { home: string; run?: 
         options.graceMs,
         live,
         probeBySignal,
+        options.interruptGraceMs,
       ),
   );
   let timedOut = false;
@@ -532,7 +533,7 @@ function viaEngine(plan: Plan, run: Runner): Runner {
 const undoRunner = (run: Runner, step: LedgerStep): Runner => (command) => run(command, { [undoVariable]: ledgerKey(step) });
 
 /** Runs commands with the plan's home directory as HOME, so a step installs into the home it applies to, and with the plan's profile, so a nested hedge reads the profile this run applies or checks. */
-function spawnRunner(home: string, profileDir: string | undefined, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number, live?: Set<LiveProbe>, probeBySignal?: WeakMap<AbortSignal, LiveProbe>): Runner {
+function spawnRunner(home: string, profileDir: string | undefined, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number, live?: Set<LiveProbe>, probeBySignal?: WeakMap<AbortSignal, LiveProbe>, stopInterruptGraceMs?: number): Runner {
   return async (command, env = {}, signal) => {
     const childEnv = withLegacyNames({ ...Bun.env, HOME: home, ...(profileDir ? { HEDGE_PROFILE_DIR: profileDir } : {}), ...env });
     if (!signal) {
@@ -542,7 +543,7 @@ function spawnRunner(home: string, profileDir: string | undefined, onResult?: (s
         return 127;
       }
     }
-    return await runDetached(command, childEnv, signal, onResult, cleanupGraceMs, live, probeBySignal);
+    return await runDetached(command, childEnv, signal, onResult, cleanupGraceMs, live, probeBySignal, stopInterruptGraceMs);
   };
 }
 
@@ -680,7 +681,6 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
         } catch {}
         const ownGroupOnly = Boolean(entry.targetExited);
         const sweepTag = ownGroupOnly ? undefined : entry.tag;
-        const holderStillAlive = entry.holderFd !== undefined && !drainControlFd(entry.holderFd).closed;
         if (stillAlive) {
           killSessionSync(entry.pid, "SIGKILL", sweepTag, spare, ownGroupOnly);
           try {
@@ -690,11 +690,15 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
           killDeadSessionSync(entry.pid, sweepTag, false, spare, ownGroupOnly);
         }
         if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
-          if (holderStillAlive) {
-            killSessionSync(entry.holderPid, "SIGKILL", sweepTag, spare, ownGroupOnly);
-            try {
-              process.kill(entry.holderPid, "SIGKILL");
-            } catch {}
+          const isHolderAlive = () => entry.holderFd !== undefined && !drainControlFd(entry.holderFd).closed;
+          if (isHolderAlive()) {
+            const holderTargets = discoverTargetsSync(entry.holderPid, sweepTag, undefined, spare, ownGroupOnly);
+            if (isHolderAlive()) {
+              if (holderTargets) signalTargets(holderTargets, "SIGKILL", entry.holderPid);
+              try {
+                process.kill(entry.holderPid, "SIGKILL");
+              } catch {}
+            }
           }
           killDeadSessionSync(entry.holderPid, sweepTag, false, spare, ownGroupOnly);
         }
@@ -826,7 +830,7 @@ async function readSupervisorResult(
   return { code, cleanup, stopped };
 }
 
-async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number, live?: Set<LiveProbe>, probeBySignal?: WeakMap<AbortSignal, LiveProbe>) {
+async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number, live?: Set<LiveProbe>, probeBySignal?: WeakMap<AbortSignal, LiveProbe>, stopInterruptGraceMs?: number) {
   if (!command.length) return 127;
   let child: ReturnType<typeof Bun.spawn> | undefined;
   let probe: LiveProbe | undefined;
@@ -952,6 +956,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
       ...(payloadGuardFd !== undefined ? { guardFd: payloadGuardFd } : {}),
       ...(payloadHolderExitFd !== undefined ? { holderExitFd: payloadHolderExitFd } : {}),
       ...(cleanupGraceMs === undefined ? {} : { graceMs: cleanupGraceMs }),
+      ...(stopInterruptGraceMs === undefined ? {} : { interruptGraceMs: stopInterruptGraceMs }),
     };
     const encoded = JSON.stringify(payload);
     child = Bun.spawn(bunScript(probeSupervisor), {

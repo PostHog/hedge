@@ -64,35 +64,79 @@ function mkfifo(...paths: string[]) {
 }
 
 describe("probe supervisor", () => {
-  for (const [sig, trapName] of [
-    ["SIGINT", "INT"],
-    ["SIGQUIT", "QUIT"],
-  ] as const) {
+  test("supervise escalates SIGINT and SIGQUIT through SIGTERM to SIGKILL on an injected clock", async () => {
+    const { supervise } = await import("./probe-supervisor.ts");
+    for (const sig of ["SIGINT", "SIGQUIT"] as const) {
+      const sent: NodeJS.Signals[] = [];
+      const timers: Array<{ ms: number; fire: () => void; cancelled: boolean; fired: boolean }> = [];
+      const handlers = new Map<string, () => void>();
+      let exitCode: number | undefined;
+      const run = supervise(
+        ["probe"],
+        {
+          spawn: () => ({ pid: 42, exited: new Promise<number>(() => {}) }),
+          killGroup: (signal) => {
+            sent.push(signal);
+          },
+          timer: (ms, fire) => {
+            const entry = {
+              ms,
+              fire: () => {
+                entry.fired = true;
+                fire();
+              },
+              cancelled: false,
+              fired: false,
+            };
+            timers.push(entry);
+            return () => {
+              entry.cancelled = true;
+            };
+          },
+          onSignal: (signal, handler) => void handlers.set(signal, handler),
+          reportResult: () => {},
+          reportCleanup: () => {},
+          exit: (code) => {
+            exitCode = code;
+          },
+        },
+        150,
+        300,
+      );
+      handlers.get(sig)?.();
+      expect(sent).toEqual([sig]);
+      expect(exitCode).toBeUndefined();
+      const first = timers.find((t) => !t.cancelled && !t.fired);
+      expect(first?.ms).toBe(300);
+      first?.fire();
+      expect(sent).toEqual([sig, "SIGTERM"]);
+      expect(exitCode).toBeUndefined();
+      const second = timers.find((t) => !t.cancelled && !t.fired);
+      expect(second?.ms).toBe(150);
+      second?.fire();
+      expect(sent).toEqual([sig, "SIGTERM", "SIGKILL"]);
+      expect(await run).toBe(143);
+      expect(exitCode).toBe(143);
+    }
+  });
+
+  for (const sig of ["SIGINT", "SIGQUIT"] as const) {
     test(`escalates real ${sig} through SIGTERM to SIGKILL on a probe that stays alive on ${sig} and SIGTERM`, async () => {
       const dir = temp.make("sup-esc-");
-      const [ready, sawSig, sawTerm, gone] = [
-        join(dir, "ready"),
-        join(dir, "saw-sig"),
-        join(dir, "saw-term"),
-        join(dir, "gone"),
-      ];
-      mkfifo(ready, sawSig, sawTerm, gone);
+      const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+      mkfifo(ready, gone);
       const started = fifoRead(ready);
-      const gotSig = fifoRead(sawSig);
-      const gotTerm = fifoRead(sawTerm);
       const holderGone = fifoRead(gone);
       const probeCmd = [
         "sh",
         "-c",
-        `trap 'echo ${sig} > "$1"' ${trapName}; trap 'echo SIGTERM > "$2"' TERM; exec 3>"$3"; echo $$ > "$4"; while true; do sleep 30 3>&- & wait; done`,
+        'trap "" INT QUIT TERM; exec 3>"$1"; echo $$ > "$2"; exec sleep 30',
         "probe",
-        sawSig,
-        sawTerm,
         gone,
         ready,
       ];
       const runnerScript = `import { humanStepsLeft } from ${JSON.stringify(applyPath)};
-await humanStepsLeft(${JSON.stringify(probePlan("esc", probeCmd))}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}), graceMs: 100 });`;
+await humanStepsLeft(${JSON.stringify(probePlan("esc", probeCmd))}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}), graceMs: 0, interruptGraceMs: 0 });`;
       const runner = Bun.spawn([process.execPath, "-e", runnerScript], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
       let pid = 0;
       try {
@@ -100,10 +144,6 @@ await humanStepsLeft(${JSON.stringify(probePlan("esc", probeCmd))}, { home: ${JS
         expect(pid).toBeGreaterThan(0);
 
         runner.kill(sig);
-        expect((await gotSig).trim()).toBe(sig);
-        expect(() => process.kill(pid, 0)).not.toThrow();
-
-        expect((await gotTerm).trim()).toBe("SIGTERM");
         expect(await holderGone).toBe("");
         expect(await runner.exited).not.toBe(0);
       } finally {
@@ -167,7 +207,7 @@ await humanStepsLeft(${JSON.stringify(probePlan("esc", probeCmd))}, { home: ${JS
     try {
       const pending = humanStepsLeft(
         probePlan("stubborn", ["sh", "-c", 'exec 4>"$1"; sh -c "$2" 4>&- & wait', "probe", leaderGone, childScript]),
-        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 250 },
+        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 0 },
       );
       childPid = Number((await started).trim());
       expect(childPid).toBeGreaterThan(0);
@@ -400,7 +440,8 @@ await humanStepsLeft({
     const supReady = fifoRead(supPidFile);
     const detachedScript = `const c = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "worker", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 c.unref();
-await Bun.write(${JSON.stringify(supPidFile)}, String(process.ppid) + "\\n");
+const supPgid = Bun.spawnSync(["ps", "-o", "pgid=", "-p", String(process.pid)]).stdout.toString().trim();
+await Bun.write(${JSON.stringify(supPidFile)}, supPgid + "\\n");
 await Bun.sleep(30_000);`;
     let workerPid = 0;
     try {
@@ -1211,7 +1252,8 @@ process.exit(res.failing.length === 0 && res.unchecked.length === 0 ? 0 : 1);`;
     const supReady = fifoRead(supPidFile);
     const probeScript = `const w = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "worker", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 w.unref();
-await Bun.write(${JSON.stringify(supPidFile)}, String(process.ppid) + "\\n");
+const supPgid = Bun.spawnSync(["ps", "-o", "pgid=", "-p", String(process.pid)]).stdout.toString().trim();
+await Bun.write(${JSON.stringify(supPidFile)}, supPgid + "\\n");
 await Bun.sleep(30_000);`;
     let workerPid = 0;
     try {
@@ -1320,7 +1362,8 @@ w.unref();
 process.exit(0);`;
     const probeScript = `const h = Bun.spawn([process.execPath, "-e", ${JSON.stringify(helperScript)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 await h.exited;
-await Bun.write(${JSON.stringify(helperDone)}, String(process.ppid) + "\\n");
+const supPgid = Bun.spawnSync(["ps", "-o", "pgid=", "-p", String(process.pid)]).stdout.toString().trim();
+await Bun.write(${JSON.stringify(helperDone)}, supPgid + "\\n");
 await Bun.sleep(30_000);`;
     let workerPid = 0;
     try {
@@ -1836,76 +1879,102 @@ await humanStepsLeft({
     expect(existsSync(marker)).toBe(false);
   });
 
-  test("preserves probe cleanup grace for a captured child when a probe receives SIGTERM", async () => {
-    const dir = temp.make("sup-capture-grace-");
+  test("preserves probe cleanup grace for single and double nested captured children when a probe receives SIGTERM", async () => {
     const shBin = Bun.which("sh") ?? "/bin/sh";
     const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
-    const [ready, cleaned, gone] = [join(dir, "ready"), join(dir, "cleaned"), join(dir, "gone")];
-    mkfifo(ready, cleaned, gone);
-    const started = fifoRead(ready);
-    const sawCleaned = fifoRead(cleaned);
-    const closed = fifoRead(gone);
-    const childCmd = `trap 'echo cleaning >&2; sleep 0.05; echo cleaned > ${JSON.stringify(cleaned)}; exit 0' TERM; exec 3>${JSON.stringify(gone)}; echo $$ > ${JSON.stringify(ready)}; sleep 30 3>&- & wait`;
-    const probeScript = `import { capture } from ${JSON.stringify(coderPath)};
+    for (const depth of [1, 2] as const) {
+      const dir = temp.make(`sup-capture-grace-d${depth}-`);
+      const [ready, trapped, gate, cleaned, gone] = [
+        join(dir, "ready"),
+        join(dir, "trapped"),
+        join(dir, "gate"),
+        join(dir, "cleaned"),
+        join(dir, "gone"),
+      ];
+      mkfifo(ready, trapped, gate, cleaned, gone);
+      const started = fifoRead(ready);
+      const sawTrapped = fifoRead(trapped);
+      const sawCleaned = fifoRead(cleaned);
+      const closed = fifoRead(gone);
+      const childCmd = `trap 'echo cleaning >&2; echo trapped > ${JSON.stringify(trapped)}; cat ${JSON.stringify(gate)} >/dev/null; echo cleaned > ${JSON.stringify(cleaned)}; exit 0' TERM; exec 3>${JSON.stringify(gone)}; echo $$ > ${JSON.stringify(ready)}; sleep 30 3>&- & wait`;
+      const innerCapture = `import { capture } from ${JSON.stringify(coderPath)};
 await capture([${JSON.stringify(shBin)}, "-c", ${JSON.stringify(childCmd)}], { timeoutMs: 30_000 });`;
-    let fireDeadline!: () => void;
-    let childPid = 0;
-    try {
-      const pending = humanStepsLeft(probePlan("capture-grace", [process.execPath, "-e", probeScript]), {
-        home: dir,
-        giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)),
-        graceMs: 600,
-      });
-      childPid = Number((await started).trim());
-      expect(childPid).toBeGreaterThan(0);
-      fireDeadline();
-      const res = await pending;
-      expect(res.unchecked.map((s) => s.id)).toEqual(["capture-grace"]);
-      expect((await sawCleaned).trim()).toBe("cleaned");
-      expect(await closed).toBe("");
-    } finally {
-      if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
+      const probeScript =
+        depth === 1
+          ? innerCapture
+          : `import { capture } from ${JSON.stringify(coderPath)};
+await capture([process.execPath, "-e", ${JSON.stringify(innerCapture)}], { timeoutMs: 30_000 });`;
+      let fireDeadline!: () => void;
+      let childPid = 0;
+      try {
+        const pending = humanStepsLeft(probePlan(`capture-grace-${depth}`, [process.execPath, "-e", probeScript]), {
+          home: dir,
+          giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)),
+          graceMs: 10_000,
+        });
+        childPid = Number((await started).trim());
+        expect(childPid).toBeGreaterThan(0);
+        fireDeadline();
+        const res = await pending;
+        expect(res.unchecked.map((s) => s.id)).toEqual([`capture-grace-${depth}`]);
+        expect((await sawTrapped).trim()).toBe("trapped");
+        expect(() => process.kill(childPid, 0)).not.toThrow();
+        await fifoWrite(gate, "go\n");
+        expect((await sawCleaned).trim()).toBe("cleaned");
+        expect(await closed).toBe("");
+      } finally {
+        if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
+      }
     }
   });
 
   test("propagates spare-file persistence failure instead of silently acknowledging a nested capture with surviving daemons", async () => {
+    if (process.getuid?.() === 0) return;
     const dir = temp.make("sup-spare-persist-fail-");
+    const tmp = join(dir, "tmp");
+    const uid = typeof process.getuid === "function" ? String(process.getuid()) : "u";
+    const spareDir = join(tmp, `hedge-sup-${uid}`);
     const envBin = Bun.which("env") ?? "/usr/bin/env";
     const shBin = Bun.which("sh") ?? "/bin/sh";
     const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
-    const { spareEnvVar } = await import("./probe-supervisor.ts");
-    const { mkdirSync } = await import("node:fs");
-    const blockingSpareDir = join(dir, "blocked-spare-as-dir");
-    mkdirSync(blockingSpareDir, { recursive: true });
-    const [daemonReady, daemonGone] = [join(dir, "daemon-ready"), join(dir, "daemon-gone")];
-    mkfifo(daemonReady, daemonGone);
+    const { chmodSync, mkdirSync } = await import("node:fs");
+    mkdirSync(spareDir, { recursive: true, mode: 0o700 });
+    const [daemonReady, daemonGone, exitGate] = [join(dir, "daemon-ready"), join(dir, "daemon-gone"), join(dir, "exit-gate")];
+    mkfifo(daemonReady, daemonGone, exitGate);
     const daemonStarted = fifoRead(daemonReady);
     const daemonClosed = fifoRead(daemonGone);
     const daemonScript = `const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 d.unref();
+await Bun.spawn(["cat", ${JSON.stringify(exitGate)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exited;
 process.exit(0);`;
     const probeScript = `import { capture } from ${JSON.stringify(coderPath)};
 try {
-  await capture([process.execPath, "-e", ${JSON.stringify(daemonScript)}], {
-    env: { ...process.env, ${JSON.stringify(spareEnvVar)}: ${JSON.stringify(blockingSpareDir)} },
-    timeoutMs: 5_000,
-  });
+  await capture([process.execPath, "-e", ${JSON.stringify(daemonScript)}], { timeoutMs: 10_000 });
   process.exit(0);
 } catch {
   process.exit(17);
 }`;
+    const driverScript = `import { humanStepsLeft } from ${JSON.stringify(applyPath)};
+const res = await humanStepsLeft(${JSON.stringify(probePlan("spare-fail", [process.execPath, "-e", probeScript]))}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}), graceMs: 0 });
+process.exit(res.failing.map((s) => s.id).join(",") === "spare-fail" ? 0 : 1);`;
     let daemonPid = 0;
+    const driver = Bun.spawn([process.execPath, "-e", driverScript], {
+      env: { ...process.env, TMPDIR: tmp },
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
     try {
-      const proc = Bun.spawn([process.execPath, "-e", probeScript], {
-        stdin: "ignore",
-        stdout: "ignore",
-        stderr: "ignore",
-      });
       daemonPid = Number((await daemonStarted).trim());
       expect(daemonPid).toBeGreaterThan(0);
-      expect(await proc.exited).toBe(17);
+      chmodSync(spareDir, 0o500);
+      await fifoWrite(exitGate, "go\n");
+      expect(await driver.exited).toBe(0);
     } finally {
+      try { chmodSync(spareDir, 0o700); } catch {}
+      driver.kill("SIGKILL");
       if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
+      await driver.exited.catch(() => {});
       await daemonClosed.catch(() => {});
     }
   });

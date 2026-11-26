@@ -138,7 +138,11 @@ export function recordSparedProcess(filePath: string, pids: number[], sids: numb
   return { ok: false, error: `could not record spared processes in ${filePath}`, code: "ENOENT" };
 }
 
-function readSpared(filePath: string | undefined): { pids: Set<number>; sids: Set<number> } {
+export type SparedSet = { pids: Set<number>; sids: Set<number> };
+export type SpareInput = string | SparedSet | undefined;
+
+export function readSpared(filePath: SpareInput): SparedSet {
+  if (filePath && typeof filePath !== "string") return filePath;
   const pids = new Set<number>();
   const sids = new Set<number>();
   if (!filePath || !isOwnedDirectory(dirname(filePath))) return { pids, sids };
@@ -435,7 +439,7 @@ export async function waitForFdClosed(fd: number, timeoutMs: number): Promise<vo
   }
 }
 
-export function discoverTargetsLinux(sessionId?: number, tag?: string, deadLeaderReaped?: boolean, sparePath?: string, ownGroupOnly = false): ProcTargets {
+export function discoverTargetsLinux(sessionId?: number, tag?: string, deadLeaderReaped?: boolean, sparePath?: SpareInput, ownGroupOnly = false): ProcTargets {
   const self = process.pid;
   const effectiveTag = ownGroupOnly ? undefined : tag;
   const includeDetached = Boolean(effectiveTag);
@@ -667,7 +671,7 @@ function buildTargetsFromPs(
   tag: string | undefined,
   treeText: string | undefined,
   excludePids: Set<number>,
-  sparePath?: string,
+  sparePath?: SpareInput,
   ownGroupOnly = false,
 ): ProcTargets {
   const effectiveTag = ownGroupOnly ? undefined : tag;
@@ -808,7 +812,7 @@ function ppidDarwin(lib: DarwinLib, pid: number): number {
   return n >= 20 ? new DataView(buf.buffer).getUint32(16, true) : 0;
 }
 
-export function discoverTargetsSync(sessionId?: number, tag?: string, deadLeaderReaped?: boolean, sparePath?: string, ownGroupOnly = false): ProcTargets | undefined {
+export function discoverTargetsSync(sessionId?: number, tag?: string, deadLeaderReaped?: boolean, sparePath?: SpareInput, ownGroupOnly = false): ProcTargets | undefined {
   if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag, deadLeaderReaped, sparePath, ownGroupOnly);
   const effectiveTag = ownGroupOnly ? undefined : tag;
   if (sessionId === undefined && !effectiveTag) return undefined;
@@ -957,7 +961,7 @@ async function runBoundedPs(args: string[]): Promise<{ pid: number; text: string
   }
 }
 
-export async function discoverTargets(sessionId?: number, tag?: string, sparePath?: string, ownGroupOnly = false): Promise<ProcTargets | undefined> {
+export async function discoverTargets(sessionId?: number, tag?: string, sparePath?: SpareInput, ownGroupOnly = false): Promise<ProcTargets | undefined> {
   if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag, undefined, sparePath, ownGroupOnly);
   const treeRes = await runBoundedPs(["-Ao", "pid=,ppid=,pgid="]);
   if (!treeRes) return discoverTargetsSync(sessionId, tag, undefined, sparePath, ownGroupOnly);
@@ -1015,7 +1019,7 @@ function signalDeadTargets(targets: ProcTargets, deadSessionId?: number, guard?:
   }
 }
 
-function sweepDeadLinux(deadSessionId: number, tag: string | undefined, reaped: boolean, sparePath?: string, ownGroupOnly = false): void {
+function sweepDeadLinux(deadSessionId: number, tag: string | undefined, reaped: boolean, sparePath?: SpareInput, ownGroupOnly = false): void {
   const effectiveTag = ownGroupOnly ? undefined : tag;
   if (isDeadLeaderRecycledLinux(deadSessionId, reaped)) {
     if (effectiveTag) signalDeadTargets(discoverTargetsLinux(undefined, effectiveTag, undefined, sparePath), undefined);
@@ -1029,7 +1033,7 @@ function sweepDeadLinux(deadSessionId: number, tag: string | undefined, reaped: 
   signalDeadTargets(targets, deadSessionId, () => !isDeadLeaderRecycledLinux(deadSessionId, reaped));
 }
 
-export function killDeadSessionSync(deadSessionId: number, tag?: string, reaped = false, sparePath?: string, ownGroupOnly = false): void {
+export function killDeadSessionSync(deadSessionId: number, tag?: string, reaped = false, sparePath?: SpareInput, ownGroupOnly = false): void {
   if (process.platform === "linux") {
     sweepDeadLinux(deadSessionId, tag, reaped, sparePath, ownGroupOnly);
     return;
@@ -1046,7 +1050,7 @@ export function killDeadSessionSync(deadSessionId: number, tag?: string, reaped 
   signalDeadTargets(found, deadSessionId, lib ? () => !isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped) : undefined);
 }
 
-export function killDeadSession(deadSessionId: number, tag?: string, reaped = false, sparePath?: string, ownGroupOnly = false): void | Promise<void> {
+export function killDeadSession(deadSessionId: number, tag?: string, reaped = false, sparePath?: SpareInput, ownGroupOnly = false): void | Promise<void> {
   if (process.platform === "linux") {
     if (!reaped && isDeadLeaderRecycledLinux(deadSessionId, false)) {
       return Bun.sleep(15).then(() => sweepDeadLinux(deadSessionId, tag, reaped, sparePath, ownGroupOnly));
@@ -1143,7 +1147,12 @@ const realTimer: Timer = (ms, fire) => {
   return () => clearTimeout(handle);
 };
 
-export async function supervise(command: string[], host: SupervisorHost, cleanupGraceMs = graceMs): Promise<number> {
+export async function supervise(
+  command: string[],
+  host: SupervisorHost,
+  cleanupGraceMs = graceMs,
+  stopInterruptGraceMs = interruptGraceMs,
+): Promise<number> {
   let resolveDone!: (code: number) => void;
   const settled = new Promise<number>((resolve) => (resolveDone = resolve));
 
@@ -1217,7 +1226,7 @@ export async function supervise(command: string[], host: SupervisorHost, cleanup
       return;
     }
     if (!cancelInterrupt && !cancelHard) {
-      cancelInterrupt = host.timer(interruptGraceMs, () => {
+      cancelInterrupt = host.timer(stopInterruptGraceMs, () => {
         cancelInterrupt = undefined;
         forwardGroup("SIGTERM", armHard);
       });
@@ -1298,6 +1307,7 @@ if (import.meta.main) {
   let command: string[] = [];
   let targetEnv: Record<string, string | undefined> | undefined;
   let cleanupGraceMs = graceMs;
+  let stopInterruptGraceMs = interruptGraceMs;
   let controlFd: number | undefined;
   let resultFd: number | undefined;
   let spareFile: string | undefined;
@@ -1319,6 +1329,7 @@ if (import.meta.main) {
         command: unknown[];
         env?: unknown;
         graceMs?: unknown;
+        interruptGraceMs?: unknown;
         controlFd?: unknown;
         resultFd?: unknown;
         spareFile?: unknown;
@@ -1340,6 +1351,7 @@ if (import.meta.main) {
         targetEnv = cleanEnv;
       }
       if (typeof record.graceMs === "number" && record.graceMs >= 0) cleanupGraceMs = record.graceMs;
+      if (typeof record.interruptGraceMs === "number" && record.interruptGraceMs >= 0) stopInterruptGraceMs = record.interruptGraceMs;
       if (typeof record.controlFd === "number" && Number.isInteger(record.controlFd) && record.controlFd >= 3) controlFd = record.controlFd;
       if (typeof record.resultFd === "number" && Number.isInteger(record.resultFd) && record.resultFd >= 3) resultFd = record.resultFd;
       if (typeof record.spareFile === "string" && record.spareFile) spareFile = record.spareFile;
@@ -1418,6 +1430,7 @@ if (import.meta.main) {
       command,
       ...(targetEnv ? { env: targetEnv } : {}),
       graceMs: cleanupGraceMs,
+      interruptGraceMs: stopInterruptGraceMs,
       ...(spareFile ? { spareFile } : {}),
       ...(childControlFd !== undefined ? { controlFd: childControlFd } : {}),
       ...(childResultFd !== undefined ? { resultFd: childResultFd } : {}),
@@ -1607,5 +1620,5 @@ if (import.meta.main) {
       if (holderFd === undefined && reported && !stopReported) removeSpareFile(spareFile);
       process.exit(code);
     },
-  }, cleanupGraceMs);
+  }, cleanupGraceMs, stopInterruptGraceMs);
 }

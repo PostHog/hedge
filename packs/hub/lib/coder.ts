@@ -3,7 +3,7 @@ import { rm, rmdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { boxPrefix } from "../../../src/hub/names.ts";
-import { appendTag, createPipe, drainControlFd, killDeadSessionSync, killSessionSync, parseSpareLine, readFdChunk, recordSparedProcess, setCloexec, spareEnvVar, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
+import { appendTag, createPipe, drainControlFd, killDeadSessionSync, killSessionSync, parseSpareLine, readFdChunk, setCloexec, spareEnvVar, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
 import { bunScript } from "../../../src/runner/bun.ts";
 import { heldLocks } from "./box-lock.ts";
 
@@ -221,7 +221,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     const parentTag = env?.[tagEnvVar] ?? process.env[tagEnvVar];
     const inProbe = (parentTag ?? "").split(",").some((part) => part.trim().startsWith("probe-"));
     const keepAliveOnSignal = locks.length > 0 && !inProbe;
-    const tag = crypto.randomUUID();
+    const tag = inProbe ? `probe-${crypto.randomUUID()}` : crypto.randomUUID();
     const inheritedSpare = env?.[spareEnvVar] || process.env[spareEnvVar] || undefined;
     const sparePipe = inheritedSpare ? undefined : createPipe();
     if (sparePipe) setCloexec(sparePipe.readFd, true);
@@ -503,9 +503,6 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           detached: true,
         },
       );
-      if (keepAliveOnSignal && inheritedSpare) {
-        recordSparedProcess(inheritedSpare, [child.pid], [child.pid]);
-      }
       closeResultWrite();
       closeConfigRead();
       closeSpareWrite();
@@ -622,24 +619,35 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       }
       closeControl();
       if (inheritedSpare && status.error === undefined && resultReader) {
-        const spareLine = await Promise.race([
-          resultReader.nextLine(),
-          waitUpTo(live.exited, 2_000).then(() => ""),
+        let ackTimer: ReturnType<typeof setTimeout> | undefined;
+        const spareAck = await Promise.race([
+          resultReader.nextLine().then((line) => ({ timedOut: false as const, line })),
+          new Promise<{ timedOut: true; line: string }>((resolve) => {
+            ackTimer = setTimeout(() => resolve({ timedOut: true, line: "" }), 2_000);
+          }),
         ]);
-        if (spareLine.trim()) {
-          let parsedAck: { spareError?: unknown; code?: unknown } | undefined;
-          try {
-            parsedAck = JSON.parse(spareLine.trim()) as { spareError?: unknown; code?: unknown };
-          } catch {}
-          if (typeof parsedAck?.spareError === "string") {
-            const err = new Error(parsedAck.spareError) as NodeJS.ErrnoException;
-            if (typeof parsedAck.code === "string") err.code = parsedAck.code;
-            throw err;
-          }
+        if (ackTimer !== undefined) clearTimeout(ackTimer);
+        if (spareAck.timedOut) {
+          stopStream.abort();
+          if (!tagSweep) tagSweep = runOutOfProcessSweep();
+          await tagSweep;
+          throw new Error("timed out confirming spare-file persistence");
         }
-      }
-      if (inheritedSpare && !supervisorReaped) {
-        await waitUpTo(live.exited, 2_000);
+        let parsedAck: { saved?: unknown; spareError?: unknown; code?: unknown } | undefined;
+        if (spareAck.line.trim()) {
+          try {
+            parsedAck = JSON.parse(spareAck.line.trim()) as { saved?: unknown; spareError?: unknown; code?: unknown };
+          } catch {}
+        }
+        if (typeof parsedAck?.spareError === "string") {
+          const err = new Error(parsedAck.spareError) as NodeJS.ErrnoException;
+          if (typeof parsedAck.code === "string") err.code = parsedAck.code;
+          throw err;
+        }
+        if (parsedAck?.saved !== true) {
+          throw new Error("capture supervisor exited before confirming spare-file persistence");
+        }
+        if (!supervisorReaped) await waitUpTo(live.exited, 500);
       }
       if (!supervisorReaped) live.unref();
       if (tagSweep) await tagSweep;
