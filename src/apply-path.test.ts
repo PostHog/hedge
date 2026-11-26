@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
 const engineRoot = join(import.meta.dir, "..");
-const applyPathEntries = ["src/reconciler/apply.ts", "src/adapters/index.ts", "packs/memory/hooks/memory-index.ts", "packs/memory/hooks/memory-recall.ts", "packs/memory/sync/secret-scan.ts"];
+const applyPathEntries = ["src/reconciler/apply.ts", "src/adapters/index.ts", "packs/memory/hooks/memory-index.ts", "packs/memory/sync/secret-scan.ts"];
 
 function importGraph(entries: string[]) {
   const transpiler = new Bun.Transpiler({ loader: "ts" });

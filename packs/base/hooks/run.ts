@@ -1,7 +1,7 @@
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import type { HookResult } from "../lib/hook.ts";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import type { Hook, HookResult } from "../lib/hook.ts";
 import { redactSecrets } from "./secret-guard.ts";
 
 export type { HookResult };
@@ -12,17 +12,7 @@ type Decision = { decision?: string; reason?: string; hookSpecificOutput?: Speci
 
 const strictness = ["allow", "ask", "deny"];
 
-/**
- * Runs every hook in name order and picks one answer. A JSON block wins, then an exit-2 block, then a
- * JSON answer with hook-specific output, then the first other output. Every hook's hook-specific output
- * is merged into one: the strictest permission decision wins (deny, then ask, then allow), the contexts
- * are joined, and any other field keeps its first value, so another hook can never undo the secret guard.
- * A deny drops any rewritten input, a block turns a tool call's answer into a deny, and prompt suppression
- * stays on once any hook asks for it. A permission request's deny wins over its allow. Codex cannot ask the
- * person, so an ask becomes a deny there. The joined context is redacted, so no hook can echo a secret back.
- * A failing hook only reports.
- */
-export async function dispatch(dir: string, provider: string, input: string, run: RunHook = runWithBun): Promise<HookResult> {
+export async function dispatch(dir: string, provider: string, input: string, run: RunHook = runInProcessWithin(engineRoot)): Promise<HookResult> {
   const results: Array<HookResult & { name: string; json?: Decision }> = [];
   for (const name of listHooks(dir)) {
     const result = await run(join(dir, name), provider, input);
@@ -93,6 +83,37 @@ function listHooks(dir: string) {
     return [];
   }
 }
+
+const engineRoot = resolve(dirname(realpathSync(import.meta.path)), "../../..");
+
+const isInside = (root: string, path: string) => {
+  const rest = relative(realpathSync(root), path);
+  return rest !== "" && !rest.startsWith("..") && !isAbsolute(rest);
+};
+
+const failure = (error: unknown): HookResult => ({ code: 1, stdout: "", stderr: `${error instanceof Error ? error.message : String(error)}\n` });
+
+const hookTranspiler = new Bun.Transpiler({ loader: "ts" });
+
+function exportsInProcessHook(source: string) {
+  try {
+    return hookTranspiler.scan(source).exports.includes("hedgeHook");
+  } catch {
+    return false;
+  }
+}
+
+export const runInProcessWithin = (root: string): RunHook => async (path, provider, input) => {
+  try {
+    const real = realpathSync(path);
+    if (!isInside(root, real) || !exportsInProcessHook(readFileSync(real, "utf8"))) return await runWithBun(path, provider, input);
+    const { hedgeHook } = (await import(real)) as { hedgeHook?: Hook };
+    if (typeof hedgeHook !== "function") return failure(new Error("hedgeHook export is not a function"));
+    return await hedgeHook(provider, () => Promise.resolve(input), process.env.HOME ?? homedir());
+  } catch (error) {
+    return failure(error);
+  }
+};
 
 async function runWithBun(path: string, provider: string, input: string): Promise<HookResult> {
   const child = Bun.spawn([process.execPath, path, provider], { stdin: new Blob([input]), stdout: "pipe", stderr: "pipe" });

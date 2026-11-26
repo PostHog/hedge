@@ -57,4 +57,6 @@ export const hook: Hook = async (provider, readInput, home) => {
   }
 };
 
+export { hook as hedgeHook };
+
 if (import.meta.main) await runHook(hook);

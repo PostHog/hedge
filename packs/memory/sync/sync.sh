@@ -243,6 +243,8 @@ remote_has_main() {
   return 1
 }
 has_commits() { g rev-parse --quiet --verify HEAD >/dev/null; }
+index_limit=180
+index_lines() { g show "$1:${subtree:+$subtree/}MEMORY.md" 2>/dev/null | awk 'END { print NR }'; }
 
 attempt=1
 while :; do
@@ -278,6 +280,12 @@ while :; do
     fail "an unpushed memory change holds a secret. The sync took its commits back and left the files as they are. Remove the secret; until then nothing syncs."
   fi
   [ "$scan" -eq 0 ] || fail "cannot scan the outgoing memory for secrets. Nothing was pushed."
+  outgoing=$(index_lines HEAD)
+  shared=0
+  [ -z "$base" ] || shared=$(index_lines "$base")
+  if [ "$outgoing" -gt "$index_limit" ] && [ "$outgoing" -gt "$shared" ]; then
+    fail "MEMORY.md would have $outgoing lines after this machine's changes. Claude Code loads only the first 200 lines of MEMORY.md, so later notes never load. Fold related notes into topic files and keep the index at $index_limit lines or fewer; until then this machine pushes nothing."
+  fi
   if g push --quiet "$url" HEAD:main 2>/dev/null; then
     echo "Memory: pushed from $machine."
     exit 0

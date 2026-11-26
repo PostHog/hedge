@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { matchThread, type ShellThread, t3StatePath, t3UserData } from "../../base/lib/t3/index.ts";
 import { subagentParent } from "../../pull-requests/lib/pr-owners.ts";
-import { isSnoozed, nestedSession, realProcesses, waits, withinDeadline, type ProcessTable, type ProofStopEvent } from "./proof-stop.ts";
+import { isSnoozed, nestedSession, realProcesses, waits, withinDeadline, type ProcessTable, type StopHookEvent } from "./thread-waits.ts";
 import { personName } from "./prose-question.ts";
 
 export type WakeStopOptions = { home: string; threadId: string | undefined; shell: () => Promise<{ threads: ShellThread[] }>; processes?: ProcessTable; now?: () => number; deadline?: () => Promise<void> };
@@ -22,7 +22,7 @@ export const noWakeReason = (person: string) => `Hedge blocked this stop: your c
 
 const writtenByT3 = (time: string) => Number.isFinite(Date.parse(time)) && new Date(time).toISOString() === time;
 
-const claudeWakesOnEnd = (event: ProofStopEvent) => Boolean(event.background_tasks?.some((task) => ["running", "pending"].includes(task.status ?? "")));
+const claudeWakesOnEnd = (event: StopHookEvent) => Boolean(event.background_tasks?.some((task) => ["running", "pending"].includes(task.status ?? "")));
 
 function hasScheduledCheck(home: string, threadId: string): boolean {
   const path = t3StatePath(t3UserData(home));
@@ -47,10 +47,10 @@ const wakes = (threads: ShellThread[], thread: ShellThread) => waits(threads, th
 
 type WakeStopBlock = { decision: "block"; reason: string };
 
-export const wakeStop = (event: ProofStopEvent, message: string | undefined, options: WakeStopOptions): Promise<WakeStopBlock | undefined> =>
+export const wakeStop = (event: StopHookEvent, message: string | undefined, options: WakeStopOptions): Promise<WakeStopBlock | undefined> =>
   withinDeadline((signal) => check(event, message, options, signal), options.deadline);
 
-async function check(event: ProofStopEvent, message: string | undefined, options: WakeStopOptions, signal: AbortSignal): Promise<WakeStopBlock | undefined> {
+async function check(event: StopHookEvent, message: string | undefined, options: WakeStopOptions, signal: AbortSignal): Promise<WakeStopBlock | undefined> {
   const { home, threadId } = options;
   if (event.stop_hook_active || !threadId || !message || !closesOnWait(message)) return undefined;
   if (claudeWakesOnEnd(event) || event.session_crons?.length) return undefined;

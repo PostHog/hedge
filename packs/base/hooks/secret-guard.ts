@@ -286,4 +286,6 @@ function checkedGuard(provider: Provider, event: HookEvent): HookDecision | unde
 export const hook: Hook = async (provider, readInput) =>
   provider === "claude" || provider === "codex" ? printing(guard(provider, JSON.parse(await readInput()) as HookEvent)) : { code: 1, stdout: "", stderr: "Usage: secret-guard.ts claude|codex\n" };
 
+export { hook as hedgeHook };
+
 if (import.meta.main) await runHook(hook);

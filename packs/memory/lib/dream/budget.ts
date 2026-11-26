@@ -1,6 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join, posix, relative, resolve } from "node:path";
-import { minimumTerm, triggersOf } from "../triggers.ts";
 
 export const memoryLimits = {
   indexLines: 180, indexBytes: 24_000, repoIndexLines: 100, repoIndexBytes: 12_000,
@@ -77,7 +76,6 @@ function noteProblems(file: string, text: string, names: Set<string>, now: numbe
   const modified = Date.parse(frontmatterField(text, "modified") ?? "");
   if (status && status !== "confirmed" && status !== "unconfirmed") problems.push(`status ${status}; use confirmed or unconfirmed`);
   if (status === "unconfirmed" && modified && now - modified > memoryLimits.unconfirmedDays * day) problems.push(`unconfirmed since ${new Date(modified).toISOString().slice(0, 10)}; confirm it against a session or the code, or delete it`);
-  for (const term of triggersOf(text)) if (term.length < minimumTerm) problems.push(`trigger "${term}" is shorter than ${minimumTerm} characters and never fires; name the command or tool`);
   const repo = /^projects\/([^/]+)\//.exec(file)?.[1];
   const checkout = repo ? checkouts(repo) : undefined;
   for (const path of checkout ? namedPaths(text) : []) {

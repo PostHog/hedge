@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { tempDirs } from "../../../src/testing/git.ts";
+import { devbox, engineSource, resolveEngine, skillSources } from "../../../src/testing/packs.ts";
 
 const temp = tempDirs();
 afterEach(() => temp.cleanup());
@@ -111,5 +112,28 @@ describe("the loop pause guard", () => {
 
   test("leaves the loops alone on a machine without a loop ledger setting", () => {
     expect(answer(machine(paused, {}), delegate, [claudePrompt(scheduled(qualityRun))])).toBeUndefined();
+  });
+
+  test("installs into PreToolUse and denies a paused coordinator's delegation through the installed hook runner", async () => {
+    const engine = await engineSource();
+    const plan = resolveEngine([engine, ...skillSources(temp.make("skills-"), engine)], { packs: ["pull-requests", "orchestration"] }, devbox);
+    const installed = plan.files.find((file) => file.target.endsWith("/loop-pause.ts"));
+    expect(installed?.target).toBe(".config/hedge/hooks/PreToolUse/loop-pause.ts");
+    if (!installed || !("source" in installed)) throw new Error("expected linked loop-pause hook");
+    const home = machine(paused);
+    const hookTarget = join(home, installed.target);
+    mkdirSync(dirname(hookTarget), { recursive: true });
+    symlinkSync(installed.source, hookTarget);
+    symlinkSync(join(import.meta.dir, "../../base/hooks/run.ts"), join(home, ".config/hedge/hooks/run.ts"));
+    const child = Bun.spawn([process.execPath, join(home, ".config/hedge/hooks/run.ts"), "claude", "PreToolUse"], {
+      env: { ...process.env, HOME: home },
+      stdin: new Blob([JSON.stringify({ tool_name: delegate, transcript_path: transcript(claudePrompt(scheduled(qualityRun))) })]),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(await child.exited).toBe(0);
+    expect(JSON.parse(await new Response(child.stdout).text())).toMatchObject({
+      hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("Paused: yes") },
+    });
   });
 });

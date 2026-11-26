@@ -1,11 +1,10 @@
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { closeSync, openSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AvailableSource } from "../../src/pack/types.ts";
-import { tempDirs } from "../../src/testing/git.ts";
+import { spawnGit, tempDirs } from "../../src/testing/git.ts";
 import { skillSources, devbox, engineSource, fileContent, resolveEngine } from "../../src/testing/packs.ts";
 import { memoryUrl, syncMemory } from "./commands/memory-sync.ts";
-import { check, indexLimit } from "./hooks/memory-cap.ts";
 
 const temp = tempDirs();
 afterEach(() => temp.cleanup());
@@ -14,17 +13,15 @@ beforeAll(async () => (engine = await engineSource()));
 
 const withPack = (fields = {}) =>
   resolveEngine([engine, ...skillSources(temp.make("skills-"), engine)], { packs: ["memory"], settings: { "memory.repo": "me/notes" }, ...fields }, devbox);
-const lines = (count: number) => Array.from({ length: count }, (_, index) => `- note ${index}`).join("\n") + "\n";
 
 describe("the Memory pack", () => {
   test("asks for the memory repo at setup", () => {
     expect(withPack({ settings: {} }).unanswered.map((setting) => setting.key)).toEqual(["memory.repo"]);
   });
 
-  test("points Claude's auto memory at the checkout, caps its index, and syncs every five minutes", () => {
+  test("points Claude's auto memory at the checkout and syncs every five minutes", () => {
     const result = withPack();
     expect(result.config).toContainEqual(expect.objectContaining({ provider: "claude", key: "autoMemoryDirectory", value: "~/.agents/memory" }));
-    expect(result.files.map((file) => file.target)).toContain(".config/hedge/hooks/PreToolUse/memory-cap.ts");
     expect(result.jobs).toContainEqual(expect.objectContaining({ id: "memory-sync", command: ["hedge", "memory-sync"], schedule: { every: "5m" } }));
     expect(fileContent(result, ".agents/guides/memory.md")).toContain("`~/.agents/memory`");
     expect(Object.keys(result.commands)).toContain("memory-sync");
@@ -33,7 +30,6 @@ describe("the Memory pack", () => {
   test("leaves the Claude parts out for a Codex-only plan", () => {
     const result = withPack({ plan: "codex" });
     expect(result.config.some((entry) => entry.key === "autoMemoryDirectory")).toBe(false);
-    expect(result.files.some((file) => file.target.endsWith("memory-cap.ts"))).toBe(false);
     expect(result.jobs.map((job) => job.id)).toContain("memory-sync");
   });
 
@@ -48,40 +44,13 @@ describe("the Memory pack", () => {
   });
 });
 
-describe("the memory cap hook", () => {
-  test("blocks a write that makes MEMORY.md longer than the limit", () => {
-    const reason = check({ tool_name: "Write", tool_input: { file_path: "/m/MEMORY.md", content: lines(indexLimit + 1) } });
-    expect(reason).toContain(`would have ${indexLimit + 1} lines`);
-    expect(check({ tool_name: "Write", tool_input: { file_path: "/m/MEMORY.md", content: lines(indexLimit) } })).toBeUndefined();
-    expect(check({ tool_name: "Write", tool_input: { file_path: "/m/notes.md", content: lines(500) } })).toBeUndefined();
-  });
+describe("the memory index hook", () => {
+  const indexHook = join(import.meta.dir, "hooks/memory-index.ts");
 
-  test("counts the lines an edit leaves", () => {
-    const path = join(temp.make("memory-"), "MEMORY.md");
-    writeFileSync(path, lines(indexLimit - 1));
-    expect(check({ tool_name: "Edit", tool_input: { file_path: path, old_string: "- note 0\n", new_string: "- note 0\n- new\n" } })).toBeUndefined();
-    expect(check({ tool_name: "Edit", tool_input: { file_path: path, old_string: "- note 0\n", new_string: "- note 0\n- a\n- b\n" } })).toContain(`would have ${indexLimit + 1} lines`);
-  });
-
-  test("exits 2 with the reason through Bun", async () => {
-    const input = JSON.stringify({ tool_name: "Write", tool_input: { file_path: "/m/MEMORY.md", content: lines(indexLimit + 5) } });
-    const child = Bun.spawn([process.execPath, join(import.meta.dir, "hooks/memory-cap.ts"), "claude"], { stdin: new Blob([input]), stderr: "pipe" });
-    expect(await child.exited).toBe(2);
-    expect(await new Response(child.stderr).text()).toContain("Fold related notes into topic files");
-  });
-
-  test("lets a Codex call through without waiting for its input", async () => {
-    const child = Bun.spawn([process.execPath, join(import.meta.dir, "hooks/memory-cap.ts"), "codex"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
-    expect(await child.exited).toBe(0);
-    expect(await new Response(child.stdout).text()).toBe("");
-  });
-});
-
-describe("the memory hooks", () => {
-  test.each(["memory-index.ts", "memory-recall.ts"])("%s answers nothing and lets the agent go on when it cannot read its input", async (name) => {
+  test("answers nothing and lets the agent go on when it cannot read its input", async () => {
     const unreadable = openSync(temp.make("stdin-"), "r");
     try {
-      const child = Bun.spawn([process.execPath, join(import.meta.dir, "hooks", name), "claude"], { stdin: unreadable, stdout: "pipe", stderr: "pipe", env: { ...process.env, HOME: temp.make("home-") } });
+      const child = Bun.spawn([process.execPath, indexHook, "claude"], { stdin: unreadable, stdout: "pipe", stderr: "pipe", env: { ...process.env, HOME: temp.make("home-") } });
       expect(await child.exited).toBe(0);
       expect(await new Response(child.stdout).text()).toBe("");
     } finally {
@@ -89,9 +58,42 @@ describe("the memory hooks", () => {
     }
   });
 
-  test.each(["memory-index.ts", "memory-recall.ts"])("%s answers nothing for an unknown agent without waiting for its input", async (name) => {
-    const child = Bun.spawn([process.execPath, join(import.meta.dir, "hooks", name), "gemini"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+  test("answers nothing for an unknown agent without waiting for its input", async () => {
+    const child = Bun.spawn([process.execPath, indexHook, "gemini"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
     expect(await child.exited).toBe(0);
     expect(await new Response(child.stdout).text()).toBe("");
+  });
+
+  test("gives Codex the main and repo indexes and Claude only the repo index through the installed runner", async () => {
+    const home = temp.make("home-");
+    const hooksDir = join(home, ".config/hedge/hooks/SessionStart");
+    mkdirSync(hooksDir, { recursive: true });
+    symlinkSync(indexHook, join(hooksDir, "memory-index.ts"));
+    symlinkSync(join(import.meta.dir, "../base/hooks/run.ts"), join(home, ".config/hedge/hooks/run.ts"));
+    mkdirSync(join(home, ".agents/memory/projects/notes-app"), { recursive: true });
+    writeFileSync(join(home, ".agents/memory/MEMORY.md"), "# Memory index\n- [Ask before deleting](ask.md)\n");
+    writeFileSync(join(home, ".agents/memory/projects/notes-app/INDEX.md"), "# notes-app\n- [Flaky sync test](flaky.md)\n");
+    const repo = join(home, "notes-app");
+    mkdirSync(repo, { recursive: true });
+    await spawnGit(repo, "init", "-q");
+    await spawnGit(repo, "remote", "add", "origin", "git@github.com:someone/notes-app.git");
+
+    const runInstalled = async (provider: "claude" | "codex") => {
+      const child = Bun.spawn([process.execPath, join(home, ".config/hedge/hooks/run.ts"), provider, "SessionStart"], {
+        env: { ...process.env, HOME: home },
+        stdin: new Blob([JSON.stringify({ session_id: `s-${provider}`, cwd: repo, source: "startup" })]),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(await child.exited).toBe(0);
+      return JSON.parse(await new Response(child.stdout).text()).hookSpecificOutput.additionalContext as string;
+    };
+
+    const codex = await runInstalled("codex");
+    expect(codex).toContain("Ask before deleting");
+    expect(codex).toContain("Flaky sync test");
+    const claude = await runInstalled("claude");
+    expect(claude).toContain("Flaky sync test");
+    expect(claude).not.toContain("Ask before deleting");
   });
 });

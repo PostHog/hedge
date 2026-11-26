@@ -91,33 +91,56 @@ describe("hedge loop check-pause", () => {
 });
 
 describe("hedge loop next-id", () => {
+  const runningLedger = (files: Record<string, string>) => ledger({ "limits.md": "Paused: no\n", ...files });
+
+  test("refuses a lane id while the loops are paused, says to start no lane, and reserves nothing", async () => {
+    const home = temp.make("home-");
+    const dir = ledger({ "limits.md": "Paused: yes\n", "lanes.md": lanes("L064") });
+    expect(await loop(["next-id", "--kind", "lane", "--ledger", dir], undefined, home)).toEqual({ code: 1, out: expect.stringContaining("start no lane") });
+    writeFileSync(join(dir, "limits.md"), "Paused: no\n");
+    expect((await loop(["next-id", "--kind", "lane", "--ledger", dir], undefined, home)).out).toBe("L065");
+  });
+
+  test("refuses a lane id when it cannot tell whether the loops are paused, and reserves nothing", async () => {
+    const home = temp.make("home-");
+    const dir = ledger({ "lanes.md": lanes("L064") });
+    expect(await loop(["next-id", "--kind", "lane", "--ledger", dir], undefined, home)).toEqual({ code: 3, out: expect.stringContaining("limits.md cannot be read") });
+    writeFileSync(join(dir, "limits.md"), "Paused: no\n");
+    expect((await loop(["next-id", "--kind", "lane", "--ledger", dir], undefined, home)).out).toBe("L065");
+  });
+
+  test("still hands out a signal id while the loops are paused, so triage can record what it found", async () => {
+    const dir = ledger({ "limits.md": "Paused: yes\n", "signals.md": signals("S230") });
+    expect(await loop(["next-id", "--kind", "signal", "--ledger", dir])).toEqual({ code: 0, out: "S231" });
+  });
+
   test("prints the lane and signal ids after the highest ones in the ledger", async () => {
-    const dir = ledger({ "lanes.md": lanes("L009", "L064", "L010"), "signals.md": signals("S228", "S230") });
+    const dir = runningLedger({ "lanes.md": lanes("L009", "L064", "L010"), "signals.md": signals("S228", "S230") });
     expect((await loop(["next-id", "--kind", "lane", "--ledger", dir])).out).toBe("L065");
     expect((await loop(["next-id", "--kind", "signal", "--ledger", dir])).out).toBe("S231");
   });
 
   test("counts a follow-up lane with a letter after its number", async () => {
-    const dir = ledger({ "lanes.md": lanes("L064", "L065b") });
+    const dir = runningLedger({ "lanes.md": lanes("L064", "L065b") });
     expect((await loop(["next-id", "--kind", "lane", "--ledger", dir])).out).toBe("L066");
   });
 
   test("never hands out an id twice before the ledger records it", async () => {
     const home = temp.make("home-");
-    const dir = ledger({ "lanes.md": lanes("L064") });
+    const dir = runningLedger({ "lanes.md": lanes("L064") });
     const first = await loop(["next-id", "--kind", "lane", "--ledger", dir], undefined, home);
     const second = await loop(["next-id", "--kind", "lane", "--ledger", dir], undefined, home);
     expect([first.out, second.out]).toEqual(["L065", "L066"]);
   });
 
   test("counts a row written with a space before its first pipe", async () => {
-    const dir = ledger({ "lanes.md": `${lanes("L064")}\n  | L070 | signal | S231 | running |` });
+    const dir = runningLedger({ "lanes.md": `${lanes("L064")}\n  | L070 | signal | S231 | running |` });
     expect((await loop(["next-id", "--kind", "lane", "--ledger", dir])).out).toBe("L071");
   });
 
   test("shares reservations between paths that lead to the same ledger", async () => {
     const home = temp.make("home-");
-    const dir = ledger({ "lanes.md": lanes("L064") });
+    const dir = runningLedger({ "lanes.md": lanes("L064") });
     const link = join(temp.make("link-"), "ledger");
     symlinkSync(dir, link);
     const one = await loop(["next-id", "--kind", "lane", "--ledger", dir], undefined, home);
@@ -128,7 +151,7 @@ describe("hedge loop next-id", () => {
   test("keeps the ids of two ledgers apart", async () => {
     const home = temp.make("home-");
     const ids = [];
-    for (const dir of [ledger({ "lanes.md": lanes("L064") }), ledger({ "lanes.md": lanes("L064") })]) ids.push((await loop(["next-id", "--kind", "lane", "--ledger", dir], undefined, home)).out);
+    for (const dir of [runningLedger({ "lanes.md": lanes("L064") }), runningLedger({ "lanes.md": lanes("L064") })]) ids.push((await loop(["next-id", "--kind", "lane", "--ledger", dir], undefined, home)).out);
     expect(ids).toEqual(["L065", "L065"]);
   });
 
@@ -138,7 +161,7 @@ describe("hedge loop next-id", () => {
 
   test("gives every one of many parallel callers its own id", async () => {
     const home = temp.make("home-");
-    const dir = ledger({ "lanes.md": lanes("L064") });
+    const dir = runningLedger({ "lanes.md": lanes("L064") });
     const callers = Array.from({ length: 12 }, () => Bun.spawn([process.execPath, command, "next-id", "--kind", "lane", "--ledger", dir], { env: { PATH: Bun.env.PATH, HOME: home, HEDGE_SETTINGS: "{}", BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" }, stdout: "pipe" }));
     const ids = await Promise.all(callers.map(async (caller) => (await new Response(caller.stdout).text()).trim()));
     expect(ids.toSorted()).toEqual(Array.from({ length: 12 }, (_, index) => `L0${65 + index}`));
@@ -146,7 +169,7 @@ describe("hedge loop next-id", () => {
 
   test("refuses a flag given twice and reserves nothing", async () => {
     const home = temp.make("home-");
-    const dir = ledger({ "lanes.md": lanes("L064") });
+    const dir = runningLedger({ "lanes.md": lanes("L064") });
     await expect(loop(["next-id", "--kind", "bogus", "--kind", "lane", "--ledger", dir], undefined, home)).rejects.toThrow("--kind given twice");
     expect((await loop(["next-id", "--kind", "lane", "--ledger", dir], undefined, home)).out).toBe("L065");
   });

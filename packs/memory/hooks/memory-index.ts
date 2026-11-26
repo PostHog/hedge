@@ -33,4 +33,6 @@ export async function sessionIndexes(input: HookInput, provider: Provider, home:
 
 export const hook = contextHook("SessionStart", sessionIndexes);
 
+export { hook as hedgeHook };
+
 if (import.meta.main) await runHook(hook);

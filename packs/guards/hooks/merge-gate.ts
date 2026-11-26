@@ -52,4 +52,6 @@ async function answer(input: string, home: string): Promise<Denial | undefined> 
 
 export const hook: Hook = async (_provider, readInput, home) => printing(await answer(await readInput(), home));
 
+export { hook as hedgeHook };
+
 if (import.meta.main) await runHook(hook, { exitOnAnswer: true });

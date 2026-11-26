@@ -187,3 +187,25 @@ test("refuses to commit conflict markers", async () => {
   expect(result.code).toBe(1);
   expect(result.out).toContain("conflict markers");
 });
+
+test("pushes nothing that grows MEMORY.md past 180 lines, and pushes once the index is folded", async () => {
+  const { root, remote } = setup();
+  const laptop = await sync(root, remote, "laptop");
+  const index = (lines: number) => `# Memory\n${Array.from({ length: lines - 1 }, (_, line) => `- note ${line}`).join("\n")}\n`;
+  writeFileSync(join(laptop.checkout, "MEMORY.md"), index(181));
+  const refused = await sync(root, remote, "laptop");
+  expect([refused.code, refused.out]).toEqual([1, expect.stringContaining("MEMORY.md would have 181 lines")]);
+  expect(remoteHistory(root, remote)).not.toContain("- note 179");
+  writeFileSync(join(laptop.checkout, "MEMORY.md"), index(180));
+  expect((await sync(root, remote, "laptop")).code).toBe(0);
+  expect(remoteHistory(root, remote)).toContain("- note 178");
+});
+
+test("pushes a note while MEMORY.md was already past 180 lines and this machine did not grow it", async () => {
+  const { root, remote } = setup();
+  commitAll(join(root, "seed-main"), "long index", { "MEMORY.md": `# Memory\n${"- old\n".repeat(190)}` });
+  const laptop = await sync(root, remote, "laptop");
+  writeFileSync(join(laptop.checkout, "trap.md"), "a trap\n");
+  expect((await sync(root, remote, "laptop")).code).toBe(0);
+  expect(remoteHistory(root, remote)).toContain("a trap");
+});

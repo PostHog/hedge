@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { main } from "../../src/cli.ts";
 import { isolateGit, tempDirs } from "../../src/testing/git.ts";
 import { devbox, engineSource, resolveEngine, skillSources } from "../../src/testing/packs.ts";
-import { fire, notes } from "../memory/recall-testing.ts";
 import { flush } from "./lib/usage-flush.ts";
 
 isolateGit();
@@ -96,13 +95,9 @@ describe("the Usage events workflow", () => {
 });
 
 describe("usage events", () => {
-  test("carry command names, plain subcommands, and counts, never arguments, prompts, file contents, or secrets", async () => {
+  test("carry command names and plain subcommands, never arguments, prompts, file contents, or secrets", async () => {
     const key = projectKey();
-    const home = await machine(["memory"], { "memory.repo": "me/notes", ...destination(key) });
-    for (const [path, text] of Object.entries(notes)) {
-      mkdirSync(join(home, ".agents/memory", path, ".."), { recursive: true });
-      writeFileSync(join(home, ".agents/memory", path), text);
-    }
+    const home = await machine([], destination(key));
     const token = secret();
     const prompt = `Please read /home/someone/customer-notes.md and use ${token}`;
     await hedge(["settings", token], home, { CLAUDECODE: "1" });
@@ -114,26 +109,23 @@ describe("usage events", () => {
     await hedge(["devbox", "list"], home);
     await hedge(["settings-snapshot", "box4817"], home);
     await hedge(["settings-snapshot", "--check"], home);
-    const recalled = await fire(home, "claude", "PreToolUse", { session_id: "s1", tool_name: "Bash", tool_input: { command: `hedge proof ${token} # ${prompt}` } });
-    expect(recalled.context).toContain("Pass full SHAs");
 
     const events = spooled(home).map(({ event, properties }) => ({ event, ...properties }));
-    expect(events.map(({ event, command, subcommand, notes: count, caller }) => ({ event, command, subcommand, notes: count, caller }))).toEqual([
-      { event: "hedge command", command: "settings", subcommand: "", notes: undefined, caller: "agent" },
-      { event: "hedge command", command: "run", subcommand: "", notes: undefined, caller: "person" },
-      { event: "hedge command", command: "packs", subcommand: "", notes: undefined, caller: "job" },
-      { event: "hedge command", command: "hub", subcommand: "", notes: undefined, caller: "job" },
-      { event: "hedge command", command: "hub", subcommand: "status", notes: undefined, caller: "job" },
-      { event: "hedge command", command: "devbox", subcommand: "", notes: undefined, caller: "job" },
-      { event: "hedge command", command: "settings-snapshot", subcommand: "", notes: undefined, caller: "job" },
-      { event: "hedge command", command: "settings-snapshot", subcommand: "", notes: undefined, caller: "job" },
-      { event: "memory recalled", command: undefined, subcommand: undefined, notes: 1, caller: expect.any(String) },
+    expect(events.map(({ event, command, subcommand, caller }) => ({ event, command, subcommand, caller }))).toEqual([
+      { event: "hedge command", command: "settings", subcommand: "", caller: "agent" },
+      { event: "hedge command", command: "run", subcommand: "", caller: "person" },
+      { event: "hedge command", command: "packs", subcommand: "", caller: "job" },
+      { event: "hedge command", command: "hub", subcommand: "", caller: "job" },
+      { event: "hedge command", command: "hub", subcommand: "status", caller: "job" },
+      { event: "hedge command", command: "devbox", subcommand: "", caller: "job" },
+      { event: "hedge command", command: "settings-snapshot", subcommand: "", caller: "job" },
+      { event: "hedge command", command: "settings-snapshot", subcommand: "", caller: "job" },
     ]);
 
     expect((await hedge(["usage", "flush"], home)).code).toBe(0);
     const sent = JSON.stringify(received);
-    for (const leak of [token, "customer", "Please read", "Pass full SHAs", "4817"]) expect(sent).not.toContain(leak);
-    expect(received.map((request) => [request.path, request.body.api_key, request.body.batch.length])).toEqual([["/batch/", key, 9]]);
+    for (const leak of [token, "customer", "Please read", "4817"]) expect(sent).not.toContain(leak);
+    expect(received.map((request) => [request.path, request.body.api_key, request.body.batch.length])).toEqual([["/batch/", key, 8]]);
     expect(received[0]!.body.batch[0]!.properties).toMatchObject({ distinct_id: expect.stringMatching(/^hedge-/), $process_person_profile: false });
     expect(existsSync(spool(home))).toBe(false);
   });

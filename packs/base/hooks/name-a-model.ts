@@ -21,4 +21,6 @@ export const hook: Hook = async (provider, readInput, home) => {
   return blocking(table ? `${reminder}\n\n${table}` : `${reminder} ${pointer}`);
 };
 
+export { hook as hedgeHook };
+
 if (import.meta.main) await runHook(hook);

@@ -128,12 +128,27 @@ describe("the Base pack", () => {
     expect(model("both")).toEqual(["claudeAgent"]);
   });
 
+  const checkedTools = {
+    claude: ["Bash", "Agent", "Task", "AskUserQuestion", "mcp__t3-code__t3_thread_organize", "mcp__github__merge_pull_request", "mcp__playwright__browser_click"],
+    codex: ["Bash", "exec_command", "shell", "shell_command", "local_shell", "request_user_input", "mcp__t3-code__t3_thread_organize", "mcp__github__merge_pull_request"],
+  };
+  const unchecked = ["Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "Glob", "Grep", "LS", "WebFetch", "WebSearch", "TodoWrite", "apply_patch", "update_plan", "view_image", "Bashful", "XBash", "Agents"];
+
+  test.each(["claude", "codex"] as const)("starts %s's PreToolUse hooks only for shell, agent, question, and MCP tools", (provider) => {
+    const entry = plan("both").config.find((item) => item.provider === provider && item.key === "hooks.PreToolUse");
+    const groups = entry?.value as Array<{ matcher?: string }>;
+    expect(groups.length).toBeGreaterThan(0);
+    expect(groups.every((group) => typeof group.matcher === "string" && group.matcher.length > 0)).toBe(true);
+    const starts = (tool: string) => groups.some((group) => group.matcher === undefined || new RegExp(group.matcher).test(tool));
+    expect(checkedTools[provider].filter(starts)).toEqual(checkedTools[provider]);
+    expect(unchecked.filter(starts)).toEqual([]);
+  });
+
   test("links hooks everywhere and the heavy slice only on a devbox", () => {
     const linked = (result: Plan) => result.files.filter((item) => item.target.startsWith(".config/")).map((item) => item.target);
     expect(linked(plan("both", devbox))).toContain(".config/systemd/user/hedge-heavy.slice");
     expect(linked(plan("both"))).not.toContain(".config/systemd/user/hedge-heavy.slice");
     expect(linked(plan("codex"))).not.toContain(".config/hedge/hooks/PreToolUse/name-a-model.ts");
-    for (const ai of plans) expect(linked(plan(ai))).toContain(".config/hedge/hooks/UserPromptSubmit/cast-the-reviewer.ts");
     expect(linked(plan("claude"))).toEqual(expect.arrayContaining([".config/hedge/hooks/run.sh", ".config/hedge/hooks/PostToolUse/secret-guard.ts", ".config/hedge/hooks/PreToolUse/name-a-model.ts"]));
   });
 
