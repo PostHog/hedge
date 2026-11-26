@@ -480,6 +480,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       const command = holdingLocks(argv, locks, timeoutMs, env?.PATH || process.env.PATH || "");
       const childEnv = env ?? process.env;
       const fullTag = keepAliveOnSignal ? tag : appendTag(childEnv[tagEnvVar] ?? process.env[tagEnvVar], tag);
+      const preserveEmptyEnv = !inProbe && !inheritedSpare && env !== undefined && Object.keys(env).length === 0;
       const envEntries: Array<[string, string]> = [];
       for (const [k, v] of Object.entries(childEnv)) {
         if (v !== undefined && k !== tagEnvVar && k !== spareEnvVar) envEntries.push([k, v]);
@@ -487,7 +488,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       const configJson = JSON.stringify({
         argv: command,
         envEntries,
-        injectedTag: tag,
+        ...(preserveEmptyEnv ? { preserveEmptyEnv: true } : { injectedTag: tag }),
         ...(inheritedSpare ? { injectedSpare: inheritedSpare } : {}),
         ...(typeof childEnv[tagEnvVar] === "string" ? { callerTag: childEnv[tagEnvVar] } : {}),
         ...(typeof childEnv[spareEnvVar] === "string" ? { callerSpare: childEnv[spareEnvVar] } : {}),

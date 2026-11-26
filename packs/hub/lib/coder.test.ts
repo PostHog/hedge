@@ -1178,41 +1178,61 @@ test("cleans up an adopted detached env -i worker on Linux when its adopting par
   if (process.platform !== "linux") return;
   const envBin = Bun.which("env") ?? "/usr/bin/env";
   const shBin = Bun.which("sh") ?? "/bin/sh";
+  const coderPath = join(import.meta.dir, "coder.ts");
   const dir = temp.make("hedge-capture-adopted-kill-");
-  const [workerReady, launcherDone, workerGone] = [join(dir, "w-ready"), join(dir, "l-done"), join(dir, "w-gone")];
+  const [workerReady, launcherDone, workerGone, resultFile] = [
+    join(dir, "w-ready"),
+    join(dir, "l-done"),
+    join(dir, "w-gone"),
+    join(dir, "result.json"),
+  ];
   expect(Bun.spawnSync(["mkfifo", workerReady, launcherDone, workerGone]).exitCode).toBe(0);
   const workerStarted = Bun.file(workerReady).text();
-  const helperExited = Bun.file(launcherDone).text();
   const workerClosed = Bun.file(workerGone).text();
-  const launcherScript = `const w = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "worker", ${JSON.stringify(workerGone)}, ${JSON.stringify(workerReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  const launcherScript = `const w = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; read _ < "$2"; echo $$ > "$3"; exec sleep 30', "worker", ${JSON.stringify(workerGone)}, ${JSON.stringify(launcherDone)}, ${JSON.stringify(workerReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 w.unref();
 process.exit(0);`;
-  const targetScript = `const h = Bun.spawn([process.execPath, "-e", ${JSON.stringify(launcherScript)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  const targetScript = `import { writeFileSync } from "node:fs";
+const h = Bun.spawn([process.execPath, "-e", ${JSON.stringify(launcherScript)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 await h.exited;
-await Bun.write(${JSON.stringify(launcherDone)}, String(h.pid) + "\\n");
+writeFileSync(${JSON.stringify(launcherDone)}, "reaped\\n");
 await Bun.sleep(30_000);`;
+  const runnerScript = `import { capture } from ${JSON.stringify(coderPath)};
+const res = await capture([process.execPath, "-e", ${JSON.stringify(targetScript)}], { timeoutMs: 30_000 });
+await Bun.write(${JSON.stringify(resultFile)}, JSON.stringify(res));`;
+  const runner = Bun.spawn([process.execPath, "-e", runnerScript], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  const isDescendantOf = (pid: number, ancestor: number): boolean => {
+    let cur = pid;
+    for (let depth = 0; depth < 8 && cur > 1; depth++) {
+      if (cur === ancestor) return true;
+      const ppid = Number(Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(cur)]).stdout.toString().trim());
+      if (!Number.isFinite(ppid) || ppid <= 1 || ppid === cur) return false;
+      cur = ppid;
+    }
+    return false;
+  };
   let workerPid = 0;
   try {
-    const running = capture([process.execPath, "-e", targetScript], { timeoutMs: 30_000 });
-    const [rawWorker, rawLauncher] = await Promise.all([workerStarted, helperExited]);
-    workerPid = Number(rawWorker.trim());
-    const launcherPid = Number(rawLauncher.trim());
+    workerPid = Number((await workerStarted).trim());
     expect(workerPid).toBeGreaterThan(0);
-    let adopterPid = 0;
-    for (let i = 0; i < 40; i++) {
-      const ppid = Number(Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(workerPid)]).stdout.toString().trim());
-      if (ppid > 1 && ppid !== launcherPid && ppid !== process.pid) {
-        adopterPid = ppid;
-        break;
-      }
-      await Bun.sleep(25);
-    }
+    const adopterPid = Number(Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(workerPid)]).stdout.toString().trim());
     expect(adopterPid).toBeGreaterThan(1);
+    expect(isDescendantOf(adopterPid, runner.pid)).toBe(true);
     process.kill(adopterPid, "SIGKILL");
-    const res = await running;
+    expect(await runner.exited).toBe(0);
+    const res = JSON.parse(await Bun.file(resultFile).text()) as { code: number };
     expect(res.code).toBe(137);
     expect(await workerClosed).toBe("");
   } finally {
+    runner.kill("SIGKILL");
+    await runner.exited.catch(() => {});
     if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
   }
+});
+
+test("preserves an empty environment for standalone captures outside probes", async () => {
+  if (process.platform === "win32") return;
+  const envBin = Bun.which("env") ?? "/usr/bin/env";
+  const res = await capture([envBin], { env: {}, timeoutMs: 5_000 });
+  expect(res).toEqual({ code: 0, stdout: "", stderr: "" });
 });

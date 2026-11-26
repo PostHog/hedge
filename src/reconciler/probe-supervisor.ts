@@ -1506,7 +1506,12 @@ export function killTargetSessionSync(
     }
     const found = discoverTargetsSync(targetPid, tag, undefined, spared);
     const stillSame = pidIdentityNow(targetPid);
-    if (!stillSame || stillSame.startTime !== targetStartTime) {
+    if (!stillSame) {
+      if (found) signalDeadTargets(found, targetPid, () => !pidIdentityNow(targetPid), tag, spared);
+      killDeadSessionSync(targetPid, tag, true, spared);
+      return;
+    }
+    if (stillSame.startTime !== targetStartTime) {
       if (tag) killSessionSync(undefined, "SIGKILL", tag, spared);
       return;
     }
@@ -1544,7 +1549,12 @@ export async function killTargetSession(
     }
     const found = await discoverTargets(targetPid, tag, spared);
     const stillSame = pidIdentityNow(targetPid);
-    if (!stillSame || stillSame.startTime !== targetStartTime) {
+    if (!stillSame) {
+      if (found) signalDeadTargets(found, targetPid, () => !pidIdentityNow(targetPid), tag, spared);
+      await killDeadSession(targetPid, tag, true, spared);
+      return;
+    }
+    if (stillSame.startTime !== targetStartTime) {
       if (tag) await killSession(undefined, "SIGKILL", tag, undefined, spared);
       return;
     }
@@ -2267,9 +2277,37 @@ if (import.meta.main) {
   const rememberedDetached = new Map<number, { pgid: number; startTime: string }>();
   await supervise(command, {
     spawn: (argv) => {
-      const child =
-        (reportFd !== 1 ? spawnInOwnGroup(argv, targetEnv) : undefined) ??
-        Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio: ["ignore", "ignore", "ignore"] });
+      const stripInjected = (src: Record<string, string> | undefined, keepSpare: boolean) => {
+        const clean: Record<string, string> = Object.create(null);
+        const source = src ?? process.env;
+        for (const [k, v] of Object.entries(source)) {
+          if (v === undefined || k === tagEnvVar || k === probeGraceEnvVar) continue;
+          if (!keepSpare && k === spareEnvVar) continue;
+          clean[k] = v;
+        }
+        return clean;
+      };
+      const spawnWithEnv = (envObj: Record<string, string> | undefined) =>
+        (reportFd !== 1 ? spawnInOwnGroup(argv, envObj) : undefined) ??
+        Bun.spawn(argv, { ...(envObj ? { env: envObj } : {}), stdio: ["ignore", "ignore", "ignore"] });
+      let child: { pid?: number; exited: Promise<number>; kill?: (signal?: NodeJS.Signals) => void };
+      try {
+        child = spawnWithEnv(targetEnv);
+      } catch (spawnError) {
+        if ((spawnError as NodeJS.ErrnoException)?.code === "E2BIG") {
+          try {
+            child = spawnWithEnv(stripInjected(targetEnv, true));
+          } catch (spareError) {
+            if ((spareError as NodeJS.ErrnoException)?.code === "E2BIG") {
+              child = spawnWithEnv(stripInjected(targetEnv, false));
+            } else {
+              throw spareError;
+            }
+          }
+        } else {
+          throw spawnError;
+        }
+      }
       targetHandle = child;
       return child;
     },

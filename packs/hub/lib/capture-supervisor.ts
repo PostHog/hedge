@@ -8,6 +8,7 @@ type StartConfig = {
   envEntries?: Array<[string, string]>;
   injectedTag?: string;
   injectedSpare?: string;
+  preserveEmptyEnv?: boolean;
   callerTag?: string;
   callerSpare?: string;
 };
@@ -542,7 +543,7 @@ if (!parsed || killing || gracefulSignal) {
   redirectStdioOutputsToNull();
   killAll();
 } else {
-  const { argv, env, envEntries, injectedTag, injectedSpare } = parsed;
+  const { argv, env, envEntries, injectedTag, injectedSpare, preserveEmptyEnv } = parsed;
   let cleanBaseEnv: Record<string, string> | undefined;
   if (Array.isArray(envEntries)) {
     cleanBaseEnv = Object.create(null) as Record<string, string>;
@@ -554,8 +555,9 @@ if (!parsed || killing || gracefulSignal) {
     }
   }
   const effectiveInheritedSpare = injectedSpare ?? inheritedSpare;
-  const childSpareEndpoint =
-    spareServer?.endpoint && effectiveInheritedSpare
+  const childSpareEndpoint = preserveEmptyEnv
+    ? undefined
+    : spareServer?.endpoint && effectiveInheritedSpare
       ? `${spareServer.endpoint},${effectiveInheritedSpare}`
       : (spareServer?.endpoint ?? effectiveInheritedSpare);
   const cloneEnv = (base: Record<string, string> | undefined) => {

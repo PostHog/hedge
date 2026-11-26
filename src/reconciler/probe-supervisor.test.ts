@@ -1983,4 +1983,49 @@ await Bun.sleep(30_000);`;
       await uClosed.catch(() => {});
     }
   });
+
+  test("runs a near-ARG_MAX probe under a 256 KiB stack limit without failing setup checks due to supervisor env entries", async () => {
+    if (process.platform !== "linux") return;
+    const trueBin = Bun.which("true") ?? "/bin/true";
+    const dir = temp.make("sup-arg-limit-");
+    const script = `import { humanStepsLeft } from ${JSON.stringify(applyPath)};
+const baseEnv = { ...process.env, HOME: ${JSON.stringify(dir)} };
+const envBytes = Object.entries(baseEnv).reduce((sum, [k, v]) => sum + k.length + (v?.length ?? 0) + 10, 0);
+const half = Math.floor((131_072 - envBytes - ${trueBin.length} - 120) / 2);
+const a = "a".repeat(half);
+const b = "b".repeat(half);
+const direct = Bun.spawnSync([${JSON.stringify(trueBin)}, a, b], { env: baseEnv });
+if (direct.exitCode !== 0) process.exit(2);
+const res = await humanStepsLeft({
+  machine: { schema: 1, role: "linux" },
+  os: "linux",
+  ai: "both",
+  packs: [],
+  workflows: [],
+  files: [],
+  config: [],
+  owners: {},
+  jobs: [],
+  human: [{ id: "arg-limit", pack: "team", say: "Arg limit.", probe: [${JSON.stringify(trueBin)}, a, b] }],
+  steps: [],
+  checks: [],
+  commands: {},
+  handlers: {},
+  models: [],
+  settings: {},
+  unanswered: [],
+  ask: [],
+  dropped: [],
+}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}) });
+process.exit(res.failing.length === 0 && res.unchecked.length === 0 ? 0 : 1);`;
+    const proc = Bun.spawn(["sh", "-c", 'ulimit -s 256 && exec "$1" -e "$2"', "probe-arg-limit", process.execPath, script], {
+      env: { PATH: "/usr/bin:/bin", HOME: dir },
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+  });
 });
