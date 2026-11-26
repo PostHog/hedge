@@ -22,7 +22,7 @@ function gateSettings(home: string): GateSettings {
   return { person: typeof person === "string" && person.trim() ? person.trim() : fallbackPerson, exempt: exemptList(settings["guards.merge-gate-exempt"]), text };
 }
 
-const shellQuoted = (word: unknown) => `'${String(word).replaceAll("'", "'\\''")}'`;
+const shellQuoted = (word: unknown) => /^[\w@%+=:,./-]+$/.test(String(word)) ? String(word) : `'${String(word).replaceAll("'", "'\\''")}'`;
 
 function shellCommand(input: Record<string, unknown> = {}) {
   const command = input.command ?? input.cmd;

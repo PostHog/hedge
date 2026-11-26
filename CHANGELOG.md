@@ -18,9 +18,11 @@
   A file that an earlier redirect on the same line writes counts as unread
   too. Before, such a body could post `/trunk merge` past the gate when the
   command line did not spell it out.
-- Only the words that carry a comment's body count. A shell variable in a
-  redirect, an environment prefix, the repo name, a GraphQL read, a label, or
-  a review body does not make the comment unread.
+- Only the words that carry a body or a GraphQL query count. A shell
+  variable in a redirect, an environment prefix, the repo name, a GraphQL
+  variable, or a label does not make a call unread. A review, a comment or
+  PR body edit, or a GraphQL query built at run time is refused, as for a
+  file the gate cannot read.
 
 ### A check that a person passes no longer turns into a ci gap
 

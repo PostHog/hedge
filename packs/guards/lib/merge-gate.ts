@@ -19,10 +19,10 @@ const restMerge = /\/repos\/[^/\s]+\/[^/\s]+\/pulls\/\d+\/merge\b/i;
 
 const oneShape = "`gh pr comment <number> --repo <owner>/<repo> --body '/trunk merge'`";
 export const cliReason = `Hedge blocked this command: an agent enters the Trunk merge queue only with ${oneShape}, which the merge gate checks. Use that form.`;
-export const graphqlReason = `Hedge blocked this call: a GraphQL merge, auto-merge, enqueue, or comment that posts \`/trunk merge\` skips the merge gate, and a query read from piped input or an unreadable file may be one. Enqueue with ${oneShape}, or merge with \`gh pr merge <number> --repo <owner>/<repo>\`.`;
+export const graphqlReason = `Hedge blocked this call: a GraphQL merge, auto-merge, enqueue, or comment that posts \`/trunk merge\` skips the merge gate, and a query read from piped input or an unreadable file, or built at run time, may be one. Enqueue with ${oneShape}, or merge with \`gh pr merge <number> --repo <owner>/<repo>\`.`;
 export const rawReason = `Hedge blocked this command: it merges a PR or posts \`/trunk merge\` straight to the GitHub API, or sends GitHub a payload the merge gate cannot read, which skips the merge gate. Enqueue with ${oneShape}.`;
 export const otherEndpointReason = `Hedge blocked this call: it writes \`/trunk merge\` somewhere other than a new PR comment, such as an edited comment or a review. Enqueue with ${oneShape}.`;
-export const unreadPayloadReason = "Hedge blocked this call: the merge gate cannot read the file it sends, such as one that this command writes before the call or a path it cannot open, so it cannot tell whether the call posts `/trunk merge`. Write the file in one call, then send it with a call of its own.";
+export const unreadPayloadReason = "Hedge blocked this call: the merge gate cannot read the file it sends, such as one that this command writes before the call or a path it cannot open, or a body built at run time, such as a shell variable or another command's output, so it cannot tell whether the call posts `/trunk merge`. Write the file in one call, then send it with a call of its own. Name it by its literal path, or give the body as literal text.";
 export const splitStringReason = "Hedge blocked this command: `env -S` runs a command line that the merge gate cannot read. Write the gh, trunk, or curl command out as its own words.";
 export const shellAliasReason = "Hedge blocked this command: it runs a gh alias that the merge gate cannot read, a shell alias or one with arguments. Write the gh command out.";
 const unreadVia = " (unread body)";
@@ -122,13 +122,13 @@ function repositoryOf(gh: Gh, found: Command, cwd: string | undefined, io: Inten
 const stdinPath = /^(?:-|\/dev\/stdin|\/dev\/fd\/\d+|\/proc\/(?:self|\d+)\/fd\/\d+)$/;
 const home = (path: string) => path === "~" ? homedir() : path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
 
-function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline: string[], files: string[]) {
+function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline: string[], files: string[], bodies = inline) {
   const paths = files.map((path) => stdinPath.test(path) ? "-" : path);
   const piped = paths.includes("-") && !found.stdin;
   const read = paths.map((path) => path === "-" ? found.stdin?.body ?? "" : builtPath(found, path) ? undefined : io.readText(resolve(cwd ?? ".", found.chdir ?? ".", home(path))));
-  const expanded = bodiesOf(found, inline).map((body) => expandedBody(body, cwd, io));
+  const expanded = bodiesOf(found, bodies).map((body) => expandedBody(body, cwd, io));
   const texts = [...inline, ...read.filter((text) => text !== undefined), found.stdin?.body ?? "", ...expanded.filter((text) => text !== undefined)];
-  return { texts: [...texts, ...texts.flatMap(jsonStrings)], unread: read.includes(undefined), piped, builtUnread: expanded.includes(undefined) };
+  return { texts: [...texts, ...texts.flatMap(jsonStrings)], unread: read.includes(undefined) || expanded.includes(undefined), piped };
 }
 
 type Body = { text: string; programs: string[]; parameters: boolean };
@@ -149,8 +149,10 @@ function expandedBody({ text, programs, parameters }: Body, cwd: string | undefi
   let expanded = text;
   for (const program of programs) {
     const output = catOutput(program, cwd, io);
-    const spelled = [`$(${program})`, `\`${program}\``].find((form) => expanded.includes(form));
-    if (output === undefined || spelled === undefined) return undefined;
+    const forms = [`$(${program})`, `\`${program}\``];
+    const spelled = forms.find((form) => expanded.includes(form));
+    const ambiguous = forms.reduce((count, form) => count + expanded.split(form).length - 1, 0) > programs.filter((other) => other === program).length;
+    if (output === undefined || spelled === undefined || ambiguous) return undefined;
     expanded = expanded.replace(spelled, () => output.replace(/\n+$/, ""));
   }
   return expanded;
@@ -172,8 +174,7 @@ function jsonStrings(text: string): string[] {
 }
 
 const builtAtRunTime = /[$`]/;
-type Sent = { texts: string[]; unread: boolean; builtUnread?: boolean };
-const asComment = <T extends Sent>(sent: T): T => ({ ...sent, unread: sent.unread || sent.builtUnread === true });
+type Sent = { texts: string[]; unread: boolean };
 const readsEnqueue = ({ texts }: Sent, raw: string) => texts.some((text) => enqueueLine.test(text)) || (texts.some((text) => builtAtRunTime.test(text)) && mentionsEnqueue.test(raw));
 const sendsEnqueue = (sent: Sent, raw: string) => sent.unread || readsEnqueue(sent, raw);
 const elsewhere = (sent: Sent, raw: string): MergeIntent => ({ targets: [], refusal: readsEnqueue(sent, raw) ? otherEndpointReason : unreadPayloadReason });
@@ -247,7 +248,7 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   if (!args) return { targets: [], refusal: shellAliasReason };
   const gh = parseGh(inOrder(args));
   if ((gh.group === "pr" || gh.group === "issue") && gh.action === "comment") {
-    const sent = asComment(sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file")));
+    const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"));
     if (!sent.piped && !sendsEnqueue(sent, raw)) return { targets: [] };
     const named = namedPr(gh, found, cwd, io);
     const reads = readsEnqueue(sent, raw);
@@ -267,7 +268,8 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const fields = values(gh, "-f", "--raw-field", "-F", "--field");
   const inline = [...fields, ...fields.map((field) => field.replace(/^[^=]*=/, ""))];
   const fieldFiles = values(gh, "-F", "--field").flatMap((field) => field.match(/^[^=]*=@(.+)$/s)?.[1] ?? []);
-  const sent = sentTexts(found, cwd, io, inline, [...values(gh, "--input"), ...fieldFiles]);
+  const bodies = fields.flatMap((field) => field.match(/^(?:body|query)=(.*)$/s)?.[1] ?? []);
+  const sent = sentTexts(found, cwd, io, inline, [...values(gh, "--input"), ...fieldFiles], bodies);
   let endpoint = endpointOf(gh).replace(/[?#].*$/s, "").replace(/\/$/, "");
   if (endpoint === "graphql") return sent.piped || sent.unread || sent.texts.some((text) => mentionsEnqueue.test(text) || graphqlMerge.test(text)) || mentionsEnqueue.test(raw) ? { targets: [], refusal: graphqlReason } : { targets: [] };
   if (/\{owner\}|\{repo\}|:owner|:repo/.test(endpoint)) {
@@ -277,7 +279,7 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const method = (values(gh, "-X", "--method").at(-1) ?? (fields.length || values(gh, "--input").length ? "POST" : "GET")).toUpperCase();
   if (method === "GET") return { targets: [] };
   const comment = endpoint.match(/^repos\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)\/comments$/);
-  const enqueues = sendsEnqueue(comment && method === "POST" ? asComment(sent) : sent, raw);
+  const enqueues = sendsEnqueue(sent, raw);
   if (comment && method === "POST" && sent.piped) return { targets: [{ repository: comment[1]!, pr: Number(comment[2]), via: `gh api issues/<n>/comments${unreadVia}` }] };
   const merge = endpoint.match(/^repos\/([\w.-]+\/[\w.-]+)\/pulls\/(\d+)\/merge$/);
   if (merge) return { targets: [{ repository: merge[1]!, pr: Number(merge[2]), via: "gh api pulls/<n>/merge" }] };
@@ -351,7 +353,8 @@ export function mergeIntent(call: ToolCall, command: string, exempt: string[], i
     catch { return mentionsEnqueue.test(command) || graphqlMerge.test(command) || restMerge.test(command) ? { targets: [], refusal: rawReason } : intent; }
     const dirs = new Map<Scope, string[]>();
     const written = new Set<string>();
-    const unwritten: IntentIO = { ...io, readText: (path) => written.has(path) ? undefined : io.readText(path) };
+    let writtenUnknown = false;
+    const unwritten: IntentIO = { ...io, readText: (path) => writtenUnknown || written.has(path) ? undefined : io.readText(path) };
     const cwdIn = (scope: Scope | undefined): string | undefined => scope === undefined ? call.cwd : dirs.get(scope)?.at(-1) ?? cwdIn(scope.parent);
     for (const found of commands) {
       const name = basename(found.name);
@@ -365,7 +368,10 @@ export function mergeIntent(call: ToolCall, command: string, exempt: string[], i
         continue;
       }
       const one = commandIntent(found, command, cwdIn(found.scope), unwritten);
-      for (const target of [...found.outputs, ...found.writes]) written.add(resolve(cwdIn(found.scope) ?? ".", found.chdir ?? ".", home(target)));
+      for (const target of [...found.outputs, ...found.writes]) {
+        if (/[$`*?[{]/.test(target)) writtenUnknown = true;
+        written.add(resolve(cwdIn(found.scope) ?? ".", home(target)));
+      }
       intent = { targets: [...intent.targets, ...one.targets], refusal: intent.refusal ?? one.refusal };
     }
   } else if (/github/i.test(tool) || t3Tool.test(tool)) intent = mcpIntent(tool, call.tool_input ?? {});
@@ -460,7 +466,6 @@ const heldReason = (held: string[], person: string) => `Hedge blocked this merge
 
 const unreadReason = (repositories: string[]) => `Hedge blocked this merge: the decision ledger could not be read, so the merge gate cannot tell whether an agent accepted a proof gap in ${repositories.join(", ")} itself, and such a gap holds a merge until the person's word. Try again when the hub answers.`;
 
-/** Whether a target is a comment whose body the gate could not read, so a refusal of the call should say so first. */
 export const unreadBody = (intent: MergeIntent) => [...intent.targets, ...intent.exempt ?? []].some((target) => target.via.endsWith(unreadVia));
 
 /** Why the call may not go out, or undefined when every open layer of every target passed the gate at its head and none holds a gap an agent accepted without the person's merge word. */

@@ -779,6 +779,7 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     writeFileSync(join(dir, "oneline.md"), "/trunk merge\n");
     writeFileSync(join(dir, "open.md"), "See");
     writeFileSync(join(dir, "$R"), report);
+    writeFileSync(join(dir, "$F"), report);
     mkdirSync(join(dir, "sub"));
     writeFileSync(join(dir, "sub/enqueue.md"), report);
     writeFileSync(join(dir, "sub/report.md"), `${report}\n/trunk merge\n`);
@@ -803,7 +804,6 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     ["gh pr comment 9 --repo example/product --body \"$(env -C sub cat enqueue.md)\""],
     ["gh api graphql -F pr=$PR -f query='query($pr:Int!){ repository(owner:\"example\", name:\"product\"){ pullRequest(number:$pr){ title } } }'"],
     ["gh api -X POST repos/example/product/issues/9/labels -f \"labels[]=$L\""],
-    ["gh pr review 9 --repo example/product --approve --body \"Proofs pass at $SHA\""],
   ])("a decision report that names a pending merge is no merge, and posts without a gate read on a PR with a held gap: %s", async (command) => {
     const hook = machine({}, [heldGap]);
     expect(await hook(command, reportDir())).toBeUndefined();
@@ -833,6 +833,7 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     const hook = machine({}, [heldGap]);
     expect(await hook.tool("local_shell", { command: ["gh", "pr", "comment", "9", "--repo", "example/product", "--body", "Costs $5, it's `cheap`"] })).toBeUndefined();
     expect(await hook.tool("local_shell", { command: ["gh", "pr", "comment", "9", "--repo", "example/product", "--body", "/trunk merge"] })).toBeDefined();
+    expect(await hook.tool("local_shell", { command: ["env", "-S", "gh pr merge 9 --repo example/product"] })).toContain("`env -S` runs a command line");
   });
 
   test("a refusal of an unread body says so first when the gate cannot read its settings", async () => {
@@ -874,6 +875,10 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     ["printf '/trunk merge\\n' > report.md; gh pr comment 9 --repo example/product --body-file report.md"],
     ["R=enqueue.md; gh pr comment 9 --repo example/product --body-file \"$R\""],
     ["R=enqueue.md; gh pr comment 9 --repo example/product --body \"$(cat \"$R\")\""],
+    ["F=enqueue.md; gh api repos/example/product/issues/9/comments -F body=@\"$F\""],
+    ["gh pr comment 9 --repo example/product --body \"Example: \\$(cat oneline.md)\n$(cat oneline.md)\""],
+    ["env -C sub cat ../oneline.md > report.md; gh pr comment 9 --repo example/product --body-file report.md"],
+    ["cat enqueue.md > \"$F\"; gh pr comment 9 --repo example/product --body-file report.md"],
     ["cat enqueue.md > report.md && gh pr comment 9 --repo example/product --body \"$(cat report.md)\""],
   ])("a comment that may post /trunk merge from a file or a run-time value is still checked as an enqueue: %s", async (command) => {
     const hook = machine({ "repos/example/product/pulls/9": pull(head) });
@@ -883,6 +888,12 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
   test.each([
     ["gh pr review 9 --repo example/product --comment --body \"$(cat enqueue.md)\""],
     ["gh api -X PATCH repos/example/product/issues/comments/1 -f body=\"$(cat enqueue.md)\""],
+    ["B=$(cat enqueue.md); gh api -X PATCH repos/example/product/issues/comments/1 -f body=\"$B\""],
+    ["B=$(cat enqueue.md); gh api -X PATCH repos/example/product/pulls/9 -f body=\"$B\""],
+    ["B=$(cat enqueue.md); gh pr review 9 --repo example/product --comment --body \"$B\""],
+    ["gh pr review 9 --repo example/product --approve --body \"Proofs pass at $SHA\""],
+    ["Q=$(cat mutation.graphql); gh api graphql -f query=\"$Q\""],
+    ["gh api graphql -F pr=9 -f query=\"$(cat mutation.graphql | cat)\""],
   ])("a review or edit that may write /trunk merge from a file or a run-time value is still refused: %s", async (command) => {
     const hook = machine({ "repos/example/product/pulls/9": pull(head) });
     expect(await hook(command, reportDir())).toBeDefined();
