@@ -531,39 +531,40 @@ function parseLocalRepoBytes(dir: string, effective: string): { base: Buffer; ra
   return { base, rawPath: expanded, asFileUrl: false };
 }
 
-type LocalRepoInfo = { resolved: string; primary: string; aliasKey: string; pointerKey?: string; hasLiveRepo: boolean; isLocal: boolean };
+type LocalRepoInfo = { resolved: string; primary: string; lexicalKey: string; aliasKey: string; pointerKey?: string; hasLiveRepo: boolean; isLocal: boolean };
 type ResolvedIdentity = { digest: string; display: string; localInfo: LocalRepoInfo };
 
 function canonicalLocalRepoInfo(dir: string, effective: string): LocalRepoInfo {
   if (process.platform === "win32") {
-    if (effective.startsWith("\0raw:")) return { resolved: effective, primary: effective, aliasKey: effective, hasLiveRepo: false, isLocal: false };
+    if (effective.startsWith("\0raw:")) return { resolved: effective, primary: effective, lexicalKey: effective, aliasKey: effective, hasLiveRepo: false, isLocal: false };
     if (effective.startsWith("file://")) {
       try {
         const abs = resolve(fileURLToPath(effective));
         const out = pathToFileURL(existsSync(abs) ? realpathSync(abs) : abs).href;
-        return { resolved: out, primary: out, aliasKey: out, hasLiveRepo: existsSync(abs), isLocal: true };
+        return { resolved: out, primary: out, lexicalKey: out, aliasKey: out, hasLiveRepo: existsSync(abs), isLocal: true };
       } catch {
-        return { resolved: effective, primary: effective, aliasKey: effective, hasLiveRepo: false, isLocal: true };
+        return { resolved: effective, primary: effective, lexicalKey: effective, aliasKey: effective, hasLiveRepo: false, isLocal: true };
       }
     }
     if (/^[a-z][a-z0-9+.-]*:\/\//i.test(effective) || (!/^[a-z]:[\\/]/i.test(effective) && /^[^/\\]+:/.test(effective))) {
-      return { resolved: effective, primary: effective, aliasKey: effective, hasLiveRepo: false, isLocal: false };
+      return { resolved: effective, primary: effective, lexicalKey: effective, aliasKey: effective, hasLiveRepo: false, isLocal: false };
     }
     const abs = resolve(dir, effective);
     try {
       const out = realpathSync(abs);
-      return { resolved: out, primary: out, aliasKey: out, hasLiveRepo: true, isLocal: true };
+      return { resolved: out, primary: out, lexicalKey: out, aliasKey: out, hasLiveRepo: true, isLocal: true };
     } catch {
-      return { resolved: abs, primary: abs, aliasKey: abs, hasLiveRepo: false, isLocal: true };
+      return { resolved: abs, primary: abs, lexicalKey: abs, aliasKey: abs, hasLiveRepo: false, isLocal: true };
     }
   }
   const parsed = parseLocalRepoBytes(dir, effective);
-  if (!parsed) return { resolved: effective, primary: effective, aliasKey: effective, hasLiveRepo: false, isLocal: false };
+  if (!parsed) return { resolved: effective, primary: effective, lexicalKey: effective, aliasKey: effective, hasLiveRepo: false, isLocal: false };
   const { base, rawPath, asFileUrl } = parsed;
   const resolved = resolvePosixPathBytes(base, rawPath);
   const invalidPrimary = decodeRepoBytes(Buffer.concat([Buffer.from("\0invalid-local:"), base, zeroByteBuf, rawPath]));
   const primary = resolved ? encodeCanonicalLocal(resolved, asFileUrl) : invalidPrimary;
   const lexicalPrimary = resolved ? (resolvePosixPathBytes(base, rawPath, false) ?? resolved) : undefined;
+  const lexicalKey = lexicalPrimary ? encodeCanonicalLocal(lexicalPrimary, asFileUrl) : invalidPrimary;
   const aliasKey =
     resolved && lexicalPrimary
       ? lexicalPrimary.equals(resolved)
@@ -576,6 +577,7 @@ function canonicalLocalRepoInfo(dir: string, effective: string): LocalRepoInfo {
     return {
       resolved: primaryGit.isStandardChild ? primary : encodeCanonicalLocal(primaryGit.identity, asFileUrl),
       primary,
+      lexicalKey,
       aliasKey,
       ...(pointerKey ? { pointerKey } : {}),
       hasLiveRepo: true,
@@ -594,6 +596,7 @@ function canonicalLocalRepoInfo(dir: string, effective: string): LocalRepoInfo {
     return {
       resolved: dotGitInfo.isStandardChild ? encodeCanonicalLocal(dotGitResolved, asFileUrl) : encodeCanonicalLocal(dotGitInfo.identity, asFileUrl),
       primary,
+      lexicalKey,
       aliasKey,
       ...(dotGitPointerKey ? { pointerKey: dotGitPointerKey } : {}),
       hasLiveRepo: true,
@@ -601,7 +604,7 @@ function canonicalLocalRepoInfo(dir: string, effective: string): LocalRepoInfo {
     };
   }
   const effectivePointerKey = pointerKey ?? dotGitPointerKey;
-  return { resolved: primary, primary, aliasKey, ...(effectivePointerKey ? { pointerKey: effectivePointerKey } : {}), hasLiveRepo: false, isLocal: true };
+  return { resolved: primary, primary, lexicalKey, aliasKey, ...(effectivePointerKey ? { pointerKey: effectivePointerKey } : {}), hasLiveRepo: false, isLocal: true };
 }
 
 type LocalAliasEntry = { aliasHash: string; targetHash: string };
@@ -612,11 +615,12 @@ function localAliasPlan(localInfo: LocalRepoInfo | undefined, effectiveDigest: s
   clearAliases?: ClearAliasEntry[];
 } {
   if (!localInfo || !localInfo.isLocal || !localInfo.hasLiveRepo || repoDigest(localInfo.resolved) !== effectiveDigest) return {};
-  const keys = localInfo.pointerKey && localInfo.pointerKey !== localInfo.aliasKey ? [localInfo.aliasKey, localInfo.pointerKey] : [localInfo.aliasKey];
-  if (localInfo.resolved !== localInfo.primary) {
+  const keys = [...new Set([localInfo.aliasKey, localInfo.lexicalKey, ...(localInfo.pointerKey ? [localInfo.pointerKey] : [])])];
+  if (localInfo.resolved !== localInfo.primary || localInfo.lexicalKey !== localInfo.primary) {
+    const aliasKeys = keys.filter((key) => key !== localInfo.resolved);
     return {
-      localAliases: keys.map((key) => ({ aliasHash: repoDigest(key), targetHash: effectiveDigest })),
-      clearAliases: keys.map((key) => {
+      localAliases: aliasKeys.map((key) => ({ aliasHash: repoDigest(key), targetHash: effectiveDigest })),
+      clearAliases: aliasKeys.map((key) => {
         const aliasHash = repoDigest(key);
         return { aliasHash, keepRef: localAliasRef(aliasHash, effectiveDigest) };
       }),
@@ -1220,14 +1224,37 @@ async function recordPinRef(dir: string, repoHash: string, oid: string, undo?: R
   return undefined;
 }
 
-async function recordHistoryRef(dir: string, repoHash: string, commit: string, from: string, undo?: RefUndo[]): Promise<string | undefined> {
+async function existingCommitOids(dir: string): Promise<Set<string> | undefined> {
+  const listed = await git(dir, "cat-file", "--batch-all-objects", "--batch-check=%(objecttype) %(objectname)");
+  if (!listed.ok) return undefined;
+  const commits = new Set<string>();
+  for (const line of listed.stdout.split("\n")) {
+    if (line.startsWith("commit ")) {
+      const oid = line.slice(7).trim().toLowerCase();
+      if (gitHash.test(oid)) commits.add(oid);
+    }
+  }
+  return commits;
+}
+
+async function recordHistoryRef(
+  dir: string,
+  repoHash: string,
+  commit: string,
+  from: string,
+  undo?: RefUndo[],
+  preFetchCommits?: Set<string>,
+): Promise<string | undefined> {
   const normalized = commit.toLowerCase();
   const listed = await git(dir, "rev-list", normalized, `^${from.toLowerCase()}`);
   if (!listed.ok) return listed.stderr || "could not list verified commit history";
-  const commits = listed.stdout
+  const rawCommits = listed.stdout
     .split("\n")
     .map((line) => line.trim().toLowerCase())
     .filter((line) => gitHash.test(line));
+  const commits = preFetchCommits
+    ? rawCommits.filter((oid) => oid === normalized || !preFetchCommits.has(oid))
+    : [normalized];
   if (!commits.length) return undefined;
   if (commits.length <= inlineHistoryPinLimit) {
     const targetRefs = commits.map((oid) => pinRef(repoHash, oid));
@@ -1277,6 +1304,7 @@ async function saveGood(
   historyFrom?: string,
   localAliases?: LocalAliasEntry[],
   clearAliases?: ClearAliasEntry[],
+  preFetchCommits?: Set<string>,
 ): Promise<string | undefined> {
   const before = await lastGood(dir);
   const unchanged =
@@ -1318,7 +1346,7 @@ async function saveGood(
         await rollbackRefs(dir, refUndo);
         return recordedFrom;
       }
-      const recordedHistory = await recordHistoryRef(dir, currentCommit.repoHash, currentCommit.commit, historyFrom, refUndo);
+      const recordedHistory = await recordHistoryRef(dir, currentCommit.repoHash, currentCommit.commit, historyFrom, refUndo, preFetchCommits);
       if (recordedHistory && !unchanged) {
         await rollbackRefs(dir, refUndo);
         return recordedHistory;
@@ -1616,7 +1644,9 @@ export function sourceCache(home: string) {
 
 const branchName = (ref: unknown) => {
   if (typeof ref !== "string") return undefined;
-  const stripped = stripSourceRefspec(ref).replace(/^refs\/heads\//, "");
+  const stripped = stripSourceRefspec(ref);
+  if (stripped.startsWith("refs/heads/")) return stripped.slice("refs/heads/".length) || undefined;
+  if (stripped.startsWith("refs/")) return undefined;
   return stripped || undefined;
 };
 
@@ -1779,6 +1809,7 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
   const edits = await localEdits(dir);
   if (edits.length) return { state: "edited", say: `${ref.name} moved, but Hedge ${editsReason(ref, dir, edits)}.` };
   const savedFetchHead = await snapshotFetchHead(dir);
+  const preFetchCommits = await existingCommitOids(dir);
   const fetched = await fetchExact(dir, repo, head, false);
   if (!fetched.ok || !fetched.oid) {
     await restoreFetchHead(dir, savedFetchHead);
@@ -1820,7 +1851,7 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} changed checkout HEAD while loading` };
   }
   const { localAliases: refreshAliases, clearAliases: clearRefreshAliases } = localAliasPlan(afterRefreshIdentity.localInfo, effectiveDigest);
-  const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest }, verifiedHistoryFrom, refreshAliases, clearRefreshAliases);
+  const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest }, verifiedHistoryFrom, refreshAliases, clearRefreshAliases, preFetchCommits);
   if (saveError) {
     if (before) await restoreCheckout(dir, before);
     else if ((await git(dir, "checkout", "-q", "--detach", `${from}^{commit}`)).ok) clearLoadedModules(dir);
