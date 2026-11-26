@@ -245,6 +245,30 @@ test("trusted fails without asking the keychain when the hub gives no certificat
   }
 });
 
+test("trusted propagates cleanup failure when removing the temporary certificate directory fails", async () => {
+  if (process.platform === "win32" || process.getuid?.() === 0) return;
+  const home = roleHome(temp.make("hedge-https-"), "mac");
+  const tmpDir = temp.make("hedge-https-tmp-");
+  const prevTmp = process.env.TMPDIR;
+  process.env.TMPDIR = tmpDir;
+  const answer = `Hub HTTPS root certificate: /x/root.crt\n${certificate}`;
+  const { deps } = hub({
+    home,
+    run: async (command) => {
+      if (command[0] === "ssh") return { code: 0, stdout: answer, stderr: "" };
+      chmodSync(tmpDir, 0o500);
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  try {
+    await expect(hubHttps("trusted", deps)).rejects.toThrow(/EACCES|EPERM|permission/i);
+  } finally {
+    chmodSync(tmpDir, 0o700);
+    if (prevTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = prevTmp;
+  }
+});
+
 test("remove stops and deletes the unit and config it wrote, keeps the certificate authority, and left then reports nothing left", async () => {
   const { deps, home } = hub();
   await hubHttps("install", deps);

@@ -159,12 +159,13 @@ await humanStepsLeft(${JSON.stringify(probePlan("esc", probeCmd))}, { home: ${JS
     const sawCleaned = fifoRead(cleaned);
     const childClosed = fifoRead(childGone);
     const childScript = `trap 'cat ${JSON.stringify(gate)} >/dev/null; echo cleaned > ${JSON.stringify(cleaned)}; exit 0' TERM; exec 3>${JSON.stringify(childGone)}; echo $$ > ${JSON.stringify(ready)}; sleep 30 3>&- & wait`;
+    const clock = manualClock();
     let fireDeadline!: () => void;
     let childPid = 0;
     try {
       const pending = humanStepsLeft(
         probePlan("grace", ["sh", "-c", 'exec 4>"$1"; sh -c "$2" 4>&- & wait', "probe", leaderGone, childScript]),
-        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 1_000 },
+        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 10_000, clockFd: clock.readFd },
       );
       childPid = Number((await started).trim());
       expect(childPid).toBeGreaterThan(0);
@@ -180,6 +181,7 @@ await humanStepsLeft(${JSON.stringify(probePlan("esc", probeCmd))}, { home: ${JS
       expect((await sawCleaned).trim()).toBe("cleaned");
       expect(await childClosed).toBe("");
     } finally {
+      clock.close();
       if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
     }
   });
@@ -1925,5 +1927,30 @@ await Bun.sleep(30_000);`;
       await unrelated.exited.catch(() => {});
       await unrelatedClosed.catch(() => {});
     }
+  });
+
+  test("reportSpared propagates resource exhaustion instead of treating EMFILE as an ancestor shutdown", async () => {
+    if (process.platform === "win32") return;
+    const supervisorPath = join(import.meta.dir, "probe-supervisor.ts");
+    const script = `import { closeSync, openSync } from "node:fs";
+import { reportSpared, startSpareServer } from ${JSON.stringify(supervisorPath)};
+const server = startSpareServer(async () => true);
+if (!server) process.exit(2);
+const fds: number[] = [];
+try {
+  for (;;) fds.push(openSync("/dev/null", "r"));
+} catch {}
+const res = await reportSpared(server.endpoint, [12345], [12345], 500);
+for (const fd of fds) try { closeSync(fd); } catch {}
+server.close();
+process.exit(res.ok ? 1 : 0);`;
+    const proc = Bun.spawn(["sh", "-c", 'ulimit -n 48 && exec "$1" -e "$2"', "spare-emfile", process.execPath, script], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
   });
 });

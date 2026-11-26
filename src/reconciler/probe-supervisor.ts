@@ -123,12 +123,43 @@ export function startSpareServer(
   }
 }
 
+function fdExhaustionError(): string | undefined {
+  try {
+    const fd = openSync("/dev/null", "r");
+    try {
+      closeSync(fd);
+    } catch {}
+    return undefined;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code === "EMFILE" || code === "ENFILE") {
+      return err instanceof Error ? err.message : code;
+    }
+    return undefined;
+  }
+}
+
+function isGoneSocketError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return code === "ECONNREFUSED" || code === "ECONNRESET" || code === "EPIPE";
+}
+
+function reportSparedError(err: unknown): { status: "gone" } | { status: "err"; error: string } {
+  const exhausted = fdExhaustionError();
+  if (exhausted) return { status: "err", error: exhausted };
+  if (isGoneSocketError(err)) return { status: "gone" };
+  const message = err instanceof Error ? err.message : String(err || "failed to report spared processes");
+  return { status: "err", error: message };
+}
+
 async function reportSparedOne(
   host: string,
   port: number,
   payload: string,
   timeoutMs: number,
 ): Promise<{ status: "ok" } | { status: "gone" } | { status: "err"; error: string }> {
+  const exhausted = fdExhaustionError();
+  if (exhausted) return { status: "err", error: exhausted };
   return await new Promise((resolve) => {
     let settled = false;
     let buf = "";
@@ -163,15 +194,15 @@ async function reportSparedOne(
         close() {
           finish({ status: "gone" });
         },
-        error() {
-          finish({ status: "gone" });
+        error(_socket, err) {
+          finish(reportSparedError(err));
         },
-        connectError() {
-          finish({ status: "gone" });
+        connectError(_socket, err) {
+          finish(reportSparedError(err));
         },
       },
-    }).catch(() => {
-      finish({ status: "gone" });
+    }).catch((err) => {
+      finish(reportSparedError(err));
     });
   });
 }

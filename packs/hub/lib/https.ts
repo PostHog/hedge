@@ -157,6 +157,7 @@ async function trusted(hub: HttpsHub): Promise<number> {
   let folder: string | undefined;
   let stopped: NodeJS.Signals | undefined;
   let reRaised = false;
+  let removeError: unknown;
   let removePromise: Promise<void> | undefined;
   let resolveMkdtemp!: () => void;
   const mkdtempDone = new Promise<void>((resolve) => {
@@ -166,7 +167,9 @@ async function trusted(hub: HttpsHub): Promise<number> {
     if (!removePromise) {
       removePromise = mkdtempDone.then(() => {
         if (!folder) return;
-        return rm(folder, { recursive: true, force: true }).catch(() => {});
+        return rm(folder, { recursive: true, force: true }).catch((error) => {
+          removeError = error;
+        });
       });
     }
     return removePromise;
@@ -202,6 +205,7 @@ async function trusted(hub: HttpsHub): Promise<number> {
     void waitRemove(200).finally(() => reRaise(signal));
   };
   for (const name of stopSignals) process.on(name, interrupted);
+  let bodyFailed = false;
   try {
     try {
       folder = await mkdtemp(join(tmpdir(), "hedge-hub-ca-"));
@@ -213,9 +217,15 @@ async function trusted(hub: HttpsHub): Promise<number> {
     await writePrivateFile(path, certificate);
     if (stopped) return 1;
     return (await hub.run(["security", "verify-cert", "-l", "-L", "-p", "ssl", "-c", path], { timeoutMs: trustProbeLimitMs })).code === 0 ? 0 : 1;
+  } catch (error) {
+    bodyFailed = true;
+    throw error;
   } finally {
     await waitRemove(stopped ? 200 : 5_000);
     if (stopped) reRaise(stopped);
-    else release();
+    else {
+      release();
+      if (!bodyFailed && removeError !== undefined) throw removeError;
+    }
   }
 }

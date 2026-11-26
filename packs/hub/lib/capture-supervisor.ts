@@ -1,5 +1,5 @@
 import { closeSync, writeSync } from "node:fs";
-import { discoverTargets, discoverTargetsLinux, discoverTargetsSync, drainControlFd, emptySpared, enableChildSubreaper, graceMs, interruptGraceMs, killDeadSession, mergeSpared, ownTag, type OwnGroupChild, probeGraceEnvVar, readFdChunk, redirectStdioOutputsToNull, reportSpared, setCloexec, shieldGroupSignals, signalTargets, spareEnvVar, spawnInOwnGroup, startSpareServer, type StopSignal, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { discoverTargets, discoverTargetsLinux, discoverTargetsSync, drainControlFd, emptySpared, enableChildSubreaper, graceMs, interruptGraceMs, killDeadSession, mergeSpared, ownTag, probeGraceEnvVar, readFdChunk, redirectStdioOutputsToNull, reportSpared, setCloexec, shieldGroupSignals, signalTargets, spareEnvVar, startSpareServer, type StopSignal, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
 type StartConfig = { argv: string[]; env?: Record<string, string>; envEntries?: Array<[string, string]> };
 
@@ -16,9 +16,9 @@ const stopSignalsSet = new Set<StopSignal>(["SIGINT", "SIGTERM", "SIGHUP", "SIGQ
 const rawProbeGrace = Number(process.env[probeGraceEnvVar]);
 const probeGraceMs = Number.isFinite(rawProbeGrace) && rawProbeGrace >= 0 ? rawProbeGrace : graceMs;
 const localSpared = emptySpared();
-let target: OwnGroupChild | ReturnType<typeof Bun.spawn> | undefined;
+let target: ReturnType<typeof Bun.spawn> | undefined;
 let targetPid: number | undefined;
-let targetDetached = false;
+let targetDetached = true;
 let targetReaped = false;
 let targetCode: number | undefined;
 let confirmedDone = false;
@@ -360,14 +360,8 @@ if (!parsed || killing || gracefulSignal) {
   }
   const stdio: [number, number, number, ...number[]] = [0, 1, 2, ...lockFds];
   try {
-    const grouped = spawnInOwnGroup(argv, targetEnv);
-    if (grouped) {
-      target = grouped;
-      targetDetached = false;
-    } else {
-      target = Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio, detached: true });
-      targetDetached = true;
-    }
+    target = Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio, detached: true });
+    targetDetached = true;
     targetPid = target.pid;
   } catch (error) {
     for (const fd of lockFds) closeQuiet(fd);

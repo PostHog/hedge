@@ -822,10 +822,18 @@ process.exit(ok ? 0 : 1);`;
   expect(code).toBe(0);
 });
 
-test("makes the captured command its own process-group leader like direct detached spawn", async () => {
-  if (process.platform !== "linux" || !Bun.which("setsid")) return;
-  const res = await capture(["setsid", "sh", "-c", "exit 42"], { timeoutMs: 5_000 });
-  expect(res.code).toBe(0);
+test("makes the captured command its own session and process-group leader like direct detached spawn", async () => {
+  if (process.platform === "win32") return;
+  const info = await capture(["sh", "-c", 'ps -o pid=,pgid=,sid= -p "$$"'], { timeoutMs: 5_000 });
+  expect(info.code).toBe(0);
+  const [pid, pgid, sid] = info.stdout.trim().split(/\s+/).map(Number);
+  expect(pid).toBeGreaterThan(0);
+  expect(pgid).toBe(pid);
+  expect(sid).toBe(pid);
+  if (process.platform === "linux" && Bun.which("setsid")) {
+    const res = await capture(["setsid", "sh", "-c", "exit 42"], { timeoutMs: 5_000 });
+    expect(res.code).toBe(0);
+  }
 });
 
 test("kills the direct target on timeout even when TMPDIR is read-only", async () => {
@@ -991,7 +999,8 @@ test("rejects NUL bytes in captured arguments or environment and matches Bun.spa
   await expect(capture(["printf", "before\u0000after"], { timeoutMs: 5_000 })).rejects.toMatchObject({ code: "ERR_INVALID_ARG_VALUE" });
   await expect(capture(["printf", "ok"], { env: { ...process.env, BAD: "a\u0000b" }, timeoutMs: 5_000 })).rejects.toMatchObject({ code: "ERR_INVALID_ARG_VALUE" });
   expect(await capture(["printf", "ok"], { env: { PATH: "" }, timeoutMs: 5_000 })).toEqual({ code: 0, stdout: "ok", stderr: "" });
-  const bunRes = await capture(["bun", "--version"], { env: {}, timeoutMs: 5_000 });
+  expect(await capture(["printf", "ok"], { env: {}, timeoutMs: 5_000 })).toEqual({ code: 0, stdout: "ok", stderr: "" });
+  const bunRes = await capture(["bun", "--version"], { timeoutMs: 5_000 });
   expect(bunRes.code).toBe(0);
   expect(bunRes.stdout.trim().length).toBeGreaterThan(0);
   await expect(capture(["printf", "ok"], { env: { PATH: "/nonexistent-hedge-path-only" }, timeoutMs: 5_000 })).rejects.toMatchObject({ code: "ENOENT" });
