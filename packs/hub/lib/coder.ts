@@ -3,7 +3,7 @@ import { rm, rmdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { boxPrefix } from "../../../src/hub/names.ts";
-import { appendTag, createPipe, drainControlFd, killDeadSessionSync, killSessionSync, parseSpareLine, readFdChunk, setCloexec, spareEnvVar, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
+import { appendTag, createPipe, createSocketPair, killDeadSessionSync, killSessionSync, readFdChunk, setCloexec, spareEnvVar, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
 import { bunScript } from "../../../src/runner/bun.ts";
 import { heldLocks } from "./box-lock.ts";
 
@@ -114,6 +114,7 @@ function createResultReader(fd: number, stop: AbortSignal) {
   const chunk = new Uint8Array(1024);
   let buf = "";
   let eof = false;
+  let active = false;
   let activeRead: Promise<void> = Promise.resolve();
   const nextLine = (): Promise<string> => {
     const readNext = (async () => {
@@ -129,7 +130,13 @@ function createResultReader(fd: number, stop: AbortSignal) {
           buf = "";
           return rest;
         }
-        const n = await readFdChunk(fd, chunk);
+        active = true;
+        let n = 0;
+        try {
+          n = await readFdChunk(fd, chunk);
+        } finally {
+          active = false;
+        }
         if (n <= 0) {
           eof = true;
           const rest = buf + decoder.decode();
@@ -154,6 +161,9 @@ function createResultReader(fd: number, stop: AbortSignal) {
   };
   return {
     nextLine,
+    get reading() {
+      return active;
+    },
     get done() {
       return activeRead;
     },
@@ -178,42 +188,31 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     const output = inherit ? "inherit" : "pipe";
     const locks = heldLocks();
     const input = stdin === undefined ? "ignore" : new TextEncoder().encode(stdin);
-    const resultPipe = createPipe();
-    const configPipe = createPipe();
-    if (!resultPipe || !configPipe) {
-      if (resultPipe) {
-        try { closeSync(resultPipe.readFd); } catch {}
-        try { closeSync(resultPipe.writeFd); } catch {}
-      }
-      if (configPipe) {
-        try { closeSync(configPipe.readFd); } catch {}
-        try { closeSync(configPipe.writeFd); } catch {}
-      }
-      throw new Error("could not create supervisor pipes");
-    }
-    setCloexec(resultPipe.readFd, true);
-    setCloexec(configPipe.writeFd, true);
-    let resultReadClosed = false;
-    let resultWriteClosed = false;
+    const ipcPair = createSocketPair();
+    if (!ipcPair) throw new Error("could not create supervisor socket");
+    setCloexec(ipcPair.parentFd, true);
+    let ipcParentClosed = false;
+    let ipcChildClosed = false;
+    const closeIpcParent = () => {
+      if (ipcParentClosed) return;
+      ipcParentClosed = true;
+      try { closeSync(ipcPair.parentFd); } catch {}
+    };
+    const closeIpcChild = () => {
+      if (ipcChildClosed) return;
+      ipcChildClosed = true;
+      try { closeSync(ipcPair.childFd); } catch {}
+    };
+    let configPipe: { readFd: number; writeFd: number } | undefined;
     let configReadClosed = false;
     let configWriteClosed = false;
-    const closeResultRead = () => {
-      if (resultReadClosed) return;
-      resultReadClosed = true;
-      try { closeSync(resultPipe.readFd); } catch {}
-    };
-    const closeResultWrite = () => {
-      if (resultWriteClosed) return;
-      resultWriteClosed = true;
-      try { closeSync(resultPipe.writeFd); } catch {}
-    };
     const closeConfigRead = () => {
-      if (configReadClosed) return;
+      if (!configPipe || configReadClosed) return;
       configReadClosed = true;
       try { closeSync(configPipe.readFd); } catch {}
     };
     const closeConfigWrite = () => {
-      if (configWriteClosed) return;
+      if (!configPipe || configWriteClosed) return;
       configWriteClosed = true;
       try { closeSync(configPipe.writeFd); } catch {}
     };
@@ -223,36 +222,8 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     const keepAliveOnSignal = locks.length > 0 && !inProbe;
     const tag = inProbe ? `probe-${crypto.randomUUID()}` : crypto.randomUUID();
     const inheritedSpare = env?.[spareEnvVar] || process.env[spareEnvVar] || undefined;
-    const sparePipe = inheritedSpare ? undefined : createPipe();
-    if (sparePipe) setCloexec(sparePipe.readFd, true);
-    let spareReadClosed = false;
-    let spareWriteClosed = false;
-    const closeSpareRead = () => {
-      if (!sparePipe || spareReadClosed) return;
-      spareReadClosed = true;
-      try { closeSync(sparePipe.readFd); } catch {}
-    };
-    const closeSpareWrite = () => {
-      if (!sparePipe || spareWriteClosed) return;
-      spareWriteClosed = true;
-      try { closeSync(sparePipe.writeFd); } catch {}
-    };
     let spareFile: string | undefined = inheritedSpare;
     let spareHandedOff = Boolean(inheritedSpare);
-    const resolveSpareFile = (): string | undefined => {
-      if (!spareFile && sparePipe && !spareReadClosed) {
-        const drained = drainControlFd(sparePipe.readFd);
-        const path = drained.lines.map(parseSpareLine).find((p) => p !== undefined);
-        if (path) {
-          spareFile = path;
-          closeSpareRead();
-        } else if (drained.closed) {
-          closeSpareRead();
-        }
-      }
-      return spareFile;
-    };
-    let controlFd: number | undefined;
     let stopped = false;
     let supervisorReaped = false;
     let confirmedDone = false;
@@ -263,18 +234,10 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     let resultRead: Promise<{ code?: number; error?: string; errCode?: string } | undefined> | undefined;
     let resultReader: ReturnType<typeof createResultReader> | undefined;
     const stopStream = new AbortController();
-    const closeControl = () => {
-      if (controlFd === undefined) return;
-      const fd = controlFd;
-      controlFd = undefined;
-      try {
-        closeSync(fd);
-      } catch {}
-    };
     const runOutOfProcessSweep = async (): Promise<void> => {
       if (!child) return;
       const pid = child.pid;
-      const spare = resolveSpareFile();
+      const spare = spareFile;
       const fallbackCleanup = (fallbackSpare: string | undefined) => {
         if (!child) return;
         if (!supervisorReaped) {
@@ -289,9 +252,9 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       };
       let tempPipe: { readFd: number; writeFd: number } | undefined;
       let fd: number;
-      if (!supervisorReaped && controlFd !== undefined) {
-        fd = controlFd;
-        controlFd = undefined;
+      let ownsTempFd = false;
+      if (!supervisorReaped && !ipcParentClosed) {
+        fd = ipcPair.parentFd;
       } else {
         tempPipe = createPipe();
         if (!tempPipe) {
@@ -302,23 +265,16 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           closeSync(tempPipe.readFd);
         } catch {}
         fd = tempPipe.writeFd;
+        ownsTempFd = true;
       }
       setCloexec(fd, false);
-      const extraFds = [fd];
-      let watchdogSpareFd: number | undefined;
-      if (!spare && sparePipe && !spareReadClosed) {
-        watchdogSpareFd = 3 + extraFds.length;
-        extraFds.push(sparePipe.readFd);
-        setCloexec(sparePipe.readFd, false);
-        spareReadClosed = true;
-      }
       let helper: ReturnType<typeof Bun.spawn> | undefined;
       try {
         const payload = JSON.stringify([
           {
             pid,
             tag,
-            ...(spare ? { spareFile: spare } : watchdogSpareFd !== undefined ? { spareFd: watchdogSpareFd } : {}),
+            ...(spare ? { spareFile: spare } : {}),
             ...(inheritedSpare ? { keepSpareFile: true } : {}),
             fd: 3,
             delayMs: 0,
@@ -326,22 +282,19 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         ]);
         helper = Bun.spawn(bunScript(probeWatchdog, payload), {
           env: watchdogEnv(),
-          stdio: ["ignore", "ignore", "ignore", ...extraFds],
+          stdio: ["ignore", "ignore", "ignore", fd],
           detached: true,
         });
-        if (spare || watchdogSpareFd !== undefined) spareHandedOff = true;
+        if (spare) spareHandedOff = true;
       } catch {
-        const fallbackSpare =
-          spare ??
-          (watchdogSpareFd !== undefined && sparePipe
-            ? drainControlFd(sparePipe.readFd).lines.map(parseSpareLine).find((p) => p !== undefined)
-            : undefined);
-        fallbackCleanup(fallbackSpare);
+        fallbackCleanup(spare);
       } finally {
-        for (const extra of extraFds) {
+        if (ownsTempFd) {
           try {
-            closeSync(extra);
+            closeSync(fd);
           } catch {}
+        } else {
+          setCloexec(fd, true);
         }
       }
       if (helper) {
@@ -353,9 +306,9 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       stopped = true;
       if (!child) return;
       if (!supervisorReaped) {
-        if (controlFd !== undefined) {
+        if (!ipcParentClosed) {
           try {
-            writeSync(controlFd, "kill\n");
+            writeSync(ipcPair.parentFd, "kill\n");
           } catch {}
         }
         try {
@@ -366,10 +319,10 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       if (!tagSweep) tagSweep = runOutOfProcessSweep();
     };
     const interrupted = (name: NodeJS.Signals) => {
-      if (inProbe && child && !supervisorReaped && controlFd !== undefined) {
+      if (inProbe && child && !supervisorReaped && !ipcParentClosed) {
         pendingProbeInterrupt = name;
         try {
-          writeSync(controlFd, `sig:${name}\n`);
+          writeSync(ipcPair.parentFd, `sig:${name}\n`);
         } catch {}
         if (!probeInterruptHooked) {
           probeInterruptHooked = true;
@@ -377,7 +330,6 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           void liveChild.exited.finally(() => {
             const sig = pendingProbeInterrupt;
             if (!sig) return;
-            closeControl();
             release();
             if (!process.listenerCount(sig)) {
               if (sig === "SIGQUIT") process.exit(131);
@@ -388,26 +340,17 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         return;
       }
       stopChild();
-      const spare = resolveSpareFile();
-      if (child && !supervisorReaped && controlFd !== undefined) {
-        const fd = controlFd;
-        controlFd = undefined;
+      const spare = spareFile;
+      if (child && !supervisorReaped && !ipcParentClosed) {
+        const fd = ipcPair.parentFd;
         setCloexec(fd, false);
-        const extraFds = [fd];
-        let watchdogSpareFd: number | undefined;
-        if (!spare && sparePipe && !spareReadClosed) {
-          watchdogSpareFd = 3 + extraFds.length;
-          extraFds.push(sparePipe.readFd);
-          setCloexec(sparePipe.readFd, false);
-          spareReadClosed = true;
-        }
         let handedOff = false;
         try {
           const payload = JSON.stringify([
             {
               pid: child.pid,
               tag,
-              ...(spare ? { spareFile: spare } : watchdogSpareFd !== undefined ? { spareFd: watchdogSpareFd } : {}),
+              ...(spare ? { spareFile: spare } : {}),
               ...(inheritedSpare ? { keepSpareFile: true } : {}),
               fd: 3,
               delayMs: supervisorGraceMs,
@@ -415,30 +358,21 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           ]);
           const watchdog = Bun.spawn(bunScript(probeWatchdog, payload), {
             env: watchdogEnv(),
-            stdio: ["ignore", "ignore", "ignore", ...extraFds],
+            stdio: ["ignore", "ignore", "ignore", fd],
             detached: true,
           });
           watchdog.unref();
           handedOff = true;
-          if (spare || watchdogSpareFd !== undefined) spareHandedOff = true;
+          if (spare) spareHandedOff = true;
         } catch {
         } finally {
+          setCloexec(fd, true);
           if (!handedOff) {
-            const fallbackSpare =
-              spare ??
-              (watchdogSpareFd !== undefined && sparePipe
-                ? drainControlFd(sparePipe.readFd).lines.map(parseSpareLine).find((p) => p !== undefined)
-                : undefined);
-            killSessionSync(child.pid, "SIGKILL", tag, fallbackSpare);
+            killSessionSync(child.pid, "SIGKILL", tag, spare);
             try {
               child.kill("SIGKILL");
             } catch {}
-            if (!inheritedSpare) removeSpareAsync(fallbackSpare);
-          }
-          for (const extra of extraFds) {
-            try {
-              closeSync(extra);
-            } catch {}
+            if (!inheritedSpare) removeSpareAsync(spare);
           }
         }
       } else if (child) {
@@ -486,40 +420,50 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       }
       envEntries.push([tagEnvVar, tag]);
       if (inheritedSpare) envEntries.push([spareEnvVar, inheritedSpare]);
-      const controlFdIndex = 3 + locks.length;
-      const resultFdIndex = controlFdIndex + 1;
-      const configFdIndex = controlFdIndex + 2;
-      const spareFdIndex = sparePipe ? configFdIndex + 1 : undefined;
+      const configJson = JSON.stringify({
+        argv: command,
+        envEntries,
+        ...(!inheritedSpare ? { spareTag: tag, ...(childEnv.HOME ? { spareHome: childEnv.HOME } : {}) } : {}),
+      });
+      const configBytes = new TextEncoder().encode(configJson);
+      const inlineConfig = configBytes.byteLength <= 32_768 && !configJson.includes("\0");
+      if (!inlineConfig) {
+        configPipe = createPipe();
+        if (!configPipe) throw new Error("could not create supervisor config pipe");
+        setCloexec(configPipe.writeFd, true);
+      }
+      const ipcFdIndex = 3 + locks.length;
+      const configFdArg = configPipe ? String(ipcFdIndex + 1) : "-";
       const supEnv = supervisorEnv(fullTag);
       if (inheritedSpare) supEnv[spareEnvVar] = inheritedSpare;
       else delete supEnv[spareEnvVar];
-      const extraArgs = spareFdIndex !== undefined ? [String(spareFdIndex)] : [];
-      const extraStdio = sparePipe ? [sparePipe.writeFd] : [];
+      if (inlineConfig) supEnv.HEDGE_CAPTURE_CONFIG = configJson;
+      else delete supEnv.HEDGE_CAPTURE_CONFIG;
+      const extraStdio = configPipe ? [configPipe.readFd] : [];
       child = Bun.spawn(
-        bunScript(captureSupervisor, String(locks.length), String(controlFdIndex), String(resultFdIndex), String(configFdIndex), ...extraArgs),
+        bunScript(captureSupervisor, String(locks.length), String(ipcFdIndex), configFdArg),
         {
           env: supEnv,
-          stdio: [input, output, output, ...locks, "pipe", resultPipe.writeFd, configPipe.readFd, ...extraStdio],
+          stdio: [input, output, output, ...locks, ipcPair.childFd, ...extraStdio],
           detached: true,
         },
       );
-      closeResultWrite();
+      closeIpcChild();
       closeConfigRead();
-      closeSpareWrite();
       const live = child;
-      const fd = live.stdio[controlFdIndex];
-      if (typeof fd === "number") {
-        setCloexec(fd, true);
-        controlFd = fd;
-      }
-      const reader = createResultReader(resultPipe.readFd, stopStream.signal);
+      const reader = createResultReader(ipcPair.parentFd, stopStream.signal);
       resultReader = reader;
-      resultRead = reader.nextLine().then(
-        (raw) => {
+      resultRead = (async () => {
+        for (;;) {
+          const raw = await reader.nextLine();
           const line = raw.trim();
           if (!line) return undefined;
           try {
-            const record = JSON.parse(line) as { code?: unknown; error?: unknown };
+            const record = JSON.parse(line) as { spareFile?: unknown; code?: unknown; error?: unknown };
+            if (typeof record.spareFile === "string" && record.spareFile.length > 0) {
+              if (!spareFile) spareFile = record.spareFile;
+              continue;
+            }
             if (typeof record.error === "string") {
               const status = { error: record.error, ...(typeof record.code === "string" ? { errCode: record.code } : {}) };
               settle(status);
@@ -532,12 +476,10 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
             }
           } catch {}
           return undefined;
-        },
-        () => undefined,
-      );
+        }
+      })().catch(() => undefined);
       void live.exited.then(async (code) => {
         supervisorReaped = true;
-        closeControl();
         const reported = resultRead ? await resultRead : undefined;
         if (reported) settle(reported);
         if (!confirmedDone && !expired && !pendingProbeInterrupt && !tagSweep) tagSweep = runOutOfProcessSweep();
@@ -560,19 +502,13 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       if (stopped || expired) {
         closeConfigWrite();
         stopChild();
-      } else {
-        const configBytes = new TextEncoder().encode(
-          JSON.stringify({
-            argv: command,
-            envEntries,
-            ...(!inheritedSpare ? { spareTag: tag, ...(childEnv.HOME ? { spareHome: childEnv.HOME } : {}) } : {}),
-          }),
-        );
+      } else if (configPipe) {
+        const writeFdNum = configPipe.writeFd;
         configWrite = (async () => {
           try {
             let offset = 0;
             while (offset < configBytes.byteLength) {
-              const written = await writeFd(configPipe.writeFd, configBytes, offset);
+              const written = await writeFd(writeFdNum, configBytes, offset);
               if (written <= 0) break;
               offset += written;
             }
@@ -608,16 +544,14 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       cancel();
       if (pendingProbeInterrupt) {
         await live.exited;
-        closeControl();
         return { code: status.code ?? 143, stdout, stderr };
       }
       confirmedDone = true;
-      if (!supervisorReaped && controlFd !== undefined) {
+      if (!supervisorReaped && !ipcParentClosed) {
         try {
-          writeSync(controlFd, "done\n");
+          writeSync(ipcPair.parentFd, "done\n");
         } catch {}
       }
-      closeControl();
       if (inheritedSpare && status.error === undefined && resultReader) {
         let ackTimer: ReturnType<typeof setTimeout> | undefined;
         const spareAck = await Promise.race([
@@ -660,23 +594,20 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     } finally {
       if (hardKill) clearTimeout(hardKill);
       cancel();
-      closeResultWrite();
+      closeIpcChild();
       closeConfigRead();
-      closeSpareWrite();
       if (configWrite) await configWrite.catch(() => {});
       else closeConfigWrite();
       stopStream.abort();
       if (resultRead) await resultRead.catch(() => {});
-      if (resultReader) {
-        void resultReader.done.finally(() => closeResultRead());
+      if (resultReader && resultReader.reading) {
+        void resultReader.done.finally(() => closeIpcParent());
       } else {
-        closeResultRead();
+        closeIpcParent();
       }
-      closeControl();
       if (!spareHandedOff && (expired || !confirmedDone)) {
-        removeSpareAsync(resolveSpareFile());
+        removeSpareAsync(spareFile);
       }
-      closeSpareRead();
       release();
     }
   };

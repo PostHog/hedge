@@ -696,27 +696,23 @@ describe("humanStepsLeft", () => {
     expect(result).toEqual({ failing: [], unchecked: [] });
   });
 
-  test("preserves an already-completed real probe failure when the deadline fires during cleanup while marking a timed-out real probe unchecked and stopping it", async () => {
+  test("preserves an already-completed real probe failure and its background helper when the deadline fires while marking a timed-out real probe unchecked and stopping it", async () => {
     const home = temp.make("home-busy-deadline-");
-    const [childReady, trapReady, childGone, sawCleanup, cleanupGate, slowReady, slowGone] = [
+    const [childReady, childGone, slowReady, slowGone, afterReady] = [
       join(home, "child-ready"),
-      join(home, "trap-ready"),
       join(home, "child-gone"),
-      join(home, "saw-cleanup"),
-      join(home, "cleanup-gate"),
       join(home, "slow-ready"),
       join(home, "slow-gone"),
+      join(home, "after-ready"),
     ];
-    expect(Bun.spawnSync(["mkfifo", childReady, trapReady, childGone, sawCleanup, cleanupGate, slowReady, slowGone]).exitCode).toBe(0);
+    expect(Bun.spawnSync(["mkfifo", childReady, childGone, slowReady, slowGone, afterReady]).exitCode).toBe(0);
     const childStarted = Bun.file(childReady).text();
     const childClosed = Bun.file(childGone).text();
-    const cleanupStarted = Bun.file(sawCleanup).text();
     const slowStarted = Bun.file(slowReady).text();
     const slowClosed = Bun.file(slowGone).text();
-    const childCmd = 'pid=; trap \'kill "$pid" 2>/dev/null; echo cleanup > "$4"; cat "$5" >/dev/null; exit 0\' TERM; exec 3>"$1"; echo $$ > "$2"; echo armed > "$3"; while true; do sleep 30 3>&- & pid=$!; wait "$pid"; done';
-    const failScript = `const c = Bun.spawn(["sh", "-c", ${JSON.stringify(childCmd)}, "child", ${JSON.stringify(childGone)}, ${JSON.stringify(childReady)}, ${JSON.stringify(trapReady)}, ${JSON.stringify(sawCleanup)}, ${JSON.stringify(cleanupGate)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    const afterStarted = Bun.file(afterReady).text();
+    const failScript = `const c = Bun.spawn(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "child", ${JSON.stringify(childGone)}, ${JSON.stringify(childReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 c.unref();
-await Bun.file(${JSON.stringify(trapReady)}).text();
 process.exit(1);`;
     let fireDeadline!: () => void;
     const quickFailStep = {
@@ -731,32 +727,45 @@ process.exit(1);`;
       say: "Slow.",
       probe: ["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "probe", slowGone, slowReady],
     };
+    const fillers = Array.from({ length: 6 }, (_, i) => ({
+      id: `hold-${i}`,
+      pack: "team",
+      say: "Hold.",
+      probe: ["sh", "-c", "exec sleep 30"],
+    }));
+    const afterStep = {
+      id: "after-quick",
+      pack: "team",
+      say: "After quick.",
+      probe: ["sh", "-c", 'echo started > "$1"; exec sleep 30', "probe", afterReady],
+    };
     let childPid = 0;
     let slowPid = 0;
     try {
-      const pending = humanStepsLeft(plan({ human: [quickFailStep, slowStep] }), {
+      const pending = humanStepsLeft(plan({ human: [quickFailStep, slowStep, ...fillers, afterStep] }), {
         home,
         giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)),
-        graceMs: 10_000,
+        graceMs: 0,
       });
-      [childPid, slowPid] = (await Promise.all([childStarted, slowStarted])).map((s) => Number(s.trim())) as [number, number];
+      const [rawChild, rawSlow] = await Promise.all([childStarted, slowStarted, afterStarted]);
+      childPid = Number(rawChild.trim());
+      slowPid = Number(rawSlow.trim());
       expect(childPid).toBeGreaterThan(0);
       expect(slowPid).toBeGreaterThan(0);
-      expect((await cleanupStarted).trim()).toBe("cleanup");
       fireDeadline();
       const res = await pending;
       expect(res.failing.map((item) => item.id)).toEqual(["quick-fail"]);
-      expect(res.unchecked.map((item) => item.id)).toEqual(["slow-real"]);
+      expect(res.unchecked.map((item) => item.id)).toContain("slow-real");
       expect(await slowClosed).toBe("");
-      await Bun.spawn(["sh", "-c", 'printf "go\\n" > "$1"', "gate", cleanupGate], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exited;
-      expect(await childClosed).toBe("");
+      expect(() => process.kill(childPid, 0)).not.toThrow();
     } finally {
       if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
       if (slowPid > 0) try { process.kill(slowPid, "SIGKILL"); } catch {}
+      await childClosed.catch(() => {});
     }
   });
 
-  test("preserves an intentionally detached daemon while watchdog cleans up an ordinary child after normal probe exit", async () => {
+  test("preserves both same-group and detached background helpers left by a probe that exits before the deadline", async () => {
     const home = temp.make("home-detached-watchdog-");
     const [daemonReady, daemonGone, childReady, childGone, exitGate] = [
       join(home, "daemon-ready"),
@@ -772,7 +781,7 @@ process.exit(1);`;
     const childClosed = Bun.file(childGone).text();
     const script = `const daemon = Bun.spawn(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 daemon.unref();
-const child = Bun.spawn(["sh", "-c", 'trap "" TERM; exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "child", ${JSON.stringify(childGone)}, ${JSON.stringify(childReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+const child = Bun.spawn(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "child", ${JSON.stringify(childGone)}, ${JSON.stringify(childReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 child.unref();
 await Bun.file(${JSON.stringify(exitGate)}).text();
 process.exit(0);`;
@@ -786,12 +795,13 @@ process.exit(0);`;
       expect(childPid).toBeGreaterThan(0);
       await Bun.spawn(["sh", "-c", 'printf go > "$1"', "gate", exitGate], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exited;
       expect(await pending).toEqual({ failing: [], unchecked: [] });
-      expect(await childClosed).toBe("");
+      expect(() => process.kill(childPid, 0)).not.toThrow();
       expect(() => process.kill(daemonPid, 0)).not.toThrow();
     } finally {
       if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
       if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
       await daemonClosed.catch(() => {});
+      await childClosed.catch(() => {});
     }
   });
 

@@ -547,8 +547,11 @@ test("kills a background child left in an unlocked command's own process group a
   const leaderClosed = Bun.file(leaderGone).text();
   const clock = handTimer();
   const pgidScript = `import { dlopen, FFIType } from "bun:ffi";
-const lib = dlopen(process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6", { setpgid: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
-if (lib.symbols.setpgid(0, 0) !== 0) process.exit(2);
+const lib = dlopen(process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6", {
+  getpgrp: { args: [], returns: FFIType.i32 },
+  setpgid: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+});
+if (lib.symbols.getpgrp() !== process.pid && lib.symbols.setpgid(0, 0) !== 0) process.exit(2);
 const c = Bun.spawn(["sh", "-c", ${JSON.stringify(`exec 4>${JSON.stringify(leaderGone)}; { sleep 30 4>&- & } 3>${JSON.stringify(gone)}; echo $! > ${JSON.stringify(ready)}`)}], { stdio: ["inherit", "inherit", "inherit"] });
 process.exit(await c.exited);`;
   const result = captureWith(clock.timer)([process.execPath, "-e", pgidScript], { timeoutMs: 30 });
@@ -801,4 +804,26 @@ test("captures large environments alongside held box locks without IPC descripto
     ),
   );
   expect(result).toEqual({ code: 0, stdout: String(chunk.length * 4), stderr: "" });
+});
+
+test("runs 48 concurrent captures under a 256 file-descriptor limit without EMFILE", async () => {
+  const coderPath = join(import.meta.dir, "coder.ts");
+  const script = `import { capture } from ${JSON.stringify(coderPath)};
+const results = await Promise.all(Array.from({ length: 48 }, (_, i) => capture(["sh", "-c", \`printf '%s' \${i}\`], { timeoutMs: 10_000 })));
+const ok = results.length === 48 && results.every((r, i) => r.code === 0 && r.stdout === String(i));
+process.exit(ok ? 0 : 1);`;
+  const proc = Bun.spawn(["sh", "-c", 'ulimit -n 256 && exec "$1" -e "$2"', "fd-cap", process.execPath, script], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+  expect(stderr).toBe("");
+  expect(code).toBe(0);
+});
+
+test("makes the captured command its own process-group leader like direct detached spawn", async () => {
+  if (process.platform !== "linux" || !Bun.which("setsid")) return;
+  const res = await capture(["setsid", "sh", "-c", "exit 42"], { timeoutMs: 5_000 });
+  expect(res.code).toBe(0);
 });

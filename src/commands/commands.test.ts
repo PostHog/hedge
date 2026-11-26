@@ -285,33 +285,56 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
     }
   });
 
-  test("reports a failing human step that exits nonzero even when the deadline fires while its background child is still cleaning up", async () => {
+  test("reports a failing human step that exits nonzero while leaving its background helper running and stopping a slow probe at the deadline", async () => {
     const { home } = await machineWithProfile();
-    const [childReady, ready, sawTerm, gone] = [
+    const [childReady, ready, gone, slowReady, slowGone, allowDone] = [
       join(home, "child-ready"),
       join(home, "ready"),
-      join(home, "saw-term"),
       join(home, "gone"),
+      join(home, "slow-ready"),
+      join(home, "slow-gone"),
+      join(home, "allow-done"),
     ];
-    expect(Bun.spawnSync(["mkfifo", childReady, ready, sawTerm, gone]).exitCode).toBe(0);
-    const childBin = join(home, "stray-child.sh");
+    expect(Bun.spawnSync(["mkfifo", childReady, ready, gone, slowReady, slowGone, allowDone]).exitCode).toBe(0);
+    const childBin = join(home, "helper-child.sh");
     writeFileSync(
       childBin,
-      '#!/bin/sh\ntrap \'echo term > "$3"; exit 0\' TERM\nexec 3>"$1"\necho $$ > "$2"\nsleep 30 3>&- & wait\n',
+      '#!/bin/sh\nexec 3>"$1"\necho $$ > "$2"\nexec sleep 30\n',
       { mode: 0o755 },
     );
+    const fillers = Array.from({ length: 6 }, (_, i) => humanStep(`hold-${i}`, "exec sleep 30"));
     await withTeamPack(home, {
-      workflows: [flow("allowlist")],
-      human: [humanStep("allowlist", `${JSON.stringify(childBin)} "$HOME/gone" "$HOME/child-ready" "$HOME/saw-term" & pid=$(cat "$HOME/child-ready"); echo "$pid" > "$HOME/ready"; exit 7`, "allowlist")],
+      workflows: [flow("allowlist"), flow("slow")],
+      human: [
+        humanStep("allowlist", `${JSON.stringify(childBin)} "$HOME/gone" "$HOME/child-ready" & pid=$(cat "$HOME/child-ready"); echo "$pid" > "$HOME/ready"; exit 7`, "allowlist"),
+        humanStep("slow", 'exec 3>"$HOME/slow-gone"; echo $$ > "$HOME/slow-ready"; exec sleep 30', "slow"),
+        ...fillers,
+        humanStep("after-allow", 'echo done > "$HOME/allow-done"; exec sleep 30'),
+      ],
     });
-    const [started, gotTerm, holderGone] = [fifoRead(ready), fifoRead(sawTerm), fifoRead(gone)];
-    const deadlineDuringCleanup = { now: () => 0, sleep: async () => void (await gotTerm) };
+    const [started, holderGone, slowStarted, slowClosed, allowFinished] = [
+      fifoRead(ready),
+      fifoRead(gone),
+      fifoRead(slowReady),
+      fifoRead(slowGone),
+      fifoRead(allowDone),
+    ];
+    const deadlineAfterAllowDone = {
+      now: () => 0,
+      sleep: async () => void (await Promise.all([started, slowStarted, allowFinished])),
+    };
     try {
-      const output = (await hedge(home, ["packs"], 0, { clock: deadlineDuringCleanup })).output;
-      expect(output).toContain(`  ~ team  Team rules.\n      Workflows: allowlist needs setup\n${needsSetup}`);
-      expect(await holderGone).toBe("");
+      const output = (await hedge(home, ["packs"], 0, { clock: deadlineAfterAllowDone })).output;
+      expect(output).toContain("allowlist needs setup");
+      expect(output).toContain("slow not checked");
+      expect(await slowClosed).toBe("");
+      const helperPid = Number((await started).trim());
+      expect(helperPid).toBeGreaterThan(0);
+      expect(() => process.kill(helperPid, 0)).not.toThrow();
     } finally {
       await endHolder(started);
+      await endHolder(slowStarted);
+      await holderGone.catch(() => {});
     }
   });
 
@@ -438,30 +461,24 @@ process.exit(await c.exited);`;
 
   test("propagates pack-level human prerequisite timeouts to dependent workflows and prints both hints when another probe fails", async () => {
     const { home } = await machineWithProfile();
-    const [ready, gone, allowReady, allowSawTerm, allowGone] = [
-      join(home, "ready"),
-      join(home, "gone"),
-      join(home, "allow-ready"),
-      join(home, "allow-saw-term"),
-      join(home, "allow-gone"),
-    ];
-    expect(Bun.spawnSync(["mkfifo", ready, gone, allowReady, allowSawTerm, allowGone]).exitCode).toBe(0);
-    const childBin = join(home, "allow-child.sh");
-    writeFileSync(
-      childBin,
-      '#!/bin/sh\ntrap \'echo term > "$3"; exit 0\' TERM\nexec 3>"$1"\necho $$ > "$2"\nsleep 30 3>&- & wait\n',
-      { mode: 0o755 },
-    );
+    const [ready, gone, allowDone] = [join(home, "ready"), join(home, "gone"), join(home, "allow-done")];
+    expect(Bun.spawnSync(["mkfifo", ready, gone, allowDone]).exitCode).toBe(0);
+    const fillers = Array.from({ length: 6 }, (_, i) => humanStep(`hold-${i}`, "exec sleep 30"));
     await withTeamPack(home, {
       workflows: [flow("allowlist"), flow("sync")],
       human: [
-        humanStep("allowlist", `${JSON.stringify(childBin)} "$HOME/allow-gone" "$HOME/allow-ready" "$HOME/allow-saw-term" & cat "$HOME/allow-ready" >/dev/null; exit 1`, "allowlist"),
+        humanStep("allowlist", "exit 1", "allowlist"),
         humanStep("sign-in", blockedProbe("-")),
+        ...fillers,
+        humanStep("after-allow", 'echo done > "$HOME/allow-done"; exec sleep 30'),
       ],
       steps: [{ id: "sync-step", workflow: "sync", after: "sign-in", run: ["true"] }],
     });
-    const [holderGone, started, allowTerm, allowClosed] = [fifoRead(gone), fifoRead(ready), fifoRead(allowSawTerm), fifoRead(allowGone)];
-    const timesOutOnceStarted = { now: () => 0, sleep: async () => void (await Promise.all([started, allowTerm, allowClosed])) };
+    const [holderGone, started, allowFinished] = [fifoRead(gone), fifoRead(ready), fifoRead(allowDone)];
+    const timesOutOnceStarted = {
+      now: () => 0,
+      sleep: async () => void (await Promise.all([started, allowFinished])),
+    };
     try {
       const output = (await hedge(home, ["packs"], 0, { clock: timesOutOnceStarted })).output;
       expect(output).toContain("  ~ team  Team rules.\n      Workflows: allowlist needs setup, sync not checked\n      Needs setup on this machine. Run hedge doctor for the steps.\n      Hedge could not check this pack's setup right now. Run hedge doctor.");

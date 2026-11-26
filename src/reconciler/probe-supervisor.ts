@@ -140,19 +140,30 @@ export function recordSparedProcess(filePath: string, pids: number[], sids: numb
 
 export type SparedSet = { pids: Set<number>; sids: Set<number> };
 export type SpareInput = string | SparedSet | undefined;
+export type SpareReadResult = { ok: true; spared: SparedSet } | { ok: false };
 
-export function readSpared(filePath: SpareInput): SparedSet {
-  if (filePath && typeof filePath !== "string") return filePath;
+const emptySparedSet = (): SparedSet => ({ pids: new Set<number>(), sids: new Set<number>() });
+
+export function readSparedChecked(filePath: string | undefined): SpareReadResult {
+  if (!filePath) return { ok: true, spared: emptySparedSet() };
+  const dir = dirname(filePath);
+  try {
+    const dirInfo = lstatSync(dir);
+    if (!dirInfo.isDirectory() || dirInfo.isSymbolicLink()) return { ok: true, spared: emptySparedSet() };
+    if (typeof process.getuid === "function" && dirInfo.uid !== process.getuid()) return { ok: true, spared: emptySparedSet() };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    return code === "ENOENT" ? { ok: true, spared: emptySparedSet() } : { ok: false };
+  }
   const pids = new Set<number>();
   const sids = new Set<number>();
-  if (!filePath || !isOwnedDirectory(dirname(filePath))) return { pids, sids };
   let fd: number | undefined;
   try {
     const flags = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
     fd = openSync(filePath, flags);
     const stat = fstatSync(fd);
-    if (!stat.isFile()) return { pids, sids };
-    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return { pids, sids };
+    if (!stat.isFile()) return { ok: true, spared: { pids, sids } };
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return { ok: true, spared: { pids, sids } };
     const raw = readFileSync(fd, "utf8");
     for (const line of raw.split("\n")) {
       if (line.startsWith("pid:")) {
@@ -163,7 +174,11 @@ export function readSpared(filePath: SpareInput): SparedSet {
         if (Number.isInteger(n) && n > 0) sids.add(n);
       }
     }
-  } catch {
+    return { ok: true, spared: { pids, sids } };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT" || code === "ELOOP") return { ok: true, spared: { pids, sids } };
+    return { ok: false };
   } finally {
     if (fd !== undefined) {
       try {
@@ -171,7 +186,18 @@ export function readSpared(filePath: SpareInput): SparedSet {
       } catch {}
     }
   }
-  return { pids, sids };
+}
+
+export function readSpared(filePath: SpareInput): SparedSet {
+  if (filePath && typeof filePath !== "string") return filePath;
+  const res = readSparedChecked(filePath);
+  return res.ok ? res.spared : emptySparedSet();
+}
+
+function resolveSpareInput(sparePath: SpareInput): { spared: SparedSet; unreadable: boolean } {
+  if (sparePath && typeof sparePath !== "string") return { spared: sparePath, unreadable: false };
+  const res = readSparedChecked(sparePath);
+  return res.ok ? { spared: res.spared, unreadable: false } : { spared: emptySparedSet(), unreadable: true };
 }
 
 export function removeSpareFile(filePath: string | undefined): void {
@@ -269,6 +295,7 @@ export function enableChildSubreaper(): void {
 type PosixLib = {
   poll: (fds: ReturnType<typeof ptr>, nfds: number, timeout: number) => number;
   pipe: (fds: ReturnType<typeof ptr>) => number;
+  socketpair: (domain: number, type: number, protocol: number, fds: ReturnType<typeof ptr>) => number;
   fcntl: (fd: number, cmd: number, arg: number) => number;
   dup2: (oldfd: number, newfd: number) => number;
 };
@@ -284,12 +311,14 @@ function getPosixLib(): PosixLib | null {
       const lib = dlopen(libName, {
         poll: { args: [FFIType.pointer, nfdsType, FFIType.i32], returns: FFIType.i32 },
         pipe: { args: [FFIType.pointer], returns: FFIType.i32 },
+        socketpair: { args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.pointer], returns: FFIType.i32 },
         fcntl: { args: [FFIType.i32, FFIType.i32, FFIType.i32], returns: FFIType.i32 },
         dup2: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
       });
       posixLib = {
         poll: (fds, nfds, timeout) => lib.symbols.poll(fds, nfds, timeout),
         pipe: (fds) => lib.symbols.pipe(fds),
+        socketpair: (domain, type, protocol, fds) => lib.symbols.socketpair(domain, type, protocol, fds),
         fcntl: (fd, cmd, arg) => lib.symbols.fcntl(fd, cmd, arg),
         dup2: (oldfd, newfd) => lib.symbols.dup2(oldfd, newfd),
       };
@@ -332,6 +361,14 @@ export function createPipe(): { readFd: number; writeFd: number } | undefined {
   const fds = new Int32Array(2);
   if (lib.pipe(ptr(fds)) !== 0) return undefined;
   return { readFd: fds[0]!, writeFd: fds[1]! };
+}
+
+export function createSocketPair(): { parentFd: number; childFd: number } | undefined {
+  const lib = getPosixLib();
+  if (!lib) return undefined;
+  const fds = new Int32Array(2);
+  if (lib.socketpair(1, 1, 0, ptr(fds)) !== 0) return undefined;
+  return { parentFd: fds[0]!, childFd: fds[1]! };
 }
 
 export function setCloexec(fd: number, enabled: boolean): void {
@@ -439,11 +476,19 @@ export async function waitForFdClosed(fd: number, timeoutMs: number): Promise<vo
   }
 }
 
-export function discoverTargetsLinux(sessionId?: number, tag?: string, deadLeaderReaped?: boolean, sparePath?: SpareInput, ownGroupOnly = false): ProcTargets {
+export function discoverTargetsLinux(
+  sessionId?: number,
+  tag?: string,
+  deadLeaderReaped?: boolean,
+  sparePath?: SpareInput,
+  ownGroupOnly = false,
+  skipDetached = false,
+): ProcTargets {
   const self = process.pid;
-  const effectiveTag = ownGroupOnly ? undefined : tag;
+  const { spared, unreadable } = resolveSpareInput(sparePath);
+  const blockDetached = ownGroupOnly || skipDetached || unreadable;
+  const effectiveTag = blockDetached ? undefined : tag;
   const includeDetached = Boolean(effectiveTag);
-  const spared = readSpared(sparePath);
   const rows: Array<{ pid: number; ppid: number; pgrp: number; sid: number; envTag?: string }> = [];
   const matched = new Set<number>();
   const activeTags = new Set<string>(effectiveTag ? [effectiveTag] : []);
@@ -481,7 +526,7 @@ export function discoverTargetsLinux(sessionId?: number, tag?: string, deadLeade
       }
     }
   } catch {}
-  if (includeDetached || (!ownGroupOnly && sessionId === undefined)) {
+  if (includeDetached || (!blockDetached && sessionId === undefined)) {
     let grew = true;
     while (grew) {
       grew = false;
@@ -673,10 +718,12 @@ function buildTargetsFromPs(
   excludePids: Set<number>,
   sparePath?: SpareInput,
   ownGroupOnly = false,
+  skipDetached = false,
 ): ProcTargets {
-  const effectiveTag = ownGroupOnly ? undefined : tag;
+  const { spared, unreadable } = resolveSpareInput(sparePath);
+  const blockDetached = ownGroupOnly || skipDetached || unreadable;
+  const effectiveTag = blockDetached ? undefined : tag;
   const includeDetached = Boolean(effectiveTag);
-  const spared = readSpared(sparePath);
   const rows: Array<{ pid: number; ppid: number; pgid: number; envTag?: string }> = [];
   const matched = new Set<number>();
   const activeTags = new Set<string>(effectiveTag ? [effectiveTag] : []);
@@ -702,7 +749,7 @@ function buildTargetsFromPs(
       }
     }
   }
-  if (includeDetached || (!ownGroupOnly && sessionId === undefined)) {
+  if (includeDetached || (!blockDetached && sessionId === undefined)) {
     let grew = true;
     while (grew) {
       grew = false;
@@ -812,9 +859,18 @@ function ppidDarwin(lib: DarwinLib, pid: number): number {
   return n >= 20 ? new DataView(buf.buffer).getUint32(16, true) : 0;
 }
 
-export function discoverTargetsSync(sessionId?: number, tag?: string, deadLeaderReaped?: boolean, sparePath?: SpareInput, ownGroupOnly = false): ProcTargets | undefined {
-  if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag, deadLeaderReaped, sparePath, ownGroupOnly);
-  const effectiveTag = ownGroupOnly ? undefined : tag;
+export function discoverTargetsSync(
+  sessionId?: number,
+  tag?: string,
+  deadLeaderReaped?: boolean,
+  sparePath?: SpareInput,
+  ownGroupOnly = false,
+  skipDetached = false,
+): ProcTargets | undefined {
+  if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag, deadLeaderReaped, sparePath, ownGroupOnly, skipDetached);
+  const { spared, unreadable } = resolveSpareInput(sparePath);
+  const blockDetached = ownGroupOnly || skipDetached || unreadable;
+  const effectiveTag = blockDetached ? undefined : tag;
   if (sessionId === undefined && !effectiveTag) return undefined;
   const lib = getDarwinLib();
   if (!lib) return undefined;
@@ -825,7 +881,6 @@ export function discoverTargetsSync(sessionId?: number, tag?: string, deadLeader
   const actual = lib.proc_listallpids(ptr(buf), buf.byteLength);
   if (actual <= 0) return undefined;
   const self = process.pid;
-  const spared = readSpared(sparePath);
   const limit = Math.min(actual, capacity);
   let effectiveSessionId = sessionId;
   if (deadLeaderReaped !== undefined && sessionId !== undefined) {
@@ -848,7 +903,7 @@ export function discoverTargetsSync(sessionId?: number, tag?: string, deadLeader
   for (let i = 0; i < limit; i++) {
     const pid = buf[i]!;
     if (pid <= 0 || pid === self || pid === effectiveSessionId) continue;
-    const ppid = effectiveTag || (!ownGroupOnly && effectiveSessionId === undefined) ? ppidDarwin(lib, pid) : 0;
+    const ppid = effectiveTag || (!blockDetached && effectiveSessionId === undefined) ? ppidDarwin(lib, pid) : 0;
     const sid = lib.getsid(pid);
     const pgid = lib.getpgid(pid);
     const envTag = effectiveTag ? readEnvTagDarwin(pid) : undefined;
@@ -859,7 +914,7 @@ export function discoverTargetsSync(sessionId?: number, tag?: string, deadLeader
       matched.add(pid);
     }
   }
-  if (effectiveTag || (!ownGroupOnly && effectiveSessionId === undefined)) {
+  if (effectiveTag || (!blockDetached && effectiveSessionId === undefined)) {
     let grew = true;
     while (grew) {
       grew = false;
@@ -961,11 +1016,17 @@ async function runBoundedPs(args: string[]): Promise<{ pid: number; text: string
   }
 }
 
-export async function discoverTargets(sessionId?: number, tag?: string, sparePath?: SpareInput, ownGroupOnly = false): Promise<ProcTargets | undefined> {
-  if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag, undefined, sparePath, ownGroupOnly);
+export async function discoverTargets(
+  sessionId?: number,
+  tag?: string,
+  sparePath?: SpareInput,
+  ownGroupOnly = false,
+  skipDetached = false,
+): Promise<ProcTargets | undefined> {
+  if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag, undefined, sparePath, ownGroupOnly, skipDetached);
   const treeRes = await runBoundedPs(["-Ao", "pid=,ppid=,pgid="]);
-  if (!treeRes) return discoverTargetsSync(sessionId, tag, undefined, sparePath, ownGroupOnly);
-  return buildTargetsFromPs(process.pid, sessionId, tag, treeRes.text, new Set([treeRes.pid]), sparePath, ownGroupOnly);
+  if (!treeRes) return discoverTargetsSync(sessionId, tag, undefined, sparePath, ownGroupOnly, skipDetached);
+  return buildTargetsFromPs(process.pid, sessionId, tag, treeRes.text, new Set([treeRes.pid]), sparePath, ownGroupOnly, skipDetached);
 }
 
 function signalOneGroup(pgrp: number, signal: NodeJS.Signals): void {
@@ -1019,50 +1080,77 @@ function signalDeadTargets(targets: ProcTargets, deadSessionId?: number, guard?:
   }
 }
 
-function sweepDeadLinux(deadSessionId: number, tag: string | undefined, reaped: boolean, sparePath?: SpareInput, ownGroupOnly = false): void {
-  const effectiveTag = ownGroupOnly ? undefined : tag;
+function sweepDeadLinux(
+  deadSessionId: number,
+  tag: string | undefined,
+  reaped: boolean,
+  sparePath?: SpareInput,
+  ownGroupOnly = false,
+  skipDetached = false,
+): void {
+  const { spared, unreadable } = resolveSpareInput(sparePath);
+  const blockDetached = ownGroupOnly || skipDetached || unreadable;
+  const effectiveTag = blockDetached ? undefined : tag;
   if (isDeadLeaderRecycledLinux(deadSessionId, reaped)) {
-    if (effectiveTag) signalDeadTargets(discoverTargetsLinux(undefined, effectiveTag, undefined, sparePath), undefined);
+    if (effectiveTag) signalDeadTargets(discoverTargetsLinux(undefined, effectiveTag, undefined, spared), undefined);
     return;
   }
-  const targets = discoverTargetsLinux(deadSessionId, effectiveTag, reaped, sparePath, ownGroupOnly);
+  const targets = discoverTargetsLinux(deadSessionId, effectiveTag, reaped, spared, ownGroupOnly, blockDetached);
   if (targets.leaderSeenLive || isDeadLeaderRecycledLinux(deadSessionId, reaped)) {
-    if (effectiveTag) signalDeadTargets(discoverTargetsLinux(undefined, effectiveTag, undefined, sparePath), undefined);
+    if (effectiveTag) signalDeadTargets(discoverTargetsLinux(undefined, effectiveTag, undefined, spared), undefined);
     return;
   }
   signalDeadTargets(targets, deadSessionId, () => !isDeadLeaderRecycledLinux(deadSessionId, reaped));
 }
 
-export function killDeadSessionSync(deadSessionId: number, tag?: string, reaped = false, sparePath?: SpareInput, ownGroupOnly = false): void {
+export function killDeadSessionSync(
+  deadSessionId: number,
+  tag?: string,
+  reaped = false,
+  sparePath?: SpareInput,
+  ownGroupOnly = false,
+  skipDetached = false,
+): void {
   if (process.platform === "linux") {
-    sweepDeadLinux(deadSessionId, tag, reaped, sparePath, ownGroupOnly);
+    sweepDeadLinux(deadSessionId, tag, reaped, sparePath, ownGroupOnly, skipDetached);
     return;
   }
-  const effectiveTag = ownGroupOnly ? undefined : tag;
-  const found = discoverTargetsSync(deadSessionId, effectiveTag, reaped, sparePath, ownGroupOnly);
+  const { spared, unreadable } = resolveSpareInput(sparePath);
+  const blockDetached = ownGroupOnly || skipDetached || unreadable;
+  const effectiveTag = blockDetached ? undefined : tag;
+  const found = discoverTargetsSync(deadSessionId, effectiveTag, reaped, spared, ownGroupOnly, blockDetached);
   if (!found) return;
   const lib = getDarwinLib();
   if (lib && isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped)) {
-    const tagged = effectiveTag ? discoverTargetsSync(undefined, effectiveTag, undefined, sparePath) : undefined;
+    const tagged = effectiveTag ? discoverTargetsSync(undefined, effectiveTag, undefined, spared) : undefined;
     if (tagged) signalDeadTargets(tagged, undefined);
     return;
   }
   signalDeadTargets(found, deadSessionId, lib ? () => !isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped) : undefined);
 }
 
-export function killDeadSession(deadSessionId: number, tag?: string, reaped = false, sparePath?: SpareInput, ownGroupOnly = false): void | Promise<void> {
+export function killDeadSession(
+  deadSessionId: number,
+  tag?: string,
+  reaped = false,
+  sparePath?: SpareInput,
+  ownGroupOnly = false,
+  skipDetached = false,
+): void | Promise<void> {
   if (process.platform === "linux") {
     if (!reaped && isDeadLeaderRecycledLinux(deadSessionId, false)) {
-      return Bun.sleep(15).then(() => sweepDeadLinux(deadSessionId, tag, reaped, sparePath, ownGroupOnly));
+      return Bun.sleep(15).then(() => sweepDeadLinux(deadSessionId, tag, reaped, sparePath, ownGroupOnly, skipDetached));
     }
-    sweepDeadLinux(deadSessionId, tag, reaped, sparePath, ownGroupOnly);
+    sweepDeadLinux(deadSessionId, tag, reaped, sparePath, ownGroupOnly, skipDetached);
     return;
   }
-  const effectiveTag = ownGroupOnly ? undefined : tag;
+  const { spared, unreadable } = resolveSpareInput(sparePath);
+  const blockDetached = ownGroupOnly || skipDetached || unreadable;
+  const effectiveTag = blockDetached ? undefined : tag;
   return (async () => {
     let treeRes = await runBoundedPs(["-Ao", "pid=,ppid=,pgid=,stat="]);
     if (!treeRes) {
-      killDeadSessionSync(deadSessionId, effectiveTag, reaped, sparePath, ownGroupOnly);
+      killDeadSessionSync(deadSessionId, effectiveTag, reaped, spared, ownGroupOnly, blockDetached);
       return;
     }
     let stat = psPidStat(treeRes.text, deadSessionId);
@@ -1070,7 +1158,7 @@ export function killDeadSession(deadSessionId: number, tag?: string, reaped = fa
       await Bun.sleep(15);
       treeRes = await runBoundedPs(["-Ao", "pid=,ppid=,pgid=,stat="]);
       if (!treeRes) {
-        killDeadSessionSync(deadSessionId, effectiveTag, reaped, sparePath, ownGroupOnly);
+        killDeadSessionSync(deadSessionId, effectiveTag, reaped, spared, ownGroupOnly, blockDetached);
         return;
       }
       stat = psPidStat(treeRes.text, deadSessionId);
@@ -1079,17 +1167,24 @@ export function killDeadSession(deadSessionId: number, tag?: string, reaped = fa
     const recycled = (stat !== undefined && (reaped || !stat.includes("Z"))) || (lib !== null && isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped));
     const sid = recycled ? undefined : deadSessionId;
     if (sid === undefined && !effectiveTag) return;
-    const targets = buildTargetsFromPs(process.pid, sid, effectiveTag, treeRes.text, new Set([treeRes.pid]), sparePath, ownGroupOnly);
+    const targets = buildTargetsFromPs(process.pid, sid, effectiveTag, treeRes.text, new Set([treeRes.pid]), spared, ownGroupOnly, blockDetached);
     if (sid !== undefined && lib && isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped)) {
-      if (effectiveTag) signalDeadTargets(buildTargetsFromPs(process.pid, undefined, effectiveTag, treeRes.text, new Set([treeRes.pid]), sparePath), undefined);
+      if (effectiveTag) signalDeadTargets(buildTargetsFromPs(process.pid, undefined, effectiveTag, treeRes.text, new Set([treeRes.pid]), spared), undefined);
       return;
     }
     signalDeadTargets(targets, sid, sid !== undefined && lib ? () => !isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped) : undefined);
   })();
 }
 
-export function killSessionSync(sessionId: number | undefined, signal: NodeJS.Signals, tag?: string, sparePath?: string, ownGroupOnly = false): void {
-  signalTargets(discoverTargetsSync(sessionId, tag, undefined, sparePath, ownGroupOnly) ?? { pids: [], groups: [], orphanPids: [] }, signal, sessionId);
+export function killSessionSync(
+  sessionId: number | undefined,
+  signal: NodeJS.Signals,
+  tag?: string,
+  sparePath?: SpareInput,
+  ownGroupOnly = false,
+  skipDetached = false,
+): void {
+  signalTargets(discoverTargetsSync(sessionId, tag, undefined, sparePath, ownGroupOnly, skipDetached) ?? { pids: [], groups: [], orphanPids: [] }, signal, sessionId);
 }
 
 export function killSession(
@@ -1097,19 +1192,20 @@ export function killSession(
   signal: NodeJS.Signals,
   tag?: string,
   remembered?: Map<number, number>,
-  sparePath?: string,
+  sparePath?: SpareInput,
   ownGroupOnly = false,
+  skipDetached = false,
 ): void | Promise<void> {
   if (process.platform === "linux") {
-    signalTargets(discoverTargetsLinux(sessionId, tag, undefined, sparePath, ownGroupOnly), signal, sessionId);
+    signalTargets(discoverTargetsLinux(sessionId, tag, undefined, sparePath, ownGroupOnly, skipDetached), signal, sessionId);
     return;
   }
-  return discoverTargets(sessionId, tag, sparePath, ownGroupOnly).then((found) => {
+  return discoverTargets(sessionId, tag, sparePath, ownGroupOnly, skipDetached).then((found) => {
     const targets: ProcTargets = found
       ? { pids: [...found.pids], groups: [...found.groups], orphanPids: [...found.orphanPids] }
       : { pids: [], groups: [], orphanPids: [] };
     const lib = getDarwinLib();
-    if (!ownGroupOnly && remembered && lib) {
+    if (!ownGroupOnly && !skipDetached && remembered && lib) {
       for (const pid of targets.pids) {
         const pgid = lib.getpgid(pid);
         if (pgid > 0 && pgid !== sessionId && pgid !== process.pid) remembered.set(pid, pgid);
@@ -1235,27 +1331,12 @@ export async function supervise(
 
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
     host.onSignal(sig, () => {
-      if (forwarded.has(sig)) return;
+      if (forwarded.has(sig) || (leaderDone && resultReported)) return;
       if (!stop) {
         stop = sig;
         if (!leaderDone) host.reportStop?.();
       }
       if (!target) return exit(128);
-      if (leaderDone && resultReported) {
-        if (!normalCleanupStarted) {
-          normalCleanupStarted = true;
-          forwardGroup(sig, () => arm(sig));
-          host.reportCleanup();
-        } else if (sig === "SIGTERM" || sig === "SIGHUP") {
-          forwardGroup(sig, armHard);
-        } else {
-          armEpoch++;
-          cancelHard?.();
-          cancelHard = undefined;
-          forwardGroup(sig, () => arm(sig));
-        }
-        return;
-      }
       forwardGroup(sig, () => arm(sig));
     });
   }
@@ -1279,18 +1360,8 @@ export async function supervise(
   if (!stop) {
     resultReported = true;
     host.reportResult(code);
-    if (host.hasGroupMembers) {
-      const hasMembers = await host.hasGroupMembers(target.pid);
-      if (finished || stop) return settled;
-      if (!hasMembers) {
-        exit(code);
-        return settled;
-      }
-    }
-    if (stop) return settled;
-    normalCleanupStarted = true;
-    forwardGroup("SIGTERM", armHard);
-    host.reportCleanup();
+    exit(code);
+    return settled;
   }
   return settled;
 }
@@ -1469,7 +1540,6 @@ if (import.meta.main) {
     closeFd(innerResult?.readFd);
     closeFd(holderAlive?.writeFd);
     if (reported) {
-      if (inner.signalCode !== null) killDeadSessionSync(inner.pid, undefined, true, spareFile, true);
       removeSpareFile(spareFile);
       process.exit(inner.signalCode ? 137 : code);
     }
@@ -1511,8 +1581,8 @@ if (import.meta.main) {
   enableChildSubreaper();
   const runTag = ownTag(process.env[tagEnvVar]);
   const onHolderDead = () => {
-    const sweepTag = reported ? undefined : runTag;
-    const targets = discoverTargetsLinux(process.pid, sweepTag, undefined, spareFile, reported);
+    if (reported) process.exit(0);
+    const targets = discoverTargetsLinux(process.pid, runTag, undefined, spareFile, false);
     signalDeadTargets(targets, process.pid);
     if (targetHandle) {
       try {

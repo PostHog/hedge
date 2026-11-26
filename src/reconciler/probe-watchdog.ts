@@ -2,7 +2,7 @@ import { closeSync, writeSync } from "node:fs";
 import { rm, rmdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { bunScript } from "../runner/bun.ts";
-import { discoverTargets, drainControlFd, killDeadSession, parseSpareLine, probeResultReported, readSpared, signalTargets, type SparedSet, waitForFdClosed, watchdogEnv } from "./probe-supervisor.ts";
+import { discoverTargets, drainControlFd, killDeadSession, parseSpareLine, probeResultReported, readSparedChecked, signalTargets, type SparedSet, waitForFdClosed, watchdogEnv } from "./probe-supervisor.ts";
 
 export type WatchEntry = {
   pid: number;
@@ -178,12 +178,12 @@ export async function watchEntries(
     return true;
   };
   const sweepHolderAndSpare = async (entry: WatchEntry, reported: boolean) => {
-    const spared = await readSpare(resolveSpare(entry));
-    const ownGroupOnly = reported || spared === undefined;
-    const sweepTag = ownGroupOnly ? undefined : entry.tag;
     try {
-      if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
-        await killDeadSession(entry.holderPid, sweepTag, false, spared, ownGroupOnly);
+      if (!reported && entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
+        const spared = await readSpare(resolveSpare(entry));
+        const skipDetached = spared === undefined;
+        const sweepTag = skipDetached ? undefined : entry.tag;
+        await killDeadSession(entry.holderPid, sweepTag, false, spared, false, skipDetached);
       }
     } finally {
       await removeSpare(entry);
@@ -191,18 +191,18 @@ export async function watchEntries(
   };
   const killLiveHolder = async (entry: WatchEntry, reported: boolean) => {
     try {
-      if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
+      if (!reported && entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
         const spared = await readSpare(resolveSpare(entry));
-        const ownGroupOnly = reported || spared === undefined;
-        const sweepTag = ownGroupOnly ? undefined : entry.tag;
-        const targets = await discoverTargets(entry.holderPid, sweepTag, spared, ownGroupOnly);
+        const skipDetached = spared === undefined;
+        const sweepTag = skipDetached ? undefined : entry.tag;
+        const targets = await discoverTargets(entry.holderPid, sweepTag, spared, false, skipDetached);
         if (holderAlive(entry)) {
           signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.holderPid);
           try {
             process.kill(entry.holderPid, "SIGKILL");
           } catch {}
         }
-        await killDeadSession(entry.holderPid, sweepTag, false, spared, ownGroupOnly);
+        await killDeadSession(entry.holderPid, sweepTag, false, spared, false, skipDetached);
       }
     } finally {
       closeEntry(entry);
@@ -211,10 +211,11 @@ export async function watchEntries(
   };
   const sweepDead = async (entry: WatchEntry, reported: boolean, waitHolder = false) => {
     try {
+      if (reported) return;
       const spared = await readSpare(resolveSpare(entry));
-      const ownGroupOnly = reported || spared === undefined;
-      const sweepTag = ownGroupOnly ? undefined : entry.tag;
-      await killDeadSession(entry.pid, sweepTag, false, spared, ownGroupOnly);
+      const skipDetached = spared === undefined;
+      const sweepTag = skipDetached ? undefined : entry.tag;
+      await killDeadSession(entry.pid, sweepTag, false, spared, false, skipDetached);
       if (waitHolder && entry.holderFd !== undefined && holderAlive(entry)) {
         await waitForFdClosed(entry.holderFd, 200);
         if (holderAlive(entry)) {
@@ -292,10 +293,11 @@ export async function watchEntries(
     if (deadRunners.length > 0) {
       await Promise.all(
         deadRunners.map(async ({ entry, reported }) => {
+          if (reported) return;
           const spared = await readSpare(resolveSpare(entry));
-          const ownGroupOnly = reported || spared === undefined;
-          const sweepTag = ownGroupOnly ? undefined : entry.tag;
-          await killDeadSession(entry.pid, sweepTag, false, spared, ownGroupOnly);
+          const skipDetached = spared === undefined;
+          const sweepTag = skipDetached ? undefined : entry.tag;
+          await killDeadSession(entry.pid, sweepTag, false, spared, false, skipDetached);
         }),
       );
     }
@@ -315,15 +317,12 @@ export async function watchEntries(
           try {
             if (alive(entry.fd)) {
               const initialReported = resultReported(entry);
-              const spared = await readSpare(resolveSpare(entry));
-              const initialOwnGroupOnly = initialReported || spared === undefined;
-              const initialTag = initialOwnGroupOnly ? undefined : entry.tag;
-              let targets = await discoverTargets(entry.pid, initialTag, spared, initialOwnGroupOnly);
-              if (alive(entry.fd)) {
-                if (!initialOwnGroupOnly && resultReported(entry)) {
-                  targets = await discoverTargets(entry.pid, undefined, spared, true);
-                }
-                if (alive(entry.fd)) {
+              if (!initialReported) {
+                const spared = await readSpare(resolveSpare(entry));
+                const skipDetached = spared === undefined;
+                const initialTag = skipDetached ? undefined : entry.tag;
+                const targets = await discoverTargets(entry.pid, initialTag, spared, false, skipDetached);
+                if (alive(entry.fd) && !resultReported(entry)) {
                   signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.pid);
                   try {
                     process.kill(entry.pid, "SIGKILL");
@@ -336,7 +335,7 @@ export async function watchEntries(
                 }
               } else {
                 sweptDead = true;
-                await sweepDead(entry, resultReported(entry), true);
+                await sweepDead(entry, true, true);
               }
             } else {
               sweptDead = true;
@@ -356,9 +355,10 @@ export async function watchEntries(
 
 if (import.meta.main) {
   if (Bun.argv[2] === "--read-spare") {
-    const spared = readSpared(Bun.argv[3]);
+    const res = readSparedChecked(Bun.argv[3]);
+    if (!res.ok) process.exit(1);
     try {
-      writeSync(1, JSON.stringify({ pids: [...spared.pids], sids: [...spared.sids] }) + "\n");
+      writeSync(1, JSON.stringify({ pids: [...res.spared.pids], sids: [...res.spared.sids] }) + "\n");
     } catch {}
     process.exit(0);
   }

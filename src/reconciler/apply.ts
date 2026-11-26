@@ -674,33 +674,34 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
         if (!spare && entry.spareFd !== undefined) {
           spare = drainControlFd(entry.spareFd).lines.map(parseSpareLine).find((p) => p !== undefined);
         }
-        let stillAlive = false;
-        try {
-          writeSync(entry.fd, "\n");
-          stillAlive = true;
-        } catch {}
-        const ownGroupOnly = Boolean(entry.targetExited);
-        const sweepTag = ownGroupOnly ? undefined : entry.tag;
-        if (stillAlive) {
-          killSessionSync(entry.pid, "SIGKILL", sweepTag, spare, ownGroupOnly);
+        const completed = Boolean(entry.targetExited);
+        if (!completed) {
+          let stillAlive = false;
           try {
-            process.kill(entry.pid, "SIGKILL");
+            writeSync(entry.fd, "\n");
+            stillAlive = true;
           } catch {}
-        } else {
-          killDeadSessionSync(entry.pid, sweepTag, false, spare, ownGroupOnly);
-        }
-        if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
-          const isHolderAlive = () => entry.holderFd !== undefined && !drainControlFd(entry.holderFd).closed;
-          if (isHolderAlive()) {
-            const holderTargets = discoverTargetsSync(entry.holderPid, sweepTag, undefined, spare, ownGroupOnly);
-            if (isHolderAlive()) {
-              if (holderTargets) signalTargets(holderTargets, "SIGKILL", entry.holderPid);
-              try {
-                process.kill(entry.holderPid, "SIGKILL");
-              } catch {}
-            }
+          if (stillAlive) {
+            killSessionSync(entry.pid, "SIGKILL", entry.tag, spare, false);
+            try {
+              process.kill(entry.pid, "SIGKILL");
+            } catch {}
+          } else {
+            killDeadSessionSync(entry.pid, entry.tag, false, spare, false);
           }
-          killDeadSessionSync(entry.holderPid, sweepTag, false, spare, ownGroupOnly);
+          if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
+            const isHolderAlive = () => entry.holderFd !== undefined && !drainControlFd(entry.holderFd).closed;
+            if (isHolderAlive()) {
+              const holderTargets = discoverTargetsSync(entry.holderPid, entry.tag, undefined, spare, false);
+              if (isHolderAlive()) {
+                if (holderTargets) signalTargets(holderTargets, "SIGKILL", entry.holderPid);
+                try {
+                  process.kill(entry.holderPid, "SIGKILL");
+                } catch {}
+              }
+            }
+            killDeadSessionSync(entry.holderPid, entry.tag, false, spare, false);
+          }
         }
         removeSpareAsync(spare);
       }
@@ -1007,12 +1008,12 @@ async function runDetached(command: string[], env: Record<string, string | undef
         await statusPromise.catch(() => {});
         const sawResult = reportedResult || Boolean(owned.targetExited) || (owned.resultFd !== undefined && probeResultReported(owned.resultFd) === "reported");
         sawCleanExit = sawResult && child?.signalCode === null;
-        if (child?.signalCode !== null || (!sawResult && supCode !== 128 && supCode !== 143)) {
+        if (!sawResult && (child?.signalCode !== null || (supCode !== 128 && supCode !== 143))) {
           if (owned.guardFd !== undefined) await waitForFdClosed(owned.guardFd, 500);
           const spareFile = resolveProbeSpare(owned);
-          await killDeadSession(owned.pid, sawResult ? undefined : owned.tag, true, spareFile, sawResult);
+          await killDeadSession(owned.pid, owned.tag, true, spareFile, false);
           if (owned.runnerPid !== undefined) {
-            await killDeadSession(owned.runnerPid, sawResult ? undefined : owned.tag, false, spareFile, sawResult);
+            await killDeadSession(owned.runnerPid, owned.tag, false, spareFile, false);
           }
         }
       },
