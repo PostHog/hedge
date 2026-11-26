@@ -1,5 +1,5 @@
 import { closeSync, writeSync } from "node:fs";
-import { discoverTargets, drainControlFd, emptySpared, killDeadSession, mergeSpared, parseSpareUpdate, probeResultReported, type SerializedSpared, signalTargets, type SparedSet, waitForFdClosed } from "./probe-supervisor.ts";
+import { discoverTargets, drainControlFd, emptySpared, killDeadSession, killTargetSession, mergeSpared, parseSpareUpdate, probeResultReported, type SerializedSpared, signalTargets, type SparedSet, waitForFdClosed } from "./probe-supervisor.ts";
 
 export type WatchEntry = {
   pid: number;
@@ -13,6 +13,8 @@ export type WatchEntry = {
   spareRest?: string;
   holderPid?: number;
   holderFd?: number;
+  targetPid?: number;
+  targetStartTime?: string;
 };
 export type WatchClock = { now: () => number; sleep: (ms: number) => Promise<void> };
 
@@ -149,6 +151,11 @@ export async function watchEntries(
       closeEntry(entry);
     }
   };
+  const sweepTarget = async (entry: WatchEntry, spared: SparedSet) => {
+    if (entry.targetPid !== undefined && entry.targetPid !== entry.pid) {
+      await killTargetSession(entry.targetPid, entry.targetStartTime, entry.tag, spared);
+    }
+  };
   const sweepDead = async (entry: WatchEntry, reported: boolean, waitHolder = false) => {
     if (reported) {
       if (waitHolder && entry.holderFd !== undefined && holderAlive(entry)) {
@@ -161,6 +168,7 @@ export async function watchEntries(
     }
     const spared = drainSpared(entry);
     await killDeadSession(entry.pid, entry.tag, false, spared, false);
+    await sweepTarget(entry, spared);
     if (waitHolder && entry.holderFd !== undefined && holderAlive(entry)) {
       await waitForFdClosed(entry.holderFd, 200);
       if (holderAlive(entry)) {
@@ -260,7 +268,7 @@ export async function watchEntries(
                 const spared = drainSpared(entry);
                 const targets = await discoverTargets(entry.pid, entry.tag, spared, false);
                 if (alive(entry.fd) && !resultReported(entry)) {
-                  signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.pid);
+                  signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.pid, entry.tag, spared);
                   try {
                     process.kill(entry.pid, "SIGKILL");
                   } catch {}

@@ -1,5 +1,5 @@
 import { closeSync, writeSync } from "node:fs";
-import { discoverTargets, discoverTargetsLinux, discoverTargetsSync, drainControlFd, emptySpared, enableChildSubreaper, graceMs, interruptGraceMs, killDeadSession, mergeSpared, ownTag, type PidIdentity, probeGraceEnvVar, type ProcTargets, readFdChunk, redirectStdioOutputsToNull, reportSpared, setCloexec, shieldGroupSignals, signalTargets, spareEnvVar, startSpareServer, type StopSignal, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { discoverTargets, discoverTargetsLinux, discoverTargetsSync, drainControlFd, emptySpared, enableChildSubreaper, graceMs, interruptGraceMs, killDeadSession, mergeSpared, ownTag, type PidIdentity, pidIdentityNow, probeGraceEnvVar, type ProcTargets, readFdChunk, redirectStdioOutputsToNull, reportSpared, setCloexec, shieldGroupSignals, signalTargets, spareEnvVar, startSpareServer, type StopSignal, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
 type StartConfig = { argv: string[]; env?: Record<string, string>; envEntries?: Array<[string, string]> };
 
@@ -49,7 +49,13 @@ const closeQuiet = (fd: number) => {
 
 const writeResult = (
   fd: number,
-  payload: { spare: { pids: number[]; sids: number[] } } | { code: number } | { error: string; code?: string } | { saved: true } | { spareError: string; code?: string },
+  payload:
+    | { spare: { pids: number[]; sids: number[] } }
+    | { targetPid: number; targetStartTime?: string }
+    | { code: number }
+    | { error: string; code?: string }
+    | { saved: true }
+    | { spareError: string; code?: string },
 ) => {
   const bytes = new TextEncoder().encode(JSON.stringify(payload) + "\n");
   try {
@@ -148,7 +154,7 @@ const applyMergedSignal = (
     groups.add(targetPid);
     groupMembers.delete(targetPid);
   }
-  signalTargets({ pids: [], groups: [...groups], orphanPids: [...orphanPids], groupMembers, pidIdentities }, sig, undefined);
+  signalTargets({ pids: [], groups: [...groups], orphanPids: [...orphanPids], groupMembers, pidIdentities }, sig, undefined, runTag, localSpared);
 };
 
 const signalBoth = (sig: NodeJS.Signals): void | Promise<void> => {
@@ -381,6 +387,8 @@ if (!parsed || killing || gracefulSignal) {
     target = Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio, detached: true });
     targetDetached = true;
     targetPid = target.pid;
+    const targetIdentity = pidIdentityNow(targetPid);
+    writeResult(ipcFd, { targetPid, ...(targetIdentity ? { targetStartTime: targetIdentity.startTime } : {}) });
   } catch (error) {
     for (const fd of lockFds) closeQuiet(fd);
     redirectStdioOutputsToNull();

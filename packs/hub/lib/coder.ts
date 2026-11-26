@@ -1,8 +1,8 @@
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, write, writeSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { boxPrefix } from "../../../src/hub/names.ts";
-import { appendTag, createPipe, createSocketPair, emptySpared, killDeadSessionSync, killSessionSync, mergeSpared, probeGraceEnvVar, readFdChunk, serializeSpared, setCloexec, spareEnvVar, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
+import { appendTag, createPipe, createSocketPair, emptySpared, killDeadSessionSync, killSessionSync, killTargetSessionSync, mergeSpared, probeGraceEnvVar, serializeSpared, setCloexec, spareEnvVar, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
 import { bunScript } from "../../../src/runner/bun.ts";
 import { heldLocks } from "./box-lock.ts";
 
@@ -93,21 +93,22 @@ async function readText(stream: ReadableStream<Uint8Array> | number | undefined,
 
 const defaultSupervisorGraceMs = process.platform === "linux" ? 150 : 350;
 
-const writeFd = (fd: number, data: Uint8Array, offset: number): Promise<number> =>
-  new Promise((resolve, reject) => {
-    write(fd, data, offset, data.byteLength - offset, null, (error, written) => {
-      if (error) reject(error);
-      else resolve(written);
-    });
-  });
-
 function createResultReader(fd: number, stop: AbortSignal) {
   const decoder = new TextDecoder("utf-8");
-  const chunk = new Uint8Array(1024);
+  const reader = Bun.file(fd).stream().getReader();
   let buf = "";
   let eof = false;
+  let canceled = false;
   let active = false;
   let activeRead: Promise<void> = Promise.resolve();
+  const cancelReader = () => {
+    if (canceled) return;
+    canceled = true;
+    eof = true;
+    void reader.cancel().catch(() => {});
+  };
+  if (stop.aborted) cancelReader();
+  else stop.addEventListener("abort", cancelReader, { once: true });
   const nextLine = (): Promise<string> => {
     const readNext = (async () => {
       for (;;) {
@@ -123,33 +124,28 @@ function createResultReader(fd: number, stop: AbortSignal) {
           return rest;
         }
         active = true;
-        let n = 0;
+        let part: { value?: Uint8Array; done: boolean };
         try {
-          n = await readFdChunk(fd, chunk);
+          part = await reader.read();
+        } catch {
+          part = { done: true };
         } finally {
           active = false;
         }
-        if (n <= 0) {
+        if (part.done || !part.value) {
           eof = true;
           const rest = buf + decoder.decode();
           buf = "";
           return rest;
         }
-        buf += decoder.decode(chunk.subarray(0, n), { stream: true });
+        buf += decoder.decode(part.value, { stream: true });
       }
     })();
     activeRead = readNext.then(
       () => {},
       () => {},
     );
-    const aborted = new Promise<string>((resolve) => {
-      if (stop.aborted) {
-        resolve("");
-        return;
-      }
-      stop.addEventListener("abort", () => resolve(""), { once: true });
-    });
-    return Promise.race([readNext, aborted]);
+    return readNext;
   };
   return {
     nextLine,
@@ -288,6 +284,8 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     let wakePendingSlot: (() => void) | undefined;
     let supervisorReaped = false;
     let confirmedDone = false;
+    let targetPid: number | undefined;
+    let targetStartTime: string | undefined;
     let pendingProbeInterrupt: NodeJS.Signals | undefined;
     let probeInterruptHooked = false;
     let tagSweep: Promise<void> | undefined;
@@ -307,6 +305,9 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           } catch {}
         } else {
           killDeadSessionSync(pid, tag, true, spared);
+        }
+        if (targetPid !== undefined && targetPid !== pid) {
+          killTargetSessionSync(targetPid, targetStartTime, tag, spared);
         }
       };
       let tempPipe: { readFd: number; writeFd: number } | undefined;
@@ -333,6 +334,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           {
             pid,
             tag,
+            ...(targetPid !== undefined ? { targetPid, ...(targetStartTime ? { targetStartTime } : {}) } : {}),
             ...(spared.pids.size || spared.sids.size ? { spared: serializeSpared(spared) } : {}),
             fd: 3,
             delayMs: 0,
@@ -408,6 +410,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
             {
               pid: child.pid,
               tag,
+              ...(targetPid !== undefined ? { targetPid, ...(targetStartTime ? { targetStartTime } : {}) } : {}),
               ...(spared.pids.size || spared.sids.size ? { spared: serializeSpared(spared) } : {}),
               fd: 3,
               delayMs: supervisorGraceMs,
@@ -428,6 +431,9 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
             try {
               child.kill("SIGKILL");
             } catch {}
+            if (targetPid !== undefined && targetPid !== child.pid) {
+              killTargetSessionSync(targetPid, targetStartTime, tag, spared);
+            }
           }
         }
       } else if (child) {
@@ -438,6 +444,9 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           try {
             child.kill("SIGKILL");
           } catch {}
+        }
+        if (targetPid !== undefined && targetPid !== child.pid) {
+          killTargetSessionSync(targetPid, targetStartTime, tag, spared);
         }
       }
       release();
@@ -573,6 +582,11 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           break;
         } catch (error) {
           if ((inlineConfig || !compactSupEnv) && (error as NodeJS.ErrnoException)?.code === "E2BIG") {
+            closeConfigRead();
+            closeConfigWrite();
+            configPipe = undefined;
+            configReadClosed = false;
+            configWriteClosed = false;
             inlineConfig = false;
             compactSupEnv = true;
             supEnv = minimalSupervisorEnv(fullTag, inheritedSpare, true);
@@ -602,6 +616,36 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       closeIpcChild();
       closeConfigRead();
       const live = child;
+      let forceExpired = false;
+      onTimeout = () => {
+        stopChild();
+        hardKill = setTimeout(() => {
+          forceExpired = true;
+          stopStream.abort();
+          settle({ code: timedOut });
+        }, supervisorGraceMs);
+        void live.exited.finally(() => {
+          if (hardKill) clearTimeout(hardKill);
+          stopStream.abort();
+        });
+      };
+      if (expired) {
+        onTimeout();
+      }
+      if (stopped || expired) {
+        closeConfigWrite();
+        stopChild();
+      } else if (configPipe) {
+        const writeFdNum = configPipe.writeFd;
+        configWrite = (async () => {
+          try {
+            await Bun.write(Bun.file(writeFdNum), configBytes);
+          } catch {
+          } finally {
+            closeConfigWrite();
+          }
+        })();
+      }
       const reader = createResultReader(ipcPair!.parentFd, stopStream.signal);
       resultReader = reader;
       resultRead = (async () => {
@@ -610,7 +654,18 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           const line = raw.trim();
           if (!line) return undefined;
           try {
-            const record = JSON.parse(line) as { spare?: { pids?: unknown; sids?: unknown }; code?: unknown; error?: unknown };
+            const record = JSON.parse(line) as {
+              spare?: { pids?: unknown; sids?: unknown };
+              targetPid?: unknown;
+              targetStartTime?: unknown;
+              code?: unknown;
+              error?: unknown;
+            };
+            if (typeof record.targetPid === "number") {
+              targetPid = record.targetPid;
+              if (typeof record.targetStartTime === "string") targetStartTime = record.targetStartTime;
+              continue;
+            }
             if (record.spare && typeof record.spare === "object") {
               const pids = Array.isArray(record.spare.pids) ? record.spare.pids.filter((n): n is number => typeof n === "number") : [];
               const sids = Array.isArray(record.spare.sids) ? record.spare.sids.filter((n): n is number => typeof n === "number") : [];
@@ -638,41 +693,6 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         if (!confirmedDone && !expired && !pendingProbeInterrupt && !tagSweep) tagSweep = runOutOfProcessSweep();
         settle({ code });
       });
-      let forceExpired = false;
-      onTimeout = () => {
-        stopChild();
-        hardKill = setTimeout(() => {
-          forceExpired = true;
-          stopStream.abort();
-          settle({ code: timedOut });
-        }, supervisorGraceMs);
-        void live.exited.finally(() => {
-          if (hardKill) clearTimeout(hardKill);
-          stopStream.abort();
-        });
-      };
-      if (expired) {
-        onTimeout();
-      }
-      if (stopped || expired) {
-        closeConfigWrite();
-        stopChild();
-      } else if (configPipe) {
-        const writeFdNum = configPipe.writeFd;
-        configWrite = (async () => {
-          try {
-            let offset = 0;
-            while (offset < configBytes.byteLength) {
-              const written = await writeFd(writeFdNum, configBytes, offset);
-              if (written <= 0) break;
-              offset += written;
-            }
-          } catch {
-          } finally {
-            closeConfigWrite();
-          }
-        })();
-      }
       let stdout: string;
       let stderr: string;
       let status: { code?: number; error?: string; errCode?: string };

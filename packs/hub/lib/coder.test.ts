@@ -1046,3 +1046,81 @@ test("ignores oversized ambient HEDGE_* environment variables when capturing wit
     else process.env.HEDGE_OVERSIZED_AMBIENT_TEST = prev;
   }
 });
+
+test("runs 64 concurrent config-pipe captures under a 256 file-descriptor limit without stalling", async () => {
+  const coderPath = join(import.meta.dir, "coder.ts");
+  const script = `import { capture } from ${JSON.stringify(coderPath)};
+const pad = "p".repeat(20_000);
+const results = await Promise.all(
+  Array.from({ length: 64 }, (_, i) =>
+    capture(["sh", "-c", \`printf '%s' \${i}\`], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", PAD: pad }, timeoutMs: 10_000 }),
+  ),
+);
+const ok = results.length === 64 && results.every((r, i) => r.code === 0 && r.stdout === String(i));
+process.exit(ok ? 0 : 1);`;
+  const proc = Bun.spawn(["sh", "-c", 'ulimit -n 256 && exec "$1" -e "$2"', "fd-pipe-cap", process.execPath, script], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+  expect(stderr).toBe("");
+  expect(code).toBe(0);
+});
+
+test("stops a captured env -i target when its capture supervisor is killed with SIGKILL", async () => {
+  if (process.platform === "win32") return;
+  const envBin = Bun.which("env") ?? "/usr/bin/env";
+  const shBin = Bun.which("sh") ?? "/bin/sh";
+  const dir = temp.make("hedge-capture-sup-kill-");
+  const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+  expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+  const started = Bun.file(ready).text();
+  const closed = Bun.file(gone).text();
+  let targetPid = 0;
+  try {
+    const running = capture(
+      [envBin, "-i", shBin, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "target", gone, ready],
+      { timeoutMs: 30_000 },
+    );
+    targetPid = Number((await started).trim());
+    expect(targetPid).toBeGreaterThan(0);
+    const supPid = Number(Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(targetPid)]).stdout.toString().trim());
+    expect(supPid).toBeGreaterThan(1);
+    expect(supPid).not.toBe(process.pid);
+    process.kill(supPid, "SIGKILL");
+    const res = await running;
+    expect(res.code).toBe(137);
+    expect(await closed).toBe("");
+  } finally {
+    if (targetPid > 0) try { process.kill(targetPid, "SIGKILL"); } catch {}
+  }
+});
+
+test("rejects cleanly through capture when all file descriptors are exhausted", async () => {
+  if (process.platform === "win32") return;
+  const coderPath = join(import.meta.dir, "coder.ts");
+  const script = `import { closeSync, openSync } from "node:fs";
+import { capture } from ${JSON.stringify(coderPath)};
+const fds: number[] = [];
+try {
+  for (;;) fds.push(openSync("/dev/null", "r"));
+} catch {}
+let failed = false;
+try {
+  await capture(["sh", "-c", "exit 0"], { timeoutMs: 5_000 });
+} catch {
+  failed = true;
+} finally {
+  for (const fd of fds) try { closeSync(fd); } catch {}
+}
+process.exit(failed ? 0 : 1);`;
+  const proc = Bun.spawn(["sh", "-c", 'ulimit -n 64 && exec "$1" -e "$2"', "fd-exhaust-cap", process.execPath, script], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+  expect(stderr).toBe("");
+  expect(code).toBe(0);
+});

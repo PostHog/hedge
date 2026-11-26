@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { Plan } from "../pack/types.ts";
 import { tempDirs } from "../testing/git.ts";
 import { humanStepsLeft } from "./apply.ts";
-import { createPipe, setCloexec, signalTargets } from "./probe-supervisor.ts";
+import { createPipe, setCloexec } from "./probe-supervisor.ts";
 
 const temp = tempDirs();
 const activeHelpers: Array<{ kill(signal?: NodeJS.Signals): void }> = [];
@@ -1929,62 +1929,55 @@ await Bun.sleep(30_000);`;
     }
   });
 
-  test("reportSpared propagates resource exhaustion instead of treating EMFILE as an ancestor shutdown", async () => {
+  test("escalates cancellation on a group whose leader exited leaving a child while sparing an unrelated process group", async () => {
     if (process.platform === "win32") return;
-    const supervisorPath = join(import.meta.dir, "probe-supervisor.ts");
-    const script = `import { closeSync, openSync } from "node:fs";
-import { reportSpared, startSpareServer } from ${JSON.stringify(supervisorPath)};
-const server = startSpareServer(async () => true);
-if (!server) process.exit(2);
-const fds: number[] = [];
-try {
-  for (;;) fds.push(openSync("/dev/null", "r"));
-} catch {}
-const res = await reportSpared(server.endpoint, [12345], [12345], 500);
-for (const fd of fds) try { closeSync(fd); } catch {}
-server.close();
-process.exit(res.ok ? 1 : 0);`;
-    const proc = Bun.spawn(["sh", "-c", 'ulimit -n 48 && exec "$1" -e "$2"', "spare-emfile", process.execPath, script], {
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
-    expect(stderr).toBe("");
-    expect(code).toBe(0);
-  });
-
-  test("signalTargets skips signaling a process group whose member startTime no longer matches", async () => {
-    if (process.platform === "win32") return;
-    const dir = temp.make("sup-pgid-reuse-");
-    const [ready, ping, pong, gone] = [join(dir, "ready"), join(dir, "ping"), join(dir, "pong"), join(dir, "gone")];
-    mkfifo(ready, ping, pong, gone);
-    const started = fifoRead(ready);
-    const ponged = fifoRead(pong);
-    const closed = fifoRead(gone);
+    const dir = temp.make("sup-group-handoff-");
+    const [unrelatedReady, unrelatedPing, unrelatedPong, unrelatedGone, childReady, childGone] = [
+      join(dir, "u-ready"),
+      join(dir, "u-ping"),
+      join(dir, "u-pong"),
+      join(dir, "u-gone"),
+      join(dir, "c-ready"),
+      join(dir, "c-gone"),
+    ];
+    mkfifo(unrelatedReady, unrelatedPing, unrelatedPong, unrelatedGone, childReady, childGone);
+    const uStarted = fifoRead(unrelatedReady);
+    const uPonged = fifoRead(unrelatedPong);
+    const uClosed = fifoRead(unrelatedGone);
+    const cStarted = fifoRead(childReady);
+    const cClosed = fifoRead(childGone);
     const shBin = Bun.which("sh") ?? "/bin/sh";
-    const child = Bun.spawn(
-      [shBin, "-c", 'exec 3>"$1"; echo $$ > "$2"; read _ < "$3"; echo alive > "$4"; exec sleep 30', "group", gone, ready, ping, pong],
+    const unrelated = Bun.spawn(
+      [shBin, "-c", 'exec 3>"$1"; echo $$ > "$2"; read _ < "$3"; echo alive > "$4"; exec sleep 30', "unrelated", unrelatedGone, unrelatedReady, unrelatedPing, unrelatedPong],
       { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" },
     );
+    const probeScript = `const sub = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'trap "" TERM; sh -c "trap \\"\\" TERM; exec 3>\\"$1\\"; echo \\$\\$ > \\"$2\\"; exec sleep 30" child "$1" "$2" & exit 0', "sub", ${JSON.stringify(childGone)}, ${JSON.stringify(childReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await sub.exited;
+await Bun.sleep(30_000);`;
+    const clock = manualClock();
+    let fireDeadline!: () => void;
+    let childPid = 0;
     try {
-      const pid = Number((await started).trim());
-      expect(pid).toBe(child.pid);
-      signalTargets(
-        {
-          pids: [pid],
-          groups: [pid],
-          orphanPids: [],
-          groupMembers: new Map([[pid, [{ pid, startTime: "stale-start-time", pgid: pid }]]]),
-        },
-        "SIGKILL",
+      expect(Number((await uStarted).trim())).toBe(unrelated.pid);
+      const pending = humanStepsLeft(
+        probePlan("group-handoff", [process.execPath, "-e", probeScript]),
+        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 10_000, clockFd: clock.readFd },
       );
-      await fifoWrite(ping, "check\n");
-      expect((await ponged).trim()).toBe("alive");
+      childPid = Number((await cStarted).trim());
+      expect(childPid).toBeGreaterThan(0);
+      fireDeadline();
+      const res = await pending;
+      expect(res.unchecked.map((s) => s.id)).toEqual(["group-handoff"]);
+      clock.tick();
+      expect(await cClosed).toBe("");
+      await fifoWrite(unrelatedPing, "check\n");
+      expect((await uPonged).trim()).toBe("alive");
     } finally {
-      child.kill("SIGKILL");
-      await child.exited.catch(() => {});
-      await closed.catch(() => {});
+      clock.close();
+      if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
+      unrelated.kill("SIGKILL");
+      await unrelated.exited.catch(() => {});
+      await uClosed.catch(() => {});
     }
   });
 });

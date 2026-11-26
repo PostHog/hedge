@@ -1400,7 +1400,7 @@ function pidIdentityLinux(pid: number): PidIdentity | undefined {
   }
 }
 
-function pidIdentityNow(pid: number): PidIdentity | undefined {
+export function pidIdentityNow(pid: number): PidIdentity | undefined {
   if (process.platform === "linux") return pidIdentityLinux(pid);
   const lib = getDarwinLib();
   if (!lib) return undefined;
@@ -1411,13 +1411,31 @@ function pidIdentityNow(pid: number): PidIdentity | undefined {
   return { pid, startTime, pgid };
 }
 
-function groupStillLive(pgrp: number, members: PidIdentity[] | undefined): boolean {
+function hasOwnedGroupMember(
+  pgrp: number,
+  sessionId: number | undefined,
+  tag: string | undefined,
+  spared: SparedSet | undefined,
+): boolean {
+  if (sessionId === undefined && !tag) return false;
+  const found = discoverTargetsSync(sessionId, tag, undefined, spared);
+  if (!found) return false;
+  return found.groups.includes(pgrp) || (sessionId === pgrp && found.hasSessionGroup === true);
+}
+
+function groupStillLive(
+  pgrp: number,
+  members: PidIdentity[] | undefined,
+  sessionId?: number,
+  tag?: string,
+  spared?: SparedSet,
+): boolean {
   if (!members || !members.length) return true;
   for (const member of members) {
     const now = pidIdentityNow(member.pid);
     if (now && now.startTime === member.startTime && now.pgid === pgrp) return true;
   }
-  return false;
+  return hasOwnedGroupMember(pgrp, sessionId, tag, spared);
 }
 
 function pidStillLive(pid: number, expected: PidIdentity | undefined): boolean {
@@ -1426,10 +1444,16 @@ function pidStillLive(pid: number, expected: PidIdentity | undefined): boolean {
   return now !== undefined && now.startTime === expected.startTime;
 }
 
-export function signalTargets(targets: ProcTargets, signal: NodeJS.Signals, sessionId?: number): void {
+export function signalTargets(
+  targets: ProcTargets,
+  signal: NodeJS.Signals,
+  sessionId?: number,
+  tag?: string,
+  spared?: SparedSet,
+): void {
   for (const pgrp of targets.groups) {
     if (pgrp === sessionId) continue;
-    if (!groupStillLive(pgrp, targets.groupMembers?.get(pgrp))) continue;
+    if (!groupStillLive(pgrp, targets.groupMembers?.get(pgrp), sessionId, tag, spared)) continue;
     signalOneGroup(pgrp, signal);
   }
   for (const pid of targets.orphanPids) {
@@ -1440,11 +1464,17 @@ export function signalTargets(targets: ProcTargets, signal: NodeJS.Signals, sess
   if (sessionId !== undefined) signalOneGroup(sessionId, signal);
 }
 
-function signalDeadTargets(targets: ProcTargets, deadSessionId?: number, guard?: () => boolean): void {
+function signalDeadTargets(
+  targets: ProcTargets,
+  deadSessionId?: number,
+  guard?: () => boolean,
+  tag?: string,
+  spared?: SparedSet,
+): void {
   for (const pgrp of targets.groups) {
     if (pgrp === deadSessionId) continue;
     if (guard && !guard()) return;
-    if (!groupStillLive(pgrp, targets.groupMembers?.get(pgrp))) continue;
+    if (!groupStillLive(pgrp, targets.groupMembers?.get(pgrp), deadSessionId, tag, spared)) continue;
     signalOneGroup(pgrp, "SIGKILL");
   }
   for (const pid of targets.orphanPids) {
@@ -1455,9 +1485,53 @@ function signalDeadTargets(targets: ProcTargets, deadSessionId?: number, guard?:
   }
   if (deadSessionId !== undefined && targets.hasSessionGroup) {
     if (guard && !guard()) return;
-    if (!groupStillLive(deadSessionId, targets.groupMembers?.get(deadSessionId))) return;
+    if (!groupStillLive(deadSessionId, targets.groupMembers?.get(deadSessionId), deadSessionId, tag, spared)) return;
     signalOneGroup(deadSessionId, "SIGKILL");
   }
+}
+
+export function killTargetSessionSync(
+  targetPid: number,
+  targetStartTime: string | undefined,
+  tag?: string,
+  spareInput?: SpareInput,
+): void {
+  const spared = resolveSpareInput(spareInput);
+  const now = pidIdentityNow(targetPid);
+  if (now) {
+    if (targetStartTime && now.startTime !== targetStartTime) return;
+    killSessionSync(targetPid, "SIGKILL", tag, spared);
+    const after = pidIdentityNow(targetPid);
+    if (after && (!targetStartTime || after.startTime === targetStartTime)) {
+      try {
+        process.kill(targetPid, "SIGKILL");
+      } catch {}
+    }
+    return;
+  }
+  killDeadSessionSync(targetPid, tag, true, spared);
+}
+
+export async function killTargetSession(
+  targetPid: number,
+  targetStartTime: string | undefined,
+  tag?: string,
+  spareInput?: SpareInput,
+): Promise<void> {
+  const spared = resolveSpareInput(spareInput);
+  const now = pidIdentityNow(targetPid);
+  if (now) {
+    if (targetStartTime && now.startTime !== targetStartTime) return;
+    await killSession(targetPid, "SIGKILL", tag, undefined, spared);
+    const after = pidIdentityNow(targetPid);
+    if (after && (!targetStartTime || after.startTime === targetStartTime)) {
+      try {
+        process.kill(targetPid, "SIGKILL");
+      } catch {}
+    }
+    return;
+  }
+  await killDeadSession(targetPid, tag, true, spared);
 }
 
 function sweepDeadLinux(
@@ -1470,15 +1544,15 @@ function sweepDeadLinux(
   const spared = resolveSpareInput(spareInput);
   const effectiveTag = ownGroupOnly ? undefined : tag;
   if (isDeadLeaderRecycledLinux(deadSessionId, reaped)) {
-    if (effectiveTag) signalDeadTargets(discoverTargetsLinux(undefined, effectiveTag, undefined, spared), undefined);
+    if (effectiveTag) signalDeadTargets(discoverTargetsLinux(undefined, effectiveTag, undefined, spared), undefined, undefined, effectiveTag, spared);
     return;
   }
   const targets = discoverTargetsLinux(deadSessionId, effectiveTag, reaped, spared, ownGroupOnly);
   if (targets.leaderSeenLive || isDeadLeaderRecycledLinux(deadSessionId, reaped)) {
-    if (effectiveTag) signalDeadTargets(discoverTargetsLinux(undefined, effectiveTag, undefined, spared), undefined);
+    if (effectiveTag) signalDeadTargets(discoverTargetsLinux(undefined, effectiveTag, undefined, spared), undefined, undefined, effectiveTag, spared);
     return;
   }
-  signalDeadTargets(targets, deadSessionId, () => !isDeadLeaderRecycledLinux(deadSessionId, reaped));
+  signalDeadTargets(targets, deadSessionId, () => !isDeadLeaderRecycledLinux(deadSessionId, reaped), effectiveTag, spared);
 }
 
 export function killDeadSessionSync(
@@ -1499,10 +1573,10 @@ export function killDeadSessionSync(
   const lib = getDarwinLib();
   if (lib && isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped)) {
     const tagged = effectiveTag ? discoverTargetsSync(undefined, effectiveTag, undefined, spared) : undefined;
-    if (tagged) signalDeadTargets(tagged, undefined);
+    if (tagged) signalDeadTargets(tagged, undefined, undefined, effectiveTag, spared);
     return;
   }
-  signalDeadTargets(found, deadSessionId, lib ? () => !isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped) : undefined);
+  signalDeadTargets(found, deadSessionId, lib ? () => !isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped) : undefined, effectiveTag, spared);
 }
 
 export function killDeadSession(
@@ -1543,10 +1617,10 @@ export function killDeadSession(
     if (sid === undefined && !effectiveTag) return;
     const targets = buildTargetsFromPs(process.pid, sid, effectiveTag, treeRes.text, new Set([treeRes.pid]), spared, ownGroupOnly);
     if (sid !== undefined && lib && isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped)) {
-      if (effectiveTag) signalDeadTargets(buildTargetsFromPs(process.pid, undefined, effectiveTag, treeRes.text, new Set([treeRes.pid]), spared), undefined);
+      if (effectiveTag) signalDeadTargets(buildTargetsFromPs(process.pid, undefined, effectiveTag, treeRes.text, new Set([treeRes.pid]), spared), undefined, undefined, effectiveTag, spared);
       return;
     }
-    signalDeadTargets(targets, sid, sid !== undefined && lib ? () => !isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped) : undefined);
+    signalDeadTargets(targets, sid, sid !== undefined && lib ? () => !isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped) : undefined, effectiveTag, spared);
   })();
 }
 
@@ -1557,7 +1631,9 @@ export function killSessionSync(
   spareInput?: SpareInput,
   ownGroupOnly = false,
 ): void {
-  signalTargets(discoverTargetsSync(sessionId, tag, undefined, spareInput, ownGroupOnly) ?? { pids: [], groups: [], orphanPids: [] }, signal, sessionId);
+  const spared = resolveSpareInput(spareInput);
+  const effectiveTag = ownGroupOnly ? undefined : tag;
+  signalTargets(discoverTargetsSync(sessionId, tag, undefined, spared, ownGroupOnly) ?? { pids: [], groups: [], orphanPids: [] }, signal, sessionId, effectiveTag, spared);
 }
 
 export function killSession(
@@ -1568,11 +1644,13 @@ export function killSession(
   spareInput?: SpareInput,
   ownGroupOnly = false,
 ): void | Promise<void> {
+  const spared = resolveSpareInput(spareInput);
+  const effectiveTag = ownGroupOnly ? undefined : tag;
   if (process.platform === "linux") {
-    signalTargets(discoverTargetsLinux(sessionId, tag, undefined, spareInput, ownGroupOnly), signal, sessionId);
+    signalTargets(discoverTargetsLinux(sessionId, tag, undefined, spared, ownGroupOnly), signal, sessionId, effectiveTag, spared);
     return;
   }
-  return discoverTargets(sessionId, tag, spareInput, ownGroupOnly).then((found) => {
+  return discoverTargets(sessionId, tag, spared, ownGroupOnly).then((found) => {
     const groupMembers = new Map<number, PidIdentity[]>();
     if (found?.groupMembers) {
       for (const [pgid, members] of found.groupMembers) groupMembers.set(pgid, [...members]);
@@ -1631,7 +1709,7 @@ export function killSession(
         }
       }
     }
-    signalTargets(targets, signal, sessionId);
+    signalTargets(targets, signal, sessionId, effectiveTag, spared);
   });
 }
 
