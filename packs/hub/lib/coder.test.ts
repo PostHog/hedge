@@ -1100,14 +1100,11 @@ test("does not leak ambient loader diagnostics into stderr for clean-env capture
   const printfBin = Bun.which("printf") ?? "/usr/bin/printf";
   const coderPath = join(import.meta.dir, "coder.ts");
   const script = `import { capture } from ${JSON.stringify(coderPath)};
+process.env.LD_PRELOAD = "/nonexistent/hedge-missing-preload.so";
+process.env.DYLD_INSERT_LIBRARIES = "/nonexistent/hedge-missing-preload.dylib";
 const res = await capture([${JSON.stringify(printfBin)}, "ok"], { env: {}, timeoutMs: 5_000 });
 console.log(JSON.stringify(res));`;
   const proc = Bun.spawn([process.execPath, "-e", script], {
-    env: {
-      ...process.env,
-      LD_PRELOAD: "/nonexistent/hedge-missing-preload.so",
-      DYLD_INSERT_LIBRARIES: "/nonexistent/hedge-missing-preload.dylib",
-    },
     stdin: "ignore",
     stdout: "pipe",
     stderr: "ignore",
@@ -1115,6 +1112,25 @@ console.log(JSON.stringify(res));`;
   const [code, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
   expect(code).toBe(0);
   expect(JSON.parse(stdout.trim())).toEqual({ code: 0, stdout: "ok", stderr: "" });
+});
+
+test("runs near-ARG_MAX commands with an empty env without hitting E2BIG from supervisor env entries", async () => {
+  if (process.platform !== "linux") return;
+  const trueBin = Bun.which("true") ?? "/bin/true";
+  const coderPath = join(import.meta.dir, "coder.ts");
+  const script = `import { capture } from ${JSON.stringify(coderPath)};
+const a = "a".repeat(65_450);
+const b = "b".repeat(65_450);
+const res = await capture([${JSON.stringify(trueBin)}, a, b], { env: {}, timeoutMs: 5_000 });
+process.exit(res.code === 0 ? 0 : 1);`;
+  const proc = Bun.spawn(["sh", "-c", 'ulimit -s 256 && exec "$1" -e "$2"', "arg-limit", process.execPath, script], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+  expect(stderr).toBe("");
+  expect(code).toBe(0);
 });
 
 test("rejects cleanly through capture when all file descriptors are exhausted", async () => {

@@ -484,11 +484,13 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       for (const [k, v] of Object.entries(childEnv)) {
         if (v !== undefined && k !== tagEnvVar && k !== spareEnvVar) envEntries.push([k, v]);
       }
-      envEntries.push([tagEnvVar, tag]);
-      if (inheritedSpare) envEntries.push([spareEnvVar, inheritedSpare]);
       const configJson = JSON.stringify({
         argv: command,
         envEntries,
+        injectedTag: tag,
+        ...(inheritedSpare ? { injectedSpare: inheritedSpare } : {}),
+        ...(typeof childEnv[tagEnvVar] === "string" ? { callerTag: childEnv[tagEnvVar] } : {}),
+        ...(typeof childEnv[spareEnvVar] === "string" ? { callerSpare: childEnv[spareEnvVar] } : {}),
       });
       let compactSupEnv = false;
       let supEnv = minimalSupervisorEnv(fullTag, inheritedSpare, compactSupEnv);

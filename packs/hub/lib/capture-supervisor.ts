@@ -1,7 +1,15 @@
 import { closeSync, writeSync } from "node:fs";
 import { discoverTargets, discoverTargetsLinux, discoverTargetsSync, drainControlFd, emptySpared, enableChildSubreaper, graceMs, interruptGraceMs, killDeadSession, mergeSpared, ownTag, type PidIdentity, pidIdentityNow, probeGraceEnvVar, type ProcTargets, readFdChunk, redirectStdioOutputsToNull, reportSpared, setCloexec, shieldGroupSignals, signalTargets, spareEnvVar, startSpareServer, type StopSignal, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
-type StartConfig = { argv: string[]; env?: Record<string, string>; envEntries?: Array<[string, string]> };
+type StartConfig = {
+  argv: string[];
+  env?: Record<string, string>;
+  envEntries?: Array<[string, string]>;
+  injectedTag?: string;
+  injectedSpare?: string;
+  callerTag?: string;
+  callerSpare?: string;
+};
 
 enableChildSubreaper();
 shieldGroupSignals();
@@ -360,31 +368,46 @@ if (!parsed || killing || gracefulSignal) {
   redirectStdioOutputsToNull();
   killAll();
 } else {
-  const { argv, env, envEntries } = parsed;
-  let targetEnv: Record<string, string> | undefined;
+  const { argv, env, envEntries, injectedTag, injectedSpare, callerTag, callerSpare } = parsed;
+  let baseEnv: Record<string, string> | undefined;
   if (Array.isArray(envEntries)) {
-    targetEnv = Object.create(null) as Record<string, string>;
-    for (const [k, v] of envEntries) targetEnv[k] = v;
+    baseEnv = Object.create(null) as Record<string, string>;
+    for (const [k, v] of envEntries) baseEnv[k] = v;
+    if (callerTag !== undefined) baseEnv[tagEnvVar] = callerTag;
+    if (callerSpare !== undefined) baseEnv[spareEnvVar] = callerSpare;
   } else if (env && typeof env === "object") {
-    targetEnv = Object.create(null) as Record<string, string>;
+    baseEnv = Object.create(null) as Record<string, string>;
     for (const [k, v] of Object.entries(env)) {
-      if (typeof v === "string") targetEnv[k] = v;
+      if (typeof v === "string") baseEnv[k] = v;
     }
   }
+  const effectiveInheritedSpare = injectedSpare ?? inheritedSpare;
   const childSpareEndpoint =
-    spareServer?.endpoint && inheritedSpare
-      ? `${spareServer.endpoint},${inheritedSpare}`
-      : (spareServer?.endpoint ?? inheritedSpare);
-  if (childSpareEndpoint) {
-    if (!targetEnv) {
-      targetEnv = Object.create(null) as Record<string, string>;
+    spareServer?.endpoint && effectiveInheritedSpare
+      ? `${spareServer.endpoint},${effectiveInheritedSpare}`
+      : (spareServer?.endpoint ?? effectiveInheritedSpare);
+  let targetEnv: Record<string, string> | undefined = baseEnv;
+  if (injectedTag || childSpareEndpoint) {
+    targetEnv = Object.create(null) as Record<string, string>;
+    if (baseEnv) {
+      for (const [k, v] of Object.entries(baseEnv)) targetEnv[k] = v;
+    } else {
       for (const [k, v] of Object.entries(process.env)) if (v !== undefined) targetEnv[k] = v;
     }
-    targetEnv[spareEnvVar] = childSpareEndpoint;
+    if (injectedTag) targetEnv[tagEnvVar] = injectedTag;
+    if (childSpareEndpoint) targetEnv[spareEnvVar] = childSpareEndpoint;
   }
   const stdio: [number, number, number, ...number[]] = [0, 1, 2, ...lockFds];
   try {
-    target = Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio, detached: true });
+    try {
+      target = Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio, detached: true });
+    } catch (spawnError) {
+      if ((spawnError as NodeJS.ErrnoException)?.code === "E2BIG" && targetEnv !== baseEnv) {
+        target = Bun.spawn(argv, { ...(baseEnv ? { env: baseEnv } : {}), stdio, detached: true });
+      } else {
+        throw spawnError;
+      }
+    }
     targetDetached = true;
     targetPid = target.pid;
     const targetIdentity = pidIdentityNow(targetPid);
