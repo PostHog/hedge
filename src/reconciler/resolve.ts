@@ -183,7 +183,7 @@ function serviceCatalog(order: Candidate[], profile: Profile, active: Set<string
       const other = ports.get(port);
       if (other) throw new ResolveError(`port ${port} is claimed by both ${other} and ${name}`);
       ports.set(port, name);
-      return [{ pack: manifest.name, id, port, health, ...(after ? { after } : {}) }];
+      return [{ pack: manifest.name, id, port, health, ...(after ? { after } : {}), ...(scope.workflow ? { workflow: scope.workflow } : {}) }];
     }),
   );
 }

@@ -6,6 +6,7 @@ import type { AvailableSource, ProfileFile } from "../pack/types.ts";
 import { defaultSources } from "../setup/defaults.ts";
 import { cachedCheckout, isolateGit, spawnGit, template, tempDirs } from "../testing/git.ts";
 import { engineSource, resolveEngine } from "../testing/packs.ts";
+import { packsCommand } from "./packs.ts";
 import { settingsCommand } from "./settings.ts";
 
 isolateGit();
@@ -186,6 +187,83 @@ describe("hedge packs", () => {
       expect(result.output).toStartWith(message);
     }
     expect((await pushed()).packs).toEqual(["pull-requests"]);
+  });
+
+  test("marks a pack and its workflows as needing setup while a human probe fails, skips off workflows, and flips back when it passes", async () => {
+    const { home } = await machineWithProfile();
+    const source = join(home, ".local/share/hedge/sources/team");
+    await cachedCheckout(source, { name: "team", repo: "team/packs", ref: "main" });
+    mkdirSync(join(source, "packs/team"), { recursive: true });
+    writeFileSync(
+      join(source, "packs/team/pack.json"),
+      JSON.stringify({
+        schema: 1,
+        name: "team",
+        summary: "Team tools.",
+        workflows: [
+          { id: "sync", name: "Sync", sentence: "Sync notes.", default: true },
+          { id: "other", name: "Other", sentence: "Other flow.", default: true },
+          { id: "off-flow", name: "Off", sentence: "Off flow.", default: false },
+        ],
+        human: [
+          { id: "auth", say: "Sign in.", probe: ["sh", "-c", 'test -f "$HOME/.team-auth"'] },
+          { id: "off-auth", say: "Off sign in.", workflow: "off-flow", probe: ["sh", "-c", "exit 1"] },
+        ],
+        steps: [{ id: "sync-step", run: ["true"], after: "auth", workflow: "sync" }],
+      }),
+    );
+    const dir = join(home, "profile");
+    const file = JSON.parse(readFileSync(join(dir, "hedge.json"), "utf8")) as ProfileFile;
+    writeFileSync(join(dir, "hedge.json"), JSON.stringify({ ...file, sources: [...file.sources, { name: "team", repo: "team/packs", ref: "main" }], packs: [...file.packs, "team"] }, null, 2) + "\n");
+    await spawnGit(dir, "commit", "-q", "-am", "Team");
+    await spawnGit(dir, "push", "-q");
+
+    const failing = await hedge(home, ["packs"]);
+    expect(failing.code).toBe(0);
+    expect(failing.output).toContain("  ~ team  Team tools.");
+    expect(failing.output).toContain("      Workflows: sync needs setup, other on, off-flow off");
+    expect(failing.output).toContain("Some packs still need setup on this machine. Run hedge doctor to see what is left.");
+
+    writeFileSync(join(home, ".team-auth"), "ok\n");
+    const passing = await hedge(home, ["packs"]);
+    expect(passing.code).toBe(0);
+    expect(passing.output).toContain("  ✓ team  Team tools.");
+    expect(passing.output).toContain("      Workflows: sync on, other on, off-flow off");
+    expect(passing.output).not.toContain("Some packs still need setup");
+  });
+
+  test("marks hub-only served workflows as needing setup only on the hub, and marks timed-out probes as not checked", async () => {
+    const engine = await engineSource();
+    const manifest = {
+      schema: 1 as const,
+      name: "team",
+      summary: "Team tools.",
+      workflows: [
+        { id: "serve-flow", name: "Serve", sentence: "Served flow.", default: true },
+        { id: "plain-flow", name: "Plain", sentence: "Plain flow.", default: true },
+      ],
+      human: [{ id: "hub-auth", say: "Sign in on hub.", probe: ["hub-auth"] }],
+      served: [{ id: "api", port: 9123, health: "/health", after: "hub-auth", workflow: "serve-flow" }],
+    };
+    const team: AvailableSource = { ref: { name: "team", repo: "team/packs", ref: "main" }, dir: "/team", packs: [{ manifest, dir: "/team/packs/team" }] };
+    const profile = { schema: 1, engine: { repo: "PostHog/hedge", ref: "main", channel: "track" }, sources: [team.ref], packs: ["team"], plan: "both", settings: {}, workflows: {}, hub: "hub-box", devboxes: ["node-1"] } satisfies ProfileFile;
+    const render = async (name: string, left: { failing: Array<typeof manifest.human[number] & { pack: string }>; unchecked: Array<typeof manifest.human[number] & { pack: string }> }) => {
+      const plan = resolveEngine([engine, team], { packs: ["team"], hub: "hub-box", devboxes: ["node-1"] }, { schema: 1, role: "linux", name });
+      const lines: string[] = [];
+      await packsCommand([], { profileDir: "/profile", profile, plan, preview: () => plan, packs: [...engine.packs, ...team.packs], machine: {} as never, print: (line) => lines.push(line), apply: async () => 0, humanLeft: async () => left });
+      return lines.join("\n");
+    };
+    const step = { ...manifest.human[0]!, pack: "team" };
+    const onHub = await render("hub-box", { failing: [step], unchecked: [] });
+    expect(onHub).toContain("  ~ team  Team tools.");
+    expect(onHub).toContain("      Workflows: serve-flow needs setup, plain-flow on");
+    const onNode = await render("node-1", { failing: [step], unchecked: [] });
+    expect(onNode).toContain("  ~ team  Team tools.");
+    expect(onNode).toContain("      Workflows: serve-flow on, plain-flow on");
+    const timedOut = await render("hub-box", { failing: [], unchecked: [step] });
+    expect(timedOut).toContain("  ? team  Team tools.");
+    expect(timedOut).toContain("      Workflows: serve-flow not checked, plain-flow on");
+    expect(timedOut).toContain("Some setup checks did not finish in time. Run hedge doctor to check them.");
   });
 });
 

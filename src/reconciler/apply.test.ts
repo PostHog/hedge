@@ -5,7 +5,7 @@ import type { Plan } from "../pack/types.ts";
 import { tempDirs } from "../testing/git.ts";
 import { providerConfigAdapter, type CommandRunner } from "../adapters/provider-config/adapter.ts";
 import { keyHelper } from "../adapters/provider-config/proxy-route.ts";
-import { apply, check, filesAdapter, type Adapter } from "./apply.ts";
+import { apply, check, filesAdapter, humanStepsLeft, type Adapter } from "./apply.ts";
 import { changeLedger, readLedger } from "./ledger.ts";
 
 const temp = tempDirs();
@@ -638,5 +638,21 @@ describe("a leading hedge in a pack's commands", () => {
     const { calls, run } = recorder();
     await check(plan({ ...team, engineRoot: undefined, checks: [{ id: "gh", pack: "team", run: ["gh", "hedge"], say: "No gh." }] }), { home: temp.make("home-"), run });
     expect(calls).toEqual(["gh hedge", "hedge whoami", "hedge status", "hedge whoami"]);
+  });
+});
+
+describe("humanStepsLeft", () => {
+  test("separates failing probes from timed-out probes and stops a hanging subprocess", async () => {
+    const home = temp.make("home-");
+    const human = [
+      { id: "ok", pack: "team", say: "Ok.", probe: ["sh", "-c", "exit 0"] },
+      { id: "missing", pack: "team", say: "Sign in.", probe: ["sh", "-c", "exit 1"] },
+      { id: "slow", pack: "team", say: "Slow.", probe: ["sleep", "30"] },
+    ];
+    const started = Date.now();
+    const left = await humanStepsLeft(plan({ human }), { home, timeoutMs: 150 });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(left.failing.map((step) => step.id)).toEqual(["missing"]);
+    expect(left.unchecked.map((step) => step.id)).toEqual(["slow"]);
   });
 });

@@ -1,3 +1,4 @@
+import type { HumanStep, Owned, Plan } from "../pack/types.ts";
 import { oldNameOnly } from "../pack/aliases.ts";
 import { keptWorkflows, workflowDefaults } from "../profile/profile.ts";
 import { FlagError, parseSetupFlags } from "../setup/flags.ts";
@@ -11,7 +12,7 @@ const usage = "hedge packs [--add <pack>]... [--remove <pack>]... [--workflows <
 export async function packsCommand(args: string[], context: ChangeContext): Promise<number> {
   const flags = parseSetupFlags(args);
   if (flags.preset !== undefined || flags.plan !== undefined || flags.devbox !== undefined || flags.nonInteractive) throw new FlagError(`usage: ${usage}`);
-  if (!flags.add.length && !flags.remove.length && !Object.keys(flags.workflows).length && !Object.keys(flags.set).length) return listPacks(context), 0;
+  if (!flags.add.length && !flags.remove.length && !Object.keys(flags.workflows).length && !Object.keys(flags.set).length) return await listPacks(context), 0;
 
   const known = manifests(context);
   const aliases = catalogAliases(context);
@@ -63,22 +64,58 @@ export async function packsCommand(args: string[], context: ChangeContext): Prom
   return saveAndApply(context, { packs, workflows, settings }, "your packs");
 }
 
-function listPacks(context: ChangeContext) {
+function affectedWorkflows(plan: Plan, steps: Array<Owned<HumanStep>>): Set<string> {
+  const ids = new Set<string>();
+  const gated = [
+    ...plan.jobs,
+    ...plan.steps,
+    ...plan.config,
+    ...(plan.onHub ? (plan.catalog ?? []) : []),
+  ];
+  for (const step of steps) {
+    if (step.workflow) ids.add(step.workflow);
+    for (const item of gated) {
+      if (item.workflow && item.after === step.id && item.pack === step.pack) ids.add(item.workflow);
+    }
+  }
+  return ids;
+}
+
+async function listPacks(context: ChangeContext) {
   const on = new Set(activePacks(context).map((manifest) => manifest.name));
   const aliases = catalogAliases(context);
   const partly = oldNameOnly(aliases, context.profile.packs);
   const missing = context.plan.packs.filter((pack) => !pack.available);
+  const left = context.humanLeft ? await context.humanLeft() : { failing: [], unchecked: [] };
+  const failingPacks = new Set(left.failing.map((step) => step.pack));
+  const uncheckedPacks = new Set(left.unchecked.map((step) => step.pack));
+  const failingWorkflows = affectedWorkflows(context.plan, left.failing);
+  const uncheckedWorkflows = affectedWorkflows(context.plan, left.unchecked);
+  const workflowState = (workflow: Plan["workflows"][number]) => {
+    if (!workflow.active) return workflow.reason && workflow.reason !== "turned off" ? `off: ${workflow.reason}` : "off";
+    if (failingWorkflows.has(workflow.id)) return "needs setup";
+    if (uncheckedWorkflows.has(workflow.id)) return "not checked";
+    return "on";
+  };
   context.print("Your packs:");
   for (const manifest of manifests(context)) {
-    const mark = manifest.name === "base" || (on.has(manifest.name) && !partly.has(manifest.name)) ? "✓" : "·";
+    const needsSetup = on.has(manifest.name) && failingPacks.has(manifest.name);
+    const notChecked = on.has(manifest.name) && !needsSetup && uncheckedPacks.has(manifest.name);
+    const mark =
+      needsSetup ? "~"
+      : notChecked ? "?"
+      : manifest.name === "base" || (on.has(manifest.name) && !partly.has(manifest.name)) ? "✓"
+      : "·";
     context.print(`  ${mark} ${manifest.name}  ${manifest.summary}`);
     if (on.has(manifest.name) && partly.has(manifest.name))
       for (const name of context.profile.packs.filter((name) => aliases.get(name)?.pack === manifest.name)) context.print(`      The old name ${name} selects only: ${aliases.get(name)!.workflows.join(", ")}. Add ${manifest.name} for the whole pack.`);
     const workflows = context.plan.workflows.filter((workflow) => workflow.pack === manifest.name);
-    if (on.has(manifest.name) && workflows.length) context.print(`      Workflows: ${workflows.map((workflow) => `${workflow.id} ${workflow.active ? "on" : workflow.reason && workflow.reason !== "turned off" ? `off: ${workflow.reason}` : "off"}`).join(", ")}`);
+    if (on.has(manifest.name) && workflows.length) context.print(`      Workflows: ${workflows.map((workflow) => `${workflow.id} ${workflowState(workflow)}`).join(", ")}`);
     if (on.has(manifest.name)) for (const workflow of manifest.workflows ?? []) if (workflow.risk) context.print(`      Terms note for ${workflow.id}: ${workflow.risk}`);
   }
   for (const pack of missing) context.print(`  ! ${pack.name}  is in your profile, but ${pack.reason ?? "its source is not here"}`);
+  if (left.failing.length) context.print("Some packs still need setup on this machine. Run hedge doctor to see what is left.");
+  if (left.unchecked.length) context.print("Some setup checks did not finish in time. Run hedge doctor to check them.");
   context.print("");
   context.print(`Change them with ${usage}.`);
 }

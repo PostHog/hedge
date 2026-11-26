@@ -221,6 +221,63 @@ const waitsForCheck = (plan: Plan, entry: Plan["config"][number]) => entry.after
 
 const droppedConfig = (entry: Plan["config"][number]): Plan["dropped"][number] => ({ pack: entry.pack, item: `config ${entry.provider}:${entry.key}`, reason: `check ${entry.after} does not pass`, check: entry.after });
 
+export type HumanStepsResult = { failing: Array<Owned<HumanStep>>; unchecked: Array<Owned<HumanStep>> };
+
+const probeTimeoutMs = 5_000;
+
+export async function humanStepsLeft(
+  plan: Plan,
+  options: { home: string; run?: Runner; timeoutMs?: number },
+): Promise<HumanStepsResult> {
+  if (!plan.human.length) return { failing: [], unchecked: [] };
+  const limitMs = options.timeoutMs ?? probeTimeoutMs;
+  const env = withLegacyNames({ ...Bun.env, HOME: options.home, ...(plan.machine.profileDir ? { HEDGE_PROFILE_DIR: plan.machine.profileDir } : {}) });
+  const results = await Promise.all(
+    plan.human.map(async (step): Promise<{ step: Owned<HumanStep>; state: "ok" | "failing" | "unchecked" }> => {
+      const command = engineCommand(step.probe, plan.engineRoot);
+      if (options.run) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const outcome = await Promise.race([
+            options.run(command).then((code) => ({ timedOut: false as const, code })),
+            new Promise<{ timedOut: true }>((resolve) => {
+              timer = setTimeout(() => resolve({ timedOut: true }), limitMs);
+            }),
+          ]);
+          if (outcome.timedOut) return { step, state: "unchecked" };
+          return { step, state: outcome.code === 0 ? "ok" : "failing" };
+        } catch {
+          return { step, state: "failing" };
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+      }
+      let timedOut = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const proc = Bun.spawn(command, { stdin: "ignore", stdout: "ignore", stderr: "ignore", env });
+        timer = setTimeout(() => {
+          timedOut = true;
+          try {
+            proc.kill("SIGKILL");
+          } catch {}
+        }, limitMs);
+        const code = await proc.exited;
+        if (timedOut) return { step, state: "unchecked" };
+        return { step, state: code === 0 ? "ok" : "failing" };
+      } catch {
+        return { step, state: "failing" };
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    }),
+  );
+  return {
+    failing: results.filter((item) => item.state === "failing").map((item) => item.step),
+    unchecked: results.filter((item) => item.state === "unchecked").map((item) => item.step),
+  };
+}
+
 export async function check(plan: Plan, options: { home: string; adapters?: Adapter[]; run?: Runner }): Promise<Report> {
   const run = viaEngine(plan, options.run ?? spawnRunner(options.home, plan.machine.profileDir));
   const { report, checks } = await reconcile(plan, { ...options, dryRun: true });
