@@ -236,6 +236,11 @@ function withNewer(used: Error, newer: Error[]) {
 }
 
 export const decisionId = /^d-[0-9a-f]{8}$/;
+
+export async function refuseUsedDecision(home: string, id: string) {
+  const round = await roundOfDecision(home, id);
+  if (round) throw new AnswerTaken(`Decision ${id} already started ${round}. One answer starts one round. Ask the user again`);
+}
 export type Adoption = Scope & { id: string; fits: (answer: HeardAnswer) => void };
 
 export async function adoptUsers(input: Adoption, context: DecisionContext, ledger: Ledger): Promise<Decision> {
@@ -253,8 +258,7 @@ export async function adoptUsers(input: Adoption, context: DecisionContext, ledg
   if (!word) throw new Error(`The answer of decision ${input.id}, message ${message}, is not in T3 thread ${thread}. Only an answer the user gave in the T3 app counts. Ask them again`);
   const answer = heardAnswer(word);
   fits(answer, { ...input, mark: "👤" });
-  const round = await roundOfDecision(context.home, input.id);
-  if (round) throw new AnswerTaken(`Decision ${input.id} already started ${round}. One answer starts one round. Ask the user again`);
+  await refuseUsedDecision(context.home, input.id);
   const usedOn = await usedAnswer(context.home, answer);
   if (usedOn) throw new AnswerTaken(usedOn);
   const { voided: _voided, reversed: _reversed, ...decision } = found;

@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { startT3Stub } from "../../base/lib/t3/testing.ts";
 import { parseVerdict } from "./proof.ts";
 import { cleanFixtures, settings, lookup, checkout, fakeModel, reviewHead, reviewHeadFixed, finishRound, recordingModel, stalledOnQuota, blanks, ledgerDecisions, graded, hubAt, type Checkout } from "./proof-testing.ts";
@@ -103,7 +103,7 @@ test("an override counts only when the user chose Run one more round in the ques
   expect((await pr.decide("list", "--pr", "example/product#42")).output).toBe(`- 👤 **${question}** 2026-10-25 "Run one more round" (the user, review, thread mcp:thread-1) [${decision.id}]`);
 });
 
-const linkedQuestion = "Run one more review round? [example/product#42](https://github.com/example/product/pull/42 \"PR 42\"): one more read of the merge.";
+const linkedQuestion = "Run one more review round? [example/product#42](https://github.com/example/product/pull/42 \"PR 42 (draft)\"): one more read of the merge.";
 
 async function overrideRound(pr: Checkout) {
   const third = await twoRounds(pr);
@@ -121,6 +121,7 @@ async function overrideRound(pr: Checkout) {
   return { override, recordAnswer };
 }
 
+const noRound = (pr: Checkout, round: string) => expect(pr.hedge("show", "--round", round)).rejects.toThrow(`reviews/${round} has no reservation`);
 const roundDecision = async (pr: Checkout, round: string) => /decided by 👤 decision (d-[0-9a-f]{8})/.exec((await pr.hedge("show", "--round", round)).output)?.[1];
 
 test("a second answer with the same date and words starts its round, though its card links the PR", async () => {
@@ -172,7 +173,7 @@ test("--override refuses a decision id that a round used, that is not the user's
   pr.env.CODER_WORKSPACE_NAME = "box-a";
   pr.reader.words = async () => [];
   await expect(override(elsewhere)).rejects.toThrow("is not in T3 thread");
-  expect(existsSync(join(pr.pullRequest, "reviews/4"))).toBe(false);
+  await noRound(pr, "4");
 });
 
 test("a decision id starts one round, on the PR its question leads with, even when two starts race under two spellings of the repository", async () => {
@@ -182,6 +183,20 @@ test("a decision id starts one round, on the PR its question leads with, even wh
   const spellings = [["--repo", "example/product", "--pr", "42"], ["--repo", "example/Product", "--pr", "42"]];
   const results = await Promise.allSettled(spellings.map((identity) => identity[1] === "example/product" ? override(recorded, ...identity) : pr.hedge("review-start", ...identity, "--scope", "full", "--override", recorded)));
   expect(results.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+});
+
+test("a panel start that fails after it reserved the round leaves the decision for the retry", async () => {
+  const pr = await checkout();
+  const { override, recordAnswer } = await overrideRound(pr);
+  const recorded = await recordAnswer();
+  const head = await pr.git("rev-parse", "HEAD");
+  await pr.hedge("require", "--none", "--reason", "docs only", "--author", "claude");
+  await pr.hedge("sanity", "--verdict", "justified", "--reason", "the fixture grows by one line");
+  pr.pullRequestState({ unreadable: "gh: Server Error (HTTP 502)" });
+  await expect(pr.hedge("review", "--lens", "correctness", "--scope", "fixes", "--base", head, "--override", recorded)).rejects.toThrow("Cannot read example/product#42");
+  rmSync(join(dirname(pr.home), "github", "pull-error-42"));
+  expect((await override(recorded)).code).toBe(0);
+  expect(await roundDecision(pr, "4")).toBe(recorded);
 });
 
 test("a round whose decision is voided before the round is recorded is dropped", async () => {
@@ -196,7 +211,7 @@ test("a round whose decision is voided before the round is recorded is dropped",
   hub.state.hub = "up";
   await pr.decide("void", recorded, "--reason", "the merge moved");
   await expect(override(recorded)).rejects.toThrow(`Decision ${recorded} was voided before its round was recorded, so the round is dropped`);
-  expect(existsSync(join(pr.pullRequest, "reviews/4"))).toBe(false);
+  await noRound(pr, "4");
 });
 
 test("one answer starts one round, counts only on the PR its question names, and a start that fails releases it", async () => {

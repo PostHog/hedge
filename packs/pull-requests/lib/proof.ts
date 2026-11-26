@@ -289,20 +289,16 @@ export type CapturedBy = "hedge" | "author";
 export type DecisionMark = Pick<Decision, "mark" | "id">;
 export type DropRead = (directory: string) => Promise<boolean>;
 export type OnHistory = (commit: string) => boolean;
-export type ReviewRequest = { dropUnanswered?: DropRead; onHistory?: OnHistory; autonomy?: () => Autonomy; opening?: () => Promise<boolean>; sanity?: () => Promise<void>; scope: string; base?: string; from?: string; forkBase?: string; decision?: Decision; claim?: DecisionClaim; phase?: string; arbiter: Arbiter; limits: ReviewLimits; cleanBaseMerge?: CleanBaseMerge; quietCommit?: QuietCommit; capturedBy?: CapturedBy; lock?: LockRound; lockBudget: LockBudget; now: () => Date; emptyRange?: () => boolean; triage?: TriageMark; budget?: ReadBudget };
+export type ReviewRequest = { dropUnanswered?: DropRead; onHistory?: OnHistory; autonomy?: () => Autonomy; opening?: () => Promise<boolean>; sanity?: () => Promise<void>; scope: string; base?: string; from?: string; forkBase?: string; decision?: Decision; once?: Once; phase?: string; arbiter: Arbiter; limits: ReviewLimits; cleanBaseMerge?: CleanBaseMerge; quietCommit?: QuietCommit; capturedBy?: CapturedBy; lock?: LockRound; lockBudget: LockBudget; now: () => Date; emptyRange?: () => boolean; triage?: TriageMark; budget?: ReadBudget };
 export type Reserved = { round: number | "final"; id: string; directory: string };
 type Permit = { arbiter: Arbiter; limits: ReviewLimits; autonomy?: () => Autonomy };
 
-async function reserveDecided(reviews: string, name: string, record: object, decision: Decision | undefined, { claim, ...stamping }: Stamping) {
-  if (claim) await claimDecision(claim);
-  const release = async () => { if (claim) await rm(claim.file, { force: true }); };
-  const reserved = await reserve(reviews, name, { ...record, ...decision ? { decision } : {} }, stamping).catch(async (error: unknown) => { await release(); throw error; });
-  if (reserved) return;
-  await release();
-  throw new Error(`Review ${name} started while this one weighed the budget. ${weighAgain}`);
+async function reserveDecided(reviews: string, name: string, record: object, decision: Decision | undefined, { once = (step) => step(), ...stamping }: Stamping) {
+  if (!await once(() => reserve(reviews, name, { ...record, ...decision ? { decision } : {} }, stamping))) throw new Error(`Review ${name} started while this one weighed the budget. ${weighAgain}`);
 }
 
-type Stamping = { lock: LockRound | undefined; now: () => Date; claim?: DecisionClaim };
+export type Once = <T>(step: () => Promise<T>) => Promise<T>;
+type Stamping = { lock: LockRound | undefined; now: () => Date; once?: Once };
 type Reserving = Stamping & { lockBudget: LockBudget; dropUnanswered?: DropRead; emptyRange?: () => boolean; onHistory?: OnHistory; triage?: TriageMark; budget?: ReadBudget };
 
 async function droppableReads(reviews: string, identity: ProofIdentity, dropUnanswered: DropRead | undefined) {
@@ -361,7 +357,7 @@ const nothingToRead = (from: string, carried: ReturnType<typeof reviewedThrough>
 const coversReview = (base: string, reviewed: string, cleanBaseMerge: CleanBaseMerge) => reviewedThroughMerges(base, new Set([reviewed]), cleanBaseMerge) !== undefined;
 
 export async function startReview(home: string, identity: ProofIdentity, request: ReviewRequest): Promise<Reserved> {
-  const { scope, base, phase, decision, claim, cleanBaseMerge = () => undefined, quietCommit = () => undefined, capturedBy = "author", lock, lockBudget, now } = request;
+  const { scope, base, phase, decision, once, cleanBaseMerge = () => undefined, quietCommit = () => undefined, capturedBy = "author", lock, lockBudget, now } = request;
   const from = request.from ?? base;
   const permit = { arbiter: request.arbiter, limits: request.limits, autonomy: request.autonomy };
   if (!["full", "fixes", "final"].includes(scope)) throw new Error("Review scope must be full, fixes, or final");
@@ -370,8 +366,8 @@ export async function startReview(home: string, identity: ProofIdentity, request
   if (base !== undefined && scope === "full") throw new Error("--scope full reads the diff from the merge base. Drop --base");
   const reviews = join(pullRequestDirectory(home, identity), "reviews");
   await mkdir(reviews, { recursive: true, mode: 0o700 });
-  if (scope === "final") return startFinalRead(home, identity, base, decision, finalReadPhase(phase ?? "review"), permit, cleanBaseMerge, quietCommit, capturedBy, from, { lock, lockBudget, now, claim, dropUnanswered: request.dropUnanswered, emptyRange: request.emptyRange, onHistory: request.onHistory, triage: request.triage, budget: request.budget });
-  return startRound(home, identity, reviews, { scope, base, from, forkBase: request.forkBase, decision, permit, cleanBaseMerge, capturedBy, opening: request.opening ?? (async () => false), sanity: request.sanity ?? (async () => {}), reserving: { lock, lockBudget, now, claim, triage: request.triage, budget: request.budget } });
+  if (scope === "final") return startFinalRead(home, identity, base, decision, finalReadPhase(phase ?? "review"), permit, cleanBaseMerge, quietCommit, capturedBy, from, { lock, lockBudget, now, once, dropUnanswered: request.dropUnanswered, emptyRange: request.emptyRange, onHistory: request.onHistory, triage: request.triage, budget: request.budget });
+  return startRound(home, identity, reviews, { scope, base, from, forkBase: request.forkBase, decision, permit, cleanBaseMerge, capturedBy, opening: request.opening ?? (async () => false), sanity: request.sanity ?? (async () => {}), reserving: { lock, lockBudget, now, once, triage: request.triage, budget: request.budget } });
 }
 
 type RoundStart = { scope: string; base?: string; from?: string; forkBase?: string; decision: Decision | undefined; permit: Permit; cleanBaseMerge: CleanBaseMerge; capturedBy: CapturedBy; opening: () => Promise<boolean>; sanity: () => Promise<void>; reserving: Reserving };
@@ -469,17 +465,7 @@ function claimedOn(text: string) {
 
 const usedOn = (where: string) => `This answer is already used on ${where}. One answer counts once. Ask the user again`;
 
-export type DecisionClaim = { file: string; on: string };
-export const decisionClaim = (home: string, id: string, { repository, pr }: PrRef): DecisionClaim => ({ file: join(ledgerRoot(home), "claims", `${id}.json`), on: JSON.stringify({ repository, pr } satisfies Claim) });
-
-export async function claimDecision({ file, on }: DecisionClaim) {
-  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  try { await writeFile(file, `${on}\n`, { flag: "wx", mode: 0o600 }); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    throw new Error(`Decision ${basename(file, ".json")} already started a round on ${claimedOn(await readFile(file, "utf8"))}. One answer starts one round. Ask the user again`);
-  }
-}
+export const decisionsLock = (home: string) => join(ledgerRoot(home), ".decisions");
 
 export async function roundOfDecision(home: string, id: string) {
   const root = ledgerRoot(home);
