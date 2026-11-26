@@ -7,7 +7,7 @@
 - A comment whose body the merge-gate hook cannot read, such as a file named
   by a shell variable (`--body-file $R`), still counts as a `/trunk merge`
   enqueue. Its refusal now starts by saying so, and tells the agent to give
-  the body by its literal file path, as `--body` text, or in a quoted
+  the body by its literal file path, as literal text, or in a quoted
   heredoc. Before, it read like a refusal of a merge: an end-of-run report
   that names a pending merge looked like the cause, and the comment was not
   posted.
@@ -18,12 +18,11 @@
   A file that an earlier redirect on the same line writes counts as unread
   too. Before, such a body could post `/trunk merge` past the gate when the
   command line did not spell it out.
-- Only the words that carry a body or a GraphQL query count. A shell
-  variable in a redirect, an environment prefix, the repo name, a GraphQL
-  variable of a read-only query, or a label does not make a call unread. A
-  review, a comment or PR body edit through `gh api`, or a GraphQL mutation
-  with a value built at run time is refused, as for a file the gate cannot
-  read.
+- This applies to new comments: `gh pr comment`, `gh issue comment`, and a
+  POST to `issues/<n>/comments`. Only the words that carry the comment count,
+  so a shell variable in a redirect that reads, an environment prefix, or the
+  repo name does not make it unread. Reviews, edits and GraphQL calls read
+  `$(cat <file>)` too, and otherwise work as before.
 
 ### A check that a person passes no longer turns into a ci gap
 

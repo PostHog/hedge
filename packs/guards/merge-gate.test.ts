@@ -782,9 +782,9 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     writeFileSync(join(dir, "$F"), report);
     writeFileSync(join(dir, "example.md"), "Append the footer with $(cat footer.md).\n");
     writeFileSync(join(dir, "footer.md"), "Posted by the lane.\n");
-    writeFileSync(join(dir, "q.graphql"), "mutation($b:String!){ addComment(input:{subjectId:\"X\", body:$b}){ clientMutationId } }");
-    writeFileSync(join(dir, "mutation.graphql"), "mutation($b:String!){ addComment(input:{subjectId:\"X\", body:$b}){ clientMutationId } }");
     mkdirSync(join(dir, "sub"));
+    mkdirSync(join(dir, "$DIR"));
+    writeFileSync(join(dir, "$DIR/enqueue.md"), report);
     writeFileSync(join(dir, "sub/enqueue.md"), report);
     writeFileSync(join(dir, "sub/report.md"), `${report}\n/trunk merge\n`);
     return dir;
@@ -812,6 +812,9 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     ["gh pr comment 9 --repo example/product --body \"$(env -C sub cat enqueue.md)\""],
     ["gh api graphql -F pr=$PR -f query='query($pr:Int!){ repository(owner:\"example\", name:\"product\"){ pullRequest(number:$pr){ title } } }'"],
     ["gh api -X POST repos/example/product/issues/9/labels -f \"labels[]=$L\""],
+    ["gh pr review 9 --repo example/product --approve --body \"Proofs pass at $SHA\""],
+    ["gh api -X POST repos/example/product/issues/9/comments -H \"X-Run: $RUN=report.md\" -F body=@report.md"],
+    ["wc -l < \"$REPORT\"; gh pr comment 9 --repo example/product --body-file report.md"],
   ])("a decision report that names a pending merge is no merge, and posts without a gate read on a PR with a held gap: %s", async (command) => {
     const hook = machine({}, [heldGap]);
     expect(await hook(command, reportDir())).toBeUndefined();
@@ -835,7 +838,9 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     expect(await unpassed("gh pr merge 9 --repo example/product", dir)).toStartWith("Hedge blocked this merge");
     expect(await unpassed("gh pr comment 9 --body-file \"$R\"", dir)).toStartWith("The merge gate could not read the body of this comment");
     expect(await unpassed("gh pr comment 9 --body-file \"$R\"", dir)).toContain("without naming the PR");
-    expect(await unpassed("gh pr merge 9 --repo example/product; gh pr comment 9 --repo example/product --body-file \"$R\"", dir)).toStartWith("Hedge blocked this merge");
+    const mixed = machine({ "repos/example/product/pulls/9": pull(head), "repos/example/product/pulls/10": pull(head) }, [pass("example/product", 10, head)]);
+    expect(await mixed("gh pr merge 9 --repo example/product; gh pr comment 10 --repo example/product --body-file \"$R\"", dir)).toStartWith("Hedge blocked this merge");
+    expect(await mixed("gh pr merge 10 --repo example/product; gh pr comment 9 --repo example/product --body-file \"$R\"", dir)).toStartWith("The merge gate could not read the body of this comment");
   });
 
   test("a direct argv call keeps each argument literal, so a dollar sign in the body is text", async () => {
@@ -882,6 +887,8 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     ["gh pr comment 9 --repo example/product --body \"$(env -C sub cat report.md)\""],
     ["gh pr comment 9 --repo example/product -b '$(cat enqueue.md)' --body \"$(cat enqueue.md)\""],
     ["K=body; gh api repos/example/product/issues/9/comments -f \"$K=$(cat enqueue.md)\""],
+    ["gh api repos/example/product/issues/9/comments -f \"comments[][body]=$B\""],
+    ["gh pr comment 9 --repo example/product --body \"$(env -C \"$DIR\" cat enqueue.md)\""],
     ["gh pr comment 9 --repo example/product --body \"$(cat open.md)\n$(cat oneline.md)\""],
     ["printf '/trunk merge\\n' > report.md; gh pr comment 9 --repo example/product --body-file report.md"],
     ["R=enqueue.md; gh pr comment 9 --repo example/product --body-file \"$R\""],
@@ -899,19 +906,7 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
   test.each([
     ["gh pr review 9 --repo example/product --comment --body \"$(cat enqueue.md)\""],
     ["gh api -X PATCH repos/example/product/issues/comments/1 -f body=\"$(cat enqueue.md)\""],
-    ["B=$(cat enqueue.md); gh api -X PATCH repos/example/product/issues/comments/1 -f body=\"$B\""],
-    ["B=$(cat enqueue.md); gh api -X PATCH repos/example/product/pulls/9 -f body=\"$B\""],
-    ["B=$(cat enqueue.md); gh pr review 9 --repo example/product --comment --body \"$B\""],
-    ["gh pr review 9 --repo example/product --approve --body \"Proofs pass at $SHA\""],
-    ["Q=$(cat mutation.graphql); gh api graphql -f query=\"$Q\""],
-    ["gh api graphql -F pr=9 -f query=\"$(cat mutation.graphql | cat)\""],
-    ["gh api graphql -f query='mutation($b:String!){ addComment(input:{subjectId:\"X\", body:$b}){ clientMutationId } }' -F b=\"$B\""],
-    ["gh api graphql -F query=@mutation.graphql -F b=\"$B\""],
-    ["gh api graphql -F query=@q.graphql -F b=\"$B\""],
-    ["gh api graphql -f query='query A { viewer { login } } mutation B($b:String!){ addComment(input:{subjectId:\"X\", body:$b}){ clientMutationId } }' -f operationName=B -F b=\"$B\""],
-    ["K=body; gh api -X PATCH repos/example/product/issues/comments/1 -f \"$K=$B\""],
-    ["B=$(cat enqueue.md); gh pr review 9 --repo example/product -cb\"$B\""],
-  ])("a review or edit that may write /trunk merge from a file or a run-time value is still refused: %s", async (command) => {
+  ])("a review or edit that writes /trunk merge from a file the gate reads is still refused: %s", async (command) => {
     const hook = machine({ "repos/example/product/pulls/9": pull(head) });
     expect(await hook(command, reportDir())).toBeDefined();
   });

@@ -122,18 +122,18 @@ function repositoryOf(gh: Gh, found: Command, cwd: string | undefined, io: Inten
 const stdinPath = /^(?:-|\/dev\/stdin|\/dev\/fd\/\d+|\/proc\/(?:self|\d+)\/fd\/\d+)$/;
 const home = (path: string) => path === "~" ? homedir() : path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
 
-function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline: string[], files: string[], bodies = inline) {
+function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline: string[], files: string[], comment: boolean) {
   const paths = files.map((path) => stdinPath.test(path) ? "-" : path);
   const piped = paths.includes("-") && !found.stdin;
   const read = paths.map((path) => path === "-" ? found.stdin?.body ?? "" : builtPath(found, path) ? undefined : io.readText(resolve(cwd ?? ".", found.chdir ?? ".", home(path))));
-  const expanded = bodiesOf(found, bodies).map((body) => expandedBody(body, cwd, io));
+  const expanded = bodiesOf(found, inline).map((body) => expandedBody(body, cwd, io));
   const texts = [...inline, ...read.filter((text) => text !== undefined), found.stdin?.body ?? "", ...expanded.filter((text) => text !== undefined)];
-  return { texts: [...texts, ...texts.flatMap(jsonStrings)], unread: read.includes(undefined) || expanded.includes(undefined), piped };
+  return { texts: [...texts, ...texts.flatMap(jsonStrings)], unread: read.includes(undefined) || (comment && expanded.includes(undefined)), piped };
 }
 
 type Body = { text: string; programs: string[]; parameters: boolean };
 
-const carriers = (found: Command, value: string) => found.args.flatMap((arg, index) => arg === value || arg.endsWith(`=${value}`) || (arg.endsWith(value) && /^-[A-Za-z]+$/.test(arg.slice(0, arg.length - value.length))) ? [index] : []);
+const carriers = (found: Command, value: string) => found.args.flatMap((arg, index) => arg === value || (arg.endsWith(`=${value}`) && /^[^\s=]*$/.test(arg.slice(0, arg.length - value.length - 1))) || (arg.endsWith(value) && /^-[A-Za-z]+$/.test(arg.slice(0, arg.length - value.length))) ? [index] : []);
 const builtPath = (found: Command, path: string) => carriers(found, path).some((index) => found.argParameters[index] || found.argSubstitutions[index]?.length);
 
 function bodiesOf(found: Command, inline: string[]): Body[] {
@@ -165,7 +165,7 @@ function catOutput(program: string, cwd: string | undefined, io: IntentIO): stri
   let commands: Command[];
   try { commands = commandsIn(program); } catch { return undefined; }
   const [cat, ...more] = commands;
-  if (!cat || more.length || cat.name !== "cat" || cat.argParameters.some(Boolean) || cat.stdin?.parameters || cat.args.some((arg) => arg.startsWith("-"))) return undefined;
+  if (!cat || more.length || cat.name !== "cat" || builtAtRunTime.test(cat.chdir ?? "") || cat.argParameters.some(Boolean) || cat.stdin?.parameters || cat.args.some((arg) => arg.startsWith("-"))) return undefined;
   if (!cat.args.length) return cat.stdin?.body;
   const files = cat.args.map((path) => io.readText(resolve(cwd ?? ".", cat.chdir ?? ".", home(path))));
   return files.includes(undefined) ? undefined : files.join("");
@@ -251,7 +251,7 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   if (!args) return { targets: [], refusal: shellAliasReason };
   const gh = parseGh(inOrder(args));
   if ((gh.group === "pr" || gh.group === "issue") && gh.action === "comment") {
-    const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"));
+    const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"), true);
     if (!sent.piped && !sendsEnqueue(sent, raw)) return { targets: [] };
     const named = namedPr(gh, found, cwd, io);
     const reads = readsEnqueue(sent, raw);
@@ -259,7 +259,7 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
     return { targets: [{ ...named, via: `gh ${gh.group} comment${reads ? "" : unreadVia}` }] };
   }
   if (gh.group === "pr" && gh.action === "review") {
-    const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"));
+    const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"), false);
     return sendsEnqueue(sent, raw) ? elsewhere(sent, raw) : { targets: [] };
   }
   if (gh.group === "pr" && gh.action === "merge") {
@@ -271,12 +271,12 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const fields = values(gh, "-f", "--raw-field", "-F", "--field");
   const inline = [...fields, ...fields.map((field) => field.replace(/^[^=]*=/, ""))];
   const fieldFiles = values(gh, "-F", "--field").flatMap((field) => field.match(/^[^=]*=@(.+)$/s)?.[1] ?? []);
+  const files = [...values(gh, "--input"), ...fieldFiles];
   let endpoint = endpointOf(gh).replace(/[?#].*$/s, "").replace(/\/$/, "");
-  const queries = fields.flatMap((field) => field.match(/^query=(.*)$/s)?.[1] ?? []);
-  const readQuery = queries.length > 0 && queries.every((query) => !query.startsWith("@") && !/mutation/i.test(query));
-  const bodies = endpoint === "graphql" && !readQuery ? inline : fields.flatMap((field) => field.match(/^(?:body|query)=(.*)$/s)?.[1] ?? (/^[^=]*[$`]/.test(field) ? [field] : []));
-  const sent = sentTexts(found, cwd, io, inline, [...values(gh, "--input"), ...fieldFiles], bodies);
-  if (endpoint === "graphql") return sent.piped || sent.unread || sent.texts.some((text) => mentionsEnqueue.test(text) || graphqlMerge.test(text)) || mentionsEnqueue.test(raw) ? { targets: [], refusal: graphqlReason } : { targets: [] };
+  if (endpoint === "graphql") {
+    const sent = sentTexts(found, cwd, io, inline, files, false);
+    return sent.piped || sent.unread || sent.texts.some((text) => mentionsEnqueue.test(text) || graphqlMerge.test(text)) || mentionsEnqueue.test(raw) ? { targets: [], refusal: graphqlReason } : { targets: [] };
+  }
   if (/\{owner\}|\{repo\}|:owner|:repo/.test(endpoint)) {
     const [owner, repo] = (repositoryOf(gh, found, cwd, io) ?? "/").split("/");
     endpoint = endpoint.replace(/\{owner\}|:owner/, owner ?? "").replace(/\{repo\}|:repo/, repo ?? "");
@@ -284,6 +284,7 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const method = (values(gh, "-X", "--method").at(-1) ?? (fields.length || values(gh, "--input").length ? "POST" : "GET")).toUpperCase();
   if (method === "GET") return { targets: [] };
   const comment = endpoint.match(/^repos\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)\/comments$/);
+  const sent = sentTexts(found, cwd, io, inline, files, comment !== null && method === "POST");
   const enqueues = sendsEnqueue(sent, raw);
   if (comment && method === "POST" && sent.piped) return { targets: [{ repository: comment[1]!, pr: Number(comment[2]), via: `gh api issues/<n>/comments${unreadVia}` }] };
   const merge = endpoint.match(/^repos\/([\w.-]+\/[\w.-]+)\/pulls\/(\d+)\/merge$/);
@@ -469,9 +470,10 @@ const heldReason = (held: string[], person: string) => `Hedge blocked this merge
 
 const unreadReason = (repositories: string[]) => `Hedge blocked this merge: the decision ledger could not be read, so the merge gate cannot tell whether an agent accepted a proof gap in ${repositories.join(", ")} itself, and such a gap holds a merge until the person's word. Try again when the hub answers.`;
 
-export const unreadBody = (intent: MergeIntent) => {
+export const unreadBody = (intent: MergeIntent, reason: string) => {
   const targets = [...intent.targets, ...intent.exempt ?? []];
-  return !intent.refusal && targets.length > 0 && targets.every((target) => target.via.endsWith(unreadVia));
+  const unread = targets.filter((target) => target.via.endsWith(unreadVia));
+  return !intent.refusal && unread.length > 0 && (unread.length === targets.length || unread.some((target) => reason.includes(`${target.repository}#${target.pr}`)));
 };
 
 /** Why the call may not go out, or undefined when every open layer of every target passed the gate at its head and none holds a gap an agent accepted without the person's merge word. */

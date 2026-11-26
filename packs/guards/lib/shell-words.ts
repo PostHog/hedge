@@ -383,11 +383,12 @@ function withoutRedirects(words: Word[]) {
     const attached = words[index].text.slice(operator.length);
     redirects.push(attached ? words[index].raw : `${words[index].raw}${words[index + 1]?.raw ?? ""}`);
     const word = attached ? words[index] : words[++index];
-    built ||= word !== undefined && (word.parameters || word.substitutions.length > 0);
     const target = attached || word?.text || "";
     const writes = direction !== "<" && direction !== "<&" && direction !== ">&" && (descriptor === "" || descriptor === "1" || descriptor === "&");
     if (writes) outputs.push(target);
-    if (/^(?:>>|>\||<>|>)$/.test(direction) || (direction === ">&" && !/^(?:\d+-?|-)$/.test(target))) fileWrites.push(target);
+    const writesFile = /^(?:>>|>\||<>|>)$/.test(direction) || (direction === ">&" && !/^(?:\d+-?|-)$/.test(target));
+    if (writesFile) fileWrites.push(target);
+    built ||= (writes || writesFile) && word !== undefined && (word.parameters || word.substitutions.length > 0);
   }
   return { kept, outputs, writes: fileWrites, redirects, built };
 }
