@@ -6,7 +6,7 @@ export type HeardAnswer = { thread: string; message: string; words: string; answ
 export type ThreadWords = (thread: string) => Promise<ThreadWord[]>;
 
 export const normalized = (text: string) => text.toLowerCase().replace(/[`*_"“”‘’']/g, "").replace(/\s+/g, " ").trim();
-export const unlinked = (text: string) => text.replace(/\[([^\]]*)\]\([^)\s]*\)/g, "$1");
+export const unlinked = (text: string) => text.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
 
 export const t3ThreadWords = (home: string): ThreadWords => (thread) =>
   withT3Session((client) => readThreadWords(client, thread, t3StatePath(t3UserData(home))), { home })

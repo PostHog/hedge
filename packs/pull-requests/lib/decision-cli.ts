@@ -335,7 +335,9 @@ export const ledgerHolds = async (ledger: Ledger, id: string) => fold(await ledg
 export const inLedger = (ledger: Ledger, id: string) => reachHub(() => ledgerHolds(ledger, id));
 
 export async function appendOnce(ledger: Ledger, decision: Decision) {
-  if (await inLedger(ledger, decision.id)) return decision.id;
+  const recorded = fold(await reachHub(() => ledger.read())).find((held) => held.id === decision.id);
+  if (recorded && !live(recorded)) throw new AnswerTaken(`Decision ${decision.id} was ${recorded.reversed ? "reversed" : "voided"} before its round was recorded, so the round is dropped. Ask the user again`);
+  if (recorded) return decision.id;
   return appendDecision(ledger, decision);
 }
 

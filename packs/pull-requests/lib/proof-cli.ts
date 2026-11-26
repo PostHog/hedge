@@ -2,7 +2,7 @@ import { closeSync, existsSync, openSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { answerNumbers, askGap, savedFindings, summaryGaps, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity } from "./proof.ts";
+import { claimDecision, decisionClaim, roundOfDecision, answerNumbers, askGap, savedFindings, summaryGaps, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity, type DecisionClaim } from "./proof.ts";
 import { AnswerTaken, adoptUsers, appendOnce, decideAlone, decisionId, hearUser, ledgerHolds, ledgerOf } from "./decision-cli.ts";
 import { HubUnreachable, keptOwed, refText, usersAcceptance, thisMachine, type Decision, type Ssh } from "./decision-ledger.ts";
 import { autonomyOf, decidesAll, gradeOf, type Autonomy, type Grade } from "./proof-autonomy.ts";
@@ -778,7 +778,7 @@ async function reserveRound(options: Map<string, string>, head: ProofIdentity, c
   const base = options.has("--base") ? resolveCommit(options.get("--base")!, context.run) : undefined;
   const lastRead = scope === "final" && (options.get("--phase") ?? "review") === "review";
   const from = lastRead ? await panelCommit(context.home, head) ?? base : rangeStart(scope, base, head, context.run);
-  const { decision, ...permit } = await decisionOf(options, head, context);
+  const { decision, claim, ...permit } = await decisionOf(options, head, context);
   const { triage, tier, treated, budget, record } = await reviewBudget(head, pull?.body, permit.limits.ceiling, context);
   if (tier.name === "read" && capturedBy === "hedge" && !panel && !decision && !await panelCommit(context.home, head)) throw new Error("A PR of the Read tier gets one read, and it is the panel: run hedge proof review, which runs its combined lens");
   const firstPanel = panel && !await panelCommit(context.home, head);
@@ -786,7 +786,7 @@ async function reserveRound(options: Map<string, string>, head: ProofIdentity, c
   const now = context.now ?? (() => new Date());
   const dropUnanswered = (directory: string) => roundStep(directory, context, () => dropFinalRead(directory, head, now()));
   const emptyRange = () => from !== undefined && rangeIsEmpty(context.run, from, head.commit, mergeBase(head, context.run));
-  const reserved = await startReview(context.home, head, { dropUnanswered, emptyRange, triage, budget: record, onHistory: onHistoryOf(head, context.run), opening: async () => panel && !await panelCommit(context.home, head), sanity: () => requireSanity(context.home, head, context.run, () => bloatJudge(head, context)), scope, base, from, ...isCommitSha(pull?.baseSha) ? { forkBase: pull.baseSha } : {}, ...permit, limits, decision, phase: options.get("--phase"), cleanBaseMerge: cleanBaseMerge(head, context.run), quietCommit: quietCommitIn(context.run, () => baseRefs(head, context.run)), capturedBy, lock: async (directory) => lockNewRound(directory, await context.lock()), lockBudget: async (reviews, step) => withRoundLock(reviews, await context.lock(), step), now });
+  const reserved = await startReview(context.home, head, { dropUnanswered, emptyRange, triage, budget: record, onHistory: onHistoryOf(head, context.run), opening: async () => panel && !await panelCommit(context.home, head), sanity: () => requireSanity(context.home, head, context.run, () => bloatJudge(head, context)), scope, base, from, ...isCommitSha(pull?.baseSha) ? { forkBase: pull.baseSha } : {}, ...permit, limits, decision, claim, phase: options.get("--phase"), cleanBaseMerge: cleanBaseMerge(head, context.run), quietCommit: quietCommitIn(context.run, () => baseRefs(head, context.run)), capturedBy, lock: async (directory) => lockNewRound(directory, await context.lock()), lockBudget: async (reviews, step) => withRoundLock(reviews, await context.lock(), step), now });
   return { ...reserved, scope, base, from, phase: options.get("--phase") };
 }
 
@@ -850,7 +850,8 @@ const roundStep = async <T>(directory: string, context: CommandContext, step: ()
 async function takeOverride(directory: string, options: Map<string, string>, head: ProofIdentity, context: CommandContext) {
   const reservation = await readReservation(directory);
   if (!options.has("--override") || !reservation?.decision || reservation.recorded || reservation.decision.mark !== "🤖") return;
-  const { decision } = await decisionOf(options, head, context);
+  const { decision, claim } = await decisionOf(options, head, context);
+  if (claim) await claimDecision(claim);
   await writeJson(join(directory, "round.json"), { ...reservation, decision } satisfies Reservation);
 }
 
@@ -1121,7 +1122,7 @@ function roundOption(options: Map<string, string>) {
   return round === undefined ? undefined : round === "final" ? "final" : roundId(round);
 }
 
-async function decisionOf(options: Map<string, string>, head: ProofIdentity, context: CommandContext): Promise<{ arbiter: Arbiter; autonomy: () => Autonomy; limits: { free: number; ceiling: number }; decision?: Decision }> {
+async function decisionOf(options: Map<string, string>, head: ProofIdentity, context: CommandContext): Promise<{ arbiter: Arbiter; autonomy: () => Autonomy; limits: { free: number; ceiling: number }; decision?: Decision; claim?: DecisionClaim }> {
   const rest = { arbiter: arbiterOf(context), autonomy: () => autonomyOf(context.env, () => gradeAt(head, context), "review"), limits: { free: numberSetting("pull-requests.freeReviews", context.env), ceiling: numberSetting("pull-requests.reviewCeiling", context.env) } };
   const words = options.get("--override");
   const reason = options.get("--agent") ?? options.get("--standing");
@@ -1135,12 +1136,12 @@ async function decisionOf(options: Map<string, string>, head: ProofIdentity, con
   const fits = (heard: HeardAnswer) => requireChoice(heard, lead, [runOption, stopOption], "Stop the review loop");
   if (words !== undefined && decisionId.test(words)) {
     if (options.has("--thread")) throw new Error("--thread goes with a dated quote. A decision id names the thread of its answer");
-    return { ...rest, decision: await adoptUsers({ ...ask, id: words, fits }, context, ledger) };
+    return { ...rest, decision: await adoptUsers({ ...ask, id: words, fits }, context, ledger), claim: decisionClaim(context.home, words, head) };
   }
   const decision = words !== undefined
-    ? await hearUser({ ...ask, mark: "👤", words, thread: options.get("--thread"), fits }, context, ledger).catch((error: unknown) => {
+    ? await hearUser({ ...ask, mark: "👤", words, thread: options.get("--thread"), fits }, context, ledger).catch(async (error: unknown) => {
       const recorded = error instanceof AnswerTaken && /already recorded as decision (d-[0-9a-f]{8})/.exec(error.message)?.[1];
-      if (recorded) error.message += `. When ${recorded} is the user's 👤 answer for ${refText(head)} that no round used, pass --override ${recorded}`;
+      if (recorded && !await roundOfDecision(context.home, recorded)) error.message += `. When ${recorded} is the user's 👤 answer for ${refText(head)}, pass --override ${recorded}`;
       throw error;
     })
     : await decideAlone({ ...ask, question: `Run another review round of ${refText(head)} at ${short(head.commit)}?`, answer: `Run it: ${reason}`, rejected: "Ask the user", reason: reason!, thread: options.get("--thread") }, context, ledger);
