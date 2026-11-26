@@ -218,9 +218,9 @@ export async function hearUser(input: Hearing, context: DecisionContext, ledger:
       fits(heard, input);
       const where = { thread: word.thread, message: word.id, machine: thisMachine(context.env) };
       const earlier = answerUse(await reachHub(() => ledger.read()), messageKey(where));
-      if (earlier) { used ??= alreadyUsed(earlier); continue; }
+      if (earlier) { used ??= withNewer(alreadyUsed(earlier), refusals); continue; }
       const usedOn = await usedAnswer(context.home, heard);
-      if (usedOn) { used ??= new Error(usedOn); continue; }
+      if (usedOn) { used ??= withNewer(new Error(usedOn), refusals); continue; }
       return {
         id: newId(), at: answeredAt(word), class: input.class, mark: input.mark, question: word.answered, answer: `${word.at.slice(0, 10)} "${word.text}"`, scope: scopeOf(input),
         ...input.class === "proof-gap" ? { effect: input.keepOwed ? "keep-owed" as const : "accept" as const } : {}, where,
@@ -228,6 +228,11 @@ export async function hearUser(input: Hearing, context: DecisionContext, ledger:
     } catch (error) { refusals.push(error as Error); }
   }
   throw refused(used ?? refusals[0]!);
+}
+
+function withNewer(used: Error, newer: Error[]) {
+  if (newer.length) used.message = `${used.message}. A newer answer with these words was refused: ${newer[0]!.message}`;
+  return used;
 }
 
 function withAnswerIds(error: Error, thread: string) {
