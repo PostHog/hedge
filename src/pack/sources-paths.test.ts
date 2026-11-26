@@ -1209,5 +1209,36 @@ describe("fetchSource local path resolution and object formats", () => {
     const drFailed = await advanceSource({ name: "team", repo: dirtyRollbackRepo, ref: "main" }, drCache, dr1);
     expect(drFailed.state).toBe("failed");
     await spawnGit(join(drCache, "team"), "fsck", "--full");
+
+    const branchHookRepo = join(root, "branch-hook-rollback");
+    await initRepo(branchHookRepo);
+    const bh1 = await commitPack(branchHookRepo, "team", "Branch hook v1.");
+    const bhCache = temp.make("cache-branch-hook-");
+    expect("error" in (await fetchSource({ name: "team", repo: branchHookRepo, ref: "main" }, bhCache))).toBe(false);
+    const bhHooksDir = join(bhCache, "team", ".git", "hooks");
+    mkdirSync(bhHooksDir, { recursive: true });
+    const bhHook = join(bhHooksDir, "post-checkout");
+    writeFileSync(bhHook, "#!/bin/sh\ngit update-ref refs/heads/saved-tip \"$2\"\n");
+    chmodSync(bhHook, 0o755);
+    mkdirSync(join(branchHookRepo, "packs", "team"), { recursive: true });
+    writeFileSync(join(branchHookRepo, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Branch hook broken." }));
+    await spawnGit(branchHookRepo, "commit", "-qam", "broken bh v2");
+    const bhFailed = await advanceSource({ name: "team", repo: branchHookRepo, ref: "main" }, bhCache, bh1);
+    expect(bhFailed.state).toBe("failed");
+    await spawnGit(join(bhCache, "team"), "fsck", "--full");
+
+    const parentReal = join(root, "parent-real");
+    const parentRepo = join(parentReal, "repo");
+    await initRepo(parentRepo);
+    const parentSha = await commitPack(parentRepo, "team", "Through parent symlink.");
+    const parentLink = join(root, "parent-link");
+    symlinkSync(parentReal, parentLink);
+    const parentLinkRepo = join(parentLink, "repo");
+    const parentCache = temp.make("cache-parent-symlink-");
+    expect("error" in (await fetchSource({ name: "team", repo: parentLinkRepo, ref: parentSha }, parentCache))).toBe(false);
+    rmSync(parentLink);
+    const offlineParentMissing = await fetchSource({ name: "team", repo: parentLinkRepo, ref: parentSha }, parentCache);
+    if ("error" in offlineParentMissing) throw new Error(offlineParentMissing.error);
+    expect([offlineParentMissing.packs[0]?.manifest.summary, offlineParentMissing.stale]).toEqual(["Through parent symlink.", undefined]);
   });
 });

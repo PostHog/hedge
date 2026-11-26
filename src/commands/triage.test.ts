@@ -340,18 +340,20 @@ describe("hedge triage", () => {
     );
     const sent: Sent[] = [];
     const io = scripted([]);
-    const runRealGit: CommandRunner = async (command, options = {}) => {
-      sent.push({ command, ...(options.input === undefined ? {} : { input: options.input }) });
-      if (command[0] === "git") {
-        const proc = Bun.spawn(command, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-        const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-        return { code, stdout, stderr };
-      }
-      return capture([], undefined)(command, options);
+    const runRealGit = (recorded: Sent[]): CommandRunner => {
+      const ghOnly = capture(recorded);
+      return async (command, options = {}) => {
+        if (command[0] === "git") {
+          const proc = Bun.spawn(command, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+          const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+          return { code, stdout, stderr };
+        }
+        return ghOnly(command, options);
+      };
     };
     const code = await main(
       ["triage", "--send", "--note", "Bearer private-org/inherited-packs/secretSuffix99"],
-      { home, engineRoot, platform: "darwin", env: { HEDGE_PROFILE_DIR: inherited }, print: io.terminal.print, terminal: io.terminal, capture: runRealGit, hostname: () => "noras-mbp.local", run: async () => 0 },
+      { home, engineRoot, platform: "darwin", env: { HEDGE_PROFILE_DIR: inherited }, print: io.terminal.print, terminal: io.terminal, capture: runRealGit(sent), hostname: () => "noras-mbp.local", run: async () => 0 },
     );
     expect(code).toBe(0);
     const issue = sent.find((call) => call.command[1] === "issue")!;
@@ -382,6 +384,15 @@ describe("hedge triage", () => {
     writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "mac", name: "box", profileDir }));
     const sent: Sent[] = [];
     const io = scripted([]);
+    const ghOnly = capture(sent);
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      if (command[0] === "git") {
+        const proc = Bun.spawn(command, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+        const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+        return { code, stdout, stderr };
+      }
+      return ghOnly(command, options);
+    };
     const code = await main(["triage", "--send", "--note", `failed cloning ${repoPath}`], {
       home,
       engineRoot,
@@ -389,7 +400,7 @@ describe("hedge triage", () => {
       env: {},
       print: io.terminal.print,
       terminal: io.terminal,
-      capture: capture(sent),
+      capture: runRealGit,
       hostname: () => "box.local",
       run: async () => 0,
     });
@@ -420,6 +431,15 @@ describe("hedge triage", () => {
     writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "mac", name: "source", profileDir }));
     const sent: Sent[] = [];
     const io = scripted([]);
+    const ghOnly = capture(sent);
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      if (command[0] === "git") {
+        const proc = Bun.spawn(command, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+        const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+        return { code, stdout, stderr };
+      }
+      return ghOnly(command, options);
+    };
     const code = await main(["triage", "--send", "--note", "doctor advisory check"], {
       home,
       engineRoot,
@@ -427,7 +447,7 @@ describe("hedge triage", () => {
       env: {},
       print: io.terminal.print,
       terminal: io.terminal,
-      capture: capture(sent),
+      capture: runRealGit,
       hostname: () => "source.local",
       run: async () => 0,
     });
@@ -452,6 +472,15 @@ describe("hedge triage", () => {
     );
     const sent: Sent[] = [];
     const io = scripted([]);
+    const ghOnly = capture(sent);
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      if (command[0] === "git") {
+        const proc = Bun.spawn(command, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+        const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+        return { code, stdout, stderr };
+      }
+      return ghOnly(command, options);
+    };
     const code = await main(["triage", "--send", "--note", "setup log check"], {
       home,
       engineRoot,
@@ -459,7 +488,7 @@ describe("hedge triage", () => {
       env: {},
       print: io.terminal.print,
       terminal: io.terminal,
-      capture: capture(sent),
+      capture: runRealGit,
       hostname: () => "box.local",
       run: async () => 0,
     });
