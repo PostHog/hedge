@@ -2,7 +2,7 @@ import { normalized, t3ThreadWords, type HeardAnswer, type ThreadWord, type Thre
 import { renderReport } from "./decision-report.ts";
 import { laneSecretLines } from "../../hub/lib/secret-lane-source.ts";
 import { readPullRequest, runIn } from "./pr-ci.ts";
-import { gapKind, refuseInstructionQuote, usedAnswer } from "./proof.ts";
+import { gapKind, refuseInstructionQuote, roundOfDecision, usedAnswer } from "./proof.ts";
 import { decidesAll } from "./proof-autonomy.ts";
 import {
   agentRefusal, answerUse, sameThread, askClasses, gateOverride, mergeCardChoice, mergeCardCondition, namesHead, overrideChoice, brakeDays, brakeOf, covers, decisionLine, fold, hubLedger, HubUnreachable, isUsers, liftCounted, live, messageKey, namesKind, namesPr, panelRefusal, prRef, refText, thisMachine, tierOf,
@@ -218,9 +218,9 @@ export async function hearUser(input: Hearing, context: DecisionContext, ledger:
       fits(heard, input);
       const where = { thread: word.thread, message: word.id, machine: thisMachine(context.env) };
       const earlier = answerUse(await reachHub(() => ledger.read()), messageKey(where));
-      if (earlier) { used ??= alreadyUsed(earlier); continue; }
+      if (earlier) { used ??= withNewer(alreadyUsed(earlier), refusals); continue; }
       const usedOn = await usedAnswer(context.home, heard);
-      if (usedOn) { used ??= new Error(usedOn); continue; }
+      if (usedOn) { used ??= withNewer(new Error(usedOn), refusals); continue; }
       return {
         id: newId(), at: answeredAt(word), class: input.class, mark: input.mark, question: word.answered, answer: `${word.at.slice(0, 10)} "${word.text}"`, scope: scopeOf(input),
         ...input.class === "proof-gap" ? { effect: input.keepOwed ? "keep-owed" as const : "accept" as const } : {}, where,
@@ -228,6 +228,37 @@ export async function hearUser(input: Hearing, context: DecisionContext, ledger:
     } catch (error) { refusals.push(error as Error); }
   }
   throw refused(used ?? refusals[0]!);
+}
+
+function withNewer(used: Error, newer: Error[]) {
+  if (newer.length) used.message = `${used.message}. A newer answer with these words was refused: ${newer[0]!.message}`;
+  return used;
+}
+
+export const decisionId = /^d-[0-9a-f]{8}$/;
+export type Adoption = Scope & { id: string; fits: (answer: HeardAnswer) => void };
+
+export async function adoptUsers(input: Adoption, context: DecisionContext, ledger: Ledger): Promise<Decision> {
+  checkScope(input);
+  const found = fold(await reachHub(() => ledger.read())).find((decision) => decision.id === input.id);
+  if (!found) throw new Error(`Decision ${input.id} is not in the decision ledger. hedge decision list --pr ${refText(input.prs[0]!)} lists the ids`);
+  if (found.mark !== "👤" || found.class !== input.class) throw new Error(`Decision ${input.id} is a ${found.mark} ${found.class} decision. Only the user's 👤 ${input.class} decision starts a round`);
+  if (!live(found)) throw new Error(`Decision ${input.id} is ${found.reversed ? "reversed" : "voided"}. Ask the user again`);
+  const uncovered = input.prs.filter((ref) => !covers(found, ref));
+  if (uncovered.length) throw new Error(`Decision ${input.id} does not cover ${uncovered.map(refText).join(", ")}. It covers ${found.scope.prs.join(", ")}`);
+  const { thread, message, machine } = found.where;
+  if (!message) throw new Error(`Decision ${input.id} names no answer of the user's. Ask them again`);
+  if (machine !== thisMachine(context.env)) throw new Error(`Decision ${input.id} was recorded on ${machine}. Start the round there: only that machine reads the user's answer and the rounds it started`);
+  const word = (await (context.threadWords ?? t3ThreadWords(context.home))(thread)).find((said) => said.id === message);
+  if (!word) throw new Error(`The answer of decision ${input.id}, message ${message}, is not in T3 thread ${thread}. Only an answer the user gave in the T3 app counts. Ask them again`);
+  const answer = heardAnswer(word);
+  fits(answer, { ...input, mark: "👤" });
+  const round = await roundOfDecision(context.home, input.id);
+  if (round) throw new AnswerTaken(`Decision ${input.id} already started ${round}. One answer starts one round. Ask the user again`);
+  const usedOn = await usedAnswer(context.home, answer);
+  if (usedOn) throw new AnswerTaken(usedOn);
+  const { voided: _voided, reversed: _reversed, ...decision } = found;
+  return decision;
 }
 
 function withAnswerIds(error: Error, thread: string) {

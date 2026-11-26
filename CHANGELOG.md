@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### A second "Run one more round" on the same day starts its round
+
+- `hedge proof review --override '<date> "Run one more round"'` takes the
+  newest answer with those words that is not used yet. Before, when the
+  newest answer was refused, Hedge showed that an older answer was already
+  recorded, and hid why it refused the newest.
+- The round question may name the PR as a Markdown link, such as
+  `[PostHog/posthog#1](https://github.com/PostHog/posthog/pull/1)`.
+- `--override` also takes the id of a 👤 review decision that
+  `hedge decision record` made, such as `--override d-1a2b3c4d`. Hedge reads
+  the user's answer again in its T3 thread, checks that its question is the
+  round question of this PR and that they chose "Run one more round", and
+  refuses a decision that is voided, from another machine, or already used by
+  a round.
+
 ### A check that a person passes no longer turns into a ci gap
 
 - A new setting, `pull-requests.personChecks`, lists the required checks that

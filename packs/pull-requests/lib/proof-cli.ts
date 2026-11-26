@@ -3,7 +3,7 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { answerNumbers, askGap, savedFindings, summaryGaps, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity } from "./proof.ts";
-import { AnswerTaken, appendOnce, decideAlone, hearUser, ledgerHolds, ledgerOf } from "./decision-cli.ts";
+import { AnswerTaken, adoptUsers, appendOnce, decideAlone, decisionId, hearUser, ledgerHolds, ledgerOf } from "./decision-cli.ts";
 import { HubUnreachable, keptOwed, refText, usersAcceptance, thisMachine, type Decision, type Ssh } from "./decision-ledger.ts";
 import { autonomyOf, decidesAll, gradeOf, type Autonomy, type Grade } from "./proof-autonomy.ts";
 import { ciOf, readComment, readPullRequest, runIn } from "./pr-ci.ts";
@@ -30,7 +30,7 @@ import { readCriticalPaths } from "./proof-judge.ts";
 import { reviewRules } from "./review-rules.ts";
 import { recordSanity, requireSanity } from "./proof-sanity.ts";
 import type { BloatJudge } from "./proof-bloat.ts";
-import type { ThreadWords } from "./proof-answers.ts";
+import type { HeardAnswer, ThreadWords } from "./proof-answers.ts";
 import { modelFor } from "../../base/lib/models.ts";
 import { numberSetting } from "../../base/lib/settings.ts";
 import { bunScript } from "../../../src/runner/bun.ts";
@@ -58,7 +58,10 @@ except a final read of a HEAD whose commits since the last read are only clean b
 the gate carries and change files of the PR. Ask it with your question tool, with the options "Run one more round" and "Stop
 here". Only their choice of "Run one more round" there counts, quoted with the date they gave it, for example
 --override '2026-10-24 "Run one more round"'. --thread names the T3 thread where they answered and defaults to this
-one (T3CODE_THREAD_ID). A typed message, a refusal, or a general rule, such as "ship everything autonomously", does
+one (T3CODE_THREAD_ID). With two such answers on one day, it takes the newest that is not used yet. A question may
+name the PR as a Markdown link. --override also takes the id of a 👤 review decision that hedge decision record made
+from such an answer, for example --override d-1a2b3c4d, without --thread: hedge reads the answer again in its T3
+thread, on the machine that recorded it, and refuses a decision that a round already used. A typed message, a refusal, or a general rule, such as "ship everything autonomously", does
 not answer a round. The question names the PR, and an answer to the question of another PR does not count. The
 answer lands in the decision ledger as a 👤 review decision; one answer records one decision and starts one round.
 --agent takes your own reason for a round that the arbiter escalates, or, on end, for one of the 3 reads past the review
@@ -252,7 +255,7 @@ with the merge time and the time it was saved.`,
     },
   },
   review: {
-    usage: "review [--lens <name>[:same|:other]]... [--knowledge <lens>=<file>]... [--scope full|fixes|final] [--base <reviewed-sha>] [--phase review|babysit] [--single] [--override <dated quote> [--thread <id>] | --agent <reason>] | review --wait [--round <number|final>]",
+    usage: "review [--lens <name>[:same|:other]]... [--knowledge <lens>=<file>]... [--scope full|fixes|final] [--base <reviewed-sha>] [--phase review|babysit] [--single] [--override <dated quote> [--thread <id>] | --override <decision id> | --agent <reason>] | review --wait [--round <number|final>]",
     summary: `Without --lens, --scope full runs the panel of the PR's review tier, which hedge picks from the merge-risk grade
 of the PR description and the authored production lines of the diff: lines outside tests, docs, lockfiles, and
 generated files. Read: grade low or no grade, and under 50 authored lines; one combined Correctness and Risk lens on the
@@ -622,7 +625,7 @@ change the judge. Exit 1 when no case was scored.`,
     run: async ({ options, lists }, _, context) => runEval(options, lists, context),
   },
   "review-start": {
-    usage: "review-start [--scope full|fixes|final] [--base <reviewed-sha>] [--phase review|babysit] [--override <dated quote> [--thread <id>] | --agent <reason>]",
+    usage: "review-start [--scope full|fixes|final] [--base <reviewed-sha>] [--phase review|babysit] [--override <dated quote> [--thread <id>] | --override <decision id> | --agent <reason>]",
     summary: `Reserve a review round before you dispatch its reviewers. Round 1 is --scope full and takes no --base. A later
 round is --scope fixes, and a final read is --scope final; both take --base with the commit of the latest finished
 review. The printed id names the round for review-finish and respond. A final read of a HEAD that the gate carries
@@ -1129,8 +1132,17 @@ async function decisionOf(options: Map<string, string>, head: ProofIdentity, con
   const lead = `${roundQuestion} ${head.repository}#${head.pr}:`;
   if (reason !== undefined && !reason.trim()) throw new Error("--agent needs your reason for this review");
   const ledger = ledgerOf(context);
+  const fits = (heard: HeardAnswer) => requireChoice(heard, lead, [runOption, stopOption], "Stop the review loop");
+  if (words !== undefined && decisionId.test(words)) {
+    if (options.has("--thread")) throw new Error("--thread goes with a dated quote. A decision id names the thread of its answer");
+    return { ...rest, decision: await adoptUsers({ ...ask, id: words, fits }, context, ledger) };
+  }
   const decision = words !== undefined
-    ? await hearUser({ ...ask, mark: "👤", words, thread: options.get("--thread"), fits: (heard) => requireChoice(heard, lead, [runOption, stopOption], "Stop the review loop") }, context, ledger)
+    ? await hearUser({ ...ask, mark: "👤", words, thread: options.get("--thread"), fits }, context, ledger).catch((error: unknown) => {
+      const recorded = error instanceof AnswerTaken && /already recorded as decision (d-[0-9a-f]{8})/.exec(error.message)?.[1];
+      if (recorded) error.message += `. When ${recorded} is the user's 👤 answer for ${refText(head)} that no round used, pass --override ${recorded}`;
+      throw error;
+    })
     : await decideAlone({ ...ask, question: `Run another review round of ${refText(head)} at ${short(head.commit)}?`, answer: `Run it: ${reason}`, rejected: "Ask the user", reason: reason!, thread: options.get("--thread") }, context, ledger);
   return { ...rest, decision };
 }

@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { startT3Stub } from "../../base/lib/t3/testing.ts";
 import { parseVerdict } from "./proof.ts";
-import { cleanFixtures, settings, lookup, checkout, fakeModel, reviewHead, reviewHeadFixed, finishRound, recordingModel, stalledOnQuota, blanks, ledgerDecisions, type Checkout } from "./proof-testing.ts";
+import { cleanFixtures, settings, lookup, checkout, fakeModel, reviewHead, reviewHeadFixed, finishRound, recordingModel, stalledOnQuota, blanks, ledgerDecisions, graded, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
@@ -101,6 +101,84 @@ test("an override counts only when the user chose Run one more round in the ques
   const decision = JSON.parse(readFileSync(join(pr.pullRequest, "reviews/3/round.json"), "utf8")).decision;
   expect(decision.mark).toBe("👤");
   expect((await pr.decide("list", "--pr", "example/product#42")).output).toBe(`- 👤 **${question}** 2026-10-25 "Run one more round" (the user, review, thread mcp:thread-1) [${decision.id}]`);
+});
+
+const linkedQuestion = "Run one more review round? [example/product#42](https://github.com/example/product/pull/42): one more read of the merge.";
+
+async function overrideRound(pr: Checkout) {
+  const third = await twoRounds(pr);
+  pr.env.HEDGE_REVIEW_ARBITER = escalate;
+  pr.choose("Run one more round");
+  const override = (answer: string) => pr.hedge(...third, "--override", answer, ...(answer.startsWith("d-") ? [] : ["--thread", "thread-1"]));
+  expect((await override(`2026-10-25 "Run one more round"`)).code).toBe(0);
+  await finishRound(pr, "3");
+  return override;
+}
+
+const roundDecision = (pr: Checkout, round: string) => JSON.parse(readFileSync(join(pr.pullRequest, "reviews", round, "round.json"), "utf8")).decision.id as string;
+
+test("a second answer with the same date and words starts its round, though its card links the PR", async () => {
+  const pr = await checkout();
+  const override = await overrideRound(pr);
+  pr.choose("Run one more round", "Shall I merge it?");
+  await expect(override(`2026-10-25 "Run one more round"`)).rejects.toThrow(`Ask the user again. A newer answer with these words was refused: "Run one more round" answers another question ("Shall I merge it?")`);
+
+  pr.choose("Run one more round", linkedQuestion);
+  expect((await override(`2026-10-25 "Run one more round"`)).code).toBe(0);
+  expect(roundDecision(pr, "4")).not.toBe(roundDecision(pr, "3"));
+});
+
+test("--override takes the id of the user's review decision, once, and only one that names the PR, was never a round's, and stands on their answer", async () => {
+  const pr = await checkout();
+  const override = await overrideRound(pr);
+  const recordAnswer = async (question: string) => {
+    pr.choose("Run one more round", question);
+    const message = `request-${(await pr.reader.words!("thread-1")).length}:0`;
+    const { output } = await pr.decide("record", "--mark", "👤", "--class", "review", "--pr", "example/product#42", "--message", message);
+    return /\[(d-[0-9a-f]{8})\]/.exec(output)![1]!;
+  };
+  const recorded = await recordAnswer(linkedQuestion);
+  await expect(override(`2026-10-25 "Run one more round"`)).rejects.toThrow(`already recorded as decision ${recorded}. One answer records one decision; it covers the PRs its question named. Ask the user again. When ${recorded} is the user's 👤 answer for example/product#42 that no round used, pass --override ${recorded}`);
+  await expect(override(roundDecision(pr, "3"))).rejects.toThrow("already started round 3 of example/product#42");
+  await expect(override("d-00000000")).rejects.toThrow("Decision d-00000000 is not in the decision ledger");
+  pr.pullRequestState({ body: graded("non-critical") });
+  const agents = (await pr.decide("record", "--mark", "🤖", "--class", "review", "--pr", "example/product#42", "--question", "Run another round?", "--answer", "Run it", "--rejected", "Ask the user", "--reason", "new code")).output;
+  await expect(override(/\[(d-[0-9a-f]{8})\]/.exec(agents)![1]!)).rejects.toThrow("Only the user's 👤 review decision starts a round");
+  await expect(pr.hedge("review-start", "--scope", "full", "--repo", "example/product", "--pr", "43", "--override", recorded)).rejects.toThrow(`Decision ${recorded} does not cover example/product#43`);
+  await expect(pr.hedge("review-start", "--scope", "full", "--override", recorded, "--thread", "thread-1")).rejects.toThrow("--thread goes with a dated quote");
+
+  const decisions = (await pr.decide("list")).output.split("\n").length;
+  expect((await override(recorded)).code).toBe(0);
+  expect(roundDecision(pr, "4")).toBe(recorded);
+  expect((await pr.decide("list")).output.split("\n")).toHaveLength(decisions);
+  await finishRound(pr, "4");
+  await expect(override(recorded)).rejects.toThrow("already started round 4 of example/product#42");
+  expect(existsSync(join(pr.pullRequest, "reviews/5"))).toBe(false);
+
+  await expect(override(await recordAnswer("Shall I merge example/product#42?"))).rejects.toThrow("answers another question");
+  const voided = await recordAnswer(linkedQuestion);
+  await pr.decide("void", voided, "--reason", "the merge moved");
+  await expect(override(voided)).rejects.toThrow(`Decision ${voided} is voided`);
+  pr.env.CODER_WORKSPACE_NAME = "box-a";
+  const elsewhere = await recordAnswer(linkedQuestion);
+  pr.env.CODER_WORKSPACE_NAME = "box-b";
+  await expect(override(elsewhere)).rejects.toThrow(`Decision ${elsewhere} was recorded on box-a`);
+  pr.env.CODER_WORKSPACE_NAME = "box-a";
+  pr.reader.words = async () => [];
+  await expect(override(elsewhere)).rejects.toThrow("is not in T3 thread");
+});
+
+test("a decision id starts one round, on the PR its question leads with, even when two starts race", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "new\n");
+  pr.choose("Run one more round", "Run one more review round? example/product#42: both PRs, example/product#43 too.");
+  const { output } = await pr.decide("record", "--mark", "👤", "--class", "review", "--pr", "example/product#42", "--pr", "example/product#43", "--message", "request-1:0");
+  const id = /\[(d-[0-9a-f]{8})\]/.exec(output)![1]!;
+  const start = (number: string) => pr.hedge("review-start", "--repo", "example/product", "--pr", number, "--scope", "full", "--override", id);
+  await expect(start("43")).rejects.toThrow("answers another question");
+  const results = await Promise.allSettled([start("42"), start("42")]);
+  expect(results.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+  expect(existsSync(join(pr.pullRequest, "reviews/1"))).toBe(true);
 });
 
 test("one answer starts one round, counts only on the PR its question names, and a start that fails releases it", async () => {

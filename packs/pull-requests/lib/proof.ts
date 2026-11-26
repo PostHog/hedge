@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { access, link, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
-import { normalized, type HeardAnswer } from "./proof-answers.ts";
+import { normalized, unlinked, type HeardAnswer } from "./proof-answers.ts";
 import { agentRefusal, agentsAcceptance, covers, fold, keptOwed, panelRefusal, usersAcceptance, type Decision, type DecisionState, type Ledger, type Mark, type PrRef, type Tier } from "./decision-ledger.ts";
 import type { Family, Usage } from "./proof-models.ts";
 import { quietReason, type DeltaKind, type QuietStep } from "./proof-delta.ts";
@@ -464,6 +464,20 @@ function claimedOn(text: string) {
 
 const usedOn = (where: string) => `This answer is already used on ${where}. One answer counts once. Ask the user again`;
 
+export async function roundOfDecision(home: string, id: string) {
+  const root = ledgerRoot(home);
+  for (const owner of await entries(root)) for (const name of await entries(join(root, owner))) for (const pr of await entries(join(root, owner, name))) {
+    const reviews = join(root, owner, name, pr, "reviews");
+    const dropped = droppedDirectory(reviews);
+    const rounds = [
+      ...(await reviewNames(reviews)).map((review) => ({ review, directory: join(reviews, review) })),
+      ...(await entries(dropped)).filter((entry) => droppedEntry.test(entry)).map((entry) => ({ review: droppedName(entry), directory: join(dropped, entry) })),
+    ];
+    for (const { review, directory } of rounds) if ((await readReservation(directory))?.decision?.id === id) return `${reviewLabel(review)} of ${owner}/${name}#${pr}`;
+  }
+  return undefined;
+}
+
 export async function usedAnswer(home: string, answer: HeardAnswer) {
   const claim = await readFile(claimPath(home, answer), "utf8").catch(() => undefined);
   if (claim !== undefined) return usedOn(claimedOn(claim));
@@ -485,7 +499,7 @@ export function askGap(identity: ProofIdentity, kind: string, reason: string, au
 
 export function requireChoice(answer: HeardAnswer, lead: string, [accept, decline]: [string, string], refused: string) {
   if (answer.source !== "question") throw new Error(`"${answer.words}" is a message the user typed. Only their answer to your question tool counts: ask "${lead} …" with the options "${accept}" and "${decline}"`);
-  if (!normalized(answer.answered).startsWith(normalized(lead))) throw new Error(`"${answer.words}" answers another question ("${answer.answered}"). Ask the question that hedge proof printed, which starts "${lead}"`);
+  if (!normalized(unlinked(answer.answered)).startsWith(normalized(lead))) throw new Error(`"${answer.words}" answers another question ("${answer.answered}"). Ask the question that hedge proof printed, which starts "${lead}"`);
   if (![accept, `${accept} (Recommended)`].map(normalized).includes(normalized(answer.words))) throw new Error(`The user chose "${answer.words}", not "${accept}". ${refused}`);
 }
 
