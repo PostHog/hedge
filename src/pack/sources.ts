@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync } from "node:fs";
-import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -133,23 +133,18 @@ function joinPosixBytes(parts: Buffer[]): Buffer {
   return out;
 }
 
-function lexicalPosixPathBytes(base: Buffer, rawPath: Buffer): Buffer {
+function lexicalPosixPathBytes(base: Buffer, rawPath: Buffer): Buffer | undefined {
+  const rawSegs = splitPosixBytes(rawPath);
+  if (rawSegs.some((seg) => seg.equals(dotDotBuf))) return undefined;
   const stack: Buffer[] = [];
   if (rawPath[0] !== slashByte) {
     for (const part of splitPosixBytes(base)) {
-      if (part.equals(dotDotBuf)) {
-        if (stack.length > 0) stack.pop();
-      } else if (part.length > 0 && !part.equals(dotBuf)) {
-        stack.push(part);
-      }
+      if (part.equals(dotDotBuf)) return undefined;
+      if (part.length > 0 && !part.equals(dotBuf)) stack.push(part);
     }
   }
-  for (const seg of splitPosixBytes(rawPath)) {
+  for (const seg of rawSegs) {
     if (seg.length === 0 || seg.equals(dotBuf)) continue;
-    if (seg.equals(dotDotBuf)) {
-      if (stack.length > 0) stack.pop();
-      continue;
-    }
     stack.push(seg);
   }
   return joinPosixBytes(stack);
@@ -158,7 +153,7 @@ function lexicalPosixPathBytes(base: Buffer, rawPath: Buffer): Buffer {
 function resolvePosixPathBytes(base: Buffer, rawPath: Buffer, followLast = true): Buffer | undefined {
   const queue = splitPosixBytes(rawPath);
   const trailingSlash = rawPath.length > 1 && rawPath[rawPath.length - 1] === slashByte;
-  let requireDir = trailingSlash;
+  let requireDir = false;
   const stack: Buffer[] = [];
   if (rawPath[0] !== slashByte) {
     for (const part of splitPosixBytes(base)) {
@@ -589,8 +584,9 @@ function canonicalLocalRepoInfo(dir: string, effective: string): LocalRepoInfo {
     return { resolved: invalid, primary: invalid, lexicalKey: invalid, aliasKey: invalid, hasLiveRepo: false, isLocal: true, skipPinCache: true };
   }
   const { base, rawPath, asFileUrl } = parsed;
+  const hasTrailingSlash = rawPath.length > 1 && rawPath[rawPath.length - 1] === slashByte;
   const resolved = resolvePosixPathBytes(base, rawPath);
-  const invalidPrimary = decodeRepoBytes(Buffer.concat([Buffer.from("\0invalid-local:"), base, zeroByteBuf, rawPath]));
+  const invalidPrimary = decodeRepoBytes(Buffer.concat([Buffer.from(asFileUrl ? "\0invalid-file:" : "\0invalid-local:"), base, zeroByteBuf, rawPath]));
   const primary = resolved ? encodeCanonicalLocal(resolved, asFileUrl) : invalidPrimary;
   const lexicalPrimary = resolved ? (resolvePosixPathBytes(base, rawPath, false) ?? resolved) : undefined;
   const lexicalKey = lexicalPrimary ? encodeCanonicalLocal(lexicalPrimary, asFileUrl) : invalidPrimary;
@@ -603,7 +599,7 @@ function canonicalLocalRepoInfo(dir: string, effective: string): LocalRepoInfo {
         : encodeCanonicalLocal(Buffer.concat([lexicalPrimary, zeroByteBuf, resolved]), asFileUrl)
       : invalidPrimary;
   const pointerKey = resolved && lexicalPrimary ? explicitPointerKeyBytes(resolved, lexicalPrimary, asFileUrl) : undefined;
-  const primaryGit = resolved && lexicalPrimary ? resolveGitIdentityBytes(resolved, dirnamePosixBytes(lexicalPrimary), true) : undefined;
+  const primaryGit = resolved && lexicalPrimary ? resolveGitIdentityBytes(resolved, dirnamePosixBytes(lexicalPrimary), !hasTrailingSlash) : undefined;
   if (primaryGit) {
     return {
       resolved: primaryGit.isStandardChild ? primary : encodeCanonicalLocal(primaryGit.identity, asFileUrl),
@@ -637,7 +633,7 @@ function canonicalLocalRepoInfo(dir: string, effective: string): LocalRepoInfo {
     };
   }
   const effectivePointerKey = pointerKey ?? dotGitPointerKey;
-  return { resolved: primary, primary, lexicalKey, ...(configuredKey && configuredKey !== primary && configuredKey !== lexicalKey ? { configuredKey } : {}), aliasKey, ...(effectivePointerKey ? { pointerKey: effectivePointerKey } : {}), hasLiveRepo: false, isLocal: true };
+  return { resolved: primary, primary, lexicalKey, ...(configuredKey && configuredKey !== primary && configuredKey !== lexicalKey ? { configuredKey } : {}), aliasKey, ...(effectivePointerKey ? { pointerKey: effectivePointerKey } : {}), hasLiveRepo: false, isLocal: true, ...(resolved === undefined ? { skipPinCache: true } : {}) };
 }
 
 type LocalAliasEntry = { aliasHash: string; targetHash: string };
@@ -881,6 +877,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
       (goodDigest !== undefined && (await pinTarget(dir, goodDigest, before.commit)) !== undefined));
   const preserveBefore = before !== undefined && (!good || before.commit !== good.commit) && !managedDetached;
   const freshCache = !existsSync(join(dir, ".git"));
+  const preexisting = freshCache ? await snapshotPreexisting(dir) : undefined;
   let effectiveDigest = effectiveBeforeDigest;
   let effectiveLocalInfo: LocalRepoInfo | undefined = beforeIdentity.localInfo;
   let fetchError: string | undefined;
@@ -898,7 +895,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
   if (!checkedOutCommit && !fetchError) {
     savedFetchHead = await snapshotFetchHead(dir);
     fetchedNew = true;
-    const fetched = await checkout(dir, repo, ref.ref, savedFetchHead);
+    const fetched = await checkout(dir, repo, ref.ref, savedFetchHead, preexisting);
     effectiveDigest = fetched.effectiveDigest;
     effectiveLocalInfo = fetched.localInfo;
     fetchError = fetched.error;
@@ -921,7 +918,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
     if (!("error" in loaded)) {
       const postLoadHead = (await git(dir, "rev-parse", "--verify", "--quiet", "HEAD")).stdout;
       if (!postLoadHead || postLoadHead.toLowerCase() !== commit.toLowerCase()) {
-        if (freshCache) await discardFreshCache(dir);
+        if (freshCache) await discardFreshCache(dir, preexisting);
         else if (savedFetchHead) await restoreFetchHead(dir, savedFetchHead);
         return fallBack(ref, dir, repo, effectiveDigest, good, `${ref.ref} from ${ref.repo} changed checkout HEAD while loading`, loadLimitMs, before, preserveBefore, legacyOk && effectiveDigest === effectiveBeforeDigest, isBranch);
       }
@@ -943,7 +940,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
       if (!saveError) {
         return { ref, dir, packs: loaded.packs };
       }
-      if (freshCache) await discardFreshCache(dir);
+      if (freshCache) await discardFreshCache(dir, preexisting);
       else if (savedFetchHead) await restoreFetchHead(dir, savedFetchHead);
       return fallBack(ref, dir, repo, effectiveDigest, good, `could not record ${ref.ref} from ${ref.repo}: ${saveError}`, loadLimitMs, before, preserveBefore, legacyOk && effectiveDigest === effectiveBeforeDigest, isBranch);
     }
@@ -955,7 +952,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
       effectiveDigest === effectiveBeforeDigest &&
       (goodDigest !== undefined ? goodDigest === effectiveDigest : legacyOk);
     if (freshCache) {
-      await discardFreshCache(dir);
+      await discardFreshCache(dir, preexisting);
     } else if (savedFetchHead && !keepBranchFetchHead) {
       await restoreFetchHead(dir, savedFetchHead);
     }
@@ -1377,6 +1374,25 @@ async function snapshotRepoRefs(dir: string, gitDir: string): Promise<string | u
       const bytes = await readFile(join(gitDir, name)).catch(() => undefined);
       if (bytes !== undefined) entries.push(`ROOT:${name}:${createHash("sha256").update(bytes).digest("hex")}`);
     }
+    const walkReflogs = async (rel: string) => {
+      const abs = join(gitDir, "logs", "refs", rel);
+      let items;
+      try {
+        items = await readdir(abs, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const item of items.sort((a, b) => a.name.localeCompare(b.name))) {
+        const childRel = rel ? `${rel}/${item.name}` : item.name;
+        if (item.isDirectory()) {
+          await walkReflogs(childRel);
+        } else if (item.isFile()) {
+          const bytes = await readFile(join(abs, item.name)).catch(() => undefined);
+          if (bytes !== undefined) entries.push(`REFLOG:${childRel}:${createHash("sha256").update(bytes).digest("hex")}`);
+        }
+      }
+    };
+    await walkReflogs("");
   } catch {
     return undefined;
   }
@@ -1708,11 +1724,75 @@ async function fetchExact(dir: string, repo: string, ref: string, shallow: boole
   return fetchExactAt(dir, join(dir, ".git"), repo, ref, shallow, extraEnv, noRefmap);
 }
 
-async function discardFreshCache(dir: string) {
+type PreexistingEntry =
+  | { kind: "dir" }
+  | { kind: "symlink"; target: string }
+  | { kind: "file"; bytes?: Buffer; mode: number };
+
+async function snapshotPreexisting(dir: string): Promise<Map<string, PreexistingEntry>> {
+  const map = new Map<string, PreexistingEntry>();
+  if (!existsSync(dir)) return map;
+  const walk = async (rel: string) => {
+    const abs = rel ? join(dir, rel) : dir;
+    let entries;
+    try {
+      entries = await readdir(abs, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!rel && entry.name === ".git") continue;
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      const childAbs = join(abs, entry.name);
+      if (entry.isSymbolicLink()) {
+        try {
+          map.set(childRel, { kind: "symlink", target: readlinkSync(childAbs) });
+        } catch {}
+      } else if (entry.isDirectory()) {
+        map.set(childRel, { kind: "dir" });
+        await walk(childRel);
+      } else if (entry.isFile()) {
+        try {
+          const info = await stat(childAbs);
+          const bytes = info.size <= 1_048_576 ? await readFile(childAbs) : undefined;
+          map.set(childRel, { kind: "file", ...(bytes !== undefined ? { bytes } : {}), mode: info.mode & 0o777 });
+        } catch {}
+      }
+    }
+  };
+  await walk("");
+  return map;
+}
+
+async function discardFreshCache(dir: string, preexisting?: Map<string, PreexistingEntry>) {
   const gitDir = join(dir, ".git");
-  if (existsSync(gitDir)) {
-    await git(dir, "--git-dir", gitDir, "--work-tree", dir, "rm", "-rfq", "--ignore-unmatch", ".").catch(() => {});
-    await rm(gitDir, { recursive: true, force: true }).catch(() => {});
+  if (!existsSync(gitDir)) return;
+  const listed = await git(dir, "--git-dir", gitDir, "--work-tree", dir, "ls-files", "-z").catch(() => ({ ok: false, rawStdout: "" }));
+  await rm(gitDir, { recursive: true, force: true }).catch(() => {});
+  if (!listed.ok) return;
+  const tracked = listed.rawStdout.split("\0").filter(Boolean);
+  const dirsToPrune = new Set<string>();
+  for (const rel of tracked) {
+    const prior = preexisting?.get(rel);
+    const abs = join(dir, rel);
+    if (prior) {
+      if (prior.kind === "file" && prior.bytes !== undefined) {
+        const current = await readFile(abs).catch(() => undefined);
+        if (!current || !current.equals(prior.bytes)) {
+          await writeAtomic(abs, prior.bytes, prior.mode).catch(() => {});
+        }
+      }
+      continue;
+    }
+    await rm(abs, { force: true }).catch(() => {});
+    let parent = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+    while (parent) {
+      if (!preexisting?.has(parent)) dirsToPrune.add(parent);
+      parent = parent.includes("/") ? parent.slice(0, parent.lastIndexOf("/")) : "";
+    }
+  }
+  for (const relDir of [...dirsToPrune].sort((a, b) => b.length - a.length)) {
+    await rmdir(join(dir, relDir)).catch(() => {});
   }
 }
 
@@ -1721,6 +1801,7 @@ async function checkout(
   repo: string,
   ref: string,
   savedFetchHead: SavedFetchHead,
+  preexisting?: Map<string, PreexistingEntry>,
 ): Promise<{ effectiveDigest: string; localInfo: LocalRepoInfo; commit?: string; fetchedOid?: string; error?: string }> {
   const beforeIdentity = await resolvedRepoIdentity(dir, repo);
   if (isInvalidRef(ref)) return { effectiveDigest: beforeIdentity.digest, localInfo: beforeIdentity.localInfo, error: `invalid ref ${JSON.stringify(ref)}` };
@@ -1759,12 +1840,12 @@ async function checkout(
   const targetCommit = peeled.stdout.toLowerCase();
   const moved = await git(dir, "checkout", "-q", "--detach", `${targetCommit}^{commit}`);
   if (!moved.ok) {
-    if (freshInit) await discardFreshCache(dir);
+    if (freshInit) await discardFreshCache(dir, preexisting);
     return { effectiveDigest, localInfo: afterIdentity.localInfo, error: moved.stderr };
   }
   const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
   if (!head.ok || head.stdout.toLowerCase() !== targetCommit) {
-    if (freshInit) await discardFreshCache(dir);
+    if (freshInit) await discardFreshCache(dir, preexisting);
     return { effectiveDigest, localInfo: afterIdentity.localInfo, error: head.stderr || "could not resolve checked-out HEAD" };
   }
   return { effectiveDigest, localInfo: afterIdentity.localInfo, commit: targetCommit, fetchedOid: fetched.oid };
