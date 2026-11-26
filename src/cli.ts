@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { loadPacks } from "./pack/manifest.ts";
-import { cachedSource, fetchSource, sourceCache, withoutUserinfo } from "./pack/sources.ts";
+import { cachedSource, fetchSource, sourceCache, unpinnedSources, withoutUserinfo } from "./pack/sources.ts";
 import { cannotTell } from "./pack/types.ts";
 import type { AvailableSource, CatalogEntry, FetchedSource, Finding, LoadedPack, MachineFile, Plan, Report, SourceRef } from "./pack/types.ts";
 import { loadMachine, loadProfile, pullProfile, saveMachine, thisMachine } from "./profile/profile.ts";
@@ -200,6 +200,9 @@ async function reconcile(command: "apply" | "doctor", args: string[], options: C
     const drifted = await drift(plan, report.humanLeft);
     report.findings.push(...drifted);
     if (drifted.some((finding) => finding.repair)) report.ok = false;
+    if (plan.machine.profileDir) {
+      report.findings.push(...(await unpinnedSources(sources.slice(1).map((source) => source.ref), plan.machine.profileDir)));
+    }
   }
   if (held.length) report.findings.unshift(...held), (report.ok = false);
   const notice = doctor ? await readNotice(options.home) : undefined;
