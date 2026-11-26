@@ -78,11 +78,11 @@ export async function triageReport(context: TriageContext, note?: string): Promi
   const clean = (text: string) => redact(text, context.home, known);
   const described = note?.trim() ? clean(note.trim()) : "Not described.";
   const facts = clean([...setupLines(machine, failure, timings), "", "## Versions", "", ...versions].join("\n"));
-  const checked = clean(doctor.join("\n")).split("\n");
+  const checked = clean(doctor.map(scrubUnpinnedAdvisory).join("\n")).split("\n");
   const head = ["## What happened", "", described, "", "## Setup", "", facts, "", "## hedge doctor", "", fence(checked), "", ""].join("\n");
   const ending = "\n\nMade by `hedge triage`.";
   const transcript = transcriptTail(context.home, transcriptLines);
-  const lines = transcript.lines.length ? clean(transcript.lines.join("\n")).split("\n") : [];
+  const lines = transcript.lines.length ? clean(transcript.lines.map(scrubUnpinnedAdvisory).join("\n")).split("\n") : [];
   const room = bodyLimit - head.length - ending.length - 200;
   let kept = lines.length;
   let size = lines.reduce((sum, line) => sum + line.length + 1, 0);
@@ -150,6 +150,15 @@ async function firstLine(context: TriageContext, command: string[]) {
   const answer = await context.capture(command, { signal: AbortSignal.timeout(10_000) }).catch(() => undefined);
   const line = answer?.code === 0 ? answer.stdout.trim().split("\n")[0]?.trim() : undefined;
   return line || undefined;
+}
+
+const publicSourceNames = new Set(defaultSources.map((source) => source.name));
+
+function scrubUnpinnedAdvisory(line: string): string {
+  return line.replace(
+    /^(\s*Note: The pack source )([a-z0-9][a-z0-9-]*)( is not pinned to a commit SHA\. Pin its ref in hedge\.json, so each apply loads the same packs, even offline\.)$/,
+    (match, prefix, name, suffix) => (publicSourceNames.has(name) ? match : `${prefix}<private source>${suffix}`),
+  );
 }
 
 function knownNames(hostname: string, machine: MachineFile | undefined, profile: Profile | undefined, gitName: string | undefined, origin: string | undefined): KnownName[] {

@@ -347,6 +347,33 @@ describe("hedge doctor", () => {
     expect(lines.slice(0, -1)).toEqual(["Fix: The gateway is not installed."]);
     expect(JSON.parse(lines.at(-1)!)).toEqual([{ pack: "box", id: "key", say: "Paste your key.", command: "box key" }]);
   });
+
+  test("prints a non-blocking note for an unpinned external source and stays silent once pinned to a commit SHA", async () => {
+    const home = temp.make("home-");
+    const source = temp.make("source-");
+    await spawnGit(source, "init", "-q", "-b", "main");
+    mkdirSync(join(source, "packs/ext"), { recursive: true });
+    writeFileSync(join(source, "packs/ext/pack.json"), JSON.stringify({ schema: 1, name: "ext", summary: "Ext." }));
+    await spawnGit(source, "add", ".");
+    await spawnGit(source, "commit", "-q", "-m", "v1");
+    const sha = (await spawnGit(source, "rev-parse", "HEAD")).trim();
+
+    const profile = profileDir();
+    const file = join(profile, "hedge.json");
+    const setRef = (ref: string) => writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), sources: [{ name: "ext", repo: source, ref }] }));
+
+    setRef("main");
+    expect((await hedge(["apply", "--profile", profile], home)).code).toBe(0);
+    const unpinned = await hedge(["doctor"], home);
+    expect(unpinned.code).toBe(0);
+    expect(unpinned.output).toContain("Note: The pack source ext is not pinned to a commit SHA.");
+
+    setRef(sha);
+    expect((await hedge(["apply"], home)).code).toBe(0);
+    const pinned = await hedge(["doctor"], home);
+    expect(pinned.code).toBe(0);
+    expect(pinned.output).not.toContain("is not pinned to a commit SHA");
+  });
 });
 
 describe("a profile source that would run code it does not ship", () => {

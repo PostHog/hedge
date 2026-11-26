@@ -1,10 +1,11 @@
+import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, relative, resolve, sep } from "node:path";
 import { loadPacks } from "./manifest.ts";
 import { tryLock, waitLock } from "../lock.ts";
-import type { AvailableSource, FetchedSource, LoadedPack, SourceRef } from "./types.ts";
+import type { AvailableSource, FetchedSource, Finding, LoadedPack, SourceRef } from "./types.ts";
 import { bunScript } from "../runner/bun.ts";
 import { withoutRepoEnv } from "../repo-env.ts";
 
@@ -47,11 +48,41 @@ export async function fetchSource(ref: SourceRef, cacheRoot: string, loadLimitMs
   }
 }
 
+const gitHash = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+export const isCommitPin = (ref: string) => gitHash.test(ref);
+const repoDigest = (repo: string) => createHash("sha256").update(repo).digest("hex");
+const pinRef = (repo: string, commit: string) => `refs/hedge/pins/${repoDigest(repo)}/${commit.toLowerCase()}`;
+
+async function cachedPin(dir: string, repo: string, ref: string, good: Good | undefined): Promise<string | undefined> {
+  if (!isCommitPin(ref) || !existsSync(join(dir, ".git"))) return undefined;
+  const sha = ref.toLowerCase();
+  const pinned = await git(dir, "rev-parse", "--verify", "--quiet", `${pinRef(repo, sha)}^{commit}`);
+  if (pinned.ok && pinned.stdout.toLowerCase() === sha) return sha;
+  if (good?.repo === repo && good.commit.toLowerCase() === sha) {
+    const verified = await git(dir, "rev-parse", "--verify", "--quiet", `${sha}^{commit}`);
+    if (verified.ok && verified.stdout.toLowerCase() === sha) return sha;
+  }
+  return undefined;
+}
+
 async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Promise<FetchedSource> {
   const repo = repoUrl(ref.repo);
   const edits = await localEdits(dir);
   if (edits.length) return keepEdits(ref, dir, edits, loadLimitMs);
   const good = await lastGood(dir);
+  const hit = await cachedPin(dir, repo, ref.ref, good);
+  if (hit) {
+    const head = (await git(dir, "rev-parse", "--verify", "--quiet", "HEAD")).stdout.toLowerCase();
+    const moved = head === hit || (await git(dir, "checkout", "-q", "--detach", `${hit}^{commit}`)).ok;
+    if (moved) {
+      const loaded = await load(dir, loadLimitMs);
+      if (!("error" in loaded)) {
+        await saveGood(dir, { repo, ref: ref.ref, commit: hit });
+        return { ref, dir, packs: loaded.packs };
+      }
+      return fallBack(ref, dir, repo, good, `${ref.ref} from ${ref.repo} does not load: ${loaded.error}`, loadLimitMs);
+    }
+  }
   const fetchError = await checkout(dir, repo, ref.ref);
   if (!fetchError) {
     const loaded = await load(dir, loadLimitMs);
@@ -134,6 +165,9 @@ async function lastGood(dir: string): Promise<Good | undefined> {
 }
 
 async function saveGood(dir: string, good: Good) {
+  if (gitHash.test(good.commit)) {
+    await git(dir, "update-ref", pinRef(good.repo, good.commit), good.commit.toLowerCase());
+  }
   await writeFile(goodPath(dir), JSON.stringify(good) + "\n");
 }
 
@@ -160,9 +194,34 @@ export function sourceCache(home: string) {
 }
 
 export async function followsBranch(ref: SourceRef, cacheRoot: string) {
+  if (isCommitPin(ref.ref)) return false;
   const fetched = await readFile(join(cacheRoot, ref.name, ".git", "FETCH_HEAD"), "utf8").catch(() => "");
   const branch = ref.ref.replace(/^refs\/heads\//, "");
   return fetched.split("\n")[0]?.includes(`\tbranch '${branch}' of `) ?? false;
+}
+
+const repoKey = (value: string) =>
+  value
+    .trim()
+    .replace(/^https?:\/\/github\.com\//i, "")
+    .replace(/^git@github\.com:/i, "")
+    .replace(/^ssh:\/\/git@github\.com\//i, "")
+    .replace(/\.git$/i, "")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+
+export async function unpinnedSources(sources: SourceRef[], profileDir: string): Promise<Finding[]> {
+  const unpinned = sources.filter((ref) => !isCommitPin(ref.ref));
+  if (!unpinned.length) return [];
+  const origin = await git(profileDir, "config", "--get", "remote.origin.url").then((read) => (read.ok ? read.stdout : ""), () => "");
+  const own = origin ? repoKey(origin) : "";
+  return unpinned
+    .filter((ref) => !own || repoKey(ref.repo) !== own)
+    .map((ref) => ({
+      id: `source:unpinned:${ref.name}`,
+      pack: "engine",
+      say: `The pack source ${ref.name} is not pinned to a commit SHA. Pin its ref in hedge.json, so each apply loads the same packs, even offline.`,
+    }));
 }
 
 export async function loadedCommit(ref: SourceRef, cacheRoot: string) {

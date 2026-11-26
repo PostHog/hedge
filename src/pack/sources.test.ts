@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
-import { cachedSource, fetchSource } from "./sources.ts";
+import { cachedSource, fetchSource, followsBranch, unpinnedSources } from "./sources.ts";
 
 isolateGit();
 const temp = tempDirs();
@@ -209,6 +209,49 @@ describe("fetchSource", () => {
     await fetchSource({ name: "team", repo: await packRepo("Old repo."), ref: "v1" }, cache);
     const fetched = await fetchSource({ name: "team", repo: join(temp.make(), "moved"), ref: "v1" }, cache);
     expect(fetched).toMatchObject({ error: expect.stringContaining("could not fetch v1") });
+  });
+
+  test("loads cached SHA-pinned commits offline, switches between cached SHAs, and never serves another repo's commit", async () => {
+    const repo = await packRepo("Team rules v1.");
+    const sha1 = (await spawnGit(repo, "rev-parse", "HEAD")).trim();
+    writePack(repo, "Team rules v2.");
+    await spawnGit(repo, "commit", "-q", "-am", "v2");
+    const sha2 = (await spawnGit(repo, "rev-parse", "HEAD")).trim();
+    const cache = temp.make("cache-");
+
+    await fetchSource({ name: "team", repo, ref: "main" }, cache);
+    const fetched1 = await fetchSource({ name: "team", repo, ref: sha1 }, cache);
+    if ("error" in fetched1) throw new Error(fetched1.error);
+    expect([fetched1.packs[0]?.manifest.summary, fetched1.stale]).toEqual(["Team rules v1.", undefined]);
+    expect(await followsBranch({ name: "team", repo, ref: sha1 }, cache)).toBe(false);
+
+    rmSync(repo, { recursive: true, force: true });
+    const offline1 = await fetchSource({ name: "team", repo, ref: sha1 }, cache);
+    if ("error" in offline1) throw new Error(offline1.error);
+    expect([offline1.packs[0]?.manifest.summary, offline1.stale]).toEqual(["Team rules v1.", undefined]);
+
+    const offline2 = await fetchSource({ name: "team", repo, ref: sha2 }, cache);
+    if ("error" in offline2) throw new Error(offline2.error);
+    expect([offline2.packs[0]?.manifest.summary, offline2.stale]).toEqual(["Team rules v2.", undefined]);
+
+    const otherRepo = await fetchSource({ name: "team", repo: join(temp.make(), "other"), ref: sha1 }, cache);
+    expect(otherRepo).toMatchObject({ error: expect.stringContaining(`could not fetch ${sha1}`) });
+  });
+
+  test("unpinnedSources reports unpinned external sources and skips SHAs and the profile repo itself", async () => {
+    const profile = temp.make("profile-");
+    await spawnGit(profile, "init", "-q", "-b", "main");
+    await spawnGit(profile, "remote", "add", "origin", "git@github.com:org/my-profile.git");
+    const sha = "a".repeat(40);
+    const findings = await unpinnedSources(
+      [
+        { name: "own", repo: "org/my-profile", ref: "main" },
+        { name: "pinned", repo: "ext/packs", ref: sha },
+        { name: "ext", repo: "ext/other", ref: "main" },
+      ],
+      profile,
+    );
+    expect(findings.map((finding) => [finding.id, finding.repair])).toEqual([["source:unpinned:ext", undefined]]);
   });
 });
 
