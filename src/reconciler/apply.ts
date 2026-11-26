@@ -729,6 +729,66 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
   }
 }
 
+async function sweepCrashedProbe(owned: LiveProbe, spareFile: string | undefined): Promise<void> {
+  const tempPipe = createPipe();
+  const pid = owned.runnerPid ?? owned.pid;
+  const holderPid = owned.runnerPid !== undefined ? owned.pid : undefined;
+  const fallback = () => {
+    killDeadSessionSync(owned.pid, owned.tag, true, spareFile, false);
+    if (owned.runnerPid !== undefined) {
+      killDeadSessionSync(owned.runnerPid, owned.tag, false, spareFile, false);
+    }
+  };
+  if (!tempPipe) {
+    fallback();
+    return;
+  }
+  try {
+    closeSync(tempPipe.readFd);
+  } catch {}
+  setCloexec(tempPipe.writeFd, false);
+  let helper: ReturnType<typeof Bun.spawn> | undefined;
+  try {
+    const payload = JSON.stringify([
+      {
+        pid,
+        ...(holderPid !== undefined ? { holderPid } : {}),
+        tag: owned.tag,
+        ...(spareFile ? { spareFile } : {}),
+        fd: 3,
+        delayMs: 0,
+      },
+    ]);
+    helper = Bun.spawn(bunScript(probeWatchdog, payload), {
+      env: watchdogEnv(),
+      stdio: ["ignore", "ignore", "ignore", tempPipe.writeFd],
+      detached: true,
+    });
+    owned.spareHandedOff = true;
+  } catch {
+    fallback();
+  } finally {
+    try {
+      closeSync(tempPipe.writeFd);
+    } catch {}
+  }
+  if (helper) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        helper.exited,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, 500);
+          if (typeof timer === "object" && timer && "unref" in timer && typeof timer.unref === "function") timer.unref();
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    helper.unref();
+  }
+}
+
 function handleProcessInterrupt(name: NodeJS.Signals) {
   for (const runner of [...activeRunners]) runner.stop(name);
   for (const probe of [...allLiveProbes]) probe.stop(name);
@@ -1011,10 +1071,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
         if (!sawResult && (child?.signalCode !== null || (supCode !== 128 && supCode !== 143))) {
           if (owned.guardFd !== undefined) await waitForFdClosed(owned.guardFd, 500);
           const spareFile = resolveProbeSpare(owned);
-          await killDeadSession(owned.pid, owned.tag, true, spareFile, false);
-          if (owned.runnerPid !== undefined) {
-            await killDeadSession(owned.runnerPid, owned.tag, false, spareFile, false);
-          }
+          await sweepCrashedProbe(owned, spareFile);
         }
       },
       () => {

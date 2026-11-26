@@ -69,19 +69,45 @@ const hasSurvivingTarget = async (): Promise<boolean> => {
   return false;
 };
 
-const signalBoth = (sig: NodeJS.Signals): void | Promise<void> => {
-  const jobs: Promise<void>[] = [];
-  const a = killSession(process.pid, sig, runTag, undefined, sparePath);
-  if (a && typeof (a as Promise<void>).then === "function") jobs.push(a as Promise<void>);
-  if (targetPid !== undefined) {
-    const b = targetReaped
-      ? sig === "SIGKILL"
-        ? killDeadSession(targetPid, undefined, true, sparePath)
-        : undefined
-      : killSession(targetPid, sig, undefined, undefined, sparePath);
-    if (b && typeof (b as Promise<void>).then === "function") jobs.push(b as Promise<void>);
+const applyMergedSignal = (
+  selfTargets: { pids: number[]; groups: number[]; orphanPids: number[] } | undefined,
+  targetTargets: { pids: number[]; groups: number[]; orphanPids: number[]; hasSessionGroup?: boolean; leaderSeenLive?: boolean } | undefined,
+  sig: NodeJS.Signals,
+  removeOwnSpare: boolean,
+) => {
+  if (removeOwnSpare && !inheritedSpare && sparePath) removeSpareFile(sparePath);
+  const groups = new Set<number>();
+  const orphanPids = new Set<number>();
+  const addTargets = (found: { groups: number[]; orphanPids: number[] } | undefined) => {
+    if (!found) return;
+    for (const g of found.groups) if (g !== process.pid) groups.add(g);
+    for (const p of found.orphanPids) if (p !== process.pid) orphanPids.add(p);
+  };
+  addTargets(targetTargets);
+  addTargets(selfTargets);
+  if (targetPid !== undefined && !targetReaped) groups.add(targetPid);
+  signalTargets({ pids: [], groups: [...groups], orphanPids: [...orphanPids] }, sig, undefined);
+};
+
+const signalBoth = (sig: NodeJS.Signals, removeOwnSpare = false): void | Promise<void> => {
+  if (process.platform === "linux") {
+    const selfTargets = discoverTargetsLinux(process.pid, runTag, undefined, sparePath);
+    const targetTargets = targetPid !== undefined && !targetReaped ? discoverTargetsLinux(targetPid, undefined, undefined, sparePath) : undefined;
+    applyMergedSignal(selfTargets, targetTargets, sig, removeOwnSpare);
+    if (targetPid !== undefined && targetReaped && sig === "SIGKILL") {
+      killDeadSession(targetPid, undefined, true, sparePath);
+    }
+    return;
   }
-  if (jobs.length > 0) return Promise.all(jobs).then(() => {});
+  return Promise.all([
+    discoverTargets(process.pid, runTag, sparePath),
+    targetPid !== undefined && !targetReaped ? discoverTargets(targetPid, undefined, sparePath) : Promise.resolve(undefined),
+  ]).then(async ([selfTargets, targetTargets]) => {
+    applyMergedSignal(selfTargets, targetTargets, sig, removeOwnSpare);
+    if (targetPid !== undefined && targetReaped && sig === "SIGKILL") {
+      await killDeadSession(targetPid, undefined, true, sparePath);
+    }
+  });
 };
 
 const exitDone = () => {
@@ -114,29 +140,7 @@ const killAll = (removeOwnSpare = false) => {
     }
     process.exit(137);
   };
-  if (removeOwnSpare && !inheritedSpare && sparePath) {
-    if (process.platform === "linux") {
-      const selfTargets = discoverTargetsLinux(process.pid, runTag, undefined, sparePath);
-      const targetTargets = targetPid !== undefined ? discoverTargetsLinux(targetPid, undefined, targetReaped ? true : undefined, sparePath) : undefined;
-      removeSpareFile(sparePath);
-      signalTargets(selfTargets, "SIGKILL", process.pid);
-      if (targetTargets && targetPid !== undefined) signalTargets(targetTargets, "SIGKILL", targetReaped ? undefined : targetPid);
-      finish();
-      return;
-    }
-    void Promise.all([
-      discoverTargets(process.pid, runTag, sparePath),
-      targetPid !== undefined ? discoverTargets(targetPid, undefined, sparePath) : Promise.resolve(undefined),
-    ])
-      .then(([selfTargets, targetTargets]) => {
-        removeSpareFile(sparePath);
-        signalTargets(selfTargets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", process.pid);
-        if (targetTargets && targetPid !== undefined) signalTargets(targetTargets, "SIGKILL", targetReaped ? undefined : targetPid);
-      })
-      .finally(finish);
-    return;
-  }
-  const done = signalBoth("SIGKILL");
+  const done = signalBoth("SIGKILL", removeOwnSpare);
   if (done && typeof (done as Promise<void>).then === "function") {
     void (done as Promise<void>).finally(finish);
     return;
@@ -196,7 +200,7 @@ const closeQuiet = (fd: number) => {
 
 const writeResult = (
   fd: number,
-  payload: { spareFile: string } | { code: number } | { error: string; code?: string } | { saved: true } | { spareError: string; code?: string },
+  payload: { spareFile: string } | { targetPid: number } | { code: number } | { error: string; code?: string } | { saved: true } | { spareError: string; code?: string },
 ) => {
   const bytes = new TextEncoder().encode(JSON.stringify(payload) + "\n");
   try {
@@ -342,6 +346,7 @@ if (!parsed || killing || gracefulSignal) {
   try {
     target = Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio, detached: true });
     targetPid = target.pid;
+    writeResult(ipcFd, { targetPid });
   } catch (error) {
     for (const fd of lockFds) closeQuiet(fd);
     redirectStdioOutputsToNull();

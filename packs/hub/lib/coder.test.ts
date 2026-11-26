@@ -827,3 +827,86 @@ test("makes the captured command its own process-group leader like direct detach
   const res = await capture(["setsid", "sh", "-c", "exit 42"], { timeoutMs: 5_000 });
   expect(res.code).toBe(0);
 });
+
+test("kills the direct target on timeout when the inherited spare file is unreadable", async () => {
+  if (process.getuid?.() === 0) return;
+  const { chmodSync, writeFileSync } = await import("node:fs");
+  const dir = temp.make("hedge-capture-unreadable-spare-");
+  const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+  expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+  const spareFile = join(dir, "locked.spare");
+  writeFileSync(spareFile, "", { mode: 0o600 });
+  chmodSync(spareFile, 0o000);
+  const started = Bun.file(ready).text();
+  const closed = Bun.file(gone).text();
+  let childPid = 0;
+  try {
+    const run = captureWith((_, fire) => {
+      void started.then(() => fire());
+      return () => {};
+    });
+    const res = await run(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "target", gone, ready], {
+      env: { ...process.env, HEDGE_SUPERVISOR_SPARE: spareFile },
+      timeoutMs: 5_000,
+    });
+    expect(res.code).toBe(124);
+    childPid = Number((await started).trim());
+    expect(childPid).toBeGreaterThan(0);
+    expect(await closed).toBe("");
+  } finally {
+    try { chmodSync(spareFile, 0o600); } catch {}
+    if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
+  }
+});
+
+test("delivers a single SIGTERM to the captured command when the caller receives one SIGTERM inside a probe", async () => {
+  const dir = temp.make("hedge-capture-single-term-");
+  const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+  const logFile = join(dir, "term.log");
+  expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
+  const started = Bun.file(ready).text();
+  const closed = Bun.file(gone).text();
+  const coderPath = join(import.meta.dir, "coder.ts");
+  const callerScript = `import { capture } from ${JSON.stringify(coderPath)};
+await capture(["sh", "-c", 'trap "echo term >> \\"$3\\"; exit 0" TERM; exec 3>"$1"; echo $$ > "$2"; while :; do sleep 30 3>&- & wait; done', "target", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}, ${JSON.stringify(logFile)}], { timeoutMs: 10_000 });`;
+  const caller = Bun.spawn([process.execPath, "-e", callerScript], {
+    env: { ...process.env, HEDGE_SUPERVISOR_TAG: `probe-${crypto.randomUUID()}` },
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  let targetPid = 0;
+  try {
+    targetPid = Number((await started).trim());
+    expect(targetPid).toBeGreaterThan(0);
+    caller.kill("SIGTERM");
+    expect(await closed).toBe("");
+    await caller.exited;
+    expect(readFileSync(logFile, "utf8").trim().split("\n")).toEqual(["term"]);
+  } finally {
+    caller.kill("SIGKILL");
+    if (targetPid > 0) try { process.kill(targetPid, "SIGKILL"); } catch {}
+  }
+});
+
+test("captures a 31 KB target environment alongside a large caller environment without E2BIG", async () => {
+  const coderPath = join(import.meta.dir, "coder.ts");
+  const script = `import { capture } from ${JSON.stringify(coderPath)};
+const res = await capture([process.execPath, "-e", 'process.stdout.write(String(process.env.TARGET_BIG?.length ?? 0))'], {
+  env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", TARGET_BIG: "t".repeat(31_000) },
+  timeoutMs: 10_000,
+});
+if (res.code !== 0 || res.stdout !== "31000") {
+  console.error(JSON.stringify(res));
+  process.exit(1);
+}`;
+  const proc = Bun.spawn(["sh", "-c", 'ulimit -s 256 2>/dev/null || true; exec "$1" -e "$2"', "e2big-check", process.execPath, script], {
+    env: { ...process.env, CALLER_BIG: "c".repeat(31_000) },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+  expect(stderr).toBe("");
+  expect(code).toBe(0);
+});

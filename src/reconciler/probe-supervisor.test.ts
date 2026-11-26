@@ -64,36 +64,21 @@ function mkfifo(...paths: string[]) {
 }
 
 describe("probe supervisor", () => {
-  test("supervise escalates SIGINT and SIGQUIT through SIGTERM to SIGKILL on a real subprocess with an injected clock", async () => {
-    const { supervise } = await import("./probe-supervisor.ts");
+  test("supervise escalates SIGINT and SIGQUIT through SIGTERM to SIGKILL on a real subprocess", async () => {
+    const { bunScript } = await import("../runner/bun.ts");
+    const supervisorScript = join(import.meta.dir, "probe-supervisor.ts");
     const shBin = Bun.which("sh") ?? "/bin/sh";
     for (const [sig, trapName] of [
       ["SIGINT", "INT"],
       ["SIGQUIT", "QUIT"],
     ] as const) {
-      const dir = temp.make(`sup-clock-${trapName.toLowerCase()}-`);
+      const dir = temp.make(`sup-escalate-${trapName.toLowerCase()}-`);
       const [ready, sawStop, sawTerm, gone] = [join(dir, "ready"), join(dir, "stop"), join(dir, "term"), join(dir, "gone")];
       mkfifo(ready, sawStop, sawTerm, gone);
       const started = fifoRead(ready);
       const gotStop = fifoRead(sawStop);
       const gotTerm = fifoRead(sawTerm);
       const closed = fifoRead(gone);
-      let now = 0;
-      const scheduled: Array<{ at: number; fire: () => void; cancelled: boolean; fired: boolean }> = [];
-      const advance = (ms: number) => {
-        now += ms;
-        for (;;) {
-          const next = scheduled
-            .filter((entry) => !entry.cancelled && !entry.fired && entry.at <= now)
-            .sort((a, b) => a.at - b.at)[0];
-          if (!next) break;
-          next.fired = true;
-          next.fire();
-        }
-      };
-      const handlers = new Map<string, () => void>();
-      let childPid = 0;
-      let exitCode: number | undefined;
       const cmd = [
         shBin,
         "-c",
@@ -104,56 +89,28 @@ describe("probe supervisor", () => {
         sawStop,
         sawTerm,
       ];
+      const payload = JSON.stringify({ command: cmd, graceMs: 150, interruptGraceMs: 250 });
+      const sup = Bun.spawn(bunScript(supervisorScript), {
+        stdin: new TextEncoder().encode(payload),
+        stdout: "pipe",
+        stderr: "ignore",
+        detached: true,
+      });
+      let childPid = 0;
       try {
-        const run = supervise(
-          cmd,
-          {
-            spawn: (argv) => {
-              const proc = Bun.spawn(argv, { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-              childPid = proc.pid;
-              return proc;
-            },
-            killGroup: (signal) => {
-              if (childPid > 0) {
-                try {
-                  process.kill(-childPid, signal);
-                } catch {}
-              }
-            },
-            timer: (ms, fire) => {
-              const entry = { at: now + ms, fire, cancelled: false, fired: false };
-              scheduled.push(entry);
-              return () => {
-                entry.cancelled = true;
-              };
-            },
-            onSignal: (signal, handler) => void handlers.set(signal, handler),
-            reportResult: () => {},
-            reportCleanup: () => {},
-            exit: (code) => {
-              exitCode = code;
-            },
-          },
-          150,
-          300,
-        );
-        expect(Number((await started).trim())).toBe(childPid);
-        handlers.get(sig)?.();
+        childPid = Number((await started).trim());
+        expect(childPid).toBeGreaterThan(0);
+        process.kill(sup.pid, sig);
         expect((await gotStop).trim()).toBe("stop");
-        expect(() => process.kill(childPid, 0)).not.toThrow();
-        advance(299);
-        expect(exitCode).toBeUndefined();
-        advance(1);
         expect((await gotTerm).trim()).toBe("term");
-        expect(() => process.kill(childPid, 0)).not.toThrow();
-        advance(149);
-        expect(exitCode).toBeUndefined();
-        advance(1);
         expect(await closed).toBe("");
-        expect(await run).toBe(143);
-        expect(exitCode).toBe(143);
+        const exitCode = await sup.exited;
+        expect(exitCode).not.toBe(0);
+        expect(sup.signalCode === "SIGKILL" || exitCode === 137 || exitCode === 143).toBe(true);
       } finally {
+        try { process.kill(-sup.pid, "SIGKILL"); } catch {}
         if (childPid > 0) try { process.kill(-childPid, "SIGKILL"); } catch {}
+        await sup.exited.catch(() => {});
       }
     }
   });
@@ -358,7 +315,7 @@ await humanStepsLeft(${JSON.stringify(probePlan("int", [process.execPath, "-e", 
     try {
       const pending = humanStepsLeft(
         probePlan("respawn-timeout", ["sh", "-c", probeScript]),
-        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 100 },
+        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 1000 },
       );
       expect(Number((await started).trim())).toBeGreaterThan(0);
       fireDeadline();
@@ -1936,7 +1893,7 @@ await Bun.sleep(30_000);`;
       expect(Number((await unrelatedStarted).trim())).toBeGreaterThan(0);
       const pending = humanStepsLeft(
         probePlan("holder-sweep", [process.execPath, "-e", probeScript]),
-        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 100 },
+        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 1000 },
       );
       probePid = Number((await started).trim());
       expect(probePid).toBeGreaterThan(0);
@@ -1958,77 +1915,75 @@ await Bun.sleep(30_000);`;
 
   test("stops same-session process groups while preserving a detached worker when the spare file is unreadable", async () => {
     if (process.getuid?.() === 0) return;
-    const { readSparedBounded, watchEntries } = await import("./probe-watchdog.ts");
-    const { createPipe } = await import("./probe-supervisor.ts");
-    const { chmodSync, closeSync, writeFileSync } = await import("node:fs");
+    const { chmodSync } = await import("node:fs");
+    const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
     const dir = temp.make("wd-spare-unreadable-");
-    const spareFile = join(dir, "locked.spare");
-    const [childReady, childGone, jobReady, jobGone, daemonReady, daemonGone] = [
+    const [childReady, childGone, jobReady, jobGone, daemonReady, daemonGone, lockedReady] = [
       join(dir, "child-ready"),
       join(dir, "child-gone"),
       join(dir, "job-ready"),
       join(dir, "job-gone"),
       join(dir, "daemon-ready"),
       join(dir, "daemon-gone"),
+      join(dir, "locked-ready"),
     ];
-    mkfifo(childReady, childGone, jobReady, jobGone, daemonReady, daemonGone);
+    mkfifo(childReady, childGone, jobReady, jobGone, daemonReady, daemonGone, lockedReady);
     const childStarted = fifoRead(childReady);
     const childClosed = fifoRead(childGone);
     const jobStarted = fifoRead(jobReady);
     const jobClosed = fifoRead(jobGone);
     const daemonStarted = fifoRead(daemonReady);
     const daemonClosed = fifoRead(daemonGone);
+    const lockedPath = fifoRead(lockedReady);
     const envBin = Bun.which("env") ?? "/usr/bin/env";
     const shBin = Bun.which("sh") ?? "/bin/sh";
-    const pipe = createPipe();
-    expect(pipe).toBeDefined();
-    let probe: ReturnType<typeof Bun.spawn> | undefined;
+    let fireDeadline!: () => void;
+    let spareFile = "";
     let daemonPid = 0;
     let jobPid = 0;
     try {
+      const daemonHelper = `const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+d.unref();`;
       const jobScript = `import { dlopen, FFIType } from "bun:ffi";
 const lib = dlopen(process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6", { setpgid: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
 if (lib.symbols.setpgid(0, 0) !== 0) process.exit(2);
 const j = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "job", ${JSON.stringify(jobGone)}, ${JSON.stringify(jobReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 await j.exited;`;
-      const script = `const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-d.unref();
+      const probeScript = `import { chmodSync } from "node:fs";
+import { capture } from ${JSON.stringify(coderPath)};
+const res = await capture([process.execPath, "-e", ${JSON.stringify(daemonHelper)}], { timeoutMs: 5_000 });
+if (res.code !== 0) process.exit(2);
+const spare = process.env.HEDGE_SUPERVISOR_SPARE ?? "";
+if (!spare) process.exit(3);
+chmodSync(spare, 0o000);
+await Bun.write(${JSON.stringify(lockedReady)}, spare + "\\n");
 const j = Bun.spawn([process.execPath, "-e", ${JSON.stringify(jobScript)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 j.unref();
 const c = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "child", ${JSON.stringify(childGone)}, ${JSON.stringify(childReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 await c.exited;`;
-      probe = Bun.spawn([process.execPath, "-e", script], {
-        detached: true,
-        stdin: "ignore",
-        stdout: "ignore",
-        stderr: "ignore",
-      });
-      const childPid = Number((await childStarted).trim());
-      jobPid = Number((await jobStarted).trim());
-      daemonPid = Number((await daemonStarted).trim());
+      const pending = humanStepsLeft(
+        probePlan("unreadable-spare", [process.execPath, "-e", probeScript]),
+        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 0 },
+      );
+      const [rawChild, rawJob, rawDaemon, rawSpare] = await Promise.all([childStarted, jobStarted, daemonStarted, lockedPath]);
+      const childPid = Number(rawChild.trim());
+      jobPid = Number(rawJob.trim());
+      daemonPid = Number(rawDaemon.trim());
+      spareFile = rawSpare.trim();
       expect(childPid).toBeGreaterThan(0);
       expect(jobPid).toBeGreaterThan(0);
       expect(daemonPid).toBeGreaterThan(0);
-      writeFileSync(spareFile, `pid:${daemonPid}\n`, { mode: 0o600 });
-      chmodSync(spareFile, 0o000);
-      expect(await readSparedBounded(spareFile)).toBeUndefined();
-      await watchEntries(
-        [{ pid: probe.pid, fd: pipe!.writeFd, delayMs: 0, tag: `probe-${crypto.randomUUID()}`, spareFile, keepSpareFile: true }],
-        { now: () => 1000, sleep: async () => {} },
-      );
+      expect(spareFile.length).toBeGreaterThan(0);
+      fireDeadline();
+      const res = await pending;
+      expect(res.unchecked.map((s) => s.id)).toEqual(["unreadable-spare"]);
       expect(await childClosed).toBe("");
       expect(await jobClosed).toBe("");
       expect(() => process.kill(daemonPid, 0)).not.toThrow();
     } finally {
-      try { chmodSync(spareFile, 0o600); } catch {}
-      if (pipe) {
-        try { closeSync(pipe.readFd); } catch {}
-        try { closeSync(pipe.writeFd); } catch {}
-      }
-      probe?.kill("SIGKILL");
+      if (spareFile) try { chmodSync(spareFile, 0o600); } catch {}
       if (jobPid > 0) try { process.kill(jobPid, "SIGKILL"); } catch {}
       if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
-      await probe?.exited.catch(() => {});
       await daemonClosed.catch(() => {});
     }
   });

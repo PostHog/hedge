@@ -16,6 +16,7 @@ export type WatchEntry = {
   keepSpareFile?: boolean;
   holderPid?: number;
   holderFd?: number;
+  targetPid?: number;
 };
 export type WatchClock = { now: () => number; sleep: (ms: number) => Promise<void> };
 
@@ -191,18 +192,26 @@ export async function watchEntries(
   };
   const killLiveHolder = async (entry: WatchEntry, reported: boolean) => {
     try {
-      if (!reported && entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
-        const spared = await readSpare(resolveSpare(entry));
-        const skipDetached = spared === undefined;
-        const sweepTag = skipDetached ? undefined : entry.tag;
-        const targets = await discoverTargets(entry.holderPid, sweepTag, spared, false, skipDetached);
-        if (holderAlive(entry)) {
-          signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.holderPid);
-          try {
-            process.kill(entry.holderPid, "SIGKILL");
-          } catch {}
+      if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
+        if (reported) {
+          if (holderAlive(entry)) {
+            try {
+              process.kill(entry.holderPid, "SIGKILL");
+            } catch {}
+          }
+        } else {
+          const spared = await readSpare(resolveSpare(entry));
+          const skipDetached = spared === undefined;
+          const sweepTag = skipDetached ? undefined : entry.tag;
+          const targets = await discoverTargets(entry.holderPid, sweepTag, spared, false, skipDetached);
+          if (holderAlive(entry)) {
+            signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.holderPid);
+            try {
+              process.kill(entry.holderPid, "SIGKILL");
+            } catch {}
+          }
+          await killDeadSession(entry.holderPid, sweepTag, false, spared, false, skipDetached);
         }
-        await killDeadSession(entry.holderPid, sweepTag, false, spared, false, skipDetached);
       }
     } finally {
       closeEntry(entry);
@@ -211,7 +220,16 @@ export async function watchEntries(
   };
   const sweepDead = async (entry: WatchEntry, reported: boolean, waitHolder = false) => {
     try {
-      if (reported) return;
+      if (reported) {
+        if (waitHolder && entry.holderFd !== undefined && holderAlive(entry)) {
+          await waitForFdClosed(entry.holderFd, 200);
+          if (holderAlive(entry)) {
+            await killLiveHolder(entry, true);
+            return;
+          }
+        }
+        return;
+      }
       const spared = await readSpare(resolveSpare(entry));
       const skipDetached = spared === undefined;
       const sweepTag = skipDetached ? undefined : entry.tag;
@@ -322,7 +340,17 @@ export async function watchEntries(
                 const skipDetached = spared === undefined;
                 const initialTag = skipDetached ? undefined : entry.tag;
                 const targets = await discoverTargets(entry.pid, initialTag, spared, false, skipDetached);
+                const extraTargets =
+                  entry.targetPid !== undefined && entry.targetPid !== entry.pid
+                    ? await discoverTargets(entry.targetPid, undefined, spared, false, skipDetached)
+                    : undefined;
                 if (alive(entry.fd) && !resultReported(entry)) {
+                  if (extraTargets && entry.targetPid !== undefined) {
+                    signalTargets(extraTargets, "SIGKILL", entry.targetPid);
+                    try {
+                      process.kill(entry.targetPid, "SIGKILL");
+                    } catch {}
+                  }
                   signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.pid);
                   try {
                     process.kill(entry.pid, "SIGKILL");
@@ -379,7 +407,8 @@ if (import.meta.main) {
           ((item as WatchEntry).spareFd === undefined || typeof (item as WatchEntry).spareFd === "number") &&
           ((item as WatchEntry).keepSpareFile === undefined || typeof (item as WatchEntry).keepSpareFile === "boolean") &&
           ((item as WatchEntry).holderPid === undefined || typeof (item as WatchEntry).holderPid === "number") &&
-          ((item as WatchEntry).holderFd === undefined || typeof (item as WatchEntry).holderFd === "number"),
+          ((item as WatchEntry).holderFd === undefined || typeof (item as WatchEntry).holderFd === "number") &&
+          ((item as WatchEntry).targetPid === undefined || typeof (item as WatchEntry).targetPid === "number"),
       );
     }
   } catch {}

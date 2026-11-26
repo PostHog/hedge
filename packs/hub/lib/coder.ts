@@ -170,6 +170,49 @@ function createResultReader(fd: number, stop: AbortSignal) {
   };
 }
 
+const minimalSupEnvKeys = new Set([
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "LANG",
+  "TZ",
+  "XDG_RUNTIME_DIR",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "XDG_CACHE_HOME",
+  "BUN_RUNTIME_TRANSPILER_CACHE_PATH",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "SYSTEMROOT",
+  "COMSPEC",
+]);
+
+function minimalSupervisorEnv(fullTag: string, inheritedSpare?: string): Record<string, string> {
+  const clean: Record<string, string> = Object.create(null);
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined || key === "BUN_OPTIONS" || key === "HEDGE_CAPTURE_CONFIG" || key === tagEnvVar || key === spareEnvVar) continue;
+    if (minimalSupEnvKeys.has(key) || key.startsWith("LC_") || key.startsWith("LD_") || key.startsWith("DYLD_") || key.startsWith("HEDGE_")) {
+      clean[key] = value;
+    }
+  }
+  clean[tagEnvVar] = fullTag;
+  if (inheritedSpare) clean[spareEnvVar] = inheritedSpare;
+  return clean;
+}
+
+function envByteSize(env: Record<string, string>): number {
+  let total = 0;
+  for (const [key, value] of Object.entries(env)) {
+    total += Buffer.byteLength(key) + Buffer.byteLength(value) + 2;
+  }
+  return total;
+}
+
 async function waitUpTo(promise: Promise<unknown>, ms: number): Promise<void> {
   let handle: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<void>((resolve) => {
@@ -223,6 +266,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     const tag = inProbe ? `probe-${crypto.randomUUID()}` : crypto.randomUUID();
     const inheritedSpare = env?.[spareEnvVar] || process.env[spareEnvVar] || undefined;
     let spareFile: string | undefined = inheritedSpare;
+    let targetPid: number | undefined;
     let spareHandedOff = Boolean(inheritedSpare);
     let stopped = false;
     let supervisorReaped = false;
@@ -274,6 +318,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           {
             pid,
             tag,
+            ...(targetPid !== undefined ? { targetPid } : {}),
             ...(spare ? { spareFile: spare } : {}),
             ...(inheritedSpare ? { keepSpareFile: true } : {}),
             fd: 3,
@@ -350,6 +395,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
             {
               pid: child.pid,
               tag,
+              ...(targetPid !== undefined ? { targetPid } : {}),
               ...(spare ? { spareFile: spare } : {}),
               ...(inheritedSpare ? { keepSpareFile: true } : {}),
               fd: 3,
@@ -425,29 +471,40 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         envEntries,
         ...(!inheritedSpare ? { spareTag: tag, ...(childEnv.HOME ? { spareHome: childEnv.HOME } : {}) } : {}),
       });
+      const supEnv = minimalSupervisorEnv(fullTag, inheritedSpare);
       const configBytes = new TextEncoder().encode(configJson);
-      const inlineConfig = configBytes.byteLength <= 32_768 && !configJson.includes("\0");
-      if (!inlineConfig) {
-        configPipe = createPipe();
-        if (!configPipe) throw new Error("could not create supervisor config pipe");
-        setCloexec(configPipe.writeFd, true);
-      }
+      let inlineConfig = configBytes.byteLength <= 16_384 && envByteSize(supEnv) + configBytes.byteLength <= 32_768 && !configJson.includes("\0");
       const ipcFdIndex = 3 + locks.length;
-      const configFdArg = configPipe ? String(ipcFdIndex + 1) : "-";
-      const supEnv = supervisorEnv(fullTag);
-      if (inheritedSpare) supEnv[spareEnvVar] = inheritedSpare;
-      else delete supEnv[spareEnvVar];
-      if (inlineConfig) supEnv.HEDGE_CAPTURE_CONFIG = configJson;
-      else delete supEnv.HEDGE_CAPTURE_CONFIG;
-      const extraStdio = configPipe ? [configPipe.readFd] : [];
-      child = Bun.spawn(
-        bunScript(captureSupervisor, String(locks.length), String(ipcFdIndex), configFdArg),
-        {
-          env: supEnv,
-          stdio: [input, output, output, ...locks, ipcPair.childFd, ...extraStdio],
-          detached: true,
-        },
-      );
+      const spawnSupervisor = () => {
+        if (!inlineConfig) {
+          configPipe = createPipe();
+          if (!configPipe) throw new Error("could not create supervisor config pipe");
+          setCloexec(configPipe.writeFd, true);
+          delete supEnv.HEDGE_CAPTURE_CONFIG;
+        } else {
+          supEnv.HEDGE_CAPTURE_CONFIG = configJson;
+        }
+        const configFdArg = configPipe ? String(ipcFdIndex + 1) : "-";
+        const extraStdio = configPipe ? [configPipe.readFd] : [];
+        return Bun.spawn(
+          bunScript(captureSupervisor, String(locks.length), String(ipcFdIndex), configFdArg),
+          {
+            env: supEnv,
+            stdio: [input, output, output, ...locks, ipcPair.childFd, ...extraStdio],
+            detached: true,
+          },
+        );
+      };
+      try {
+        child = spawnSupervisor();
+      } catch (error) {
+        if (inlineConfig && (error as NodeJS.ErrnoException)?.code === "E2BIG") {
+          inlineConfig = false;
+          child = spawnSupervisor();
+        } else {
+          throw error;
+        }
+      }
       closeIpcChild();
       closeConfigRead();
       const live = child;
@@ -459,17 +516,23 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           const line = raw.trim();
           if (!line) return undefined;
           try {
-            const record = JSON.parse(line) as { spareFile?: unknown; code?: unknown; error?: unknown };
+            const record = JSON.parse(line) as { spareFile?: unknown; targetPid?: unknown; code?: unknown; error?: unknown };
             if (typeof record.spareFile === "string" && record.spareFile.length > 0) {
               if (!spareFile) spareFile = record.spareFile;
               continue;
             }
+            if (typeof record.targetPid === "number" && Number.isInteger(record.targetPid) && record.targetPid > 0) {
+              targetPid = record.targetPid;
+              continue;
+            }
             if (typeof record.error === "string") {
+              targetPid = undefined;
               const status = { error: record.error, ...(typeof record.code === "string" ? { errCode: record.code } : {}) };
               settle(status);
               return status;
             }
             if (typeof record.code === "number") {
+              targetPid = undefined;
               const status = { code: record.code };
               settle(status);
               return status;
@@ -596,8 +659,12 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       cancel();
       closeIpcChild();
       closeConfigRead();
-      if (configWrite) await configWrite.catch(() => {});
-      else closeConfigWrite();
+      if (configWrite) {
+        if (expired) await waitUpTo(configWrite.catch(() => {}), 250);
+        else await configWrite.catch(() => {});
+      } else {
+        closeConfigWrite();
+      }
       stopStream.abort();
       if (resultRead) await resultRead.catch(() => {});
       if (resultReader && resultReader.reading) {
