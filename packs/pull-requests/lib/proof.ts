@@ -188,16 +188,16 @@ async function reviewsSpent(reviews: string, phase: FinalReadPhase, spending: Sp
 
 const budgetState = ({ spent, names, reservations, finished, round, counted }: Spent) => JSON.stringify([spent, names, reservations, finished, round, counted]);
 
-async function reserveWeighed<T extends Spent>(reviews: string, lockBudget: LockBudget, snapshot: () => Promise<T>, permit: (weighed: T) => Promise<Permitted>, reserveIt: (weighed: T, permitted: Permitted) => Promise<Reserved>) {
+async function reserveWeighed<T extends Spent>(reviews: string, { lockBudget, once = (step) => step() }: { lockBudget: LockBudget; once?: Once }, snapshot: () => Promise<T>, permit: (weighed: T) => Promise<Permitted>, reserveIt: (weighed: T, permitted: Permitted) => Promise<Reserved>) {
   const before = await lockBudget(reviews, snapshot);
   const verdict = await permit(before);
-  return lockBudget(reviews, async () => {
+  return lockBudget(reviews, () => once(async () => {
     const after = await snapshot();
     const started = after.names.filter((name) => !before.names.includes(name));
     if (started.length) throw new Error(`Review ${started.join(", ")} started while this one weighed the budget. ${weighAgain}`);
     if (budgetState(after) !== budgetState(before)) throw new Error(`The reviews changed while this one weighed the budget. ${weighAgain}`);
     return reserveIt(before, verdict);
-  });
+  }));
 }
 
 const weighAgain = "Run this command again to weigh it anew";
@@ -293,13 +293,13 @@ export type ReviewRequest = { dropUnanswered?: DropRead; onHistory?: OnHistory; 
 export type Reserved = { round: number | "final"; id: string; directory: string };
 type Permit = { arbiter: Arbiter; limits: ReviewLimits; autonomy?: () => Autonomy };
 
-async function reserveDecided(reviews: string, name: string, record: object, decision: Decision | undefined, { once = (step) => step(), ...stamping }: Stamping) {
-  if (!await once(() => reserve(reviews, name, { ...record, ...decision ? { decision } : {} }, stamping))) throw new Error(`Review ${name} started while this one weighed the budget. ${weighAgain}`);
+async function reserveDecided(reviews: string, name: string, record: object, decision: Decision | undefined, stamping: Stamping) {
+  if (!await reserve(reviews, name, { ...record, ...decision ? { decision } : {} }, stamping)) throw new Error(`Review ${name} started while this one weighed the budget. ${weighAgain}`);
 }
 
 export type Once = <T>(step: () => Promise<T>) => Promise<T>;
-type Stamping = { lock: LockRound | undefined; now: () => Date; once?: Once };
-type Reserving = Stamping & { lockBudget: LockBudget; dropUnanswered?: DropRead; emptyRange?: () => boolean; onHistory?: OnHistory; triage?: TriageMark; budget?: ReadBudget };
+type Stamping = { lock: LockRound | undefined; now: () => Date };
+type Reserving = Stamping & { lockBudget: LockBudget; once?: Once; dropUnanswered?: DropRead; emptyRange?: () => boolean; onHistory?: OnHistory; triage?: TriageMark; budget?: ReadBudget };
 
 async function droppableReads(reviews: string, identity: ProofIdentity, dropUnanswered: DropRead | undefined) {
   if (!dropUnanswered) return [];
@@ -308,7 +308,7 @@ async function droppableReads(reviews: string, identity: ProofIdentity, dropUnan
   return names.filter((_, index) => unanswered[index]);
 }
 
-async function startFinalRead(home: string, identity: ProofIdentity, base: string | undefined, decision: Decision | undefined, phase: FinalReadPhase, permit: Permit, cleanBaseMerge: CleanBaseMerge, quietCommit: QuietCommit, capturedBy: CapturedBy, from: string | undefined, { lockBudget, dropUnanswered, emptyRange, onHistory, triage, budget, ...stamping }: Reserving): Promise<Reserved> {
+async function startFinalRead(home: string, identity: ProofIdentity, base: string | undefined, decision: Decision | undefined, phase: FinalReadPhase, permit: Permit, cleanBaseMerge: CleanBaseMerge, quietCommit: QuietCommit, capturedBy: CapturedBy, from: string | undefined, { lockBudget, once, dropUnanswered, emptyRange, onHistory, triage, budget, ...stamping }: Reserving): Promise<Reserved> {
   if (base === undefined) throw new Error("A final read needs --base with the latest reviewed commit");
   if (base === identity.commit) throw new Error("HEAD is already reviewed. Skip the final read.");
   const reviews = join(pullRequestDirectory(home, identity), "reviews");
@@ -337,7 +337,7 @@ async function startFinalRead(home: string, identity: ProofIdentity, base: strin
     const stop = spent < ceiling ? undefined : carried ? budgetSpent(permit.limits) : onlyQuietSince(identity, counted, cleanBaseMerge, quietCommit) ? undefined : fixesUnread(permit.limits, (latestOnHistory || latest).commit);
     return permitReview(home, identity, spent >= free, { stop, pastBudget }, decision, permit);
   };
-  return reserveWeighed(reviews, lockBudget, snapshot, permitRead, async ({ dropping }, { arbiter: verdict, pastBudget }) => {
+  return reserveWeighed(reviews, { lockBudget, once }, snapshot, permitRead, async ({ dropping }, { arbiter: verdict, pastBudget }) => {
     for (const name of dropping) if (!await dropUnanswered!(join(reviews, name))) throw new Error(`The reviews changed while this one weighed the budget. ${weighAgain}`);
     const taken = new Set([...await reviewNames(reviews), ...(await entries(droppedDirectory(reviews))).filter((entry) => droppedEntry.test(entry)).map(droppedName)]);
     let read = 1;
@@ -372,7 +372,7 @@ export async function startReview(home: string, identity: ProofIdentity, request
 
 type RoundStart = { scope: string; base?: string; from?: string; forkBase?: string; decision: Decision | undefined; permit: Permit; cleanBaseMerge: CleanBaseMerge; capturedBy: CapturedBy; opening: () => Promise<boolean>; sanity: () => Promise<void>; reserving: Reserving };
 
-async function startRound(home: string, identity: ProofIdentity, reviews: string, { scope, base, from, forkBase, decision, permit, cleanBaseMerge, capturedBy, opening, sanity, reserving: { lockBudget, triage, budget, ...stamping } }: RoundStart): Promise<Reserved> {
+async function startRound(home: string, identity: ProofIdentity, reviews: string, { scope, base, from, forkBase, decision, permit, cleanBaseMerge, capturedBy, opening, sanity, reserving: { lockBudget, once, triage, budget, ...stamping } }: RoundStart): Promise<Reserved> {
   const { free, ceiling } = permit.limits;
   const snapshot = async () => ({ ...await reviewsSpent(reviews, "review", "unfinished spends"), round: await nextRound(reviews) });
   const permitRound = async ({ round, spent, pastBudget }: Awaited<ReturnType<typeof snapshot>>) => {
@@ -384,7 +384,7 @@ async function startRound(home: string, identity: ProofIdentity, reviews: string
     if (round > 1) await sanity();
     return permitReview(home, identity, spent >= free, { stop: spent >= ceiling ? budgetSpent(permit.limits) : undefined, pastBudget }, decision, permit);
   };
-  return reserveWeighed(reviews, lockBudget, snapshot, permitRound, async ({ round }, { arbiter: verdict, pastBudget }) => {
+  return reserveWeighed(reviews, { lockBudget, once }, snapshot, permitRound, async ({ round }, { arbiter: verdict, pastBudget }) => {
     await reserveDecided(reviews, String(round), { ...identity, round, scope, base, from, ...forkBase ? { forkBase } : {}, arbiter: verdict, ...pastBudget ? { pastBudget } : {}, capturedBy, ...triage ? { ...budget, triage } : {} }, decision, stamping);
     return { round, id: String(round), directory: join(reviews, String(round)) };
   });

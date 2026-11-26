@@ -817,7 +817,7 @@ async function unrecordedRound(options: Map<string, string>, head: ProofIdentity
 function requireSameRequest({ reservation, directory }: { reservation: Reservation; directory: string }, options: Map<string, string>, run: Run) {
   if (!reservation.decision || reservation.recorded) return;
   const id = options.get("--override");
-  if (id !== undefined && decisionId.test(id) && id !== reservation.decision.id) throw new Error(`Review round ${basename(directory)} at this HEAD is reserved with decision ${reservation.decision.id}, not ${id}, and that decision is not recorded yet. Run its command again with --override ${reservation.decision.id} to record it, or remove ${directory} to drop it`);
+  if (id !== undefined && decisionId.test(id) && reservation.decision.mark === "👤" && id !== reservation.decision.id) throw new Error(`Review round ${basename(directory)} at this HEAD is reserved with decision ${reservation.decision.id}, not ${id}, and that decision is not recorded yet. Run its command again with --override ${reservation.decision.id} to record it, or remove ${directory} to drop it`);
   const reserved = reservedOptions(reservation);
   if (reserved !== requestedOptions(options, reservation, run)) throw new Error(`Review round ${basename(directory)} at this HEAD is reserved with ${reserved}, and its decision is not recorded yet. Run its command again with ${reserved} to record it, or remove ${directory} to drop it`);
 }

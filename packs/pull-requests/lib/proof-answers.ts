@@ -23,6 +23,7 @@ function closingParenthesis(text: string, from: number) {
   let quote: string | undefined;
   for (let index = from; index < text.length; index++) {
     const char = text[index]!;
+    if (char === "\\") { index++; continue; }
     if (quote) { if (char === quote) quote = undefined; continue; }
     if ((char === '"' || char === "'") && /\s/.test(text[index - 1] ?? "")) quote = char;
     else if (char === "(") depth++;

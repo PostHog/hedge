@@ -4,7 +4,6 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { dirname, join } from "node:path";
 import { startT3Stub } from "../../base/lib/t3/testing.ts";
 import { parseVerdict } from "./proof.ts";
-import { unlinked } from "./proof-answers.ts";
 import { cleanFixtures, settings, lookup, checkout, fakeModel, reviewHead, reviewHeadFixed, finishRound, recordingModel, stalledOnQuota, blanks, ledgerDecisions, graded, hubAt, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
@@ -200,17 +199,37 @@ test("a panel start that fails after it reserved the round leaves the decision f
   expect(await roundDecision(pr, "4")).toBe(recorded);
 });
 
+const pull42 = "https://github.com/example/product/pull/42";
 const linkShapes: [string, string][] = [
-  ["a plain link", "[o/r#42](https://github.com/o/r/pull/42)"],
-  ["a quoted title with parentheses", '[o/r#42](https://github.com/o/r/pull/42 "PR (draft)")'],
-  ["a single-quoted title and a space before the close", "[o/r#42](https://github.com/o/r/pull/42 'PR' )"],
-  ["a title in parentheses", "[o/r#42](https://github.com/o/r/pull/42 (PR))"],
-  ["balanced parentheses in the URL", "[o/r#42](https://github.com/o/r/pull/42?q=(a))"],
-  ["an apostrophe in the URL", "[o/r#42](https://github.com/o/r/pull/42?who=it's)"],
+  ["a plain link", `[example/product#42](${pull42})`],
+  ["a quoted title with parentheses", `[example/product#42](${pull42} "PR (draft)")`],
+  ["a quoted title with escaped quotes and a parenthesis", `[example/product#42](${pull42} "A \\"quoted\\" PR (draft")`],
+  ["a single-quoted title and a space before the close", `[example/product#42](${pull42} 'PR' )`],
+  ["a title in parentheses", `[example/product#42](${pull42} (PR))`],
+  ["balanced parentheses in the URL", `[example/product#42](${pull42}?q=(a))`],
+  ["an apostrophe in the URL", `[example/product#42](${pull42}?who=it's)`],
 ];
 
-test.each(linkShapes)("a round question that links the PR as %s reads as its text", (_, link) => {
-  expect(unlinked(`Run one more review round? ${link}: why.`)).toBe("Run one more review round? o/r#42: why.");
+test.each(linkShapes)("an answer to a round question that links the PR as %s starts the round", async (_, link) => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "new\n");
+  pr.choose("Run one more round", `Run one more review round? ${link}: why.`);
+  expect((await pr.hedge("review-start", "--scope", "full", "--override", `2026-10-25 "Run one more round"`, "--thread", "thread-1")).code).toBe(0);
+  expect(await roundDecision(pr, "1")).toMatch(/^d-[0-9a-f]{8}$/);
+});
+
+test("the user's decision id replaces an agent decision that a round holds unrecorded", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "new\n");
+  pr.pullRequestState({ body: graded("non-critical") });
+  const hub = hubAt(pr, "drops appends");
+  await expect(pr.hedge("review-start", "--scope", "full", "--agent", "The arbiter escalated")).rejects.toThrow("Not recorded");
+  hub.state.hub = "up";
+  pr.choose("Run one more round", linkedQuestion);
+  const message = `request-${(await pr.reader.words!("thread-1")).length}:0`;
+  const recorded = /\[(d-[0-9a-f]{8})\]/.exec((await pr.decide("record", "--mark", "👤", "--class", "review", "--pr", "example/product#42", "--message", message)).output)![1]!;
+  expect((await pr.hedge("review-start", "--scope", "full", "--override", recorded)).code).toBe(0);
+  expect(await roundDecision(pr, "1")).toBe(recorded);
 });
 
 async function reservedWhileHubDown(pr: Checkout) {
