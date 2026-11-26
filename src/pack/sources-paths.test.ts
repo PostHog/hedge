@@ -1459,7 +1459,7 @@ describe("fetchSource local path resolution and object formats", () => {
     expect([offlineA.packs[0]?.manifest.summary, offlineA.stale]).toEqual(["SHA-256 A.", undefined]);
   });
 
-  test("serves an already-cached pin without blocking the event loop when local repository probing times out", async () => {
+  test("fails closed on symlink aliases and falls back as stale without blocking the event loop when local probing times out", async () => {
     if (process.platform === "win32") return;
     const root = temp.make("git-stalled-probe-");
     const repo = join(root, "nfs-repo");
@@ -1469,36 +1469,107 @@ describe("fetchSource local path resolution and object formats", () => {
     const initial = await fetchSource({ name: "team", repo, ref: sha }, cache);
     if ("error" in initial) throw new Error(initial.error);
 
+    const readyFifo = join(root, "probe-ready");
     const goneFifo = join(root, "probe-gone");
-    expect(Bun.spawnSync(["mkfifo", goneFifo]).exitCode).toBe(0);
+    expect(Bun.spawnSync(["mkfifo", readyFifo, goneFifo]).exitCode).toBe(0);
     const hungScript = join(root, "hung-probe.ts");
     writeFileSync(
       hungScript,
-      `import { openSync } from "node:fs";
+      `import { openSync, writeFileSync } from "node:fs";
 const fd = openSync(${JSON.stringify(goneFifo)}, "w");
 void fd;
+writeFileSync(${JSON.stringify(readyFifo)}, "started\\n");
 await new Promise(() => {});
 `,
     );
-    const readerProc = Bun.spawn(["cat", goneFifo], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-    const fifoClosed = new Response(readerProc.stdout).text();
-    let ticks = 0;
-    const ticker = setInterval(() => {
-      ticks++;
-    }, 10);
+    const readyProc = Bun.spawn(["cat", readyFifo], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    const goneProc = Bun.spawn(["cat", goneFifo], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    const readyText = new Response(readyProc.stdout).text();
+    const fifoClosed = new Response(goneProc.stdout).text();
+    let readyBeforeFetchDone = false;
+    let fetchSettled = false;
+    const readyWatcher = readyText.then((text) => {
+      if (text.trim() === "started" && !fetchSettled) readyBeforeFetchDone = true;
+    });
     try {
       const loaded = await fetchSource({ name: "team", repo, ref: sha }, cache, undefined, undefined, (dir, effective) =>
         probeLocalRepoInfo(dir, effective, 120, hungScript),
       );
+      fetchSettled = true;
+      await readyWatcher;
       if ("error" in loaded) throw new Error(loaded.error);
-      expect([loaded.packs[0]?.manifest.summary, loaded.stale]).toEqual(["Cached NFS pin.", undefined]);
-      expect(ticks).toBeGreaterThanOrEqual(3);
+      expect(loaded.packs[0]?.manifest.summary).toBe("Cached NFS pin.");
+      expect(loaded.stale).toContain("timed out inspecting local repository");
+      expect(readyBeforeFetchDone).toBe(true);
       expect(await fifoClosed).toBe("");
     } finally {
-      clearInterval(ticker);
       try {
-        readerProc.kill("SIGKILL");
+        readyProc.kill("SIGKILL");
+      } catch {}
+      try {
+        goneProc.kill("SIGKILL");
       } catch {}
     }
+
+    const mirrorLink = join(root, "mirror-link");
+    symlinkSync(repo, mirrorLink);
+    const mirrorCache = temp.make("cache-stalled-mirror-");
+    expect("error" in (await fetchSource({ name: "team", repo: mirrorLink, ref: sha }, mirrorCache))).toBe(false);
+    const mirrorRepoB = join(root, "nfs-repo-b");
+    await initRepo(mirrorRepoB);
+    await commitPack(mirrorRepoB, "team", "Other NFS repo.");
+    rmSync(mirrorLink);
+    symlinkSync(mirrorRepoB, mirrorLink);
+    const mirrorHungScript = join(root, "hung-mirror-probe.ts");
+    writeFileSync(mirrorHungScript, "await new Promise(() => {});\n");
+    const stalledMirror = await fetchSource({ name: "team", repo: mirrorLink, ref: sha }, mirrorCache, undefined, undefined, (dir, effective) =>
+      probeLocalRepoInfo(dir, effective, 80, mirrorHungScript),
+    );
+    expect("error" in stalledMirror).toBe(true);
+  });
+
+  test("applies a relative source path on first fetch before the cache directory exists", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-rel-first-");
+    const upstream = join(root, "upstream", "packs");
+    await initRepo(upstream);
+    const sha = await commitPack(upstream, "team", "Relative first apply.");
+    const cache = join(root, "cache");
+    const loaded = await fetchSource({ name: "team", repo: "../../upstream/packs", ref: sha }, cache);
+    if ("error" in loaded) throw new Error(loaded.error);
+    expect([loaded.packs[0]?.manifest.summary, loaded.stale]).toEqual(["Relative first apply.", undefined]);
+  });
+
+  test("keeps refresh enabled for the original branch after a failed apply with a trailing-slash spelling", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-blocked-slash-");
+    const repo = join(root, "repo");
+    await initRepo(repo);
+    const c1 = await commitPack(repo, "team", "Blocked slash v1.");
+    const cache = temp.make("cache-blocked-slash-");
+    expect("error" in (await fetchSource({ name: "team", repo, ref: "main" }, cache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo: `${repo}/`, ref: "missing-branch" }, cache))).toBe(true);
+    expect(await followsBranch({ name: "team", repo, ref: "main" }, cache)).toBe(true);
+    const c2 = await commitPack(repo, "team", "Blocked slash v2.");
+    expect(await advanceSource({ name: "team", repo, ref: "main" }, cache, c1)).toMatchObject({ state: "moved", commit: c2 });
+  });
+
+  test("recognizes a symbolic HEAD link to an unborn branch instead of selecting a .git sibling", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-sym-head-");
+    const plain = join(root, "packs");
+    const sibling = join(root, "packs.git");
+    await initRepo(plain);
+    const plainSha = await commitPack(plain, "team", "Unborn symlink HEAD repo.");
+    rmSync(join(plain, ".git", "HEAD"));
+    symlinkSync("refs/heads/unborn", join(plain, ".git", "HEAD"));
+    await initRepo(sibling);
+    await commitPack(sibling, "team", "Sibling dotgit repo.");
+    const cache = temp.make("cache-sym-head-");
+    const loaded = await fetchSource({ name: "team", repo: plain, ref: plainSha }, cache);
+    if ("error" in loaded) throw new Error(loaded.error);
+    expect(loaded.packs[0]?.manifest.summary).toBe("Unborn symlink HEAD repo.");
+    rmSync(sibling, { recursive: true, force: true });
+    expect("error" in (await fetchSource({ name: "team", repo: sibling, ref: plainSha }, cache))).toBe(true);
   });
 });

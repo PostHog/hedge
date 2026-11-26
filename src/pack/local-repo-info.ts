@@ -257,11 +257,24 @@ function withNestedCommonBytes(prefix: Buffer, target: Buffer): Buffer {
   return nested ? Buffer.concat([prefix, target, zeroByteBuf, Buffer.from("common:"), nested]) : Buffer.concat([prefix, target]);
 }
 
+function isValidHeadFileBytes(headPath: Buffer): boolean {
+  try {
+    const info = lstatSync(headPath);
+    if (info.isSymbolicLink()) {
+      const target = readlinkSync(headPath, "buffer").toString("latin1");
+      if (target.startsWith("refs/")) return true;
+    }
+  } catch {
+    return false;
+  }
+  const headBytes = readBoundedPrefixBytes(headPath, 256);
+  return headBytes !== undefined && isValidHeadBytes(headBytes);
+}
+
 function resolvedCommonDirBytes(dirBuf: Buffer): Buffer | undefined {
   try {
     if (!statSync(dirBuf).isDirectory()) return undefined;
-    const headBytes = readBoundedPrefixBytes(Buffer.concat([dirBuf, slashHeadBuf]), 256);
-    if (!headBytes || !isValidHeadBytes(headBytes)) return undefined;
+    if (!isValidHeadFileBytes(Buffer.concat([dirBuf, slashHeadBuf]))) return undefined;
     let commonDir = dirBuf;
     const commonPath = Buffer.concat([dirBuf, slashCommondirBuf]);
     let hasCommonFile = false;
@@ -517,13 +530,13 @@ export function lexicalFallbackLocalRepoInfo(dir: string, effective: string, tim
     if (effective.startsWith("file://")) {
       try {
         const out = pathToFileURL(resolve(fileURLToPath(effective))).href;
-        return { resolved: out, primary: out, lexicalKey: out, aliasKey: out, hasLiveRepo: false, isLocal: true, ...(timedOut ? { timedOut: true } : { skipPinCache: true }) };
+        return { resolved: out, primary: out, lexicalKey: out, aliasKey: out, hasLiveRepo: false, isLocal: true, skipPinCache: true, ...(timedOut ? { timedOut: true } : {}) };
       } catch {
-        return { resolved: effective, primary: effective, lexicalKey: effective, aliasKey: effective, hasLiveRepo: false, isLocal: true, ...(timedOut ? { timedOut: true } : { skipPinCache: true }) };
+        return { resolved: effective, primary: effective, lexicalKey: effective, aliasKey: effective, hasLiveRepo: false, isLocal: true, skipPinCache: true, ...(timedOut ? { timedOut: true } : {}) };
       }
     }
     const abs = resolve(dir, effective);
-    return { resolved: abs, primary: abs, lexicalKey: abs, aliasKey: abs, hasLiveRepo: false, isLocal: true, ...(timedOut ? { timedOut: true } : { skipPinCache: true }) };
+    return { resolved: abs, primary: abs, lexicalKey: abs, aliasKey: abs, hasLiveRepo: false, isLocal: true, skipPinCache: true, ...(timedOut ? { timedOut: true } : {}) };
   }
   const parsed = parseLocalRepoBytes(dir, effective, false);
   if (!parsed) {
@@ -539,7 +552,7 @@ export function lexicalFallbackLocalRepoInfo(dir: string, effective: string, tim
     return { resolved: invalidPrimary, primary: invalidPrimary, lexicalKey: invalidPrimary, aliasKey: invalidPrimary, hasLiveRepo: false, isLocal: true, skipPinCache: true, ...(timedOut ? { timedOut: true } : {}) };
   }
   const encoded = encodeCanonicalLocal(lexical, parsed.asFileUrl);
-  return { resolved: encoded, primary: encoded, lexicalKey: encoded, aliasKey: encoded, hasLiveRepo: false, isLocal: true, ...(timedOut ? { timedOut: true } : { skipPinCache: true }) };
+  return { resolved: encoded, primary: encoded, lexicalKey: encoded, aliasKey: encoded, hasLiveRepo: false, isLocal: true, skipPinCache: true, ...(timedOut ? { timedOut: true } : {}) };
 }
 
 export function canonicalLocalRepoInfo(dir: string, effective: string): LocalRepoInfo {

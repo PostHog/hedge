@@ -339,8 +339,7 @@ async function fetchLocked(
         : rawGood;
   const goodDigest = goodResolvedDigest(good);
   const before = await currentCheckout(dir);
-  const timedOutGoodFallback = beforeIdentity.localInfo.skipPinCache === true && beforeIdentity.localInfo.timedOut === true && good?.repo === repo && goodDigest !== undefined;
-  const effectiveBeforeDigest = timedOutGoodFallback ? goodDigest! : beforeIdentity.digest;
+  const effectiveBeforeDigest = beforeIdentity.digest;
   const legacyOk =
     good !== undefined &&
     good.repo === repo &&
@@ -363,23 +362,26 @@ async function fetchLocked(
   let fetchedOid: string | undefined;
   let savedFetchHead: SavedFetchHead | undefined;
   let checkedOutCommit: string | undefined;
-  const cachedHit =
-    beforeIdentity.localInfo.skipPinCache && !timedOutGoodFallback
-      ? undefined
-      : await checkedOutFromCache(dir, repo, effectiveBeforeDigest, ref, good);
+  const cachedHit = beforeIdentity.localInfo.skipPinCache
+    ? undefined
+    : await checkedOutFromCache(dir, repo, effectiveBeforeDigest, ref, good);
   if (cachedHit) {
     checkedOutCommit = cachedHit.commit;
     effectiveDigest = cachedHit.effectiveDigest;
   }
   if (!checkedOutCommit && !fetchError) {
-    savedFetchHead = await snapshotFetchHead(dir);
-    fetchedNew = true;
-    const fetched = await checkout(dir, repo, ref.ref, savedFetchHead, preexisting, rawEffectiveBefore, beforeIdentity, probe);
-    effectiveDigest = fetched.effectiveDigest;
-    effectiveLocalInfo = fetched.localInfo;
-    fetchError = fetched.error;
-    checkedOutCommit = fetched.commit;
-    fetchedOid = fetched.fetchedOid;
+    if (beforeIdentity.localInfo.timedOut) {
+      fetchError = "timed out inspecting local repository";
+    } else {
+      savedFetchHead = await snapshotFetchHead(dir);
+      fetchedNew = true;
+      const fetched = await checkout(dir, repo, ref.ref, savedFetchHead, preexisting, rawEffectiveBefore, beforeIdentity, probe);
+      effectiveDigest = fetched.effectiveDigest;
+      effectiveLocalInfo = fetched.localInfo;
+      fetchError = fetched.error;
+      checkedOutCommit = fetched.commit;
+      fetchedOid = fetched.fetchedOid;
+    }
   }
   if (!fetchError && checkedOutCommit) {
     const commit = checkedOutCommit;
@@ -438,7 +440,7 @@ async function fetchLocked(
     return fallBack(ref, dir, repo, effectiveDigest, good, `${ref.ref} from ${ref.repo} does not load: ${loaded.error}`, loadLimitMs, before, preserveBefore, legacyOk && effectiveDigest === effectiveBeforeDigest, isBranch);
   }
   if (savedFetchHead) await restoreFetchHead(dir, savedFetchHead);
-  return fallBack(ref, dir, repo, effectiveDigest, good, `could not fetch ${ref.ref} from ${ref.repo}: ${fetchError ?? "unknown commit"}`, loadLimitMs, before, preserveBefore, legacyOk && effectiveDigest === effectiveBeforeDigest, undefined);
+  return fallBack(ref, dir, repo, effectiveDigest, good, `could not fetch ${ref.ref} from ${ref.repo}: ${fetchError ?? "unknown commit"}`, loadLimitMs, before, preserveBefore, legacyOk && effectiveDigest === effectiveBeforeDigest, undefined, beforeIdentity.localInfo.timedOut === true);
 }
 
 function cacheDir(ref: SourceRef, cacheRoot: string): string | { error: string } {
@@ -473,7 +475,7 @@ export function repoUrl(repo: string) {
   return /^[\w.-]+\/[\w.-]+$/.test(repo) ? `https://github.com/${repo}.git` : repo;
 }
 
-async function fallBack(ref: SourceRef, dir: string, repo: string, effectiveDigest: string, good: Good | undefined, reason: string, loadLimitMs: number, before?: CheckoutState, preserveBefore = false, legacyFallback = false, askedBranch?: boolean): Promise<FetchedSource> {
+async function fallBack(ref: SourceRef, dir: string, repo: string, effectiveDigest: string, good: Good | undefined, reason: string, loadLimitMs: number, before?: CheckoutState, preserveBefore = false, legacyFallback = false, askedBranch?: boolean, skipRecordBlocked = false): Promise<FetchedSource> {
   const goodDigest = goodResolvedDigest(good);
   const effectiveMatch =
     good !== undefined &&
@@ -490,7 +492,7 @@ async function fallBack(ref: SourceRef, dir: string, repo: string, effectiveDige
           .filter((entry): entry is { repo: string; resolvedDigest: string } => entry !== undefined)
       : [];
   const recordBlocked = async () => {
-    if (!good) return;
+    if (!good || skipRecordBlocked) return;
     const existing = normalizedBlocked(good.blocked);
     if (existing.some((entry) => entry.repo === repo && entry.resolvedDigest === effectiveDigest)) return;
     const { resolved: _drop, ...rest } = good;
@@ -1078,19 +1080,29 @@ async function hasRetainedDigest(dir: string, repoHash: string): Promise<boolean
   return listed.ok && listed.stdout.length > 0;
 }
 
+async function mapBounded<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index]!);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 export async function unpinnedSources(refs: SourceRef[], profileDir: string, cacheRoot?: string): Promise<Finding[]> {
-  const unpinned: SourceRef[] = [];
-  for (const ref of refs) {
+  const checked = await mapBounded(refs, 8, async (ref) => {
     const dir = cacheRoot ? join(cacheRoot, ref.name) : undefined;
     const hasGit = dir !== undefined && existsSync(join(dir, ".git"));
     const good = dir ? await lastGood(dir) : undefined;
     const repo = repoUrl(ref.repo);
     const goodDigest = goodResolvedDigest(good);
     const identity = hasGit ? await resolvedRepoIdentity(dir, repo) : undefined;
-    const effectiveDigest =
-      identity?.localInfo.skipPinCache && identity.localInfo.timedOut && good?.repo === repo && goodDigest !== undefined
-        ? goodDigest
-        : identity?.digest;
+    const effectiveDigest = identity?.digest;
     const sameCachedRepo =
       hasGit &&
       good !== undefined &&
@@ -1102,9 +1114,10 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string, cac
         !identity?.localInfo.skipPinCache &&
         (await hasRetainedDigest(dir, effectiveDigest)));
     const hashLen = knownInCache ? await repoHashLength(dir!) : 40;
-    const pinned = isCommitPin(stripSourceRefspec(ref.ref), hashLen) && !(sameCachedRepo && cacheRoot && (await followsBranch(ref, cacheRoot)));
-    if (!pinned) unpinned.push(ref);
-  }
+    const pinned = isCommitPin(stripSourceRefspec(ref.ref), hashLen) && !(sameCachedRepo && cacheRoot && (await followsBranch(ref, cacheRoot, identity)));
+    return pinned ? undefined : ref;
+  });
+  const unpinned = checked.filter((ref): ref is SourceRef => ref !== undefined);
   if (!unpinned.length) return [];
   const origin = await git(profileDir, "config", "--get", "remote.origin.url").then(
     (read) => (read.ok ? (process.platform === "win32" ? read.rawStdout.replace(/\r?\n$/, "") : read.rawStdout.replace(/\n$/, "")) : ""),
@@ -1330,7 +1343,7 @@ async function checkout(
   if (freshInit) createdFreshGit = (await git(dir, "init", "-q")).ok;
   const rawAfterInit = await rawResolvedRepoUrl(dir, repo);
   const identity =
-    knownBeforeIdentity && rawAfterInit === beforeRawEffective
+    !freshInit && knownBeforeIdentity && rawAfterInit === beforeRawEffective
       ? knownBeforeIdentity
       : await resolveRepoIdentityAt(join(dir, ".git"), dir, rawAfterInit, probe);
   const effectiveDigest = identity.digest;
@@ -1472,7 +1485,7 @@ async function fetchHeadIsBranch(dir: string, ref: string, expectedOid?: string)
   return first.includes(`\tbranch '${branch}' of `);
 }
 
-export async function followsBranch(ref: SourceRef, cacheRoot: string) {
+export async function followsBranch(ref: SourceRef, cacheRoot: string, knownIdentity?: ResolvedIdentity) {
   const dir = join(cacheRoot, ref.name);
   const good = await lastGood(dir);
   const branch = branchName(ref.ref);
@@ -1496,9 +1509,14 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
     return false;
   }
   if (!isBranch) return false;
+  let resolvedIdentity = knownIdentity;
+  const getDigest = async () => {
+    resolvedIdentity ??= await resolvedRepoIdentity(dir, repo);
+    return resolvedIdentity.digest;
+  };
   if (isCommitPin(branch, hashLen) && matchedExplicitHead && !hasExplicitHead(ref.ref) && existsSync(join(dir, ".git"))) {
     const goodDigest = goodResolvedDigest(good);
-    const effectiveDigest = (await resolvedRepoIdentity(dir, repo)).digest;
+    const effectiveDigest = await getDigest();
     const sameRepo = goodDigest !== undefined ? goodDigest === effectiveDigest : good.repo === repo;
     const matchesVerifiedGood = sameRepo && verifiedGoodCommit(good)?.commit === branch.toLowerCase();
     if (matchesVerifiedGood || (await pinTarget(dir, effectiveDigest, branch)) !== undefined) return false;
@@ -1511,11 +1529,11 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
     (Array.isArray(good.blocked) && good.blocked.length > 0);
   if (!needsRepoCheck) return true;
   const goodDigest = goodResolvedDigest(good);
-  const effectiveDigest = (await resolvedRepoIdentity(dir, repo)).digest;
+  const effectiveDigest = await getDigest();
   const sameRepo = goodDigest !== undefined ? goodDigest === effectiveDigest : good.repo === repo;
   if ((hasPlusPrefix(ref.ref) || hasPlusPrefix(good.ref) || hasPlusPrefix(good.asked)) && !sameRepo) return false;
   if (Array.isArray(good.blocked) && good.blocked.length) {
-    if (good.blocked.some((entry) => entry && goodResolvedDigest(entry) === effectiveDigest)) return false;
+    if (good.blocked.some((entry) => entry && entry.repo === repo && goodResolvedDigest(entry) === effectiveDigest)) return false;
   }
   return true;
 }
@@ -1721,10 +1739,7 @@ export async function cachedSource(ref: SourceRef, cacheRoot: string, clock: Clo
     const repo = repoUrl(ref.repo);
     const goodDigest = goodResolvedDigest(good);
     const identity = good !== undefined && goodDigest !== undefined ? await resolvedRepoIdentity(dir, repo) : undefined;
-    const effectiveDigest =
-      identity?.localInfo.skipPinCache && identity.localInfo.timedOut && good?.repo === repo && goodDigest !== undefined
-        ? goodDigest
-        : identity?.digest;
+    const effectiveDigest = identity?.digest;
     const sameRepo = good !== undefined && (goodDigest !== undefined ? effectiveDigest === goodDigest : good.repo === repo);
     if (!sameRepo || !asked || good.commit !== head) return { ref, error: `the cached checkout is not ${ref.ref}; run hedge apply` };
     return { ref, dir, packs: await loadPacks(dir) };
