@@ -187,6 +187,141 @@ describe("hedge packs", () => {
     }
     expect((await pushed()).packs).toEqual(["pull-requests"]);
   });
+
+  test("marks a pack and its workflows as needing setup while a human probe fails, skips off workflows, and flips back when it passes", async () => {
+    const { home } = await machineWithProfile();
+    const source = join(home, ".local/share/hedge/sources/team");
+    await cachedCheckout(source, { name: "team", repo: "team/packs", ref: "main" });
+    mkdirSync(join(source, "packs/team"), { recursive: true });
+    writeFileSync(
+      join(source, "packs/team/pack.json"),
+      JSON.stringify({
+        schema: 1,
+        name: "team",
+        summary: "Team tools.",
+        workflows: [
+          { id: "sync", name: "Sync", sentence: "Sync notes.", default: true },
+          { id: "other", name: "Other", sentence: "Other flow.", default: true },
+          { id: "off-flow", name: "Off", sentence: "Off flow.", default: false },
+        ],
+        human: [
+          { id: "auth", say: "Sign in.", probe: ["sh", "-c", 'test -f "$HOME/.team-auth"'] },
+          { id: "off-auth", say: "Off sign in.", workflow: "off-flow", probe: ["sh", "-c", "exit 1"] },
+        ],
+        steps: [{ id: "sync-step", run: ["true"], after: "auth", workflow: "sync" }],
+      }),
+    );
+    const dir = join(home, "profile");
+    const file = JSON.parse(readFileSync(join(dir, "hedge.json"), "utf8")) as ProfileFile;
+    writeFileSync(join(dir, "hedge.json"), JSON.stringify({ ...file, sources: [...file.sources, { name: "team", repo: "team/packs", ref: "main" }], packs: [...file.packs, "team"] }, null, 2) + "\n");
+    await spawnGit(dir, "commit", "-q", "-am", "Team");
+    await spawnGit(dir, "push", "-q");
+
+    const failing = await hedge(home, ["packs"]);
+    expect(failing.code).toBe(0);
+    expect(failing.output).toContain("  ~ team  Team tools.");
+    expect(failing.output).toContain("      Workflows: sync needs setup, other on, off-flow off");
+    expect(failing.output).toContain("Some packs still need setup on this machine. Run hedge doctor to see what is left.");
+
+    writeFileSync(join(home, ".team-auth"), "ok\n");
+    const passing = await hedge(home, ["packs"]);
+    expect(passing.code).toBe(0);
+    expect(passing.output).toContain("  ✓ team  Team tools.");
+    expect(passing.output).toContain("      Workflows: sync on, other on, off-flow off");
+    expect(passing.output).not.toContain("Some packs still need setup");
+  });
+
+  test("marks hub-only served workflows only on the hub, renders CLI probe timeouts as not checked, and kills probes on SIGINT", async () => {
+    const { home } = await machineWithProfile();
+    const source = join(home, ".local/share/hedge/sources/team");
+    await cachedCheckout(source, { name: "team", repo: "team/packs", ref: "main" });
+    mkdirSync(join(source, "packs/team"), { recursive: true });
+    writeFileSync(
+      join(source, "packs/team/pack.ts"),
+      `import { readFileSync } from "node:fs";
+import { join } from "node:path";
+export default {
+  sdk: 1,
+  name: "team",
+  summary: "Team tools.",
+  register(hedge) {
+    const serve = hedge.workflow({ id: "serve-flow", name: "Serve", default: true, sentence: "Served flow." });
+    hedge.workflow({ id: "plain-flow", name: "Plain", default: true, sentence: "Plain flow." });
+    const auth = hedge.check({
+      id: "hub-auth",
+      say: "Sign in on hub.",
+      test: async () => {
+        const homeDir = process.env.HOME!;
+        const mode = readFileSync(join(homeDir, "probe-mode"), "utf8").trim();
+        if (mode === "fail") return false;
+        const suffix = mode === "hang2" ? "2" : "";
+        await Bun.spawn(["sh", "-c", 'exec 3>"$HOME/hold' + suffix + '"; sleep 30 >&3 & echo ready > "$HOME/ready' + suffix + '"; wait'], { env: { ...Bun.env, HOME: homeDir }, stdout: "ignore", stderr: "ignore" }).exited;
+        return false;
+      },
+    });
+    hedge.service({ on: "hub", when: serve, id: "api", after: auth, serve: { port: 9123, health: "/health", credential: async () => "k" } });
+  },
+};
+`,
+    );
+    const dir = join(home, "profile");
+    const file = JSON.parse(readFileSync(join(dir, "hedge.json"), "utf8")) as ProfileFile;
+    writeFileSync(join(dir, "hedge.json"), JSON.stringify({ ...file, hub: "hub-box", devboxes: ["node-1"], sources: [...file.sources, { name: "team", repo: "team/packs", ref: "main" }], packs: [...file.packs, "team"] }, null, 2) + "\n");
+    await spawnGit(dir, "commit", "-q", "-am", "Team");
+    await spawnGit(dir, "push", "-q");
+
+    const setHost = (name: string) => writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "linux", name, profileDir: dir }));
+    writeFileSync(join(home, "probe-mode"), "fail\n");
+    setHost("hub-box");
+    const onHub = await hedge(home, ["packs"]);
+    expect(onHub.code).toBe(0);
+    expect(onHub.output).toContain("  ~ team  Team tools.");
+    expect(onHub.output).toContain("      Workflows: serve-flow needs setup, plain-flow on");
+
+    setHost("node-1");
+    const onNode = await hedge(home, ["packs"]);
+    expect(onNode.code).toBe(0);
+    expect(onNode.output).toContain("  ~ team  Team tools.");
+    expect(onNode.output).toContain("      Workflows: serve-flow on, plain-flow on");
+
+    setHost("hub-box");
+    writeFileSync(join(home, "probe-mode"), "hang\n");
+    const ready = join(home, "ready");
+    const hold = join(home, "hold");
+    expect(await Bun.spawn(["mkfifo", ready, hold]).exited).toBe(0);
+    const holdClosed = Bun.spawn(["cat", hold], { stdout: "ignore", stderr: "ignore" }).exited;
+    const readySeen = Bun.spawn(["cat", ready], { stdout: "ignore", stderr: "ignore" }).exited;
+    let expire: (() => void) | undefined;
+    const lines: string[] = [];
+    const pending = main(["packs"], {
+      home,
+      engineRoot,
+      platform: "linux",
+      print: (line) => lines.push(line),
+      apply: async () => 0,
+      clock: { now: () => 0, sleep: () => new Promise<void>((resolve) => { expire = resolve; }) },
+    });
+    expect(await readySeen).toBe(0);
+    expire?.();
+    expect(await pending).toBe(0);
+    expect(await holdClosed).toBe(0);
+    const timedOut = lines.join("\n");
+    expect(timedOut).toContain("  ? team  Team tools.");
+    expect(timedOut).toContain("      Workflows: serve-flow not checked, plain-flow on");
+    expect(timedOut).toContain("Some setup checks did not finish in time. Run hedge doctor to check them.");
+
+    writeFileSync(join(home, "probe-mode"), "hang2\n");
+    const hold2 = join(home, "hold2");
+    const ready2 = join(home, "ready2");
+    expect(await Bun.spawn(["mkfifo", ready2, hold2]).exited).toBe(0);
+    const hold2Closed = Bun.spawn(["cat", hold2], { stdout: "ignore", stderr: "ignore" }).exited;
+    const ready2Seen = Bun.spawn(["cat", ready2], { stdout: "ignore", stderr: "ignore" }).exited;
+    const cli = Bun.spawn([process.execPath, join(engineRoot, "src/cli.ts"), "packs"], { env: { ...Bun.env, HOME: home }, stdout: "ignore", stderr: "ignore" });
+    expect(await ready2Seen).toBe(0);
+    cli.kill("SIGINT");
+    await cli.exited;
+    expect(await hold2Closed).toBe(0);
+  });
 });
 
 describe("hedge packs with a profile that still names an old pack", () => {

@@ -5,7 +5,7 @@ import type { Plan } from "../pack/types.ts";
 import { tempDirs } from "../testing/git.ts";
 import { providerConfigAdapter, type CommandRunner } from "../adapters/provider-config/adapter.ts";
 import { keyHelper } from "../adapters/provider-config/proxy-route.ts";
-import { apply, check, filesAdapter, type Adapter } from "./apply.ts";
+import { apply, check, filesAdapter, humanStepsLeft, type Adapter } from "./apply.ts";
 import { changeLedger, readLedger } from "./ledger.ts";
 
 const temp = tempDirs();
@@ -638,5 +638,32 @@ describe("a leading hedge in a pack's commands", () => {
     const { calls, run } = recorder();
     await check(plan({ ...team, engineRoot: undefined, checks: [{ id: "gh", pack: "team", run: ["gh", "hedge"], say: "No gh." }] }), { home: temp.make("home-"), run });
     expect(calls).toEqual(["gh hedge", "hedge whoami", "hedge status", "hedge whoami"]);
+  });
+});
+
+describe("humanStepsLeft", () => {
+  test("separates failing probes from timed-out probes and closes a child-held FIFO when the deadline expires", async () => {
+    const home = temp.make("home-");
+    const ready = join(home, "ready");
+    const hold = join(home, "hold");
+    expect(await Bun.spawn(["mkfifo", ready, hold]).exited).toBe(0);
+    const holdClosed = Bun.spawn(["cat", hold], { stdout: "ignore", stderr: "ignore" }).exited;
+    const readySeen = Bun.spawn(["cat", ready], { stdout: "ignore", stderr: "ignore" }).exited;
+    const human = [
+      { id: "ok", pack: "team", say: "Ok.", probe: ["sh", "-c", "exit 0"] },
+      { id: "missing", pack: "team", say: "Sign in.", probe: ["sh", "-c", "exit 1"] },
+      { id: "slow", pack: "team", say: "Slow.", probe: ["sh", "-c", 'exec 3>"$HOME/hold"; sleep 30 >&3 & echo ready > "$HOME/ready"; wait'] },
+    ];
+    let expire: (() => void) | undefined;
+    const pending = humanStepsLeft(plan({ human }), {
+      home,
+      sleep: () => new Promise<void>((resolve) => { expire = resolve; }),
+    });
+    expect(await readySeen).toBe(0);
+    expire?.();
+    const left = await pending;
+    expect(left.failing.map((step) => step.id)).toEqual(["missing"]);
+    expect(left.unchecked.map((step) => step.id)).toEqual(["slow"]);
+    expect(await holdClosed).toBe(0);
   });
 });

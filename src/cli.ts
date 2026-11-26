@@ -7,7 +7,7 @@ import { cannotTell } from "./pack/types.ts";
 import type { AvailableSource, CatalogEntry, FetchedSource, Finding, LoadedPack, MachineFile, Plan, Report, SourceRef } from "./pack/types.ts";
 import { loadMachine, loadProfile, pullProfile, saveMachine, thisMachine } from "./profile/profile.ts";
 import { engineAdapters } from "./adapters/index.ts";
-import { apply, check, filesAdapter, type Adapter, type Issuer, type Runner } from "./reconciler/apply.ts";
+import { apply, check, filesAdapter, humanStepsLeft, type Adapter, type Issuer, type Runner } from "./reconciler/apply.ts";
 import { refresh } from "./refresh.ts";
 import { listedPack, resolve } from "./reconciler/resolve.ts";
 import { undoingPack, undoVariable } from "./reconciler/ledger.ts";
@@ -243,6 +243,7 @@ async function change(command: keyof typeof changes | "hub", args: string[], opt
     machine: { ...realMachine, ...options.setup?.machine },
     print: options.print,
     apply: () => applyProfile(profileDir, options),
+    humanLeft: () => humanStepsLeft(plan, { home: options.home, run: options.run, sleep: options.clock?.sleep }),
   };
   try {
     return await (command === "hub" ? hubCommand(args, { ...context, home: options.home }) : changes[command](args, context));

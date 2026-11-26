@@ -1,4 +1,5 @@
 import type { LoadedPack, Plan, ProfileFile } from "../pack/types.ts";
+import type { HumanStepsResult } from "../reconciler/apply.ts";
 import { saveAnswers } from "../profile/profile.ts";
 import type { Machine } from "../setup/commands.ts";
 
@@ -13,6 +14,7 @@ export type ChangeContext = {
   machine: Machine;
   print(line: string): void;
   apply(): Promise<number>;
+  humanLeft?: () => Promise<HumanStepsResult>;
 };
 
 /** Commits and pushes the change, then applies it here; other machines take it at their next update. */
