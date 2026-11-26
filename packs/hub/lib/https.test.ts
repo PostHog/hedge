@@ -256,8 +256,22 @@ test("trusted propagates cleanup failure when removing the temporary certificate
     home,
     run: async (command) => {
       if (command[0] === "ssh") return { code: 0, stdout: answer, stderr: "" };
-      chmodSync(tmpDir, 0o500);
-      return { code: 0, stdout: "", stderr: "" };
+      if (
+        command.length === 8 &&
+        command[0] === "security" &&
+        command[1] === "verify-cert" &&
+        command[2] === "-l" &&
+        command[3] === "-L" &&
+        command[4] === "-p" &&
+        command[5] === "ssl" &&
+        command[6] === "-c" &&
+        command[7]?.startsWith(`${tmpDir}/`) &&
+        command[7].endsWith("/hub-ca.crt")
+      ) {
+        chmodSync(tmpDir, 0o500);
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      return { code: 1, stdout: "", stderr: `unexpected command: ${command.join(" ")}` };
     },
   });
   try {

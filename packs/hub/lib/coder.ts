@@ -748,8 +748,8 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         if (!supervisorReaped) await waitUpTo(live.exited, 50);
         return timeoutResult(timeoutMs, stdout);
       }
-      cancel();
       if (pendingProbeInterrupt) {
+        cancel();
         await live.exited;
         return { code: status.code ?? 143, stdout, stderr };
       }
@@ -760,31 +760,36 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         } catch {}
       }
       if (inheritedSpare && status.error === undefined && resultReader) {
-        const ackDeadline = performance.now() + 2_000;
+        let wakeAck: (() => void) | undefined;
+        const ackTimeout = new Promise<{ timedOut: true; line: string }>((resolve) => {
+          wakeAck = () => resolve({ timedOut: true, line: "" });
+        });
+        const prevOnTimeout = onTimeout;
+        onTimeout = () => {
+          prevOnTimeout();
+          wakeAck?.();
+        };
+        if (expired) wakeAck?.();
         let parsedAck: { saved?: unknown; spareError?: unknown; code?: unknown } | undefined;
         for (;;) {
-          const remaining = ackDeadline - performance.now();
-          if (remaining <= 0) {
-            stopStream.abort();
-            resultAbort.abort();
-            if (!tagSweep) tagSweep = runOutOfProcessSweep();
-            await tagSweep;
-            throw new Error("timed out confirming spare-file persistence");
-          }
-          let ackTimer: ReturnType<typeof setTimeout> | undefined;
           const spareAck = await Promise.race([
             resultReader.nextLine().then((line) => ({ timedOut: false as const, line })),
-            new Promise<{ timedOut: true; line: string }>((resolve) => {
-              ackTimer = setTimeout(() => resolve({ timedOut: true, line: "" }), remaining);
-            }),
+            ackTimeout,
           ]);
-          if (ackTimer !== undefined) clearTimeout(ackTimer);
-          if (spareAck.timedOut) {
+          if (spareAck.timedOut || expired) {
+            cancel();
             stopStream.abort();
             resultAbort.abort();
-            if (!tagSweep) tagSweep = runOutOfProcessSweep();
-            await tagSweep;
-            throw new Error("timed out confirming spare-file persistence");
+            if (!supervisorReaped && !forceExpired) {
+              await waitUpTo(live.exited, supervisorGraceMs);
+            }
+            if (tagSweep) {
+              await tagSweep;
+            } else if (!supervisorReaped || !supervisorKilledCleanly) {
+              await runOutOfProcessSweep();
+            }
+            if (!supervisorReaped) await waitUpTo(live.exited, 50);
+            return timeoutResult(timeoutMs, stdout);
           }
           const trimmed = spareAck.line.trim();
           if (!trimmed) break;
@@ -803,6 +808,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           parsedAck = record;
           break;
         }
+        cancel();
         if (typeof parsedAck?.spareError === "string") {
           const err = new Error(parsedAck.spareError) as NodeJS.ErrnoException;
           if (typeof parsedAck.code === "string") err.code = parsedAck.code;
@@ -812,6 +818,8 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           throw new Error("capture supervisor exited before confirming spare-file persistence");
         }
         if (!supervisorReaped) await waitUpTo(live.exited, 500);
+      } else {
+        cancel();
       }
       if (!supervisorReaped) live.unref();
       if (tagSweep) await tagSweep;
