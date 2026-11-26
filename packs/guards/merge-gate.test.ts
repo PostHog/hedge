@@ -778,6 +778,7 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     writeFileSync(join(dir, "-"), report);
     writeFileSync(join(dir, "oneline.md"), "/trunk merge\n");
     writeFileSync(join(dir, "open.md"), "See");
+    writeFileSync(join(dir, "$R"), report);
     mkdirSync(join(dir, "sub"));
     writeFileSync(join(dir, "sub/enqueue.md"), report);
     writeFileSync(join(dir, "sub/report.md"), `${report}\n/trunk merge\n`);
@@ -871,6 +872,8 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     ["gh pr comment 9 --repo example/product --body \"$(env -C sub cat report.md)\""],
     ["gh pr comment 9 --repo example/product --body \"$(cat open.md)\n$(cat oneline.md)\""],
     ["printf '/trunk merge\\n' > report.md; gh pr comment 9 --repo example/product --body-file report.md"],
+    ["R=enqueue.md; gh pr comment 9 --repo example/product --body-file \"$R\""],
+    ["R=enqueue.md; gh pr comment 9 --repo example/product --body \"$(cat \"$R\")\""],
     ["cat enqueue.md > report.md && gh pr comment 9 --repo example/product --body \"$(cat report.md)\""],
   ])("a comment that may post /trunk merge from a file or a run-time value is still checked as an enqueue: %s", async (command) => {
     const hook = machine({ "repos/example/product/pulls/9": pull(head) });

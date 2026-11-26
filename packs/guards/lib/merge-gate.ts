@@ -125,7 +125,7 @@ const home = (path: string) => path === "~" ? homedir() : path.startsWith("~/") 
 function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline: string[], files: string[]) {
   const paths = files.map((path) => stdinPath.test(path) ? "-" : path);
   const piped = paths.includes("-") && !found.stdin;
-  const read = paths.map((path) => path === "-" ? found.stdin?.body ?? "" : io.readText(resolve(cwd ?? ".", found.chdir ?? ".", home(path))));
+  const read = paths.map((path) => path === "-" ? found.stdin?.body ?? "" : builtPath(found, path) ? undefined : io.readText(resolve(cwd ?? ".", found.chdir ?? ".", home(path))));
   const expanded = bodiesOf(found, inline).map((body) => expandedBody(body, cwd, io));
   const texts = [...inline, ...read.filter((text) => text !== undefined), found.stdin?.body ?? "", ...expanded.filter((text) => text !== undefined)];
   return { texts: [...texts, ...texts.flatMap(jsonStrings)], unread: read.includes(undefined), piped, builtUnread: expanded.includes(undefined) };
@@ -133,10 +133,12 @@ function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline
 
 type Body = { text: string; programs: string[]; parameters: boolean };
 
+const carriers = (found: Command, value: string) => found.args.flatMap((arg, index) => arg === value || arg.endsWith(`=${value}`) || (/^-\w/.test(arg) && arg.slice(2) === value) ? [index] : []);
+const builtPath = (found: Command, path: string) => carriers(found, path).some((index) => found.argParameters[index] || found.argSubstitutions[index]?.length);
+
 function bodiesOf(found: Command, inline: string[]): Body[] {
-  const carries = (value: string) => (arg: string) => arg === value || arg.endsWith(`=${value}`) || (/^-\w/.test(arg) && arg.slice(2) === value);
   const words = inline.map((value) => {
-    const indexes = found.args.flatMap((arg, index) => carries(value)(arg) ? [index] : []);
+    const indexes = carriers(found, value);
     return { text: value, programs: indexes.flatMap((index) => found.argSubstitutions[index] ?? []), parameters: indexes.some((index) => found.argParameters[index]) };
   });
   return found.stdin ? [...words, { text: found.stdin.body, programs: found.stdin.substitutions, parameters: found.stdin.parameters === true }] : words;
