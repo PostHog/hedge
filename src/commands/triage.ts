@@ -155,9 +155,15 @@ async function firstLine(context: TriageContext, command: string[]) {
 const publicSourceNames = new Set(defaultSources.map((source) => source.name));
 
 function scrubUnpinnedAdvisory(line: string): string {
-  return line.replace(
+  const next = line.replace(
     /^(\s*Note: The pack source )([a-z0-9][a-z0-9-]*)( is not pinned to a commit SHA\. Pin its ref in hedge\.json, so each apply loads the same packs, even offline\.)$/,
     (match, prefix, name, suffix) => (publicSourceNames.has(name) ? match : `${prefix}<private source>${suffix}`),
+  );
+  if (next !== line) return next;
+  return line.replace(
+    /^(\s*Note: The pack source )([a-z0-9][a-z0-9-]*)( follows )(.+?)( of )(.+?)(\. Pin its ref in hedge\.json to a commit SHA, so each apply loads the same packs, even offline\.)$/,
+    (match, prefix, name, follows, _ref, ofWord, _repo, suffix) =>
+      publicSourceNames.has(name) ? match : `${prefix}<private source>${follows}<ref>${ofWord}<private repo>${suffix}`,
   );
 }
 

@@ -445,6 +445,7 @@ describe("hedge triage", () => {
       [
         "=== hedge setup at 2026-11-26T00:00:00.000Z",
         "Note: The pack source confidential-project is not pinned to a commit SHA. Pin its ref in hedge.json, so each apply loads the same packs, even offline.",
+        "Note: The pack source legacy-secret follows release/internal of acme/legacy-packs. Pin its ref in hedge.json to a commit SHA, so each apply loads the same packs, even offline.",
       ].join("\n") + "\n",
     );
     const sent: Sent[] = [];
@@ -463,7 +464,11 @@ describe("hedge triage", () => {
     expect(code).toBe(0);
     const issue = sent.find((call) => call.command[1] === "issue")!;
     expect(issue.input).not.toContain("confidential-project");
+    expect(issue.input).not.toContain("legacy-secret");
+    expect(issue.input).not.toContain("release/internal");
+    expect(issue.input).not.toContain("acme/legacy-packs");
     expect(issue.input).toContain("Note: The pack source <private source> is not pinned to a commit SHA.");
+    expect(issue.input).toContain("Note: The pack source <private source> follows <ref> of <private repo>. Pin its ref in hedge.json to a commit SHA, so each apply loads the same packs, even offline.");
   });
 });
 

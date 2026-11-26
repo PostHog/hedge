@@ -843,5 +843,70 @@ describe("fetchSource local path resolution and object formats", () => {
     const directOffline = await fetchSource({ name: "team", repo: directPtr, ref: shaMain }, directCache);
     if ("error" in directOffline) throw new Error(directOffline.error);
     expect([directOffline.packs[0]?.manifest.summary, directOffline.stale]).toEqual(["Worktree pack.", undefined]);
+
+    const repointWork = join(root, "repoint-work");
+    const otherRepo = join(root, "other-repo");
+    await initRepo(otherRepo);
+    const shaOther = await commitPack(otherRepo, "team", "Other repo.");
+    mkdirSync(repointWork, { recursive: true });
+    symlinkSync(join(mainRepo, ".git"), join(repointWork, ".git"));
+    const repointCache = temp.make("cache-repoint-unreachable-");
+    expect("error" in (await fetchSource({ name: "team", repo: repointWork, ref: shaMain }, repointCache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo: otherRepo, ref: shaOther }, repointCache))).toBe(false);
+    rmSync(join(repointWork, ".git"));
+    symlinkSync(join(root, "missing-repo", ".git"), join(repointWork, ".git"));
+    expect("error" in (await fetchSource({ name: "team", repo: repointWork, ref: shaMain }, repointCache))).toBe(true);
+  });
+
+  test("preserves trailing-slash requirements on symlink targets and validates HEAD with bounded reads", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("symlink-slash-head-");
+    const realA = join(root, "real-a");
+    const mirrorGit = join(root, "mirror.git");
+    await initRepo(realA);
+    const shaA = await commitPack(realA, "team", "Real A.");
+    await initRepo(mirrorGit);
+    const shaB = await commitPack(mirrorGit, "team", "Mirror sibling B.");
+    const pointer = join(root, "pointer");
+    writeFileSync(pointer, `gitdir: ${join(realA, ".git")}\n`);
+    const mirror = join(root, "mirror");
+    symlinkSync("pointer/", mirror);
+
+    const slashCache = temp.make("cache-symlink-slash-");
+    const viaSlash = await fetchSource({ name: "team", repo: mirror, ref: shaB }, slashCache);
+    if ("error" in viaSlash) throw new Error(viaSlash.error);
+    expect([viaSlash.packs[0]?.manifest.summary, viaSlash.stale]).toEqual(["Mirror sibling B.", undefined]);
+    rmSync(mirror);
+    symlinkSync("pointer", mirror);
+    expect("error" in (await fetchSource({ name: "team", repo: mirror, ref: shaB }, slashCache))).toBe(true);
+
+    const badHeadDir = join(root, "packs");
+    const badHeadSibling = join(root, "packs.git");
+    const thirdRepo = join(root, "third");
+    mkdirSync(join(badHeadDir, ".git", "objects"), { recursive: true });
+    mkdirSync(join(badHeadDir, ".git", "refs"), { recursive: true });
+    writeFileSync(join(badHeadDir, ".git", "HEAD"), "ref: invalid\n");
+    await initRepo(badHeadSibling);
+    const siblingSha = await commitPack(badHeadSibling, "team", "Valid sibling.");
+    await initRepo(thirdRepo);
+    const thirdSha = await commitPack(thirdRepo, "team", "Third repo.");
+
+    const headCache = temp.make("cache-bad-head-");
+    const fromSibling = await fetchSource({ name: "team", repo: badHeadDir, ref: siblingSha }, headCache);
+    if ("error" in fromSibling) throw new Error(fromSibling.error);
+    expect([fromSibling.packs[0]?.manifest.summary, fromSibling.stale]).toEqual(["Valid sibling.", undefined]);
+    expect("error" in (await fetchSource({ name: "team", repo: thirdRepo, ref: thirdSha }, headCache))).toBe(false);
+    rmSync(badHeadDir, { recursive: true, force: true });
+    await initRepo(badHeadDir);
+    await commitPack(badHeadDir, "team", "Real replacement.");
+    expect("error" in (await fetchSource({ name: "team", repo: badHeadDir, ref: siblingSha }, headCache))).toBe(true);
+
+    const hugeHeadDir = join(root, "huge-head");
+    mkdirSync(join(hugeHeadDir, ".git", "objects"), { recursive: true });
+    mkdirSync(join(hugeHeadDir, ".git", "refs"), { recursive: true });
+    const hugeHead = join(hugeHeadDir, ".git", "HEAD");
+    writeFileSync(hugeHead, "not-a-valid-head\n");
+    truncateSync(hugeHead, 64 * 1024 * 1024);
+    expect("error" in (await fetchSource({ name: "team", repo: hugeHeadDir, ref: siblingSha }, headCache))).toBe(true);
   });
 });

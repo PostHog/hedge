@@ -137,6 +137,7 @@ function joinPosixBytes(parts: Buffer[]): Buffer {
 function resolvePosixPathBytes(base: Buffer, rawPath: Buffer, followLast = true): Buffer | undefined {
   const queue = splitPosixBytes(rawPath);
   const trailingSlash = rawPath.length > 1 && rawPath[rawPath.length - 1] === slashByte;
+  let requireDir = trailingSlash;
   const stack: Buffer[] = [];
   if (rawPath[0] !== slashByte) {
     for (const part of splitPosixBytes(base)) {
@@ -172,6 +173,7 @@ function resolvePosixPathBytes(base: Buffer, rawPath: Buffer, followLast = true)
           hops++;
           const linked = readlinkSync(candidate, "buffer");
           const rest = queue.slice(index);
+          if (rest.length === 0 && linked.length > 0 && linked[linked.length - 1] === slashByte) requireDir = true;
           if (linked[0] === slashByte) stack.length = 0;
           queue.length = 0;
           queue.push(...splitPosixBytes(linked), ...rest);
@@ -183,7 +185,7 @@ function resolvePosixPathBytes(base: Buffer, rawPath: Buffer, followLast = true)
     stack.push(seg);
   }
   const out = joinPosixBytes(stack);
-  if (trailingSlash) {
+  if (requireDir) {
     try {
       if (!statSync(out).isDirectory()) return undefined;
     } catch {}
@@ -257,34 +259,83 @@ function isGitBundleFileBytes(fileBuf: Buffer): boolean {
   }
 }
 
+function readBoundedPrefixBytes(fileBuf: Buffer, maxBytes: number, rejectOversized = false): Buffer | undefined {
+  let fd: number | undefined;
+  try {
+    const info = statSync(fileBuf);
+    if (!info.isFile()) return undefined;
+    if (rejectOversized && info.size > maxBytes) return undefined;
+    const cap = Math.min(info.size, maxBytes);
+    if (cap === 0) return Buffer.alloc(0);
+    fd = openSync(fileBuf, "r");
+    const raw = Buffer.allocUnsafe(cap);
+    let filled = 0;
+    while (filled < cap) {
+      const n = readSync(fd, raw, filled, cap - filled, filled);
+      if (n <= 0) break;
+      filled += n;
+    }
+    return raw.subarray(0, filled);
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {}
+    }
+  }
+}
+
+function isValidHeadBytes(raw: Buffer): boolean {
+  const text = raw.toString("latin1");
+  if (text.startsWith("ref:")) return /^ref:[ \t\r\n\v\f]*refs\//.test(text);
+  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})(?:[\r\n]|$)/i.test(text);
+}
+
 function resolvedCommonDirBytes(dirBuf: Buffer): Buffer | undefined {
   try {
     if (!statSync(dirBuf).isDirectory()) return undefined;
-    const headPath = Buffer.concat([dirBuf, slashHeadBuf]);
-    const headInfo = statSync(headPath);
-    if (!headInfo.isFile()) return undefined;
-    const head = readFileSync(headPath, "utf8").trim();
-    if (!head.startsWith("ref:") && !gitHash.test(head)) return undefined;
+    const headBytes = readBoundedPrefixBytes(Buffer.concat([dirBuf, slashHeadBuf]), 256);
+    if (!headBytes || !isValidHeadBytes(headBytes)) return undefined;
     let commonDir = dirBuf;
     const commonPath = Buffer.concat([dirBuf, slashCommondirBuf]);
-    try {
-      if (statSync(commonPath).isFile()) {
-        const raw = readFileSync(commonPath);
-        let end = raw.length;
-        while (end > 0 && (raw[end - 1] === 0x0a || raw[end - 1] === 0x0d)) end--;
-        if (end > 0) {
-          const resolvedCommon = resolvePosixPathBytes(dirBuf, raw.subarray(0, end));
-          if (!resolvedCommon) return undefined;
-          commonDir = resolvedCommon;
-        }
+    const rawCommon = readBoundedPrefixBytes(commonPath, 8192, true);
+    if (rawCommon) {
+      let end = rawCommon.length;
+      while (end > 0 && (rawCommon[end - 1] === 0x0a || rawCommon[end - 1] === 0x0d)) end--;
+      if (end > 0) {
+        const resolvedCommon = resolvePosixPathBytes(dirBuf, rawCommon.subarray(0, end));
+        if (!resolvedCommon) return undefined;
+        commonDir = resolvedCommon;
       }
-    } catch {}
+    }
     if (!isDirectoryBytes(Buffer.concat([commonDir, slashObjectsBuf]))) return undefined;
     if (!isDirectoryBytes(Buffer.concat([commonDir, slashRefsBuf])) && !isDirectoryBytes(Buffer.concat([commonDir, slashReftableBuf]))) return undefined;
     return commonDir;
   } catch {
     return undefined;
   }
+}
+
+function explicitPointerKeyBytes(pathBuf: Buffer, lexicalPath: Buffer, asFileUrl: boolean): string | undefined {
+  const dotGit = Buffer.concat([pathBuf, slashDotGitBuf]);
+  try {
+    const linkInfo = lstatSync(dotGit);
+    if (linkInfo.isSymbolicLink()) {
+      const target = resolvePosixPathBytes(pathBuf, dotGitBuf) ?? Buffer.concat([Buffer.from("raw:"), readlinkSync(dotGit, "buffer")]);
+      return encodeCanonicalLocal(Buffer.concat([lexicalPath, zeroByteBuf, Buffer.from("dotgit-link:"), target]), asFileUrl);
+    }
+    if (linkInfo.isFile()) {
+      const target = parseGitDirFileBytes(dotGit, pathBuf);
+      return encodeCanonicalLocal(Buffer.concat([lexicalPath, zeroByteBuf, Buffer.from("dotgit-file:"), target ?? Buffer.from("invalid")]), asFileUrl);
+    }
+  } catch {}
+  const directTarget = parseGitDirFileBytes(pathBuf, dirnamePosixBytes(lexicalPath));
+  if (directTarget) {
+    return encodeCanonicalLocal(Buffer.concat([lexicalPath, zeroByteBuf, Buffer.from("direct-gitfile:"), directTarget]), asFileUrl);
+  }
+  return undefined;
 }
 
 function resolveGitIdentityBytes(pathBuf: Buffer, lexicalDir: Buffer, allowBundle: boolean): { identity: Buffer; isStandardChild: boolean } | undefined {
@@ -415,7 +466,7 @@ function parseLocalRepoBytes(dir: string, effective: string): { base: Buffer; ra
   return { base, rawPath: expanded, asFileUrl: false };
 }
 
-type LocalRepoInfo = { resolved: string; primary: string; aliasKey: string; hasLiveRepo: boolean; isLocal: boolean };
+type LocalRepoInfo = { resolved: string; primary: string; aliasKey: string; pointerKey?: string; hasLiveRepo: boolean; isLocal: boolean };
 type ResolvedIdentity = { digest: string; display: string; localInfo: LocalRepoInfo };
 
 function canonicalLocalRepoInfo(dir: string, effective: string): LocalRepoInfo {
@@ -445,21 +496,23 @@ function canonicalLocalRepoInfo(dir: string, effective: string): LocalRepoInfo {
   if (!parsed) return { resolved: effective, primary: effective, aliasKey: effective, hasLiveRepo: false, isLocal: false };
   const { base, rawPath, asFileUrl } = parsed;
   const resolved = resolvePosixPathBytes(base, rawPath);
-  if (!resolved) {
-    const invalid = decodeRepoBytes(Buffer.concat([Buffer.from("\0invalid-local:"), base, zeroByteBuf, rawPath]));
-    return { resolved: invalid, primary: invalid, aliasKey: invalid, hasLiveRepo: false, isLocal: true };
-  }
-  const primary = encodeCanonicalLocal(resolved, asFileUrl);
-  const lexicalPrimary = resolvePosixPathBytes(base, rawPath, false) ?? resolved;
-  const aliasKey = lexicalPrimary.equals(resolved)
-    ? primary
-    : encodeCanonicalLocal(Buffer.concat([lexicalPrimary, zeroByteBuf, resolved]), asFileUrl);
-  const primaryGit = resolveGitIdentityBytes(resolved, dirnamePosixBytes(lexicalPrimary), true);
+  const invalidPrimary = decodeRepoBytes(Buffer.concat([Buffer.from("\0invalid-local:"), base, zeroByteBuf, rawPath]));
+  const primary = resolved ? encodeCanonicalLocal(resolved, asFileUrl) : invalidPrimary;
+  const lexicalPrimary = resolved ? (resolvePosixPathBytes(base, rawPath, false) ?? resolved) : undefined;
+  const aliasKey =
+    resolved && lexicalPrimary
+      ? lexicalPrimary.equals(resolved)
+        ? primary
+        : encodeCanonicalLocal(Buffer.concat([lexicalPrimary, zeroByteBuf, resolved]), asFileUrl)
+      : invalidPrimary;
+  const pointerKey = resolved && lexicalPrimary ? explicitPointerKeyBytes(resolved, lexicalPrimary, asFileUrl) : undefined;
+  const primaryGit = resolved && lexicalPrimary ? resolveGitIdentityBytes(resolved, dirnamePosixBytes(lexicalPrimary), true) : undefined;
   if (primaryGit) {
     return {
       resolved: primaryGit.isStandardChild ? primary : encodeCanonicalLocal(primaryGit.identity, asFileUrl),
       primary,
       aliasKey,
+      ...(pointerKey ? { pointerKey } : {}),
       hasLiveRepo: true,
       isLocal: true,
     };
@@ -478,22 +531,28 @@ function canonicalLocalRepoInfo(dir: string, effective: string): LocalRepoInfo {
       isLocal: true,
     };
   }
-  return { resolved: primary, primary, aliasKey, hasLiveRepo: false, isLocal: true };
+  return { resolved: primary, primary, aliasKey, ...(pointerKey ? { pointerKey } : {}), hasLiveRepo: false, isLocal: true };
 }
 
+type LocalAliasEntry = { aliasHash: string; targetHash: string };
+type ClearAliasEntry = { aliasHash: string; keepRef?: string };
+
 function localAliasPlan(localInfo: LocalRepoInfo, effectiveDigest: string): {
-  localAlias?: { aliasHash: string; targetHash: string };
-  clearAliases?: { aliasHash: string; keepRef?: string };
+  localAliases?: LocalAliasEntry[];
+  clearAliases?: ClearAliasEntry[];
 } {
   if (!localInfo.isLocal || !localInfo.hasLiveRepo) return {};
-  const aliasHash = repoDigest(localInfo.aliasKey);
+  const keys = localInfo.pointerKey && localInfo.pointerKey !== localInfo.aliasKey ? [localInfo.aliasKey, localInfo.pointerKey] : [localInfo.aliasKey];
   if (localInfo.resolved !== localInfo.primary) {
     return {
-      localAlias: { aliasHash, targetHash: effectiveDigest },
-      clearAliases: { aliasHash, keepRef: localAliasRef(aliasHash, effectiveDigest) },
+      localAliases: keys.map((key) => ({ aliasHash: repoDigest(key), targetHash: effectiveDigest })),
+      clearAliases: keys.map((key) => {
+        const aliasHash = repoDigest(key);
+        return { aliasHash, keepRef: localAliasRef(aliasHash, effectiveDigest) };
+      }),
     };
   }
-  return { clearAliases: { aliasHash } };
+  return { clearAliases: keys.map((key) => ({ aliasHash: repoDigest(key) })) };
 }
 
 async function rawResolvedRepoUrlAt(dir: string, gitDir: string, repo: string) {
@@ -516,7 +575,8 @@ async function rawResolvedRepoUrl(dir: string, repo: string) {
 async function resolveRepoIdentityAt(gitDir: string, dir: string, rawEffective: string): Promise<ResolvedIdentity> {
   const localInfo = canonicalLocalRepoInfo(dir, rawEffective);
   if (localInfo.isLocal && !localInfo.hasLiveRepo) {
-    const aliased = await localAliasDigestAt(dir, gitDir, repoDigest(localInfo.aliasKey));
+    const lookupKey = localInfo.pointerKey ?? localInfo.aliasKey;
+    const aliased = await localAliasDigestAt(dir, gitDir, repoDigest(lookupKey));
     if (aliased) return { digest: aliased, display: localInfo.resolved, localInfo };
   }
   return { digest: repoDigest(localInfo.resolved), display: localInfo.resolved, localInfo };
@@ -742,7 +802,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
         return fallBack(ref, dir, repo, effectiveDigest, good, `${ref.ref} from ${ref.repo} changed checkout HEAD while loading`, loadLimitMs, before, preserveBefore, legacyOk && effectiveDigest === effectiveBeforeDigest, isBranch);
       }
       const localInfo = canonicalLocalRepoInfo(dir, await rawResolvedRepoUrl(dir, repo));
-      const { localAlias, clearAliases } = localAliasPlan(localInfo, effectiveDigest);
+      const { localAliases, clearAliases } = localAliasPlan(localInfo, effectiveDigest);
       const saveError = await saveGood(
         dir,
         {
@@ -754,7 +814,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
           resolvedDigest: effectiveDigest,
         },
         undefined,
-        localAlias,
+        localAliases,
         clearAliases,
       );
       if (!saveError) {
@@ -1137,8 +1197,8 @@ async function saveGood(
   dir: string,
   good: Good,
   historyFrom?: string,
-  localAlias?: { aliasHash: string; targetHash: string },
-  clearAliases?: { aliasHash: string; keepRef?: string },
+  localAliases?: LocalAliasEntry[],
+  clearAliases?: ClearAliasEntry[],
 ): Promise<string | undefined> {
   const before = await lastGood(dir);
   const unchanged =
@@ -1161,7 +1221,7 @@ async function saveGood(
       await rollbackRefs(dir, refUndo);
       return recorded;
     }
-    if (localAlias) {
+    for (const localAlias of localAliases ?? []) {
       const aliasRef = localAliasRef(localAlias.aliasHash, localAlias.targetHash);
       const existingAlias = await git(dir, "rev-parse", "--verify", "--quiet", aliasRef);
       const prevAliasOid = existingAlias.ok && gitHash.test(existingAlias.stdout) ? existingAlias.stdout.toLowerCase() : undefined;
@@ -1196,15 +1256,16 @@ async function saveGood(
     }
   }
   const clearStaleAliases = async () => {
-    if (!clearAliases) return;
-    const staleAliases = await git(dir, "for-each-ref", "--format=%(refname)", localAliasPrefix(clearAliases.aliasHash));
-    if (staleAliases.ok && staleAliases.stdout) {
-      const refsToClear = staleAliases.stdout
-        .split("\n")
-        .map((s) => s.trim())
-        .filter((ref) => ref !== "" && ref !== clearAliases.keepRef)
-        .map((ref) => ({ ref }));
-      if (refsToClear.length) await rollbackRefs(dir, refsToClear);
+    for (const entry of clearAliases ?? []) {
+      const staleAliases = await git(dir, "for-each-ref", "--format=%(refname)", localAliasPrefix(entry.aliasHash));
+      if (staleAliases.ok && staleAliases.stdout) {
+        const refsToClear = staleAliases.stdout
+          .split("\n")
+          .map((s) => s.trim())
+          .filter((ref) => ref !== "" && ref !== entry.keepRef)
+          .map((ref) => ({ ref }));
+        if (refsToClear.length) await rollbackRefs(dir, refsToClear);
+      }
     }
   };
   if (unchanged) {
@@ -1649,8 +1710,8 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} changed checkout HEAD while loading` };
   }
   const refreshLocalInfo = canonicalLocalRepoInfo(dir, await rawResolvedRepoUrl(dir, repo));
-  const { localAlias: refreshAlias, clearAliases: clearRefreshAliases } = localAliasPlan(refreshLocalInfo, effectiveDigest);
-  const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest }, verifiedHistoryFrom, refreshAlias, clearRefreshAliases);
+  const { localAliases: refreshAliases, clearAliases: clearRefreshAliases } = localAliasPlan(refreshLocalInfo, effectiveDigest);
+  const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest }, verifiedHistoryFrom, refreshAliases, clearRefreshAliases);
   if (saveError) {
     if (before) await restoreCheckout(dir, before);
     else if ((await git(dir, "checkout", "-q", "--detach", `${from}^{commit}`)).ok) clearLoadedModules(dir);
