@@ -11,6 +11,7 @@ export const graceMs = 150;
 export const interruptGraceMs = 300;
 export const tagEnvVar = "HEDGE_SUPERVISOR_TAG";
 export const spareEnvVar = "HEDGE_SUPERVISOR_SPARE";
+export const probeGraceEnvVar = "HEDGE_PROBE_GRACE_MS";
 
 export function encodeSpareLine(filePath: string): string {
   return `${JSON.stringify(filePath)}\n`;
@@ -94,36 +95,47 @@ function isOwnedDirectory(dir: string): boolean {
   }
 }
 
-export function recordSparedProcess(filePath: string, pids: number[], sids: number[]): void {
-  if (!pids.length && !sids.length) return;
+export type SpareRecordResult = { ok: true } | { ok: false; error: string; code?: string };
+
+export function recordSparedProcess(filePath: string, pids: number[], sids: number[]): SpareRecordResult {
+  if (!pids.length && !sids.length) return { ok: true };
   const dir = dirname(filePath);
   const flags = constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
   const lines: string[] = [];
   for (const pid of new Set(pids)) if (Number.isInteger(pid) && pid > 0) lines.push(`pid:${pid}`);
   for (const sid of new Set(sids)) if (Number.isInteger(sid) && sid > 0) lines.push(`sid:${sid}`);
-  if (!lines.length) return;
-  const payload = lines.join("\n") + "\n";
+  if (!lines.length) return { ok: true };
+  const payload = new TextEncoder().encode(lines.join("\n") + "\n");
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
-      if (!isOwnedDirectory(dir)) return;
+      if (!isOwnedDirectory(dir)) return { ok: false, error: `spare directory ${dir} is not owned by the current user`, code: "EPERM" };
       const fd = openSync(filePath, flags, 0o600);
       try {
         const stat = fstatSync(fd);
-        if (!stat.isFile()) return;
-        if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return;
-        writeSync(fd, payload);
-        return;
+        if (!stat.isFile()) return { ok: false, error: `spare path ${filePath} is not a regular file`, code: "EPERM" };
+        if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+          return { ok: false, error: `spare file ${filePath} is not owned by the current user`, code: "EPERM" };
+        }
+        let offset = 0;
+        while (offset < payload.byteLength) {
+          const written = writeSync(fd, payload, offset, payload.byteLength - offset);
+          if (written <= 0) return { ok: false, error: `short write to spare file ${filePath}`, code: "EIO" };
+          offset += written;
+        }
+        return { ok: true };
       } finally {
         try {
           closeSync(fd);
         } catch {}
       }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === "ENOENT" && attempt < 3) continue;
-      return;
+      const err = error as NodeJS.ErrnoException;
+      if (err?.code === "ENOENT" && attempt < 3) continue;
+      return { ok: false, error: err?.message ?? String(error), ...(err?.code ? { code: err.code } : {}) };
     }
   }
+  return { ok: false, error: `could not record spared processes in ${filePath}`, code: "ENOENT" };
 }
 
 function readSpared(filePath: string | undefined): { pids: Set<number>; sids: Set<number> } {
@@ -1365,6 +1377,14 @@ if (import.meta.main) {
       closeSync(spareFd);
     } catch {}
     spareFd = undefined;
+  }
+  if (!holder) {
+    const envObj: Record<string, string | undefined> = targetEnv ?? Object.create(null);
+    if (!targetEnv) {
+      for (const [k, v] of Object.entries(process.env)) if (v !== undefined) envObj[k] = v;
+      targetEnv = envObj;
+    }
+    envObj[probeGraceEnvVar] = String(cleanupGraceMs);
   }
   if (process.platform === "linux" && holder) {
     enableChildSubreaper();

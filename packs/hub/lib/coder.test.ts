@@ -698,13 +698,13 @@ test("lets a box-locked command finish its work when the caller receives SIGTERM
   const dir = temp.make("hedge-lock-sigterm-work-");
   const boxLockPath = join(import.meta.dir, "box-lock.ts");
   const coderPath = join(import.meta.dir, "coder.ts");
-  for (const nested of [false, true]) {
-    const suffix = nested ? "nested" : "direct";
+  for (const mode of ["direct", "nested-inner", "nested-outer"] as const) {
+    const nested = mode !== "direct";
     const [ready, gate, doneFile, innerPidFile] = [
-      join(dir, `ready-${suffix}`),
-      join(dir, `gate-${suffix}`),
-      join(dir, `done-${suffix}`),
-      join(dir, `inner-${suffix}`),
+      join(dir, `ready-${mode}`),
+      join(dir, `gate-${mode}`),
+      join(dir, `done-${mode}`),
+      join(dir, `inner-${mode}`),
     ];
     expect(Bun.spawnSync(["mkfifo", ready, gate, innerPidFile]).exitCode).toBe(0);
     const started = Bun.file(ready).text();
@@ -732,7 +732,8 @@ process.exit(r.code);`
       [innerPid, workerPid] = (await Promise.all([innerPidRead, started])).map((s) => Number(s.trim())) as [number, number];
       expect(innerPid).toBeGreaterThan(0);
       expect(workerPid).toBeGreaterThan(0);
-      process.kill(innerPid, "SIGTERM");
+      if (mode === "nested-outer") caller.kill("SIGTERM");
+      else process.kill(innerPid, "SIGTERM");
       expect(await caller.exited).not.toBe(0);
       expect(() => process.kill(workerPid, 0)).not.toThrow();
       await expect(withBoxLock(lockHome, "box-1", { waitMs: 0 }, async () => "free")).rejects.toThrow("is busy");

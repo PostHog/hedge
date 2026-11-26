@@ -1,5 +1,5 @@
 import { closeSync, writeSync } from "node:fs";
-import { discoverTargets, discoverTargetsLinux, discoverTargetsSync, drainControlFd, enableChildSubreaper, encodeSpareLine, killSession, ownTag, readFdChunk, recordSparedProcess, redirectStdioOutputsToNull, removeSpareFile, setCloexec, shieldGroupSignals, signalTargets, spareEnvVar, spareFilePath, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { discoverTargets, discoverTargetsLinux, discoverTargetsSync, drainControlFd, enableChildSubreaper, encodeSpareLine, graceMs, interruptGraceMs, killSession, ownTag, probeGraceEnvVar, readFdChunk, recordSparedProcess, redirectStdioOutputsToNull, removeSpareFile, setCloexec, shieldGroupSignals, signalTargets, spareEnvVar, spareFilePath, type StopSignal, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
 type StartConfig = { argv: string[]; env?: Record<string, string>; envEntries?: Array<[string, string]>; spareTag?: string; spareHome?: string };
 
@@ -9,6 +9,9 @@ shieldGroupSignals();
 const runTag = ownTag(process.env[tagEnvVar]);
 const inProbe = (process.env[tagEnvVar] ?? "").split(",").some((part) => part.trim().startsWith("probe-"));
 const inheritedSpare = Boolean(process.env[spareEnvVar]);
+const stopSignalsSet = new Set<StopSignal>(["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"]);
+const rawProbeGrace = Number(process.env[probeGraceEnvVar]);
+const probeGraceMs = Number.isFinite(rawProbeGrace) && rawProbeGrace >= 0 ? rawProbeGrace : graceMs;
 let sparePath = process.env[spareEnvVar];
 let target: ReturnType<typeof Bun.spawn> | undefined;
 let targetReaped = false;
@@ -16,14 +19,40 @@ let targetCode: number | undefined;
 let confirmedDone = false;
 let killing = false;
 let lockCount = 0;
+let gracefulSignal: StopSignal | undefined;
+let interruptTimer: ReturnType<typeof setTimeout> | undefined;
+let graceTimer: ReturnType<typeof setTimeout> | undefined;
+let resultFdClosed = false;
+const receivedSignals = new Set<StopSignal>();
+
+const clearGraceTimers = () => {
+  if (interruptTimer) {
+    clearTimeout(interruptTimer);
+    interruptTimer = undefined;
+  }
+  if (graceTimer) {
+    clearTimeout(graceTimer);
+    graceTimer = undefined;
+  }
+};
 
 const exitDone = () => {
+  clearGraceTimers();
   if (inheritedSpare && sparePath) {
     const found = discoverTargetsSync(process.pid, runTag, undefined, sparePath);
     if (found) {
       const sids = [...(found.sids ?? []), ...(found.hasSessionGroup ? [process.pid] : [])];
-      if (found.pids.length || sids.length) recordSparedProcess(sparePath, found.pids, sids);
+      if (found.pids.length || sids.length) {
+        const saved = recordSparedProcess(sparePath, found.pids, sids);
+        if (!saved.ok) {
+          if (!resultFdClosed && resultFd !== undefined) {
+            writeResult(resultFd, { spareError: saved.error, ...(saved.code ? { code: saved.code } : {}) }, true);
+          }
+          process.exit(1);
+        }
+      }
     }
+    if (!resultFdClosed && resultFd !== undefined) writeResult(resultFd, { saved: true }, true);
   } else if (!inheritedSpare && sparePath) {
     removeSpareFile(sparePath);
   }
@@ -31,6 +60,7 @@ const exitDone = () => {
 };
 
 const killAll = (removeOwnSpare = false) => {
+  clearGraceTimers();
   if (killing) return;
   killing = true;
   const finish = () => {
@@ -65,8 +95,48 @@ const killAll = (removeOwnSpare = false) => {
   finish();
 };
 
+const forwardGraceful = (sig: StopSignal) => {
+  if (killing || confirmedDone) return;
+  gracefulSignal = sig;
+  if (!receivedSignals.has(sig)) {
+    receivedSignals.add(sig);
+    void killSession(process.pid, sig, runTag, undefined, sparePath);
+  }
+  if (sig === "SIGTERM" || sig === "SIGHUP") {
+    if (interruptTimer) {
+      clearTimeout(interruptTimer);
+      interruptTimer = undefined;
+    }
+    if (!graceTimer) {
+      graceTimer = setTimeout(() => {
+        graceTimer = undefined;
+        killAll(false);
+      }, probeGraceMs);
+    }
+    return;
+  }
+  if (!interruptTimer && !graceTimer) {
+    interruptTimer = setTimeout(() => {
+      interruptTimer = undefined;
+      if (killing || confirmedDone) return;
+      if (!receivedSignals.has("SIGTERM")) {
+        receivedSignals.add("SIGTERM");
+        void killSession(process.pid, "SIGTERM", runTag, undefined, sparePath);
+      }
+      if (!graceTimer) {
+        graceTimer = setTimeout(() => {
+          graceTimer = undefined;
+          killAll(false);
+        }, probeGraceMs);
+      }
+    }, interruptGraceMs);
+  }
+};
+
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
-  process.on(sig, () => {});
+  process.on(sig, () => {
+    receivedSignals.add(sig);
+  });
 }
 
 const closeQuiet = (fd: number) => {
@@ -75,7 +145,12 @@ const closeQuiet = (fd: number) => {
   } catch {}
 };
 
-const writeResult = (fd: number, payload: { code: number } | { error: string; code?: string }) => {
+const writeResult = (
+  fd: number,
+  payload: { code: number } | { error: string; code?: string } | { saved: true } | { spareError: string; code?: string },
+  closeAfter = true,
+) => {
+  if (resultFdClosed) return;
   const bytes = new TextEncoder().encode(JSON.stringify(payload) + "\n");
   try {
     let offset = 0;
@@ -85,7 +160,10 @@ const writeResult = (fd: number, payload: { code: number } | { error: string; co
       offset += written;
     }
   } catch {}
-  closeQuiet(fd);
+  if (closeAfter) {
+    resultFdClosed = true;
+    closeQuiet(fd);
+  }
 };
 
 let readingControl = false;
@@ -107,6 +185,10 @@ const watchControl = (fd: number, initialBuf = "") => {
           confirmedDone = true;
           exitDone();
         }
+        if (line.startsWith("sig:")) {
+          const sig = line.slice(4) as StopSignal;
+          if (stopSignalsSet.has(sig)) forwardGraceful(sig);
+        }
         return false;
       };
       for (;;) {
@@ -122,6 +204,17 @@ const watchControl = (fd: number, initialBuf = "") => {
     } catch {}
     if (!killing) {
       if (confirmedDone) exitDone();
+      if (gracefulSignal) {
+        if (targetReaped) {
+          void discoverTargets(process.pid, runTag, sparePath, false).then((targets) => {
+            if (!killing && targets && targets.pids.length === 0) {
+              clearGraceTimers();
+              process.exit(targetCode ?? 0);
+            }
+          });
+        }
+        return;
+      }
       if (lockCount > 0 && !targetReaped && !inProbe) {
         if (!inheritedSpare && sparePath) removeSpareFile(sparePath);
         process.exit(0);
@@ -145,6 +238,9 @@ if (parsedLockCount === undefined || controlFd === undefined || resultFd === und
   process.exit(127);
 }
 lockCount = parsedLockCount;
+if (lockCount > 0 && !inProbe && inheritedSpare && sparePath) {
+  recordSparedProcess(sparePath, [process.pid], [process.pid]);
+}
 
 setCloexec(controlFd, true);
 setCloexec(resultFd, true);
@@ -153,7 +249,7 @@ if (spareFd !== undefined) setCloexec(spareFd, true);
 
 const lockFds = Array.from({ length: lockCount }, (_, index) => index + 3);
 const drained = drainControlFd(controlFd);
-if (drained.closed || drained.lines.includes("kill")) {
+if (drained.closed || drained.lines.includes("kill") || drained.lines.some((line) => line.startsWith("sig:"))) {
   for (const fd of [...lockFds, resultFd, configFd, ...(spareFd !== undefined ? [spareFd] : [])]) closeQuiet(fd);
   redirectStdioOutputsToNull();
   process.exit(137);
@@ -178,7 +274,7 @@ try {
   closeQuiet(configFd);
 }
 
-if (!parsed || killing) {
+if (!parsed || killing || gracefulSignal) {
   for (const fd of [...lockFds, resultFd, ...(spareFd !== undefined ? [spareFd] : [])]) closeQuiet(fd);
   redirectStdioOutputsToNull();
   killAll();
@@ -222,7 +318,7 @@ if (!parsed || killing) {
     targetReaped = true;
     targetCode = 127;
     const err = error as NodeJS.ErrnoException;
-    writeResult(resultFd, { error: err?.message ?? String(error), ...(err?.code ? { code: err.code } : {}) });
+    writeResult(resultFd, { error: err?.message ?? String(error), ...(err?.code ? { code: err.code } : {}) }, true);
   }
   if (target) {
     for (const fd of lockFds) closeQuiet(fd);
@@ -230,6 +326,15 @@ if (!parsed || killing) {
     const code = await target.exited;
     targetReaped = true;
     targetCode = code;
-    writeResult(resultFd, { code });
+    if (gracefulSignal) {
+      writeResult(resultFd, { code }, true);
+      const targets = await discoverTargets(process.pid, runTag, sparePath, false);
+      if (!killing && targets && targets.pids.length === 0) {
+        clearGraceTimers();
+        process.exit(code);
+      }
+    } else {
+      writeResult(resultFd, { code }, !(inheritedSpare && sparePath));
+    }
   }
 }

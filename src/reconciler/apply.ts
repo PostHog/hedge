@@ -680,27 +680,23 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
         } catch {}
         const ownGroupOnly = Boolean(entry.targetExited);
         const sweepTag = ownGroupOnly ? undefined : entry.tag;
+        const holderStillAlive = entry.holderFd !== undefined && !drainControlFd(entry.holderFd).closed;
         if (stillAlive) {
           killSessionSync(entry.pid, "SIGKILL", sweepTag, spare, ownGroupOnly);
           try {
             process.kill(entry.pid, "SIGKILL");
           } catch {}
-          if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
-            killSessionSync(entry.holderPid, "SIGKILL", sweepTag, spare, ownGroupOnly);
-            try {
-              process.kill(entry.holderPid, "SIGKILL");
-            } catch {}
-            killDeadSessionSync(entry.holderPid, sweepTag, false, spare, ownGroupOnly);
-          }
         } else {
           killDeadSessionSync(entry.pid, sweepTag, false, spare, ownGroupOnly);
-          if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
+        }
+        if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
+          if (holderStillAlive) {
             killSessionSync(entry.holderPid, "SIGKILL", sweepTag, spare, ownGroupOnly);
             try {
               process.kill(entry.holderPid, "SIGKILL");
             } catch {}
-            killDeadSessionSync(entry.holderPid, sweepTag, false, spare, ownGroupOnly);
           }
+          killDeadSessionSync(entry.holderPid, sweepTag, false, spare, ownGroupOnly);
         }
         removeSpareAsync(spare);
       }

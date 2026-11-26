@@ -3,7 +3,7 @@ import { rm, rmdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { boxPrefix } from "../../../src/hub/names.ts";
-import { appendTag, createPipe, drainControlFd, killDeadSessionSync, killSessionSync, parseSpareLine, readFdChunk, setCloexec, spareEnvVar, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
+import { appendTag, createPipe, drainControlFd, killDeadSessionSync, killSessionSync, parseSpareLine, readFdChunk, recordSparedProcess, setCloexec, spareEnvVar, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
 import { bunScript } from "../../../src/runner/bun.ts";
 import { heldLocks } from "./box-lock.ts";
 
@@ -109,33 +109,54 @@ function removeSpareAsync(filePath: string | undefined): void {
     .then(() => rmdir(dirname(filePath)).catch(() => {}));
 }
 
-function readResultLine(fd: number, stop: AbortSignal): { result: Promise<string>; done: Promise<void> } {
-  const readLoop = (async () => {
-    const decoder = new TextDecoder("utf-8");
-    const chunk = new Uint8Array(1024);
-    let out = "";
-    for (;;) {
-      const n = await readFdChunk(fd, chunk);
-      if (n <= 0) break;
-      out += decoder.decode(chunk.subarray(0, n), { stream: true });
-      if (out.includes("\n")) break;
-    }
-    out += decoder.decode();
-    return out;
-  })();
-  const aborted = new Promise<string>((resolve) => {
-    if (stop.aborted) {
-      resolve("");
-      return;
-    }
-    stop.addEventListener("abort", () => resolve(""), { once: true });
-  });
+function createResultReader(fd: number, stop: AbortSignal) {
+  const decoder = new TextDecoder("utf-8");
+  const chunk = new Uint8Array(1024);
+  let buf = "";
+  let eof = false;
+  let activeRead: Promise<void> = Promise.resolve();
+  const nextLine = (): Promise<string> => {
+    const readNext = (async () => {
+      for (;;) {
+        const nl = buf.indexOf("\n");
+        if (nl !== -1) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          return line;
+        }
+        if (eof) {
+          const rest = buf + decoder.decode();
+          buf = "";
+          return rest;
+        }
+        const n = await readFdChunk(fd, chunk);
+        if (n <= 0) {
+          eof = true;
+          const rest = buf + decoder.decode();
+          buf = "";
+          return rest;
+        }
+        buf += decoder.decode(chunk.subarray(0, n), { stream: true });
+      }
+    })();
+    activeRead = readNext.then(
+      () => {},
+      () => {},
+    );
+    const aborted = new Promise<string>((resolve) => {
+      if (stop.aborted) {
+        resolve("");
+        return;
+      }
+      stop.addEventListener("abort", () => resolve(""), { once: true });
+    });
+    return Promise.race([readNext, aborted]);
+  };
   return {
-    result: Promise.race([readLoop, aborted]),
-    done: readLoop.then(
-      () => {},
-      () => {},
-    ),
+    nextLine,
+    get done() {
+      return activeRead;
+    },
   };
 }
 
@@ -235,10 +256,12 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     let stopped = false;
     let supervisorReaped = false;
     let confirmedDone = false;
+    let pendingProbeInterrupt: NodeJS.Signals | undefined;
+    let probeInterruptHooked = false;
     let tagSweep: Promise<void> | undefined;
     let configWrite: Promise<void> | undefined;
     let resultRead: Promise<{ code?: number; error?: string; errCode?: string } | undefined> | undefined;
-    let resultFdDone: Promise<void> | undefined;
+    let resultReader: ReturnType<typeof createResultReader> | undefined;
     const stopStream = new AbortController();
     const closeControl = () => {
       if (controlFd === undefined) return;
@@ -343,6 +366,27 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       if (!tagSweep) tagSweep = runOutOfProcessSweep();
     };
     const interrupted = (name: NodeJS.Signals) => {
+      if (inProbe && child && !supervisorReaped && controlFd !== undefined) {
+        pendingProbeInterrupt = name;
+        try {
+          writeSync(controlFd, `sig:${name}\n`);
+        } catch {}
+        if (!probeInterruptHooked) {
+          probeInterruptHooked = true;
+          const liveChild = child;
+          void liveChild.exited.finally(() => {
+            const sig = pendingProbeInterrupt;
+            if (!sig) return;
+            closeControl();
+            release();
+            if (!process.listenerCount(sig)) {
+              if (sig === "SIGQUIT") process.exit(131);
+              process.kill(process.pid, sig);
+            }
+          });
+        }
+        return;
+      }
       stopChild();
       const spare = resolveSpareFile();
       if (child && !supervisorReaped && controlFd !== undefined) {
@@ -435,7 +479,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     try {
       const command = holdingLocks(argv, locks, timeoutMs, env?.PATH ?? process.env.PATH ?? "");
       const childEnv = env ?? process.env;
-      const fullTag = appendTag(childEnv[tagEnvVar] ?? process.env[tagEnvVar], tag);
+      const fullTag = keepAliveOnSignal ? tag : appendTag(childEnv[tagEnvVar] ?? process.env[tagEnvVar], tag);
       const envEntries: Array<[string, string]> = [];
       for (const [k, v] of Object.entries(childEnv)) {
         if (v !== undefined && k !== tagEnvVar && k !== spareEnvVar) envEntries.push([k, v]);
@@ -459,6 +503,9 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           detached: true,
         },
       );
+      if (keepAliveOnSignal && inheritedSpare) {
+        recordSparedProcess(inheritedSpare, [child.pid], [child.pid]);
+      }
       closeResultWrite();
       closeConfigRead();
       closeSpareWrite();
@@ -468,9 +515,9 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         setCloexec(fd, true);
         controlFd = fd;
       }
-      const reader = readResultLine(resultPipe.readFd, stopStream.signal);
-      resultFdDone = reader.done;
-      resultRead = reader.result.then(
+      const reader = createResultReader(resultPipe.readFd, stopStream.signal);
+      resultReader = reader;
+      resultRead = reader.nextLine().then(
         (raw) => {
           const line = raw.trim();
           if (!line) return undefined;
@@ -496,7 +543,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         closeControl();
         const reported = resultRead ? await resultRead : undefined;
         if (reported) settle(reported);
-        if (!confirmedDone && !expired && !tagSweep) tagSweep = runOutOfProcessSweep();
+        if (!confirmedDone && !expired && !pendingProbeInterrupt && !tagSweep) tagSweep = runOutOfProcessSweep();
         settle({ code });
       });
       let forceExpired = false;
@@ -562,6 +609,11 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         return timeoutResult(timeoutMs, stdout);
       }
       cancel();
+      if (pendingProbeInterrupt) {
+        await live.exited;
+        closeControl();
+        return { code: status.code ?? 143, stdout, stderr };
+      }
       confirmedDone = true;
       if (!supervisorReaped && controlFd !== undefined) {
         try {
@@ -569,6 +621,23 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         } catch {}
       }
       closeControl();
+      if (inheritedSpare && status.error === undefined && resultReader) {
+        const spareLine = await Promise.race([
+          resultReader.nextLine(),
+          waitUpTo(live.exited, 2_000).then(() => ""),
+        ]);
+        if (spareLine.trim()) {
+          let parsedAck: { spareError?: unknown; code?: unknown } | undefined;
+          try {
+            parsedAck = JSON.parse(spareLine.trim()) as { spareError?: unknown; code?: unknown };
+          } catch {}
+          if (typeof parsedAck?.spareError === "string") {
+            const err = new Error(parsedAck.spareError) as NodeJS.ErrnoException;
+            if (typeof parsedAck.code === "string") err.code = parsedAck.code;
+            throw err;
+          }
+        }
+      }
       if (inheritedSpare && !supervisorReaped) {
         await waitUpTo(live.exited, 2_000);
       }
@@ -590,8 +659,8 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       else closeConfigWrite();
       stopStream.abort();
       if (resultRead) await resultRead.catch(() => {});
-      if (resultFdDone) {
-        void resultFdDone.finally(() => closeResultRead());
+      if (resultReader) {
+        void resultReader.done.finally(() => closeResultRead());
       } else {
         closeResultRead();
       }
