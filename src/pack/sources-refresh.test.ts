@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
+import { probeLocalRepoInfo } from "./local-repo-info.ts";
 import { advanceSource, cachedSource, fetchSource, followsBranch, unpinnedSources } from "./sources.ts";
 
 isolateGit();
@@ -615,6 +616,30 @@ describe("fetchSource staged refresh and rollback", () => {
     expect(fallback.packs[0]?.manifest.summary).toBe("Carried edit same manifest.");
     expect(await spawnGit(join(cache, "team"), "rev-parse", "HEAD")).toBe(c1);
     expect(await spawnGit(join(cache, "team"), "status", "--porcelain")).toBe("");
+  });
+
+  test("preserves tracked edits created while a fetch is in progress instead of hard-resetting them on checkout failure", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-concurrent-edit-");
+    const repo = join(root, "repo");
+    await initRepo(repo);
+    const c1 = await commitPack(repo, "team", "Concurrent edit v1.");
+    const c2 = await commitPack(repo, "team", "Concurrent edit v2.");
+    const cache = temp.make("cache-concurrent-edit-");
+    expect("error" in (await fetchSource({ name: "team", repo, ref: c1 }, cache))).toBe(false);
+    let calls = 0;
+    const probeThatEdits = async (dir: string, effective: string) => {
+      calls++;
+      if (calls === 2) {
+        writeFileSync(join(cache, "team", "packs", "team", "pack.json"), JSON.stringify({ schema: 1, name: "team", summary: "User concurrent edit." }));
+      }
+      return probeLocalRepoInfo(dir, effective);
+    };
+    const res = await fetchSource({ name: "team", repo, ref: c2 }, cache, undefined, undefined, probeThatEdits);
+    if ("error" in res) throw new Error(res.error);
+    expect(res.packs[0]?.manifest.summary).toBe("User concurrent edit.");
+    expect(readFileSync(join(cache, "team", "packs", "team", "pack.json"), "utf8")).toContain("User concurrent edit.");
+    expect(await spawnGit(join(cache, "team"), "rev-parse", "HEAD")).toBe(c1);
   });
 
 });

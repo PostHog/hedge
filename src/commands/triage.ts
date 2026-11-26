@@ -173,18 +173,36 @@ function scrubUnpinnedAdvisory(line: string): string {
   return `${prefix}${safeName} follows <ref> of <private repo>${legacyAdvisorySuffix}`;
 }
 
+const encodeToken = (id: number) => `\0\x01${id.toString(2).replace(/0/g, "\x02").replace(/1/g, "\x03")}\x01\0`;
+
+function scrubUnreachableSources(line: string, nextToken: () => string, saved: Map<string, string>): string {
+  return line.replace(
+    /(unreachable sources:\s*)([a-z0-9][a-z0-9-]*(?:,\s*[a-z0-9][a-z0-9-]*)*)/g,
+    (_match, prefix, list: string) => {
+      const names = list.split(/,\s*/).map((name) => (publicSourceNames.has(name) ? name : "<private source>"));
+      const token = nextToken();
+      saved.set(token, `${prefix}${names.join(", ")}`);
+      return token;
+    },
+  );
+}
+
 function cleanWithAdvisories(lines: string[], clean: (text: string) => string): string[] {
   const saved = new Map<string, string>();
-  const tagged = lines.map((line, index) => {
+  let nextId = 0;
+  const nextToken = () => encodeToken(nextId++);
+  const tagged = lines.map((line) => {
     const scrubbed = scrubUnpinnedAdvisory(line);
-    if (scrubbed === line) return line;
-    const token = `\0HEDGE_ADVISORY_${index}\0`;
-    saved.set(token, scrubbed);
-    return token;
+    if (scrubbed !== line) {
+      const token = nextToken();
+      saved.set(token, scrubbed);
+      return token;
+    }
+    return scrubUnreachableSources(line, nextToken, saved);
   });
   const cleaned = clean(tagged.join("\n")).split("\n");
   if (!saved.size) return cleaned;
-  return cleaned.map((line) => saved.get(line) ?? line);
+  return cleaned.map((line) => line.replace(/\0\x01[\x02\x03]+\x01\0/g, (token) => saved.get(token) ?? token));
 }
 
 function knownNames(hostname: string, machine: MachineFile | undefined, profile: Profile | undefined, gitName: string | undefined, origin: string | undefined): KnownName[] {

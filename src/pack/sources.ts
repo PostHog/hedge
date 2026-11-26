@@ -1178,8 +1178,12 @@ async function checkedOutFromCache(
     (goodCommit.commit === oid || (good.peeled === true && stripSourceRefspec(good.ref).toLowerCase() === oid));
   const target = verifiedGoodMatch ? goodCommit.commit : await pinTarget(dir, effectiveDigest, oid);
   if (!target) return undefined;
+  const beforeHead = (await git(dir, "rev-parse", "--verify", "--quiet", "HEAD")).stdout.toLowerCase();
   const moved = await git(dir, "checkout", "-q", "--detach", `${target}^{commit}`);
-  return moved.ok ? { commit: target, effectiveDigest, touchedWorktree: true } : { effectiveDigest, touchedWorktree: true };
+  if (moved.ok) return { commit: target, effectiveDigest, touchedWorktree: true };
+  const afterHead = (await git(dir, "rev-parse", "--verify", "--quiet", "HEAD")).stdout.toLowerCase();
+  const movedHead = Boolean(afterHead && afterHead === target && afterHead !== beforeHead);
+  return { effectiveDigest, touchedWorktree: movedHead };
 }
 
 type SavedFetchHead = { kind: "content"; bytes: Buffer; mode: number } | { kind: "missing" } | { kind: "unreadable" };
@@ -1509,10 +1513,18 @@ async function checkout(
     return { effectiveDigest, localInfo: afterIdentity.localInfo, error: peeled.stderr || "could not resolve fetched commit" };
   }
   const targetCommit = peeled.stdout.toLowerCase();
+  if (!createdFreshGit && (await localEdits(dir)).length > 0) {
+    await restoreFetchHead(dir, savedFetchHead);
+    return { effectiveDigest, localInfo: afterIdentity.localInfo, error: "local edits detected during fetch", touchedWorktree: false };
+  }
+  const beforeHead = createdFreshGit ? "" : (await git(dir, "rev-parse", "--verify", "--quiet", "HEAD")).stdout.toLowerCase();
   const moved = await git(dir, "checkout", "-q", "--detach", `${targetCommit}^{commit}`);
   if (!moved.ok) {
     if (createdFreshGit) await discardFreshCache(dir, preexisting);
-    return { effectiveDigest, localInfo: afterIdentity.localInfo, error: moved.stderr, touchedWorktree: true };
+    const afterHead = createdFreshGit ? "" : (await git(dir, "rev-parse", "--verify", "--quiet", "HEAD")).stdout.toLowerCase();
+    const movedHead = Boolean(afterHead && afterHead === targetCommit && afterHead !== beforeHead);
+    if (!createdFreshGit && !movedHead) await restoreFetchHead(dir, savedFetchHead);
+    return { effectiveDigest, localInfo: afterIdentity.localInfo, error: moved.stderr, touchedWorktree: movedHead };
   }
   const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
   if (!head.ok || head.stdout.toLowerCase() !== targetCommit) {

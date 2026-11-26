@@ -509,6 +509,87 @@ describe("hedge triage", () => {
     expect(issue.input).toContain("Note: The pack source <private source> follows <ref> of <private repo>. Pin its ref in hedge.json to a commit SHA, so each apply loads the same packs, even offline.");
     expect(issue.input).toContain("Note: The pack source agent-skills follows <ref> of <private repo>. Pin its ref in hedge.json to a commit SHA, so each apply loads the same packs, even offline.");
   });
+
+  test("scrubs private unreachable source names in doctor output when a pinned local symlink source is repointed", async () => {
+    const { symlinkSync, unlinkSync } = await import("node:fs");
+    const home = temp.make("home-unreachable-source-");
+    const repoOne = temp.make("private-repo-one-");
+    const repoTwo = temp.make("private-repo-two-");
+    const linkRepo = join(temp.make("private-repo-link-"), "source");
+    const makePackRepo = async (dir: string, summary: string) => {
+      mkdirSync(join(dir, "packs/ops"), { recursive: true });
+      writeFileSync(join(dir, "packs/ops/pack.json"), JSON.stringify({ schema: 1, name: "ops", summary }));
+      for (const args of [["init", "-b", "main"], ["config", "user.email", "test@example.com"], ["config", "user.name", "Test"], ["add", "."], ["commit", "-m", "init"]]) {
+        await spawnGit(dir, ...args);
+      }
+      return (await spawnGit(dir, "rev-parse", "HEAD")).trim();
+    };
+    const pinOne = await makePackRepo(repoOne, "First private pack.");
+    await makePackRepo(repoTwo, "Second private pack.");
+    symlinkSync(repoOne, linkRepo);
+
+    const profileDir = join(home, "profile");
+    mkdirSync(profileDir, { recursive: true });
+    writeFileSync(
+      join(profileDir, "hedge.json"),
+      JSON.stringify({
+        schema: 1,
+        engine: { repo: "PostHog/hedge", ref: "v1", channel: "release" },
+        sources: [{ name: "confidential-packs", repo: linkRepo, ref: pinOne }],
+        packs: ["ops"],
+        plan: "both",
+        settings: {},
+        workflows: {},
+      }),
+    );
+    mkdirSync(join(home, ".config/hedge"), { recursive: true });
+    writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "linux", name: "unreachable", profileDir }));
+
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      if (command[0] === "git") {
+        const proc = Bun.spawn(command, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+        const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+        return { code, stdout, stderr };
+      }
+      return ghOnly(command, options);
+    };
+    const sent: Sent[] = [];
+    const ghOnly = capture(sent);
+    const applyIo = scripted([]);
+    expect(
+      await main(["apply"], {
+        home,
+        engineRoot,
+        platform: "linux",
+        env: {},
+        print: applyIo.terminal.print,
+        terminal: applyIo.terminal,
+        capture: runRealGit,
+        hostname: () => "unreachable.local",
+        run: async () => 0,
+      }),
+    ).toBe(0);
+
+    unlinkSync(linkRepo);
+    symlinkSync(repoTwo, linkRepo);
+
+    const io = scripted([]);
+    const code = await main(["triage", "--send", "--note", "repointed symlink check"], {
+      home,
+      engineRoot,
+      platform: "linux",
+      env: {},
+      print: io.terminal.print,
+      terminal: io.terminal,
+      capture: runRealGit,
+      hostname: () => "unreachable.local",
+      run: async () => 0,
+    });
+    expect(code).toBe(0);
+    const issue = sent.find((call) => call.command[1] === "issue")!;
+    expect(issue.input).not.toContain("confidential-packs");
+    expect(issue.input).toContain("unreachable sources: <private source>");
+  });
 });
 
 describe("hedge setup and triage", () => {
