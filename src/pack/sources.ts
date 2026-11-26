@@ -814,6 +814,15 @@ async function legacyFallbackMatches(dir: string, good: Good, rawEffectiveRepo: 
   return fetchHeadMatches(entry.url, rawEffectiveRepo) || fetchHeadMatches(entry.url, effectiveRepo) || rawEffectiveRepo === good.repo || effectiveRepo === good.repo;
 }
 
+function hasDotGitEntry(dir: string): boolean {
+  try {
+    lstatSync(join(dir, ".git"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Promise<FetchedSource> {
   const repo = repoUrl(ref.repo);
   const edits = await localEdits(dir);
@@ -876,7 +885,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
       (await pinTarget(dir, effectiveBeforeDigest, before.commit)) !== undefined ||
       (goodDigest !== undefined && (await pinTarget(dir, goodDigest, before.commit)) !== undefined));
   const preserveBefore = before !== undefined && (!good || before.commit !== good.commit) && !managedDetached;
-  const freshCache = !existsSync(join(dir, ".git"));
+  const freshCache = !hasDotGitEntry(dir);
   const preexisting = freshCache ? await snapshotPreexisting(dir) : undefined;
   let effectiveDigest = effectiveBeforeDigest;
   let effectiveLocalInfo: LocalRepoInfo | undefined = beforeIdentity.localInfo;
@@ -1659,15 +1668,26 @@ async function snapshotFetchHead(dir: string): Promise<SavedFetchHead> {
   return snapshotFetchHeadAt(join(dir, ".git"));
 }
 
-async function restoreGitFileAt(gitDir: string, name: string, saved: SavedFetchHead) {
+async function restoreGitFileAt(gitDir: string, name: string, saved: SavedFetchHead): Promise<boolean> {
   const path = join(gitDir, name);
   if (saved.kind === "content") {
     const current = await readFile(path).catch(() => undefined);
-    if (current && current.equals(saved.bytes)) return;
-    await writeAtomic(path, saved.bytes, saved.mode).catch(() => {});
+    if (current && current.equals(saved.bytes)) return true;
+    try {
+      await writeAtomic(path, saved.bytes, saved.mode);
+      return true;
+    } catch {
+      return false;
+    }
   } else if (saved.kind === "missing") {
-    await rm(path, { force: true }).catch(() => {});
+    try {
+      await rm(path, { force: true });
+      return true;
+    } catch {
+      return false;
+    }
   }
+  return false;
 }
 
 async function restoreFetchHeadAt(gitDir: string, saved: SavedFetchHead) {
@@ -1806,46 +1826,48 @@ async function checkout(
   const beforeIdentity = await resolvedRepoIdentity(dir, repo);
   if (isInvalidRef(ref)) return { effectiveDigest: beforeIdentity.digest, localInfo: beforeIdentity.localInfo, error: `invalid ref ${JSON.stringify(ref)}` };
   await mkdir(dir, { recursive: true });
-  const freshInit = !existsSync(join(dir, ".git"));
-  if (freshInit) await git(dir, "init", "-q");
+  const freshInit = !hasDotGitEntry(dir);
+  let createdFreshGit = false;
+  if (freshInit) createdFreshGit = (await git(dir, "init", "-q")).ok;
   const identity = await resolvedRepoIdentity(dir, repo);
   const effectiveDigest = identity.digest;
   let fetched = await fetchExact(dir, repo, ref, true);
-  if (!fetched.ok && freshInit) {
+  if (!fetched.ok && createdFreshGit) {
     const strippedRef = stripSourceRefspec(ref);
     const stderrText = `${fetched.fullStderr ?? ""}\n${fetched.stderr}`;
     if (isCommitPin(strippedRef, 64) || /object format|sha256|mismatched algorithms/i.test(stderrText)) {
       await rm(join(dir, ".git"), { recursive: true, force: true }).catch(() => {});
       const reinit = await git(dir, "init", "-q", "--object-format=sha256");
+      createdFreshGit = reinit.ok;
       if (reinit.ok) fetched = await fetchExact(dir, repo, ref, true);
     }
   }
   if (!fetched.ok || !fetched.oid) {
-    if (freshInit) await rm(join(dir, ".git"), { recursive: true, force: true }).catch(() => {});
+    if (createdFreshGit) await rm(join(dir, ".git"), { recursive: true, force: true }).catch(() => {});
     else await restoreFetchHead(dir, savedFetchHead);
     return { effectiveDigest, localInfo: identity.localInfo, error: fetched.stderr || "could not fetch commit" };
   }
   const afterIdentity = await resolvedRepoIdentity(dir, repo);
   if (afterIdentity.digest !== effectiveDigest) {
-    if (freshInit) await rm(join(dir, ".git"), { recursive: true, force: true }).catch(() => {});
+    if (createdFreshGit) await rm(join(dir, ".git"), { recursive: true, force: true }).catch(() => {});
     else await restoreFetchHead(dir, savedFetchHead);
     return { effectiveDigest, localInfo: identity.localInfo, error: "git remote rewrite rule changed during fetch" };
   }
   const peeled = await git(dir, "rev-parse", "--verify", "--quiet", `${fetched.oid}^{commit}`);
   if (!peeled.ok || !gitHash.test(peeled.stdout)) {
-    if (freshInit) await rm(join(dir, ".git"), { recursive: true, force: true }).catch(() => {});
+    if (createdFreshGit) await rm(join(dir, ".git"), { recursive: true, force: true }).catch(() => {});
     else await restoreFetchHead(dir, savedFetchHead);
     return { effectiveDigest, localInfo: afterIdentity.localInfo, error: peeled.stderr || "could not resolve fetched commit" };
   }
   const targetCommit = peeled.stdout.toLowerCase();
   const moved = await git(dir, "checkout", "-q", "--detach", `${targetCommit}^{commit}`);
   if (!moved.ok) {
-    if (freshInit) await discardFreshCache(dir, preexisting);
+    if (createdFreshGit) await discardFreshCache(dir, preexisting);
     return { effectiveDigest, localInfo: afterIdentity.localInfo, error: moved.stderr };
   }
   const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
   if (!head.ok || head.stdout.toLowerCase() !== targetCommit) {
-    if (freshInit) await discardFreshCache(dir, preexisting);
+    if (createdFreshGit) await discardFreshCache(dir, preexisting);
     return { effectiveDigest, localInfo: afterIdentity.localInfo, error: head.stderr || "could not resolve checked-out HEAD" };
   }
   return { effectiveDigest, localInfo: afterIdentity.localInfo, commit: targetCommit, fetchedOid: fetched.oid };
@@ -1913,18 +1935,13 @@ const isOtherQualifiedRef = (ref: unknown) => {
   const stripped = stripSourceRefspec(ref);
   return stripped.startsWith("refs/") && !stripped.startsWith("refs/heads/");
 };
-const isNonBranchNamespace = (ref: unknown) => {
-  if (typeof ref !== "string") return false;
-  const stripped = stripSourceRefspec(ref);
-  return /^refs\/(?:tags|remotes|notes|replace|bisect)\//.test(stripped) || stripped === "refs/stash";
-};
 const hasRefspecDecor = (ref: unknown) => typeof ref === "string" && (ref.startsWith("+") || ref.endsWith(":"));
 
 const sameBranchRef = (a: unknown, b: unknown, hashLen?: number): boolean => {
   const nameA = branchName(a);
   const nameB = branchName(b);
   if (!nameA || nameA !== nameB) return false;
-  if (isNonBranchNamespace(a) !== isNonBranchNamespace(b)) return false;
+  if ((isOtherQualifiedRef(a) || isOtherQualifiedRef(b)) && hasRefspecDecor(a) !== hasRefspecDecor(b)) return false;
   const fullHash = hashLen !== undefined ? isCommitPin(nameA, hashLen) : gitHash.test(nameA);
   if (!fullHash) return true;
   const headA = hasExplicitHead(a);
@@ -2107,8 +2124,8 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     await restoreFetchHead(dir, savedFetchHead);
     await restoreGitFileAt(gitDir, "shallow", savedShallow);
     if (removeObjects) {
-      await restoreGitFileAt(gitDir, join("logs", "HEAD"), savedHeadLog);
-      if (movedObjects.length) {
+      const headLogRestored = await restoreGitFileAt(gitDir, join("logs", "HEAD"), savedHeadLog);
+      if (headLogRestored && movedObjects.length) {
         await removeMigratedObjects(movedObjects);
         movedObjects = [];
       }

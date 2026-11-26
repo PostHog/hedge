@@ -905,7 +905,7 @@ describe("fetchSource local path resolution and object formats", () => {
     mkdirSync(join(hugeHeadDir, ".git", "refs"), { recursive: true });
     const hugeHead = join(hugeHeadDir, ".git", "HEAD");
     writeFileSync(hugeHead, "not-a-valid-head\n");
-    truncateSync(hugeHead, 64 * 1024 * 1024);
+    truncateSync(hugeHead, 3 * 1024 * 1024 * 1024);
     expect("error" in (await fetchSource({ name: "team", repo: hugeHeadDir, ref: siblingSha }, headCache))).toBe(true);
   });
 
@@ -1284,5 +1284,44 @@ describe("fetchSource local path resolution and object formats", () => {
     writeFileSync(preExistFile, "keep identical\n");
     expect("error" in (await fetchSource({ name: "team", repo: preExistSrc, ref: "main" }, preExistCache))).toBe(true);
     expect(readFileSync(preExistFile, "utf8")).toBe("keep identical\n");
+
+    const danglingCache = temp.make("cache-dangling-dotgit-");
+    mkdirSync(join(danglingCache, "team"), { recursive: true });
+    const danglingLink = join(danglingCache, "team", ".git");
+    symlinkSync(join(root, "missing-gitdir-target"), danglingLink);
+    expect("error" in (await fetchSource({ name: "team", repo: join(root, "missing-upstream"), ref: "main" }, danglingCache))).toBe(true);
+    const { lstatSync } = await import("node:fs");
+    expect(lstatSync(danglingLink).isSymbolicLink()).toBe(true);
+
+    const woLogRepo = join(root, "wo-headlog-repo");
+    await initRepo(woLogRepo);
+    const wo1 = await commitPack(woLogRepo, "team", "WO log v1.");
+    const woCache = temp.make("cache-wo-headlog-");
+    expect("error" in (await fetchSource({ name: "team", repo: woLogRepo, ref: "main" }, woCache))).toBe(false);
+    await spawnGit(join(woCache, "team"), "config", "core.logAllRefUpdates", "always");
+    const woHeadLog = join(woCache, "team", ".git", "logs", "HEAD");
+    mkdirSync(join(woCache, "team", ".git", "logs"), { recursive: true });
+    writeFileSync(woHeadLog, "");
+    chmodSync(woHeadLog, 0o200);
+    mkdirSync(join(woLogRepo, "packs", "team"), { recursive: true });
+    writeFileSync(join(woLogRepo, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "WO broken." }));
+    await spawnGit(woLogRepo, "commit", "-qam", "wo broken");
+    try {
+      const woFailed = await advanceSource({ name: "team", repo: woLogRepo, ref: "main" }, woCache, wo1);
+      expect(woFailed.state).toBe("failed");
+    } finally {
+      chmodSync(woHeadLog, 0o644);
+    }
+    await spawnGit(join(woCache, "team"), "fsck", "--full");
+
+    const shortTagBranchRepo = join(root, "short-tag-branch");
+    await initRepo(shortTagBranchRepo);
+    await spawnGit(shortTagBranchRepo, "checkout", "-q", "-b", "refs/tags/release");
+    const stb1 = await commitPack(shortTagBranchRepo, "team", "Tag-named branch v1.");
+    const stbCache = temp.make("cache-short-tag-branch-");
+    expect("error" in (await fetchSource({ name: "team", repo: shortTagBranchRepo, ref: "refs/heads/refs/tags/release" }, stbCache))).toBe(false);
+    expect(await followsBranch({ name: "team", repo: shortTagBranchRepo, ref: "refs/tags/release" }, stbCache)).toBe(true);
+    const stb2 = await commitPack(shortTagBranchRepo, "team", "Tag-named branch v2.");
+    expect(await advanceSource({ name: "team", repo: shortTagBranchRepo, ref: "refs/tags/release" }, stbCache, stb1)).toMatchObject({ state: "moved", commit: stb2 });
   });
 });

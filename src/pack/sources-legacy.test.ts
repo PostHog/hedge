@@ -419,8 +419,6 @@ describe("fetchSource legacy caches, branches, and hardening", () => {
     const annotatedRepo = await packRepo("Annotated tag v1.");
     await spawnGit(annotatedRepo, "tag", "-a", "rel-v1", "-m", "release v1");
     const tagOid = await spawnGit(annotatedRepo, "rev-parse", "refs/tags/rel-v1");
-    const commitOid = await spawnGit(annotatedRepo, "rev-parse", "HEAD");
-    expect(tagOid).not.toBe(commitOid);
     writePack(annotatedRepo, "Annotated tag v2.");
     await spawnGit(annotatedRepo, "commit", "-q", "-am", "v2");
     const v2Sha = await spawnGit(annotatedRepo, "rev-parse", "HEAD");

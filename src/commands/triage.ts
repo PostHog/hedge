@@ -78,11 +78,11 @@ export async function triageReport(context: TriageContext, note?: string): Promi
   const clean = (text: string) => redact(text, context.home, known);
   const described = note?.trim() ? clean(note.trim()) : "Not described.";
   const facts = clean([...setupLines(machine, failure, timings), "", "## Versions", "", ...versions].join("\n"));
-  const checked = clean(doctor.map(scrubUnpinnedAdvisory).join("\n")).split("\n");
+  const checked = cleanWithAdvisories(doctor, clean);
   const head = ["## What happened", "", described, "", "## Setup", "", facts, "", "## hedge doctor", "", fence(checked), "", ""].join("\n");
   const ending = "\n\nMade by `hedge triage`.";
   const transcript = transcriptTail(context.home, transcriptLines);
-  const lines = transcript.lines.length ? clean(transcript.lines.map(scrubUnpinnedAdvisory).join("\n")).split("\n") : [];
+  const lines = transcript.lines.length ? cleanWithAdvisories(transcript.lines, clean) : [];
   const room = bodyLimit - head.length - ending.length - 200;
   let kept = lines.length;
   let size = lines.reduce((sum, line) => sum + line.length + 1, 0);
@@ -171,6 +171,20 @@ function scrubUnpinnedAdvisory(line: string): string {
   if (sep <= 0 || sep + 4 >= rest.length) return line;
   const safeName = publicSourceNames.has(name!) ? name! : "<private source>";
   return `${prefix}${safeName} follows <ref> of <private repo>${legacyAdvisorySuffix}`;
+}
+
+function cleanWithAdvisories(lines: string[], clean: (text: string) => string): string[] {
+  const saved = new Map<string, string>();
+  const tagged = lines.map((line, index) => {
+    const scrubbed = scrubUnpinnedAdvisory(line);
+    if (scrubbed === line) return line;
+    const token = `\0HEDGE_ADVISORY_${index}\0`;
+    saved.set(token, scrubbed);
+    return token;
+  });
+  const cleaned = clean(tagged.join("\n")).split("\n");
+  if (!saved.size) return cleaned;
+  return cleaned.map((line) => saved.get(line) ?? line);
 }
 
 function knownNames(hostname: string, machine: MachineFile | undefined, profile: Profile | undefined, gitName: string | undefined, origin: string | undefined): KnownName[] {

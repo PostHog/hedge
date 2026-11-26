@@ -420,7 +420,10 @@ describe("hedge triage", () => {
       JSON.stringify({
         schema: 1,
         engine: { repo: "PostHog/hedge", ref: "v1", channel: "release" },
-        sources: [{ name: "secret-team", repo: "acme/private-packs", ref: "main" }],
+        sources: [
+          { name: "secret-team", repo: "acme/private-packs", ref: "main" },
+          { name: "pinned-secret", repo: "private", ref: "0123456789abcdef0123456789abcdef01234567" },
+        ],
         packs: [],
         plan: "both",
         settings: {},
@@ -454,6 +457,8 @@ describe("hedge triage", () => {
     expect(code).toBe(0);
     const issue = sent.find((call) => call.command[1] === "issue")!;
     expect(issue.input).not.toContain("secret-team");
+    expect(issue.input).not.toContain("pinned-secret");
+    expect(issue.input).toContain("The pack source <private source> is not pinned to a commit SHA.");
   });
 
   test("scrubs private unpinned source advisories recorded in the setup transcript", async () => {
