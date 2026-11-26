@@ -182,10 +182,14 @@ function parseGitDirFileBytes(fileBuf: Buffer, baseDir: Buffer, access?: AccessS
   let fd: number | undefined;
   try {
     const info = statSync(fileBuf);
-    if (!info.isFile() || info.size < gitdirPrefixBuf.length || info.size > 8192) return undefined;
+    if (!info.isFile() || info.size < gitdirPrefixBuf.length) return undefined;
     fd = openSync(fileBuf, "r");
     const header = Buffer.allocUnsafe(gitdirPrefixBuf.length);
     if (readSync(fd, header, 0, header.length, 0) !== header.length || !header.equals(gitdirPrefixBuf)) return undefined;
+    if (info.size > 8192) {
+      if (access) access.inaccessible = true;
+      return undefined;
+    }
     const raw = Buffer.allocUnsafe(info.size);
     header.copy(raw, 0);
     let filled = header.length;
@@ -238,7 +242,10 @@ function readBoundedPrefixBytes(fileBuf: Buffer, maxBytes: number, rejectOversiz
   try {
     const info = statSync(fileBuf);
     if (!info.isFile()) return undefined;
-    if (rejectOversized && info.size > maxBytes) return undefined;
+    if (rejectOversized && info.size > maxBytes) {
+      if (access) access.inaccessible = true;
+      return undefined;
+    }
     const cap = Math.min(info.size, maxBytes);
     if (cap === 0) return Buffer.alloc(0);
     fd = openSync(fileBuf, "r");

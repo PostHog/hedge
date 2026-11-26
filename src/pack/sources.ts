@@ -69,27 +69,42 @@ async function currentCheckout(dir: string): Promise<CheckoutState | undefined> 
   return { commit: head.stdout, ...(branch ? { branch } : {}) };
 }
 
-async function restoreCheckout(dir: string, before: CheckoutState | undefined, force = false): Promise<boolean> {
+const noHooksArgs = () => ["-c", process.platform === "win32" ? "core.hooksPath=NUL" : "core.hooksPath=/dev/null"];
+
+async function checkoutSafely(dir: string, target: CheckoutState, resetTracked: boolean): Promise<boolean> {
+  const tryMove = async (hookArgs: string[]) => {
+    if (target.branch) {
+      const tip = await git(dir, "rev-parse", "--verify", "--quiet", `refs/heads/${target.branch}`);
+      if (tip.ok && tip.stdout.toLowerCase() === target.commit.toLowerCase()) {
+        if ((await git(dir, ...hookArgs, "switch", "-q", target.branch)).ok) return true;
+      }
+    }
+    return (await git(dir, ...hookArgs, "checkout", "-q", "--detach", `${target.commit}^{commit}`)).ok;
+  };
+  const hookArgs = resetTracked ? noHooksArgs() : [];
+  let ok = await tryMove(hookArgs);
+  if (!ok && resetTracked && (await localEdits(dir)).length > 0) {
+    if ((await git(dir, ...hookArgs, "reset", "-q", "--hard", "HEAD")).ok) {
+      ok = await tryMove(hookArgs);
+    }
+  }
+  if (!ok) return false;
+  const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
+  if (!head.ok || head.stdout.toLowerCase() !== target.commit.toLowerCase()) return false;
+  clearLoadedModules(dir);
+  return true;
+}
+
+async function restoreCheckout(dir: string, before: CheckoutState | undefined, resetTracked = false): Promise<boolean> {
   if (!before) return false;
   const now = await currentCheckout(dir);
   if (now?.commit.toLowerCase() === before.commit.toLowerCase() && now.branch === before.branch) {
-    if (!force || (await localEdits(dir)).length === 0) return true;
+    if (!resetTracked || (await localEdits(dir)).length === 0) return true;
+    if (!(await git(dir, ...noHooksArgs(), "reset", "-q", "--hard", "HEAD")).ok) return false;
+    clearLoadedModules(dir);
+    return true;
   }
-  const hookArgs = force ? ["-c", process.platform === "win32" ? "core.hooksPath=NUL" : "core.hooksPath=/dev/null"] : [];
-  const forceArgs = force ? ["-f"] : [];
-  let ok = false;
-  if (before.branch) {
-    const tip = await git(dir, "rev-parse", "--verify", "--quiet", `refs/heads/${before.branch}`);
-    if (tip.ok && tip.stdout.toLowerCase() === before.commit.toLowerCase()) {
-      ok = (await git(dir, ...hookArgs, "switch", "-q", ...forceArgs, before.branch)).ok;
-    }
-  }
-  if (!ok) ok = (await git(dir, ...hookArgs, "checkout", "-q", ...forceArgs, "--detach", `${before.commit}^{commit}`)).ok;
-  if (!ok) return false;
-  const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
-  if (!head.ok || head.stdout.toLowerCase() !== before.commit.toLowerCase()) return false;
-  clearLoadedModules(dir);
-  return true;
+  return checkoutSafely(dir, before, resetTracked);
 }
 
 type ResolvedIdentity = { digest: string; display: string; localInfo: LocalRepoInfo };
@@ -366,12 +381,14 @@ async function fetchLocked(
   let fetchedOid: string | undefined;
   let savedFetchHead: SavedFetchHead | undefined;
   let checkedOutCommit: string | undefined;
+  let touchedWorktree = false;
   const cachedHit = beforeIdentity.localInfo.skipPinCache
     ? undefined
     : await checkedOutFromCache(dir, repo, effectiveBeforeDigest, ref, good);
   if (cachedHit) {
     checkedOutCommit = cachedHit.commit;
     effectiveDigest = cachedHit.effectiveDigest;
+    touchedWorktree = true;
   }
   if (!checkedOutCommit && !fetchError) {
     if (beforeIdentity.localInfo.timedOut) {
@@ -385,6 +402,7 @@ async function fetchLocked(
       fetchError = fetched.error;
       checkedOutCommit = fetched.commit;
       fetchedOid = fetched.fetchedOid;
+      if (fetched.touchedWorktree) touchedWorktree = true;
     }
   }
   if (!fetchError && checkedOutCommit) {
@@ -445,7 +463,7 @@ async function fetchLocked(
   }
   if (savedFetchHead) await restoreFetchHead(dir, savedFetchHead);
   const skipBlocked = beforeIdentity.localInfo.skipPinCache === true || effectiveLocalInfo?.skipPinCache === true;
-  return fallBack(ref, dir, repo, effectiveDigest, good, `could not fetch ${ref.ref} from ${ref.repo}: ${fetchError ?? "unknown commit"}`, loadLimitMs, before, preserveBefore, legacyOk && effectiveDigest === effectiveBeforeDigest, undefined, skipBlocked, fetchedNew || cachedHit !== undefined);
+  return fallBack(ref, dir, repo, effectiveDigest, good, `could not fetch ${ref.ref} from ${ref.repo}: ${fetchError ?? "unknown commit"}`, loadLimitMs, before, preserveBefore, legacyOk && effectiveDigest === effectiveBeforeDigest, undefined, skipBlocked, touchedWorktree);
 }
 
 function cacheDir(ref: SourceRef, cacheRoot: string): string | { error: string } {
@@ -520,13 +538,7 @@ async function fallBack(ref: SourceRef, dir: string, repo: string, effectiveDige
   if (before?.branch && before.commit.toLowerCase() === good.commit.toLowerCase()) {
     if (!(await restoreCheckout(dir, before, forceRollback))) return { ref, error: reason };
   } else {
-    const rollbackArgs = forceRollback
-      ? ["-c", process.platform === "win32" ? "core.hooksPath=NUL" : "core.hooksPath=/dev/null", "checkout", "-q", "-f", "--detach", `${good.commit}^{commit}`]
-      : ["checkout", "-q", "--detach", `${good.commit}^{commit}`];
-    if (!(await git(dir, ...rollbackArgs)).ok) return { ref, error: reason };
-    const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
-    if (!head.ok || head.stdout.toLowerCase() !== good.commit.toLowerCase()) return { ref, error: reason };
-    clearLoadedModules(dir);
+    if (!(await checkoutSafely(dir, { commit: good.commit }, forceRollback))) return { ref, error: reason };
   }
   const loaded = await load(dir, loadLimitMs);
   if ("error" in loaded) return { ref, error: reason };
@@ -1287,9 +1299,12 @@ function splitNulBytes(raw: Uint8Array): Buffer[] {
   return items;
 }
 
+const maxSnapshotTotalBytes = 4 * 1024 * 1024;
+
 async function snapshotPreexisting(dir: string): Promise<Map<string, PreexistingEntry>> {
   const map = new Map<string, PreexistingEntry>();
   if (!existsSync(dir)) return map;
+  let totalBytes = 0;
   if (process.platform === "win32") {
     const walk = async (rel: string) => {
       const abs = rel ? join(dir, rel) : dir;
@@ -1313,7 +1328,11 @@ async function snapshotPreexisting(dir: string): Promise<Map<string, Preexisting
         } else if (entry.isFile()) {
           try {
             const info = await stat(childAbs);
-            const bytes = info.size <= 1_048_576 ? await readFile(childAbs) : undefined;
+            let bytes: Buffer | undefined;
+            if (info.size <= 1_048_576 && totalBytes + info.size <= maxSnapshotTotalBytes) {
+              bytes = await readFile(childAbs);
+              totalBytes += bytes.byteLength;
+            }
             map.set(childRel, { kind: "file", ...(bytes !== undefined ? { bytes } : {}), mode: info.mode & 0o777 });
           } catch {}
         }
@@ -1351,7 +1370,11 @@ async function snapshotPreexisting(dir: string): Promise<Map<string, Preexisting
         await walkPosix(childRel);
       } else if (info.isFile()) {
         try {
-          const bytes = info.size <= 1_048_576 ? await readFile(childAbs) : undefined;
+          let bytes: Buffer | undefined;
+          if (info.size <= 1_048_576 && totalBytes + info.size <= maxSnapshotTotalBytes) {
+            bytes = await readFile(childAbs);
+            totalBytes += bytes.byteLength;
+          }
           map.set(key, { kind: "file", ...(bytes !== undefined ? { bytes } : {}), mode: info.mode & 0o777 });
         } catch {}
       }
@@ -1433,7 +1456,7 @@ async function checkout(
   beforeRawEffective?: string,
   knownBeforeIdentity?: ResolvedIdentity,
   probe: LocalRepoProbe = probeLocalRepoInfo,
-): Promise<{ effectiveDigest: string; localInfo: LocalRepoInfo; commit?: string; fetchedOid?: string; error?: string }> {
+): Promise<{ effectiveDigest: string; localInfo: LocalRepoInfo; commit?: string; fetchedOid?: string; error?: string; touchedWorktree?: boolean }> {
   const beforeIdentity = knownBeforeIdentity ?? (await resolvedRepoIdentity(dir, repo, probe));
   if (isInvalidRef(ref)) return { effectiveDigest: beforeIdentity.digest, localInfo: beforeIdentity.localInfo, error: `invalid ref ${JSON.stringify(ref)}` };
   await mkdir(dir, { recursive: true });
@@ -1485,14 +1508,14 @@ async function checkout(
   const moved = await git(dir, "checkout", "-q", "--detach", `${targetCommit}^{commit}`);
   if (!moved.ok) {
     if (createdFreshGit) await discardFreshCache(dir, preexisting);
-    return { effectiveDigest, localInfo: afterIdentity.localInfo, error: moved.stderr };
+    return { effectiveDigest, localInfo: afterIdentity.localInfo, error: moved.stderr, touchedWorktree: true };
   }
   const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
   if (!head.ok || head.stdout.toLowerCase() !== targetCommit) {
     if (createdFreshGit) await discardFreshCache(dir, preexisting);
-    return { effectiveDigest, localInfo: afterIdentity.localInfo, error: head.stderr || "could not resolve checked-out HEAD" };
+    return { effectiveDigest, localInfo: afterIdentity.localInfo, error: head.stderr || "could not resolve checked-out HEAD", touchedWorktree: true };
   }
-  return { effectiveDigest, localInfo: afterIdentity.localInfo, commit: targetCommit, fetchedOid: fetched.oid };
+  return { effectiveDigest, localInfo: afterIdentity.localInfo, commit: targetCommit, fetchedOid: fetched.oid, touchedWorktree: true };
 }
 
 function gitEnv() {
@@ -1577,18 +1600,17 @@ const sameBranchRef = (a: unknown, b: unknown, hashLen?: number): boolean => {
 async function fetchHeadIsBranch(dir: string, ref: string, expectedOid?: string): Promise<boolean | undefined> {
   const branch = branchName(ref);
   if (!branch) return false;
-  let fetched: string;
+  let raw: Buffer;
   try {
-    fetched = await readFile(join(dir, ".git", "FETCH_HEAD"), "utf8");
+    raw = await readFile(join(dir, ".git", "FETCH_HEAD"));
   } catch (error) {
     return (error as NodeJS.ErrnoException)?.code === "ENOENT" ? false : undefined;
   }
-  const first = firstFetchHeadEntry(fetched);
-  if (expectedOid) {
-    const oid = first.match(/^([0-9a-f]{40}|[0-9a-f]{64})\t/i)?.[1]?.toLowerCase();
-    if (oid !== expectedOid.toLowerCase()) return false;
-  }
-  return first.includes(`\tbranch '${branch}' of `);
+  const first = firstFetchHeadEntry(raw.toString("latin1"));
+  const line = first.match(/^([0-9a-f]{40}|[0-9a-f]{64})\t[^\t]*\t([\s\S]+)$/i);
+  if (!line) return false;
+  if (expectedOid && line[1]!.toLowerCase() !== expectedOid.toLowerCase()) return false;
+  return line[2]!.startsWith(Buffer.from(`branch '${branch}' of `, "utf8").toString("latin1"));
 }
 
 export async function followsBranch(ref: SourceRef, cacheRoot: string, knownIdentity?: ResolvedIdentity) {
@@ -1796,14 +1818,9 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     const before = await currentCheckout(dir);
     const refsBeforeCheckout = await snapshotRepoRefs(dir, gitDir);
     const rollbackCheckout = async (): Promise<boolean> => {
-      let checkoutOk: boolean;
-      if (before) {
-        checkoutOk = await restoreCheckout(dir, before, true);
-      } else {
-        const hookArg = process.platform === "win32" ? "core.hooksPath=NUL" : "core.hooksPath=/dev/null";
-        checkoutOk = (await git(dir, "-c", hookArg, "checkout", "-q", "-f", "--detach", `${from}^{commit}`)).ok;
-        if (checkoutOk) clearLoadedModules(dir);
-      }
+      const checkoutOk = before
+        ? await restoreCheckout(dir, before, true)
+        : await checkoutSafely(dir, { commit: from }, true);
       if (!checkoutOk || refsBeforeCheckout === undefined) return false;
       const refsAfterRollback = await snapshotRepoRefs(dir, gitDir);
       return refsAfterRollback !== undefined && refsAfterRollback === refsBeforeCheckout;

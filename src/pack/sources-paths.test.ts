@@ -735,4 +735,21 @@ describe("fetchSource local path resolution", () => {
     }
     expect("error" in (await fetchSource({ name: "team", repo: plain, ref: siblingSha }, cache))).toBe(true);
   });
+
+  test("fails closed when a gitdir pointer exceeds the read limit alongside a .git sibling", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-oversized-gitfile-");
+    const target = join(root, "target");
+    const plain = join(root, "packs");
+    const sibling = join(root, "packs.git");
+    await initRepo(target);
+    const targetSha = await commitPack(target, "team", "Oversized gitfile target.");
+    await initRepo(sibling);
+    await commitPack(sibling, "team", "Oversized gitfile sibling.");
+    mkdirSync(plain, { recursive: true });
+    writeFileSync(join(plain, ".git"), `gitdir: ${join(target, ".git")}\n${" ".repeat(9000)}\n`);
+    const cache = temp.make("cache-oversized-gitfile-");
+    expect("error" in (await fetchSource({ name: "team", repo: plain, ref: targetSha }, cache))).toBe(true);
+    expect("error" in (await fetchSource({ name: "team", repo: sibling, ref: targetSha }, cache))).toBe(true);
+  });
 });

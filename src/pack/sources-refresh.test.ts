@@ -557,4 +557,40 @@ describe("fetchSource staged refresh and rollback", () => {
     expect(await spawnGit(join(cache, "team"), "status", "--porcelain")).toBe("");
   });
 
+  test("preserves untracked files instead of overwriting them during offline last-good fallback", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-offline-untracked-");
+    const repo = join(root, "repo");
+    await initRepo(repo);
+    writeFileSync(join(repo, "notes.txt"), "tracked v1\n");
+    const v1 = await commitPack(repo, "team", "Untracked guard v1.");
+    rmSync(join(repo, "notes.txt"));
+    const v2 = await commitPack(repo, "team", "Untracked guard v2.");
+    const cache = temp.make("cache-offline-untracked-");
+    expect("error" in (await fetchSource({ name: "team", repo, ref: "main" }, cache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo, ref: v1 }, cache))).toBe(false);
+    await spawnGit(join(cache, "team"), "checkout", "-q", "--detach", v2);
+    writeFileSync(join(cache, "team", "notes.txt"), "user local notes\n");
+    rmSync(repo, { recursive: true, force: true });
+    const offline = await fetchSource({ name: "team", repo, ref: "main" }, cache);
+    expect("error" in offline).toBe(true);
+    expect(readFileSync(join(cache, "team", "notes.txt"), "utf8")).toBe("user local notes\n");
+  });
+
+  test("does not classify a +SHA pin as a branch when the local repo path contains tab-delimited branch text", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-tab-path-branch-");
+    const base = join(root, "base");
+    await initRepo(base);
+    const sha = await commitPack(base, "team", "Tab path pin.");
+    const weirdRepo = join(root, `x\tbranch '${sha}' of fake`);
+    renameSync(base, weirdRepo);
+    const cache = temp.make("cache-tab-path-branch-");
+    const loaded = await fetchSource({ name: "team", repo: weirdRepo, ref: `+${sha}` }, cache);
+    if ("error" in loaded) throw new Error(loaded.error);
+    expect(loaded.packs[0]?.manifest.summary).toBe("Tab path pin.");
+    expect(await followsBranch({ name: "team", repo: weirdRepo, ref: `+${sha}` }, cache)).toBe(false);
+    expect(await unpinnedSources([{ name: "team", repo: weirdRepo, ref: `+${sha}` }], root, cache)).toEqual([]);
+  });
+
 });
