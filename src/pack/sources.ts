@@ -58,9 +58,12 @@ async function cachedPin(dir: string, repo: string, ref: string, good: Good | un
   const sha = ref.toLowerCase();
   const pinned = await git(dir, "rev-parse", "--verify", "--quiet", `${pinRef(repo, sha)}^{commit}`);
   if (pinned.ok && pinned.stdout.toLowerCase() === sha) return sha;
-  if (good?.repo === repo && good.commit.toLowerCase() === sha) {
+  if (good?.repo === repo && typeof good.commit === "string" && gitHash.test(good.commit)) {
+    const goodSha = good.commit.toLowerCase();
     const verified = await git(dir, "rev-parse", "--verify", "--quiet", `${sha}^{commit}`);
-    if (verified.ok && verified.stdout.toLowerCase() === sha) return sha;
+    if (verified.ok && verified.stdout.toLowerCase() === sha) {
+      if (goodSha === sha || (await git(dir, "merge-base", "--is-ancestor", sha, `${goodSha}^{commit}`)).ok) return sha;
+    }
   }
   return undefined;
 }
@@ -165,7 +168,7 @@ async function lastGood(dir: string): Promise<Good | undefined> {
 }
 
 async function saveGood(dir: string, good: Good) {
-  if (gitHash.test(good.commit)) {
+  if (typeof good.commit === "string" && gitHash.test(good.commit)) {
     await git(dir, "update-ref", pinRef(good.repo, good.commit), good.commit.toLowerCase());
   }
   await writeFile(goodPath(dir), JSON.stringify(good) + "\n");
@@ -200,15 +203,13 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
   return fetched.split("\n")[0]?.includes(`\tbranch '${branch}' of `) ?? false;
 }
 
-const repoKey = (value: string) =>
-  value
-    .trim()
-    .replace(/^https?:\/\/github\.com\//i, "")
-    .replace(/^git@github\.com:/i, "")
-    .replace(/^ssh:\/\/git@github\.com\//i, "")
-    .replace(/\.git$/i, "")
-    .replace(/\/+$/, "")
-    .toLowerCase();
+function repoKey(value: string): string {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  const github =
+    trimmed.match(/^(?:https?:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/\s]+\/[^/\s]+?)(?:\.git)?$/i)?.[1] ??
+    (/^[\w.-]+\/[\w.-]+$/.test(trimmed) ? trimmed.replace(/\.git$/i, "") : undefined);
+  return github ? `github:${github.toLowerCase()}` : trimmed.replace(/\.git$/, "");
+}
 
 export async function unpinnedSources(sources: SourceRef[], profileDir: string): Promise<Finding[]> {
   const unpinned = sources.filter((ref) => !isCommitPin(ref.ref));

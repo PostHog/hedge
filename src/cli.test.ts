@@ -348,27 +348,43 @@ describe("hedge doctor", () => {
     expect(JSON.parse(lines.at(-1)!)).toEqual([{ pack: "box", id: "key", say: "Paste your key.", command: "box key" }]);
   });
 
-  test("prints a non-blocking note for an unpinned external source and stays silent once pinned to a commit SHA", async () => {
+  test("prints a non-blocking note for unpinned external sources, skips the profile repo and SHA pins, and respects case on local paths", async () => {
     const home = temp.make("home-");
-    const source = temp.make("source-");
-    await spawnGit(source, "init", "-q", "-b", "main");
-    mkdirSync(join(source, "packs/ext"), { recursive: true });
-    writeFileSync(join(source, "packs/ext/pack.json"), JSON.stringify({ schema: 1, name: "ext", summary: "Ext." }));
-    await spawnGit(source, "add", ".");
-    await spawnGit(source, "commit", "-q", "-m", "v1");
-    const sha = (await spawnGit(source, "rev-parse", "HEAD")).trim();
+    const root = temp.make("repos-");
+    const upper = join(root, "Team");
+    const lower = join(root, "team");
+    mkdirSync(upper);
+    mkdirSync(lower);
+    for (const [dir, pack] of [[upper, "own"], [lower, "ext"]] as const) {
+      await spawnGit(dir, "init", "-q", "-b", "main");
+      mkdirSync(join(dir, "packs", pack), { recursive: true });
+      writeFileSync(join(dir, "packs", pack, "pack.json"), JSON.stringify({ schema: 1, name: pack, summary: `${pack}.` }));
+      await spawnGit(dir, "add", ".");
+      await spawnGit(dir, "commit", "-q", "-m", "v1");
+    }
+    const sha = (await spawnGit(lower, "rev-parse", "HEAD")).trim();
 
     const profile = profileDir();
+    await spawnGit(profile, "init", "-q", "-b", "main");
+    await spawnGit(profile, "remote", "add", "origin", upper);
     const file = join(profile, "hedge.json");
-    const setRef = (ref: string) => writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), sources: [{ name: "ext", repo: source, ref }] }));
+    const setSources = (sources: Array<{ name: string; repo: string; ref: string }>) =>
+      writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), sources }));
 
-    setRef("main");
+    setSources([
+      { name: "own", repo: upper, ref: "main" },
+      { name: "ext", repo: lower, ref: "main" },
+    ]);
     expect((await hedge(["apply", "--profile", profile], home)).code).toBe(0);
     const unpinned = await hedge(["doctor"], home);
     expect(unpinned.code).toBe(0);
     expect(unpinned.output).toContain("Note: The pack source ext is not pinned to a commit SHA.");
+    expect(unpinned.output).not.toContain("The pack source own is not pinned");
 
-    setRef(sha);
+    setSources([
+      { name: "own", repo: upper, ref: "main" },
+      { name: "ext", repo: lower, ref: sha },
+    ]);
     expect((await hedge(["apply"], home)).code).toBe(0);
     const pinned = await hedge(["doctor"], home);
     expect(pinned.code).toBe(0);

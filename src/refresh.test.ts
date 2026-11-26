@@ -202,4 +202,19 @@ describe("hedge refresh", () => {
     expect(await box.hedge("refresh")).toBe(1);
     expect(box.lines.join("\n")).toContain("could not reach");
   });
+
+  test("leaves a SHA-pinned source alone even when FETCH_HEAD names a branch matching the SHA", async () => {
+    const repo = await teamRepo();
+    const sha1 = (await spawnGit(repo, "rev-parse", "HEAD")).trim();
+    const home = temp.make("home-");
+    const profile = temp.make("profile-");
+    writeFileSync(join(profile, "hedge.json"), JSON.stringify({ schema: 1, engine: { repo: "PostHog/hedge", ref: "main", channel: "track" }, sources: [{ name: "team", repo, ref: sha1 }], packs: ["team"], plan: "both", settings: {}, workflows: {} }));
+    const run = (...args: string[]) => main(args, { home, engineRoot: repoRoot, platform: "linux", env: {}, print: () => {}, run: async () => 0, adapters: () => [filesAdapter] });
+    expect(await run("apply", "--profile", profile)).toBe(0);
+    await v2(repo);
+    await spawnGit(repo, "branch", sha1, "HEAD");
+    writeFileSync(join(home, ".local/share/hedge/sources/team/.git/FETCH_HEAD"), `${sha1}\t\tbranch '${sha1}' of ${repo}\n`);
+    expect(await run("refresh")).toBe(0);
+    expect(readFileSync(join(home, guide), "utf8")).toBe("Rules v1.\n");
+  });
 });

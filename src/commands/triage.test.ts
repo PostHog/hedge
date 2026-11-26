@@ -321,9 +321,12 @@ describe("hedge triage", () => {
     expect(body).toContain("## hedge doctor");
   }, 2_000);
 
-  test("scrubs private source names in unpinned-source advisories while keeping public defaults", async () => {
+  test("scrubs private source names in unpinned-source advisories in both doctor output and transcript while keeping public defaults", async () => {
     const home = temp.make("home-");
     failedMachine(home);
+    const profileFile = join(home, "profile/hedge.json");
+    const profile = JSON.parse(readFileSync(profileFile, "utf8"));
+    writeFileSync(profileFile, JSON.stringify({ ...profile, packs: [], sources: [{ name: "acme-internal", repo: "secret-org/team-packs", ref: "main" }] }));
     writeFileSync(
       join(home, ".local/state/hedge/logs/setup.log"),
       [
@@ -333,6 +336,9 @@ describe("hedge triage", () => {
     );
     const result = await triage(home, ["--print"], []);
     expect(result.code).toBe(0);
+    const doctorSection = result.output.slice(result.output.indexOf("## hedge doctor"), result.output.indexOf("## Setup transcript"));
+    expect(doctorSection).toContain("Note: The pack source <private source> is not pinned to a commit SHA.");
+    expect(doctorSection).not.toContain("acme-internal");
     expect(result.output).toContain("Note: The pack source <private source> is not pinned to a commit SHA.");
     expect(result.output).toContain("Note: The pack source agent-skills is not pinned to a commit SHA.");
     expect(result.output).not.toContain("acme-internal");
