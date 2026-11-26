@@ -971,4 +971,63 @@ describe("fetchSource local path resolution and object formats", () => {
     symlinkSync(join(root, "missing-imp-b"), impDotGitLink);
     expect("error" in (await fetchSource({ name: "team", repo: impPath, ref: impShaA }, impCache))).toBe(true);
   });
+
+  test("handles percent-encoded file:// path boundaries, separates bare repos from removed inner .git directories, and cleans up failed fresh post-checkout hooks", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-edge-parity-");
+
+    const pctRepo = join(root, "pct-repo");
+    await initRepo(pctRepo);
+    const pctSha = await commitPack(pctRepo, "team", "Percent boundary.");
+    const pctCache = temp.make("cache-pct-boundary-");
+    const encodedBoundary = `file://localhost%2F${pctRepo.replace(/^\//, "")}`;
+    const loadedPct = await fetchSource({ name: "team", repo: encodedBoundary, ref: pctSha }, pctCache);
+    if ("error" in loadedPct) throw new Error(loadedPct.error);
+    expect(loadedPct.packs[0]?.manifest.summary).toBe("Percent boundary.");
+    rmSync(pctRepo, { recursive: true, force: true });
+    const offlinePct = await fetchSource({ name: "team", repo: `file://${pctRepo}`, ref: pctSha }, pctCache);
+    if ("error" in offlinePct) throw new Error(offlinePct.error);
+    expect([offlinePct.packs[0]?.manifest.summary, offlinePct.stale]).toEqual(["Percent boundary.", undefined]);
+
+    const outerSrc = join(root, "bare-outer-src");
+    await initRepo(outerSrc);
+    const outerSha = await commitPack(outerSrc, "team", "Outer bare repo.");
+    const hybrid = join(root, "bare-with-dotgit");
+    mkdirSync(hybrid, { recursive: true });
+    await spawnGit(hybrid, "init", "--bare", "-q", "-b", "main");
+    await spawnGit(outerSrc, "push", "-q", hybrid, "main");
+    await spawnGit(hybrid, "init", "-q", "-b", "main");
+    await spawnGit(hybrid, "config", "user.email", "test@example.com");
+    await spawnGit(hybrid, "config", "user.name", "Test");
+    const innerSha = await commitPack(hybrid, "team", "Inner dotgit repo.");
+    const hybridCache = temp.make("cache-bare-inner-");
+    expect("error" in (await fetchSource({ name: "team", repo: hybrid, ref: innerSha }, hybridCache))).toBe(false);
+    rmSync(join(hybrid, ".git"), { recursive: true, force: true });
+    expect("error" in (await fetchSource({ name: "team", repo: `${hybrid}/`, ref: innerSha }, hybridCache))).toBe(true);
+    const loadedOuter = await fetchSource({ name: "team", repo: `${hybrid}/`, ref: outerSha }, hybridCache);
+    if ("error" in loadedOuter) throw new Error(loadedOuter.error);
+    expect(loadedOuter.packs[0]?.manifest.summary).toBe("Outer bare repo.");
+
+    const hookRepo = join(root, "hook-repo");
+    await initRepo(hookRepo);
+    const hookSha = await commitPack(hookRepo, "team", "Post-checkout recovery.");
+    const templateDir = join(root, "git-template");
+    const hooksDir = join(templateDir, "hooks");
+    mkdirSync(hooksDir, { recursive: true });
+    const hookFile = join(hooksDir, "post-checkout");
+    writeFileSync(hookFile, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const hookCache = temp.make("cache-hook-recovery-");
+    const savedTemplate = process.env.GIT_TEMPLATE_DIR;
+    process.env.GIT_TEMPLATE_DIR = templateDir;
+    try {
+      const failedFresh = await fetchSource({ name: "team", repo: hookRepo, ref: hookSha }, hookCache);
+      expect("error" in failedFresh).toBe(true);
+    } finally {
+      if (savedTemplate === undefined) delete process.env.GIT_TEMPLATE_DIR;
+      else process.env.GIT_TEMPLATE_DIR = savedTemplate;
+    }
+    const recoveredHook = await fetchSource({ name: "team", repo: hookRepo, ref: hookSha }, hookCache);
+    if ("error" in recoveredHook) throw new Error(recoveredHook.error);
+    expect([recoveredHook.packs[0]?.manifest.summary, recoveredHook.stale]).toEqual(["Post-checkout recovery.", undefined]);
+  });
 });

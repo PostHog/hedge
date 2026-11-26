@@ -441,11 +441,13 @@ function resolveGitIdentityBytes(pathBuf: Buffer, lexicalDir: Buffer, allowBundl
     }
   }
   if (allowBundle && isGitBundleFileBytes(pathBuf)) {
-    return { identity: pathBuf, isStandardChild: true };
+    return { identity: Buffer.concat([pathBuf, zeroByteBuf, Buffer.from("bundle")]), isStandardChild: false };
   }
   const bareCommon = resolvedCommonDirBytes(pathBuf);
   if (bareCommon) {
-    const identity = bareCommon.equals(pathBuf) ? pathBuf : Buffer.concat([pathBuf, zeroByteBuf, bareCommon]);
+    const identity = bareCommon.equals(pathBuf)
+      ? Buffer.concat([pathBuf, zeroByteBuf, Buffer.from("bare")])
+      : Buffer.concat([pathBuf, zeroByteBuf, bareCommon]);
     return { identity, isStandardChild: false };
   }
   return undefined;
@@ -514,11 +516,10 @@ function parseLocalRepoBytes(dir: string, effective: string): { base: Buffer; ra
   const rawBytes = effective.startsWith("\0raw:") ? Buffer.from(effective.slice(5), "hex") : Buffer.from(effective, "utf8");
   const asciiHead = rawBytes.subarray(0, 7).toString("latin1");
   if (asciiHead === "file://") {
-    const afterScheme = rawBytes.subarray(7);
-    const firstSlash = afterScheme.indexOf(slashByte);
+    const decoded = decodePercentBytes(rawBytes.subarray(7));
+    const firstSlash = decoded.indexOf(slashByte);
     if (firstSlash === -1) return undefined;
-    const pathBytes = decodePercentBytes(afterScheme.subarray(firstSlash));
-    return { base: Buffer.from("/"), rawPath: pathBytes, asFileUrl: true };
+    return { base: Buffer.from("/"), rawPath: decoded.subarray(firstSlash), asFileUrl: true };
   }
   const latin = rawBytes.toString("latin1");
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(latin) || /^[^/\\]+:/.test(latin)) return undefined;
@@ -868,14 +869,9 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
           : undefined;
     const loaded = await load(dir, loadLimitMs);
     if (!("error" in loaded)) {
-      const discardFreshCache = async () => {
-        if (!freshCache) return;
-        await git(dir, "rm", "-rfq", "--ignore-unmatch", ".").catch(() => {});
-        await rm(join(dir, ".git"), { recursive: true, force: true }).catch(() => {});
-      };
       const postLoadHead = (await git(dir, "rev-parse", "--verify", "--quiet", "HEAD")).stdout;
       if (!postLoadHead || postLoadHead.toLowerCase() !== commit.toLowerCase()) {
-        if (freshCache) await discardFreshCache();
+        if (freshCache) await discardFreshCache(dir);
         else if (savedFetchHead) await restoreFetchHead(dir, savedFetchHead);
         return fallBack(ref, dir, repo, effectiveDigest, good, `${ref.ref} from ${ref.repo} changed checkout HEAD while loading`, loadLimitMs, before, preserveBefore, legacyOk && effectiveDigest === effectiveBeforeDigest, isBranch);
       }
@@ -897,7 +893,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
       if (!saveError) {
         return { ref, dir, packs: loaded.packs };
       }
-      if (freshCache) await discardFreshCache();
+      if (freshCache) await discardFreshCache(dir);
       else if (savedFetchHead) await restoreFetchHead(dir, savedFetchHead);
       return fallBack(ref, dir, repo, effectiveDigest, good, `could not record ${ref.ref} from ${ref.repo}: ${saveError}`, loadLimitMs, before, preserveBefore, legacyOk && effectiveDigest === effectiveBeforeDigest, isBranch);
     }
@@ -909,8 +905,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
       effectiveDigest === effectiveBeforeDigest &&
       (goodDigest !== undefined ? goodDigest === effectiveDigest : legacyOk);
     if (freshCache) {
-      await git(dir, "rm", "-rfq", "--ignore-unmatch", ".").catch(() => {});
-      await rm(join(dir, ".git"), { recursive: true, force: true }).catch(() => {});
+      await discardFreshCache(dir);
     } else if (savedFetchHead && !keepBranchFetchHead) {
       await restoreFetchHead(dir, savedFetchHead);
     }
@@ -1521,6 +1516,11 @@ async function fetchExact(dir: string, repo: string, ref: string, shallow: boole
   return fetchExactAt(dir, join(dir, ".git"), repo, ref, shallow);
 }
 
+async function discardFreshCache(dir: string) {
+  await git(dir, "rm", "-rfq", "--ignore-unmatch", ".").catch(() => {});
+  await rm(join(dir, ".git"), { recursive: true, force: true }).catch(() => {});
+}
+
 async function checkout(
   dir: string,
   repo: string,
@@ -1564,12 +1564,12 @@ async function checkout(
   const targetCommit = peeled.stdout.toLowerCase();
   const moved = await git(dir, "checkout", "-q", "--detach", `${targetCommit}^{commit}`);
   if (!moved.ok) {
-    if (freshInit) await rm(join(dir, ".git"), { recursive: true, force: true }).catch(() => {});
+    if (freshInit) await discardFreshCache(dir);
     return { effectiveDigest, localInfo: afterIdentity.localInfo, error: moved.stderr };
   }
   const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
   if (!head.ok || head.stdout.toLowerCase() !== targetCommit) {
-    if (freshInit) await rm(join(dir, ".git"), { recursive: true, force: true }).catch(() => {});
+    if (freshInit) await discardFreshCache(dir);
     return { effectiveDigest, localInfo: afterIdentity.localInfo, error: head.stderr || "could not resolve checked-out HEAD" };
   }
   return { effectiveDigest, localInfo: afterIdentity.localInfo, commit: targetCommit, fetchedOid: fetched.oid };

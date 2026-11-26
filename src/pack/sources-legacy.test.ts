@@ -464,11 +464,12 @@ describe("fetchSource legacy caches, branches, and hardening", () => {
     const repoB = await packRepo("Untrusted repo B.");
     const shaA = await spawnGit(repoA, "rev-parse", "HEAD");
     const shaB = await spawnGit(repoB, "rev-parse", "HEAD");
-    const forgedHash = new Bun.CryptoHasher("sha256").update(repoA).digest("hex");
     const forgedCache = temp.make("cache-forged-refspec-");
     expect("error" in (await fetchSource({ name: "team", repo: repoA, ref: shaA }, forgedCache))).toBe(false);
-    const forged = await fetchSource({ name: "team", repo: repoB, ref: `HEAD:refs/hedge/pins/${forgedHash}/${shaB}` }, forgedCache);
+    const forgedRef = `refs/heads/forged-${shaB.slice(0, 8)}`;
+    const forged = await fetchSource({ name: "team", repo: repoB, ref: `HEAD:${forgedRef}` }, forgedCache);
     expect("error" in forged).toBe(true);
+    expect(Bun.spawnSync(["git", "-C", join(forgedCache, "team"), "rev-parse", "--verify", "--quiet", forgedRef]).exitCode).not.toBe(0);
     rmSync(repoA, { recursive: true, force: true });
     const afterForge = await fetchSource({ name: "team", repo: repoA, ref: shaB }, forgedCache);
     if ("error" in afterForge) throw new Error(afterForge.error);
