@@ -347,7 +347,10 @@ if (!parsed || killing || gracefulSignal) {
       if (typeof v === "string") targetEnv[k] = v;
     }
   }
-  const childSpareEndpoint = spareServer?.endpoint ?? inheritedSpare;
+  const childSpareEndpoint =
+    spareServer?.endpoint && inheritedSpare
+      ? `${spareServer.endpoint},${inheritedSpare}`
+      : (spareServer?.endpoint ?? inheritedSpare);
   if (childSpareEndpoint) {
     if (!targetEnv) {
       targetEnv = Object.create(null) as Record<string, string>;

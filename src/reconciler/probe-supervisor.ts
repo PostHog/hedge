@@ -79,7 +79,7 @@ export function startSpareServer(
           const space = line.indexOf(" ");
           if (space <= 0 || line.slice(0, space) !== nonce) {
             try {
-              socket.write("err\n");
+              socket.write("noauth\n");
               socket.end();
             } catch {}
             return;
@@ -123,28 +123,17 @@ export function startSpareServer(
   }
 }
 
-export async function reportSpared(
-  endpoint: string,
-  pids: number[],
-  sids: number[],
-  timeoutMs = 1500,
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  const cleanPids = [...new Set(pids.filter((n) => Number.isInteger(n) && n > 0))];
-  const cleanSids = [...new Set(sids.filter((n) => Number.isInteger(n) && n > 0))];
-  if (!cleanPids.length && !cleanSids.length) return { ok: true };
-  const parts = endpoint.split(":");
-  const host = parts[0];
-  const port = Number(parts[1]);
-  const nonce = parts[2];
-  if (host !== "127.0.0.1" || !Number.isInteger(port) || port <= 0 || port > 65535 || !nonce) {
-    return { ok: false, error: "invalid spare endpoint" };
-  }
-  const payload = `${nonce} ${JSON.stringify({ pids: cleanPids, sids: cleanSids })}\n`;
-  return await new Promise<{ ok: true } | { ok: false; error: string }>((resolve) => {
+async function reportSparedOne(
+  host: string,
+  port: number,
+  payload: string,
+  timeoutMs: number,
+): Promise<{ status: "ok" } | { status: "gone" } | { status: "err"; error: string }> {
+  return await new Promise((resolve) => {
     let settled = false;
     let buf = "";
     let sock: { end?: () => void } | undefined;
-    const finish = (res: { ok: true } | { ok: false; error: string }) => {
+    const finish = (res: { status: "ok" } | { status: "gone" } | { status: "err"; error: string }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -153,7 +142,7 @@ export async function reportSpared(
       } catch {}
       resolve(res);
     };
-    const timer = setTimeout(() => finish({ ok: false, error: "timed out reporting spared processes" }), timeoutMs);
+    const timer = setTimeout(() => finish({ status: "err", error: "timed out reporting spared processes" }), Math.max(1, timeoutMs));
     void Bun.connect({
       hostname: host,
       port,
@@ -167,22 +156,58 @@ export async function reportSpared(
           const nl = buf.indexOf("\n");
           if (nl === -1) return;
           const reply = buf.slice(0, nl).trim();
-          finish(reply === "ok" ? { ok: true } : { ok: false, error: "ancestor rejected spare report" });
+          if (reply === "ok") finish({ status: "ok" });
+          else if (reply === "noauth") finish({ status: "gone" });
+          else finish({ status: "err", error: "ancestor rejected spare report" });
         },
         close() {
-          finish({ ok: false, error: "spare channel closed before acknowledgement" });
+          finish({ status: "gone" });
         },
-        error(_socket, err) {
-          finish({ ok: false, error: err?.message ?? String(err) });
+        error() {
+          finish({ status: "gone" });
         },
-        connectError(_socket, err) {
-          finish({ ok: false, error: err?.message ?? String(err) });
+        connectError() {
+          finish({ status: "gone" });
         },
       },
-    }).catch((err: unknown) => {
-      finish({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }).catch(() => {
+      finish({ status: "gone" });
     });
   });
+}
+
+export async function reportSpared(
+  endpoint: string,
+  pids: number[],
+  sids: number[],
+  timeoutMs = 1500,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const cleanPids = [...new Set(pids.filter((n) => Number.isInteger(n) && n > 0))];
+  const cleanSids = [...new Set(sids.filter((n) => Number.isInteger(n) && n > 0))];
+  if (!cleanPids.length && !cleanSids.length) return { ok: true };
+  const rawEndpoints = endpoint.split(",").map((part) => part.trim()).filter(Boolean);
+  if (!rawEndpoints.length) return { ok: false, error: "invalid spare endpoint" };
+  const parsed: Array<{ host: string; port: number; nonce: string }> = [];
+  for (const entry of rawEndpoints) {
+    const parts = entry.split(":");
+    const host = parts[0];
+    const port = Number(parts[1]);
+    const nonce = parts[2];
+    if (host !== "127.0.0.1" || !Number.isInteger(port) || port <= 0 || port > 65535 || !nonce) {
+      return { ok: false, error: "invalid spare endpoint" };
+    }
+    parsed.push({ host, port, nonce });
+  }
+  const body = JSON.stringify({ pids: cleanPids, sids: cleanSids });
+  const deadline = performance.now() + timeoutMs;
+  for (const target of parsed) {
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) return { ok: false, error: "timed out reporting spared processes" };
+    const result = await reportSparedOne(target.host, target.port, `${target.nonce} ${body}\n`, remaining);
+    if (result.status === "ok") return { ok: true };
+    if (result.status === "err") return { ok: false, error: result.error };
+  }
+  return { ok: true };
 }
 
 export function readFdChunk(fd: number, buf: Uint8Array): Promise<number> {
@@ -284,6 +309,7 @@ type PosixLib = {
   pipe: (fds: ReturnType<typeof ptr>) => number;
   socketpair: (domain: number, type: number, protocol: number, fds: ReturnType<typeof ptr>) => number;
   fcntl: (fd: number, cmd: number, arg: number) => number;
+  dup: (oldfd: number) => number;
   dup2: (oldfd: number, newfd: number) => number;
   posix_spawn: (
     pid: ReturnType<typeof ptr>,
@@ -316,6 +342,7 @@ function getPosixLib(): PosixLib | null {
         pipe: { args: [FFIType.pointer], returns: FFIType.i32 },
         socketpair: { args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.pointer], returns: FFIType.i32 },
         fcntl: { args: [FFIType.i32, FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+        dup: { args: [FFIType.i32], returns: FFIType.i32 },
         dup2: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
         posix_spawn: {
           args: [FFIType.pointer, FFIType.pointer, FFIType.pointer, FFIType.pointer, FFIType.pointer, FFIType.pointer],
@@ -335,6 +362,7 @@ function getPosixLib(): PosixLib | null {
         pipe: (fds) => lib.symbols.pipe(fds),
         socketpair: (domain, type, protocol, fds) => lib.symbols.socketpair(domain, type, protocol, fds),
         fcntl: (fd, cmd, arg) => lib.symbols.fcntl(fd, cmd, arg),
+        dup: (oldfd) => lib.symbols.dup(oldfd),
         dup2: (oldfd, newfd) => lib.symbols.dup2(oldfd, newfd),
         posix_spawn: (pid, path, fileActions, attr, argv, envp) => lib.symbols.posix_spawn(pid, path, fileActions, attr, argv, envp),
         posix_spawnattr_init: (attr) => lib.symbols.posix_spawnattr_init(attr),
@@ -501,6 +529,41 @@ export function spawnInOwnGroup(argv: string[], env?: Record<string, string>): O
       } catch {}
     },
   };
+}
+
+function dupCloexec(fd: number): number | undefined {
+  const lib = getPosixLib();
+  if (!lib) return undefined;
+  const copy = lib.dup(fd);
+  if (copy < 0) return undefined;
+  setCloexec(copy, true);
+  return copy;
+}
+
+function redirectAllStdioToNull(): void {
+  const lib = getPosixLib();
+  if (!lib) return;
+  let devNullIn: number | undefined;
+  let devNullOut: number | undefined;
+  try {
+    devNullIn = openSync("/dev/null", "r");
+    devNullOut = openSync("/dev/null", "w");
+    lib.dup2(devNullIn, 0);
+    lib.dup2(devNullOut, 1);
+    lib.dup2(devNullOut, 2);
+  } catch {
+  } finally {
+    if (devNullIn !== undefined) {
+      try {
+        closeSync(devNullIn);
+      } catch {}
+    }
+    if (devNullOut !== undefined) {
+      try {
+        closeSync(devNullOut);
+      } catch {}
+    }
+  }
 }
 
 export function redirectStdioOutputsToNull(): void {
@@ -1545,7 +1608,7 @@ if (import.meta.main) {
     else pendingStops.push(sig);
   };
   let command: string[] = [];
-  let targetEnv: Record<string, string | undefined> | undefined;
+  let targetEnv: Record<string, string> | undefined;
   let cleanupGraceMs = graceMs;
   let stopInterruptGraceMs = interruptGraceMs;
   let controlFd: number | undefined;
@@ -1608,7 +1671,7 @@ if (import.meta.main) {
   if (spareFd !== undefined) setCloexec(spareFd, true);
   if (callerSpareFd !== undefined) setCloexec(callerSpareFd, true);
   if (!holder) {
-    const envObj: Record<string, string | undefined> = targetEnv ?? Object.create(null);
+    const envObj: Record<string, string> = targetEnv ?? Object.create(null);
     if (!targetEnv) {
       for (const [k, v] of Object.entries(process.env)) if (v !== undefined) envObj[k] = v;
       targetEnv = envObj;
@@ -1742,6 +1805,16 @@ if (import.meta.main) {
   if (innerResultFd !== undefined) setCloexec(innerResultFd, true);
   if (clockFd !== undefined) setCloexec(clockFd, true);
   shieldGroupSignals();
+  let reportFd = dupCloexec(1) ?? 1;
+  if (reportFd !== 1) redirectAllStdioToNull();
+  const closeReportFd = () => {
+    if (reportFd !== 1) {
+      try {
+        closeSync(reportFd);
+      } catch {}
+      reportFd = 1;
+    }
+  };
   const closeSpareFds = () => {
     for (const fd of [spareFd, callerSpareFd]) {
       if (fd === undefined) continue;
@@ -1765,7 +1838,7 @@ if (import.meta.main) {
     return true;
   });
   if (spareServer) {
-    const envObj: Record<string, string | undefined> = targetEnv ?? Object.create(null);
+    const envObj: Record<string, string> = targetEnv ?? Object.create(null);
     if (!targetEnv) {
       for (const [k, v] of Object.entries(process.env)) if (v !== undefined) envObj[k] = v;
       targetEnv = envObj;
@@ -1845,6 +1918,7 @@ if (import.meta.main) {
   const onHolderDead = () => {
     spareServer?.close();
     closeSpareFds();
+    closeReportFd();
     if (reported) process.exit(0);
     const targets = discoverTargetsLinux(process.pid, runTag, undefined, runnerSpared, false);
     signalDeadTargets(targets, process.pid);
@@ -1857,7 +1931,7 @@ if (import.meta.main) {
   };
   if (holderFd !== undefined) {
     try {
-      writeSync(1, `runner:${process.pid}\n`);
+      writeSync(reportFd, `runner:${process.pid}\n`);
     } catch {}
     const drainedHolder = drainControlFd(holderFd);
     if (drainedHolder.closed) onHolderDead();
@@ -1881,10 +1955,11 @@ if (import.meta.main) {
   }
   if (pendingStops.length > 0) {
     try {
-      writeSync(1, "stopped\n");
+      writeSync(reportFd, "stopped\n");
     } catch {}
     spareServer?.close();
     closeSpareFds();
+    closeReportFd();
     process.exit(128);
   }
   if (controlFd !== undefined) {
@@ -1911,7 +1986,9 @@ if (import.meta.main) {
   const rememberedDetached = new Map<number, number>();
   await supervise(command, {
     spawn: (argv) => {
-      const child = Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio: ["ignore", "ignore", "ignore"] });
+      const child =
+        (reportFd !== 1 ? spawnInOwnGroup(argv, targetEnv) : undefined) ??
+        Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio: ["ignore", "ignore", "ignore"] });
       targetHandle = child;
       return child;
     },
@@ -1930,29 +2007,31 @@ if (import.meta.main) {
     },
     reportTarget: (pid) => {
       try {
-        writeSync(1, `target:${pid}\n`);
+        writeSync(reportFd, `target:${pid}\n`);
       } catch {}
     },
     reportStop: () => {
       try {
-        writeSync(1, "stopped\n");
+        writeSync(reportFd, "stopped\n");
       } catch {}
     },
     reportResult: (code) => {
       markResultFd();
       try {
-        writeSync(1, `${code}\n`);
+        writeSync(reportFd, `${code}\n`);
       } catch {}
     },
     reportCleanup: () => {
       try {
-        writeSync(1, "cleanup\n");
+        writeSync(reportFd, "cleanup\n");
       } catch {}
-      redirectStdioOutputsToNull();
+      if (reportFd !== 1) closeReportFd();
+      else redirectStdioOutputsToNull();
     },
     exit: (code) => {
       spareServer?.close();
       closeSpareFds();
+      closeReportFd();
       process.exit(code);
     },
   }, cleanupGraceMs, stopInterruptGraceMs);

@@ -243,7 +243,19 @@ async function change(command: keyof typeof changes | "hub", args: string[], opt
     machine: { ...realMachine, ...options.setup?.machine },
     print: options.print,
     apply: () => applyProfile(profileDir, options),
-    humanStepsLeft: () => humanStepsLeft(plan, { home: options.home, run: options.run, giveUp: (options.clock ?? { sleep: Bun.sleep }).sleep(probeLimitMs), ...(options.probeGraceMs === undefined ? {} : { graceMs: options.probeGraceMs }) }),
+    humanStepsLeft: () => {
+      if (options.clock) {
+        return humanStepsLeft(plan, { home: options.home, run: options.run, giveUp: options.clock.sleep(probeLimitMs), ...(options.probeGraceMs === undefined ? {} : { graceMs: options.probeGraceMs }) });
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const giveUp = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, probeLimitMs);
+        if (typeof timer === "object" && timer && "unref" in timer && typeof timer.unref === "function") timer.unref();
+      });
+      return humanStepsLeft(plan, { home: options.home, run: options.run, giveUp, ...(options.probeGraceMs === undefined ? {} : { graceMs: options.probeGraceMs }) }).finally(() => {
+        if (timer !== undefined) clearTimeout(timer);
+      });
+    },
   };
   try {
     return await (command === "hub" ? hubCommand(args, { ...context, home: options.home }) : changes[command](args, context));
