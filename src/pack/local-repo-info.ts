@@ -655,7 +655,7 @@ export function canonicalLocalRepoInfo(dir: string, effective: string): LocalRep
   const resolved = resolvePosixPathBytes(base, rawPath, true, primaryAccess);
   const invalidPrimary = decodeRepoBytes(Buffer.concat([Buffer.from(asFileUrl ? "\0invalid-file:" : "\0invalid-local:"), base, zeroByteBuf, rawPath]));
   const primary = resolved ? encodeCanonicalLocal(resolved, asFileUrl) : invalidPrimary;
-  const lexicalPrimary = resolved ? (resolvePosixPathBytes(base, rawPath, false) ?? resolved) : undefined;
+  const lexicalPrimary = resolved ? (resolvePosixPathBytes(base, stripTrailingSlashBytes(rawPath), false) ?? resolved) : undefined;
   const lexicalKey = lexicalPrimary ? encodeCanonicalLocal(lexicalPrimary, asFileUrl) : invalidPrimary;
   const configuredPrimary = resolved ? lexicalPosixPathBytes(base, rawPath) : undefined;
   const configuredKey = configuredPrimary ? encodeCanonicalLocal(configuredPrimary, asFileUrl) : undefined;

@@ -187,6 +187,32 @@ function scrubUnreachableSources(line: string, nextToken: () => string, saved: M
   );
 }
 
+const publicBranchNames = new Set(["main", "master", "HEAD"]);
+const isPublicRef = (ref: string) => publicBranchNames.has(ref) || /^(?:\+?(?:[0-9a-f]{40}|[0-9a-f]{64}):?)$/i.test(ref);
+
+function scrubRecordFallback(line: string, nextToken: () => string, saved: Map<string, string>): string {
+  const maskRef = (ref: string) => {
+    if (isPublicRef(ref)) return ref;
+    const token = nextToken();
+    saved.set(token, "<ref>");
+    return token;
+  };
+  let next = line.replace(
+    /^(\s*(?:(?:Note|Fix|To do):\s+)?The [a-z0-9][a-z0-9-]* pack (?:uses its last fetched files|is not applied): could not record )(\S+)( from [\s\S]+)$/,
+    (_match, prefix: string, ref: string, rest: string) => {
+      const maskedRest = rest.replace(/(; using )(\S+)( instead)$/, (_m, p: string, oldRef: string, s: string) => `${p}${maskRef(oldRef)}${s}`);
+      return `${prefix}${maskRef(ref)}${maskedRest}`;
+    },
+  );
+  if (next === line) {
+    next = line.replace(
+      /^(\s*could not record )(\S+)( of .+ at [0-9a-f]{12}:[\s\S]*)$/i,
+      (_match, prefix: string, branch: string, rest: string) => `${prefix}${maskRef(branch)}${rest}`,
+    );
+  }
+  return next;
+}
+
 function cleanWithAdvisories(lines: string[], clean: (text: string) => string): string[] {
   const saved = new Map<string, string>();
   let nextId = 0;
@@ -198,7 +224,9 @@ function cleanWithAdvisories(lines: string[], clean: (text: string) => string): 
       saved.set(token, scrubbed);
       return token;
     }
-    return scrubUnreachableSources(line, nextToken, saved);
+    const unreachable = scrubUnreachableSources(line, nextToken, saved);
+    if (unreachable !== line) return unreachable;
+    return scrubRecordFallback(line, nextToken, saved);
   });
   const cleaned = clean(tagged.join("\n")).split("\n");
   if (!saved.size) return cleaned;

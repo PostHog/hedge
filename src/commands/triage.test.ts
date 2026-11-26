@@ -688,6 +688,64 @@ describe("hedge triage", () => {
     expect(issue.input).not.toContain("confidential-packs");
     expect(issue.input).toContain("The <this machine> pack is not applied: not found; unreachable sources: <private source>");
   });
+
+  test("redacts private branch names in could-not-record fallback diagnostics in triage reports", async () => {
+    const home = temp.make("home-record-fallback-branch-");
+    const profileDir = join(home, "profile");
+    mkdirSync(profileDir, { recursive: true });
+    writeFileSync(
+      join(profileDir, "hedge.json"),
+      JSON.stringify({
+        schema: 1,
+        engine: { repo: "PostHog/hedge", ref: "v1", channel: "release" },
+        sources: [{ name: "team", repo: "acme/private-packs", ref: "secret/internal-release" }],
+        packs: ["ops"],
+        plan: "both",
+        settings: {},
+        workflows: {},
+      }),
+    );
+    mkdirSync(join(home, ".config/hedge"), { recursive: true });
+    writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "linux", name: "box", profileDir }));
+    const logs = join(home, ".local/state/hedge/logs");
+    mkdirSync(logs, { recursive: true });
+    writeFileSync(
+      join(logs, "setup.log"),
+      [
+        "Note: The ops pack uses its last fetched files: could not record secret/internal-release from acme/private-packs: could not record pinned commit; using secret/old-branch instead",
+        "could not record secret/refresh-branch of acme/private-packs at 0123456789ab: could not record pinned commit",
+      ].join("\n") + "\n",
+    );
+    const sent: Sent[] = [];
+    const io = scripted([]);
+    const ghOnly = capture(sent);
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      if (command[0] === "git") {
+        const proc = Bun.spawn(command, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+        const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+        return { code, stdout, stderr };
+      }
+      return ghOnly(command, options);
+    };
+    const code = await main(["triage", "--send", "--note", "record fallback branch check"], {
+      home,
+      engineRoot,
+      platform: "linux",
+      env: {},
+      print: io.terminal.print,
+      terminal: io.terminal,
+      capture: runRealGit,
+      hostname: () => "box.local",
+      run: async () => 0,
+    });
+    expect(code).toBe(0);
+    const issue = sent.find((call) => call.command[1] === "issue")!;
+    expect(issue.input).not.toContain("secret/internal-release");
+    expect(issue.input).not.toContain("secret/old-branch");
+    expect(issue.input).not.toContain("secret/refresh-branch");
+    expect(issue.input).toContain("could not record <ref> from <team source>: could not record pinned commit; using <ref> instead");
+    expect(issue.input).toContain("could not record <ref> of <team source> at 0123456789ab: could not record pinned commit");
+  });
 });
 
 describe("hedge setup and triage", () => {

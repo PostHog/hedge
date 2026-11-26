@@ -1195,7 +1195,12 @@ async function restoreGitFileAt(gitDir: string, name: string, saved: SavedFetchH
       await writeAtomic(path, saved.bytes, saved.mode);
       return true;
     } catch {
-      return false;
+      try {
+        await writeFile(path, saved.bytes);
+        return true;
+      } catch {
+        return false;
+      }
     }
   } else if (saved.kind === "missing") {
     try {
@@ -1768,6 +1773,10 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
   const restoreRefreshState = async (removeObjects = true) => {
     const fetchHeadRestored = await restoreFetchHead(dir, savedFetchHead);
     const shallowRestored = await restoreGitFileAt(gitDir, "shallow", savedShallow);
+    if (!fetchHeadRestored) {
+      await migrateStagedObjects(stageDir, targetObjectsDir, movedObjects).catch(() => {});
+      return;
+    }
     if (removeObjects) {
       const headLogRestored = await restoreGitFileAt(gitDir, join("logs", "HEAD"), savedHeadLog);
       if (fetchHeadRestored && shallowRestored && headLogRestored && movedObjects.length) {
@@ -1848,9 +1857,47 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
       await restoreRefreshState(restored);
       return { state: "failed", say: `could not record ${branch} of ${ref.repo} at ${tip.slice(0, 12)}: ${saveError}` };
     }
+    await updateRemoteTrackingRefs(dir, repo, head, tip);
     return { state: "moved", commit: tip, source: { ref, dir, packs: loaded.packs } };
   } finally {
     await rm(stageDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function updateRemoteTrackingRefs(dir: string, repo: string, headRef: string, tip: string): Promise<void> {
+  if (!repo || repo.startsWith("-")) return;
+  const configured = await git(dir, "config", "--get-all", `remote.${repo}.fetch`);
+  if (!configured.ok || !configured.stdout) return;
+  const specs = configured.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+  const matchesPattern = (ref: string, pattern: string): string | undefined => {
+    const star = pattern.indexOf("*");
+    if (star === -1) return ref === pattern ? "" : undefined;
+    const prefix = pattern.slice(0, star);
+    const suffix = pattern.slice(star + 1);
+    if (ref.length >= prefix.length + suffix.length && ref.startsWith(prefix) && ref.endsWith(suffix)) {
+      return ref.slice(prefix.length, ref.length - suffix.length);
+    }
+    return undefined;
+  };
+  const negative = specs.filter((s) => s.startsWith("^")).map((s) => s.slice(1));
+  if (negative.some((pattern) => matchesPattern(headRef, pattern) !== undefined)) return;
+  for (const rawSpec of specs) {
+    if (rawSpec.startsWith("^")) continue;
+    const force = rawSpec.startsWith("+");
+    const spec = force ? rawSpec.slice(1) : rawSpec;
+    const colon = spec.indexOf(":");
+    if (colon <= 0 || colon === spec.length - 1) continue;
+    const src = spec.slice(0, colon);
+    const dst = spec.slice(colon + 1);
+    const matched = matchesPattern(headRef, src);
+    if (matched === undefined) continue;
+    const targetRef = dst.includes("*") ? dst.replace("*", matched) : dst;
+    if (!targetRef.startsWith("refs/")) continue;
+    if (!force) {
+      const cur = await git(dir, "rev-parse", "--verify", "--quiet", targetRef);
+      if (cur.ok && cur.stdout && !(await git(dir, "merge-base", "--is-ancestor", cur.stdout, tip)).ok) continue;
+    }
+    await git(dir, "update-ref", targetRef, tip);
   }
 }
 

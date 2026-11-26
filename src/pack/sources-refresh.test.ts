@@ -268,6 +268,11 @@ describe("fetchSource staged refresh and rollback", () => {
     expect(failedOrigin.state).toBe("failed");
     expect(await spawnGit(originDir, "rev-parse", "refs/remotes/origin/main")).toBe(remoteBefore);
     await spawnGit(originDir, "fsck", "--full");
+
+    const o3 = await commitPack(originUpstream, "team", "Origin fixed v3.");
+    const movedOrigin = await advanceSource({ name: "team", repo: "origin", ref: "main" }, originCache, o1);
+    expect(movedOrigin).toMatchObject({ state: "moved", commit: o3 });
+    expect(await spawnGit(originDir, "rev-parse", "refs/remotes/origin/main")).toBe(o3);
   });
 
   test("returns a failed refresh state when staging objects fails on a read-only objects directory", async () => {
@@ -338,28 +343,31 @@ describe("fetchSource staged refresh and rollback", () => {
     expect(colMoved).toMatchObject({ state: "moved", commit: col2 });
   });
 
-  test("keeps the repository fsck-clean when a post-checkout hook dirties files during refresh rollback", async () => {
+  test("keeps the repository fsck-clean when loading dirties a tracked file during refresh rollback", async () => {
     if (process.platform === "win32") return;
     const root = temp.make("git-dirty-rollback-");
     const dirtyRollbackRepo = join(root, "dirty-rollback");
     await initRepo(dirtyRollbackRepo);
+    writeFileSync(join(dirtyRollbackRepo, "helper.txt"), "clean v1\n");
     const dr1 = await commitPack(dirtyRollbackRepo, "team", "Dirty rollback v1.");
     const drCache = temp.make("cache-dirty-rollback-");
     expect("error" in (await fetchSource({ name: "team", repo: dirtyRollbackRepo, ref: "main" }, drCache))).toBe(false);
-    const drHooksDir = join(drCache, "team", ".git", "hooks");
-    mkdirSync(drHooksDir, { recursive: true });
-    const drHook = join(drHooksDir, "post-checkout");
-    writeFileSync(drHook, "#!/bin/sh\necho dirty >> packs/team/pack.json\n");
-    chmodSync(drHook, 0o755);
-    mkdirSync(join(dirtyRollbackRepo, "packs", "team"), { recursive: true });
-    writeFileSync(join(dirtyRollbackRepo, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Dirty rollback broken." }));
-    await spawnGit(dirtyRollbackRepo, "commit", "-qam", "broken v2");
+    const cacheHelper = join(drCache, "team", "helper.txt");
+    rmSync(join(dirtyRollbackRepo, "packs", "team", "pack.json"));
+    writeFileSync(
+      join(dirtyRollbackRepo, "packs", "team", "pack.ts"),
+      `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(cacheHelper)}, "dirty during load\\n");\nthrow new Error("dirty rollback broken");\n`,
+    );
+    await spawnGit(dirtyRollbackRepo, "add", "-A");
+    await spawnGit(dirtyRollbackRepo, "commit", "-qm", "broken v2");
     const drFailed = await advanceSource({ name: "team", repo: dirtyRollbackRepo, ref: "main" }, drCache, dr1);
     expect(drFailed.state).toBe("failed");
+    expect(readFileSync(cacheHelper, "utf8")).toBe("dirty during load\n");
+    expect(await spawnGit(join(drCache, "team"), "rev-parse", "HEAD")).toBe(dr1);
     await spawnGit(join(drCache, "team"), "fsck", "--full");
   });
 
-  test("keeps migrated objects when a post-checkout hook creates a new branch before refresh rollback", async () => {
+  test("keeps migrated objects when loading creates a new branch before refresh rollback", async () => {
     if (process.platform === "win32") return;
     const root = temp.make("git-branch-hook-");
     const branchHookRepo = join(root, "branch-hook-rollback");
@@ -367,17 +375,46 @@ describe("fetchSource staged refresh and rollback", () => {
     const bh1 = await commitPack(branchHookRepo, "team", "Branch hook v1.");
     const bhCache = temp.make("cache-branch-hook-");
     expect("error" in (await fetchSource({ name: "team", repo: branchHookRepo, ref: "main" }, bhCache))).toBe(false);
-    const bhHooksDir = join(bhCache, "team", ".git", "hooks");
-    mkdirSync(bhHooksDir, { recursive: true });
-    const bhHook = join(bhHooksDir, "post-checkout");
-    writeFileSync(bhHook, "#!/bin/sh\ngit update-ref refs/heads/saved-tip \"$2\"\n");
-    chmodSync(bhHook, 0o755);
-    mkdirSync(join(branchHookRepo, "packs", "team"), { recursive: true });
-    writeFileSync(join(branchHookRepo, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Branch hook broken." }));
-    await spawnGit(branchHookRepo, "commit", "-qam", "broken bh v2");
+    const cacheDir = join(bhCache, "team");
+    rmSync(join(branchHookRepo, "packs", "team", "pack.json"));
+    writeFileSync(
+      join(branchHookRepo, "packs", "team", "pack.ts"),
+      `Bun.spawnSync(["git", "-C", ${JSON.stringify(cacheDir)}, "update-ref", "refs/heads/saved-tip", "HEAD"]);\nthrow new Error("branch hook broken");\n`,
+    );
+    await spawnGit(branchHookRepo, "add", "-A");
+    await spawnGit(branchHookRepo, "commit", "-qm", "broken bh v2");
+    const bh2 = await spawnGit(branchHookRepo, "rev-parse", "HEAD");
     const bhFailed = await advanceSource({ name: "team", repo: branchHookRepo, ref: "main" }, bhCache, bh1);
     expect(bhFailed.state).toBe("failed");
-    await spawnGit(join(bhCache, "team"), "fsck", "--full");
+    expect(await spawnGit(cacheDir, "rev-parse", "--verify", "refs/heads/saved-tip")).toBe(bh2);
+    expect(await spawnGit(cacheDir, "rev-parse", "HEAD")).toBe(bh1);
+    await spawnGit(cacheDir, "fsck", "--full");
+  });
+
+  test("restores writable FETCH_HEAD in a non-writable .git directory without leaving dangling refs on rejected refresh", async () => {
+    if (process.platform === "win32" || process.getuid?.() === 0) return;
+    const root = temp.make("git-ro-dotgit-fh-");
+    const repo = join(root, "repo");
+    await initRepo(repo);
+    const r1 = await commitPack(repo, "team", "RO dotgit v1.");
+    const cache = temp.make("cache-ro-dotgit-fh-");
+    expect("error" in (await fetchSource({ name: "team", repo, ref: "main" }, cache))).toBe(false);
+    await spawnGit(repo, "checkout", "-q", "--orphan", "rewritten");
+    const r2 = await commitPack(repo, "team", "Rewritten orphan.");
+    await spawnGit(repo, "branch", "-f", "main", r2);
+    const gitDir = join(cache, "team", ".git");
+    const fhPath = join(gitDir, "FETCH_HEAD");
+    const beforeFh = readFileSync(fhPath, "utf8");
+    chmodSync(fhPath, 0o644);
+    chmodSync(gitDir, 0o555);
+    try {
+      const refused = await advanceSource({ name: "team", repo, ref: "main" }, cache, r1);
+      expect(refused.state).toBe("refused");
+      expect(readFileSync(fhPath, "utf8")).toBe(beforeFh);
+    } finally {
+      chmodSync(gitDir, 0o755);
+    }
+    await spawnGit(join(cache, "team"), "fsck", "--full");
   });
 
   test("preserves preexisting cache files when a failed fresh checkout is discarded", async () => {

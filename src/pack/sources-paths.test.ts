@@ -823,4 +823,32 @@ describe("fetchSource local path resolution", () => {
     if ("error" in offlineA) throw new Error(offlineA.error);
     expect([offlineA.packs[0]?.manifest.summary, offlineA.stale]).toEqual(["Symlink gitfile A.", undefined]);
   });
+
+  test("resolves a trailing-slash symlink to a relative gitfile from the symlink directory like Git without poisoning the target directory's cache", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-slash-rel-sym-gf-");
+    const dirA = join(root, "dirA");
+    const dirB = join(root, "dirB");
+    const targetA = join(dirA, "target");
+    const targetB = join(dirB, "target");
+    await initRepo(targetA);
+    const shaA = await commitPack(targetA, "team", "Relative gitfile A.");
+    await initRepo(targetB);
+    const shaB = await commitPack(targetB, "team", "Relative gitfile B.");
+    writeFileSync(join(dirA, "gf"), "gitdir: target/.git\n");
+    const link = join(dirB, "link");
+    symlinkSync("../dirA/gf", link);
+
+    const cache = temp.make("cache-slash-rel-sym-gf-");
+    const loadedA = await fetchSource({ name: "team", repo: targetA, ref: shaA }, cache);
+    if ("error" in loadedA) throw new Error(loadedA.error);
+    expect(loadedA.packs[0]?.manifest.summary).toBe("Relative gitfile A.");
+
+    const loadedSlash = await fetchSource({ name: "team", repo: `${link}/`, ref: shaB }, cache);
+    if ("error" in loadedSlash) throw new Error(loadedSlash.error);
+    expect([loadedSlash.packs[0]?.manifest.summary, loadedSlash.stale]).toEqual(["Relative gitfile B.", undefined]);
+
+    const crossA = await fetchSource({ name: "team", repo: targetA, ref: shaB }, cache);
+    expect("error" in crossA).toBe(true);
+  });
 });
