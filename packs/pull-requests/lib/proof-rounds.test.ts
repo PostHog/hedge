@@ -78,6 +78,23 @@ test.each(arbiterAnswers)("the arbiter's answer %s gives the verdict it must", (
   if (verdict === "unavailable") expect(parsed.reason.length).toBeLessThan(260);
 });
 
+test("a refused newer answer with the same words shows its reason next to the used one, and a fresh plain card starts the round", async () => {
+  const pr = await checkout();
+  const third = await twoRounds(pr);
+  pr.env.HEDGE_REVIEW_ARBITER = escalate;
+  const override = () => pr.hedge(...third, "--override", `2026-10-25 "Run one more round"`, "--thread", "thread-1");
+  pr.choose("Run one more round");
+  expect((await override()).code).toBe(0);
+  await finishRound(pr, "3");
+
+  pr.choose("Run one more round", "Run one more review round? [example/product#42](https://github.com/example/product/pull/42): one more read.");
+  await expect(override()).rejects.toThrow(`Ask the user again. A newer answer with these words was refused: "Run one more round" answers another question ("Run one more review round? [example/product#42](https://github.com/example/product/pull/42): one more read."). Ask the question that hedge proof printed, which starts "Run one more review round? example/product#42:", with the PR as plain owner/repo#n, not a Markdown link`);
+
+  pr.choose("Run one more round");
+  expect((await override()).code).toBe(0);
+  expect(existsSync(join(pr.pullRequest, "reviews/4/round.json"))).toBe(true);
+});
+
 test("an override counts only when the user chose Run one more round in the question tool hedge named; a refusal or a typed message never does", async () => {
   const pr = await checkout();
   const third = await twoRounds(pr);

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### An override refused for an older answer also says why the newer one failed
+
+- When `hedge proof review --override '<date> "<words>"'` finds that an older
+  answer with those words is already used, the error now also gives the
+  reason it refused the newer answer.
+- When the user answered a card that names the PR as a Markdown link, the
+  error says to name the PR as plain owner/repo#n.
+
 ### A check that a person passes no longer turns into a ci gap
 
 - A new setting, `pull-requests.personChecks`, lists the required checks that
