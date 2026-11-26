@@ -746,6 +746,55 @@ describe("hedge triage", () => {
     expect(issue.input).toContain("could not record <ref> from <team source>: could not record pinned commit; using <ref> instead");
     expect(issue.input).toContain("could not record <ref> of <team source> at 0123456789ab: could not record pinned commit");
   });
+
+  test("redacts Unicode whitespace branches, 40-hex branch names, and unconfigured private repos in could-not-record diagnostics", async () => {
+    const home = temp.make("home-record-fallback-extra-");
+    const logs = join(home, ".local/state/hedge/logs");
+    mkdirSync(logs, { recursive: true });
+    const hexBranch = "0123456789abcdef0123456789abcdef01234567";
+    writeFileSync(
+      join(logs, "setup.log"),
+      [
+        "Note: The ops pack uses its last fetched files: could not record secret\u00a0internal-release from acme/unlisted-packs: could not record pinned commit; using secret\u00a0old-branch instead",
+        `Note: The ops pack is not applied: could not record ${hexBranch} from acme/unlisted-packs: could not record pinned commit`,
+        "could not record secret\u00a0refresh of acme/unlisted-packs at 0123456789ab: could not record pinned commit",
+        `could not record ${hexBranch} of Silthus/agent-skills at 0123456789ab: could not record pinned commit`,
+      ].join("\n") + "\n",
+    );
+    const sent: Sent[] = [];
+    const io = scripted([]);
+    const ghOnly = capture(sent);
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      if (command[0] === "git") {
+        const proc = Bun.spawn(command, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+        const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+        return { code, stdout, stderr };
+      }
+      return ghOnly(command, options);
+    };
+    const code = await main(["triage", "--send", "--note", "extra record fallback check"], {
+      home,
+      engineRoot,
+      platform: "linux",
+      env: {},
+      print: io.terminal.print,
+      terminal: io.terminal,
+      capture: runRealGit,
+      hostname: () => "box.local",
+      run: async () => 0,
+    });
+    expect(code).toBe(0);
+    const issue = sent.find((call) => call.command[1] === "issue")!;
+    expect(issue.input).not.toContain("internal-release");
+    expect(issue.input).not.toContain("old-branch");
+    expect(issue.input).not.toContain("secret\u00a0refresh");
+    expect(issue.input).not.toContain("acme/unlisted-packs");
+    expect(issue.input).not.toContain(hexBranch);
+    expect(issue.input).toContain("could not record <ref> from <private repo>: could not record pinned commit; using <ref> instead");
+    expect(issue.input).toContain("The ops pack is not applied: could not record <ref> from <private repo>: could not record pinned commit");
+    expect(issue.input).toContain("could not record <ref> of <private repo> at 0123456789ab: could not record pinned commit");
+    expect(issue.input).toContain("could not record <ref> of Silthus/agent-skills at 0123456789ab: could not record pinned commit");
+  });
 });
 
 describe("hedge setup and triage", () => {

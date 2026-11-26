@@ -801,4 +801,89 @@ describe("fetchSource staged refresh and rollback", () => {
     expect(readFileSync(refreshShared, "utf8")).toBe("refresh user edit during load\n");
   });
 
+  test("syncs remote-tracking refs with real git fetch rules for $& branches, abbreviated refspecs, checked-out branches, and non-force tags", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-origin-refspec-rules-");
+    const upstream = join(root, "upstream");
+    await initRepo(upstream);
+    const m1 = await commitPack(upstream, "team", "Main v1.");
+    await spawnGit(upstream, "checkout", "-q", "-b", "release/$&");
+    const d1 = await commitPack(upstream, "team", "Dollar v1.");
+
+    const dollarCache = temp.make("cache-dollar-refspec-");
+    const dollarDir = join(dollarCache, "team");
+    await spawnGit(root, "clone", "-q", "-b", "release/$&", upstream, dollarDir);
+    expect("error" in (await fetchSource({ name: "team", repo: "origin", ref: "release/$&" }, dollarCache))).toBe(false);
+    const d2 = await commitPack(upstream, "team", "Dollar v2.");
+    const movedDollar = await advanceSource({ name: "team", repo: "origin", ref: "release/$&" }, dollarCache, d1);
+    expect(movedDollar).toMatchObject({ state: "moved", commit: d2 });
+    expect(await spawnGit(dollarDir, "rev-parse", "refs/remotes/origin/release/$&")).toBe(d2);
+
+    await spawnGit(upstream, "checkout", "-q", "main");
+    const abbrCache = temp.make("cache-abbr-refspec-");
+    const abbrDir = join(abbrCache, "team");
+    await spawnGit(root, "clone", "-q", "-b", "main", upstream, abbrDir);
+    await spawnGit(abbrDir, "config", "--replace-all", "remote.origin.fetch", "+main:refs/remotes/origin/main");
+    await spawnGit(abbrDir, "tag", "v1", m1);
+    await spawnGit(abbrDir, "config", "--add", "remote.origin.fetch", "refs/heads/main:refs/tags/v1");
+    expect("error" in (await fetchSource({ name: "team", repo: "origin", ref: "main" }, abbrCache))).toBe(false);
+    const m2 = await commitPack(upstream, "team", "Main v2.");
+    const movedAbbr = await advanceSource({ name: "team", repo: "origin", ref: "main" }, abbrCache, m1);
+    expect(movedAbbr).toMatchObject({ state: "moved", commit: m2 });
+    expect(await spawnGit(abbrDir, "rev-parse", "refs/remotes/origin/main")).toBe(m2);
+    expect(await spawnGit(abbrDir, "rev-parse", "refs/tags/v1")).toBe(m1);
+
+    const wtCache = temp.make("cache-wt-refspec-");
+    const wtDir = join(wtCache, "team");
+    const wtBranch = join(root, "wt-main");
+    await spawnGit(root, "clone", "-q", "-b", "main", upstream, wtDir);
+    expect("error" in (await fetchSource({ name: "team", repo: "origin", ref: "main" }, wtCache))).toBe(false);
+    await spawnGit(wtDir, "worktree", "add", "-q", wtBranch, "main");
+    await spawnGit(wtDir, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/main:refs/heads/main");
+    const m3 = await commitPack(upstream, "team", "Main v3.");
+    const movedWt = await advanceSource({ name: "team", repo: "origin", ref: "main" }, wtCache, m2);
+    expect(movedWt).toMatchObject({ state: "moved", commit: m3 });
+    expect(await spawnGit(wtDir, "rev-parse", "refs/heads/main")).toBe(m2);
+  });
+
+  test("records intermediate commits in verified pin history when a retry reuses objects retained after a write-only FETCH_HEAD rollback", async () => {
+    if (process.platform === "win32" || process.getuid?.() === 0) return;
+    const root = temp.make("git-retry-retained-history-");
+    const repo = join(root, "repo");
+    await initRepo(repo);
+    const c1 = await commitPack(repo, "team", "History v1.");
+    const cache = temp.make("cache-retry-retained-history-");
+    expect("error" in (await fetchSource({ name: "team", repo, ref: "main" }, cache))).toBe(false);
+
+    const c2 = await commitPack(repo, "team", "History v2.");
+    const c3 = await commitPack(repo, "team", "History v3.");
+    mkdirSync(join(repo, "packs", "team"), { recursive: true });
+    writeFileSync(join(repo, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Broken v4." }));
+    await spawnGit(repo, "commit", "-qam", "broken v4");
+
+    const fhPath = join(cache, "team", ".git", "FETCH_HEAD");
+    chmodSync(fhPath, 0o200);
+    try {
+      const failed = await advanceSource({ name: "team", repo, ref: "main" }, cache, c1);
+      expect(failed.state).toBe("failed");
+    } finally {
+      chmodSync(fhPath, 0o644);
+    }
+
+    const c5 = await commitPack(repo, "team", "History fixed v5.");
+    const moved = await advanceSource({ name: "team", repo, ref: "main" }, cache, c1);
+    expect(moved).toMatchObject({ state: "moved", commit: c5 });
+
+    rmSync(repo, { recursive: true, force: true });
+    for (const [sha, summary] of [
+      [c2, "History v2."],
+      [c3, "History v3."],
+    ] as const) {
+      const pinned = await fetchSource({ name: "team", repo, ref: sha }, cache);
+      if ("error" in pinned) throw new Error(pinned.error);
+      expect(pinned.stale).toBeUndefined();
+      expect(pinned.packs[0]?.manifest.summary).toBe(summary);
+    }
+  });
+
 });

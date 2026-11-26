@@ -851,4 +851,25 @@ describe("fetchSource local path resolution", () => {
     const crossA = await fetchSource({ name: "team", repo: targetA, ref: shaB }, cache);
     expect("error" in crossA).toBe(true);
   });
+
+  test("does not serve a standard repo's retained pin after its .git directory is replaced by a gitfile pointing to an unavailable repo", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-dotgit-replaced-broken-gf-");
+    const repoA = join(root, "repo-a");
+    const repoB = join(root, "repo-b");
+    await initRepo(repoA);
+    const shaA = await commitPack(repoA, "team", "Standard repo A.");
+    await initRepo(repoB);
+    const shaB = await commitPack(repoB, "team", "Standard repo B.");
+
+    const cache = temp.make("cache-dotgit-replaced-broken-gf-");
+    const loadedA = await fetchSource({ name: "team", repo: repoA, ref: shaA }, cache);
+    if ("error" in loadedA) throw new Error(loadedA.error);
+    expect([loadedA.packs[0]?.manifest.summary, loadedA.stale]).toEqual(["Standard repo A.", undefined]);
+    expect("error" in (await fetchSource({ name: "team", repo: repoB, ref: shaB }, cache))).toBe(false);
+
+    rmSync(join(repoA, ".git"), { recursive: true, force: true });
+    writeFileSync(join(repoA, ".git"), `gitdir: ${join(root, "missing-repo", ".git")}\n`);
+    expect("error" in (await fetchSource({ name: "team", repo: repoA, ref: shaA }, cache))).toBe(true);
+  });
 });

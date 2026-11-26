@@ -153,6 +153,11 @@ async function firstLine(context: TriageContext, command: string[]) {
 }
 
 const publicSourceNames = new Set(defaultSources.map((source) => source.name));
+const publicRepoNames = new Set([engineRepo, ...defaultSources.map((source) => source.repo)]);
+const publicRepoSpecs = new Set([
+  ...publicRepoNames,
+  ...[...publicRepoNames].map((repo) => `https://github.com/${repo}.git`),
+]);
 
 const legacyAdvisorySuffix = ". Pin its ref in hedge.json to a commit SHA, so each apply loads the same packs, even offline.";
 
@@ -188,29 +193,56 @@ function scrubUnreachableSources(line: string, nextToken: () => string, saved: M
 }
 
 const publicBranchNames = new Set(["main", "master", "HEAD"]);
-const isPublicRef = (ref: string) => publicBranchNames.has(ref) || /^(?:\+?(?:[0-9a-f]{40}|[0-9a-f]{64}):?)$/i.test(ref);
 
-function scrubRecordFallback(line: string, nextToken: () => string, saved: Map<string, string>): string {
+function scrubRecordFallback(line: string, clean: (text: string) => string, nextToken: () => string, saved: Map<string, string>): string {
   const maskRef = (ref: string) => {
-    if (isPublicRef(ref)) return ref;
+    if (publicBranchNames.has(ref)) return ref;
     const token = nextToken();
     saved.set(token, "<ref>");
     return token;
   };
-  let next = line.replace(
-    /^(\s*(?:(?:Note|Fix|To do):\s+)?The [a-z0-9][a-z0-9-]* pack (?:uses its last fetched files|is not applied): could not record )(\S+)( from [\s\S]+)$/,
-    (_match, prefix: string, ref: string, rest: string) => {
-      const maskedRest = rest.replace(/(; using )(\S+)( instead)$/, (_m, p: string, oldRef: string, s: string) => `${p}${maskRef(oldRef)}${s}`);
-      return `${prefix}${maskRef(ref)}${maskedRest}`;
-    },
-  );
-  if (next === line) {
-    next = line.replace(
-      /^(\s*could not record )(\S+)( of .+ at [0-9a-f]{12}:[\s\S]*)$/i,
-      (_match, prefix: string, branch: string, rest: string) => `${prefix}${maskRef(branch)}${rest}`,
-    );
+  const maskRepo = (repo: string) => {
+    if (publicRepoSpecs.has(repo)) return repo;
+    const cleanedRepo = clean(repo);
+    const token = nextToken();
+    saved.set(token, /^<[^>]+>$/.test(cleanedRepo) ? cleanedRepo : "<private repo>");
+    return token;
+  };
+  const packMatch = line.match(/^(\s*(?:(?:Note|Fix|To do):\s+)?The [a-z0-9][a-z0-9-]* pack (?:uses its last fetched files|is not applied): could not record )([\s\S]+)$/);
+  if (packMatch) {
+    const [, prefix, rest] = packMatch;
+    let body = rest!;
+    let usingSuffix = "";
+    const usingIdx = body.lastIndexOf("; using ");
+    if (usingIdx !== -1 && body.endsWith(" instead")) {
+      const oldRef = body.slice(usingIdx + "; using ".length, -" instead".length);
+      usingSuffix = `; using ${maskRef(oldRef)} instead`;
+      body = body.slice(0, usingIdx);
+    }
+    const fromIdx = body.indexOf(" from ");
+    if (fromIdx > 0) {
+      const ref = body.slice(0, fromIdx);
+      const afterFrom = body.slice(fromIdx + " from ".length);
+      const colonIdx = afterFrom.indexOf(": ");
+      if (colonIdx > 0) {
+        const repo = afterFrom.slice(0, colonIdx);
+        const tail = afterFrom.slice(colonIdx);
+        return `${prefix}${maskRef(ref)} from ${maskRepo(repo)}${tail}${usingSuffix}`;
+      }
+      return `${prefix}${maskRef(ref)} from ${maskRepo(afterFrom)}${usingSuffix}`;
+    }
   }
-  return next;
+  const refreshMatch = line.match(/^(\s*could not record )([\s\S]+?)( at [0-9a-f]{12}:[\s\S]*)$/i);
+  if (refreshMatch) {
+    const [, prefix, mid, suffix] = refreshMatch;
+    const ofIdx = mid!.indexOf(" of ");
+    if (ofIdx > 0 && ofIdx + " of ".length < mid!.length) {
+      const branch = mid!.slice(0, ofIdx);
+      const repo = mid!.slice(ofIdx + " of ".length);
+      return `${prefix}${maskRef(branch)} of ${maskRepo(repo)}${suffix}`;
+    }
+  }
+  return line;
 }
 
 function cleanWithAdvisories(lines: string[], clean: (text: string) => string): string[] {
@@ -226,7 +258,7 @@ function cleanWithAdvisories(lines: string[], clean: (text: string) => string): 
     }
     const unreachable = scrubUnreachableSources(line, nextToken, saved);
     if (unreachable !== line) return unreachable;
-    return scrubRecordFallback(line, nextToken, saved);
+    return scrubRecordFallback(line, clean, nextToken, saved);
   });
   const cleaned = clean(tagged.join("\n")).split("\n");
   if (!saved.size) return cleaned;

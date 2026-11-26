@@ -120,7 +120,8 @@ function localAliasPlan(localInfo: LocalRepoInfo | undefined, effectiveDigest: s
   if (
     localInfo.resolved !== localInfo.primary ||
     localInfo.lexicalKey !== localInfo.primary ||
-    (localInfo.configuredKey !== undefined && localInfo.configuredKey !== localInfo.primary)
+    (localInfo.configuredKey !== undefined && localInfo.configuredKey !== localInfo.primary) ||
+    localInfo.pointerKey !== undefined
   ) {
     const aliasKeys = keys.filter((key) => key !== localInfo.resolved);
     return {
@@ -162,6 +163,9 @@ async function resolveRepoIdentityAt(
     const lookupKey = localInfo.pointerKey ?? localInfo.aliasKey;
     const aliased = await localAliasDigestAt(dir, gitDir, repoDigest(lookupKey));
     if (aliased) return { digest: aliased, display: localInfo.resolved, localInfo };
+    if (localInfo.pointerKey !== undefined) {
+      return { digest: repoDigest(localInfo.pointerKey), display: localInfo.resolved, localInfo };
+    }
   }
   return { digest: repoDigest(localInfo.resolved), display: localInfo.resolved, localInfo };
 }
@@ -758,26 +762,6 @@ async function recordPinRef(dir: string, repoHash: string, oid: string, undo?: R
   return undefined;
 }
 
-async function stagedCommitOids(dir: string, stageDir: string): Promise<Set<string> | undefined> {
-  const listed = await gitAtEnv(
-    dir,
-    join(dir, ".git"),
-    { GIT_OBJECT_DIRECTORY: stageDir, GIT_ALTERNATE_OBJECT_DIRECTORIES: "" },
-    "cat-file",
-    "--batch-all-objects",
-    "--batch-check=%(objecttype) %(objectname)",
-  );
-  if (!listed.ok) return undefined;
-  const commits = new Set<string>();
-  for (const line of listed.stdout.split("\n")) {
-    if (line.startsWith("commit ")) {
-      const oid = line.slice(7).trim().toLowerCase();
-      if (gitHash.test(oid)) commits.add(oid);
-    }
-  }
-  return commits;
-}
-
 function quoteGitAlternatePath(path: string): string {
   const sepChar = process.platform === "win32" ? ";" : ":";
   if (!path.includes(sepChar) && !path.startsWith("\"") && !/[\0-\x1f\x7f\\"]/.test(path)) return path;
@@ -896,7 +880,6 @@ async function recordHistoryRef(
   commit: string,
   from: string,
   undo?: RefUndo[],
-  stagedCommits?: Set<string>,
 ): Promise<string | undefined> {
   const normalized = commit.toLowerCase();
   const listed = await git(dir, "rev-list", normalized, `^${from.toLowerCase()}`);
@@ -905,9 +888,7 @@ async function recordHistoryRef(
     .split("\n")
     .map((line) => line.trim().toLowerCase())
     .filter((line) => gitHash.test(line));
-  const commits = stagedCommits
-    ? rawCommits.filter((oid) => oid === normalized || stagedCommits.has(oid))
-    : [normalized];
+  const commits = rawCommits.length ? rawCommits : [normalized];
   if (!commits.length) return undefined;
   if (commits.length <= inlineHistoryPinLimit) {
     const targetRefs = commits.map((oid) => pinRef(repoHash, oid));
@@ -957,7 +938,6 @@ async function saveGood(
   historyFrom?: string,
   localAliases?: LocalAliasEntry[],
   clearAliases?: ClearAliasEntry[],
-  stagedCommits?: Set<string>,
 ): Promise<string | undefined> {
   const before = await lastGood(dir);
   const unchanged =
@@ -999,7 +979,7 @@ async function saveGood(
         await rollbackRefs(dir, refUndo);
         return recordedFrom;
       }
-      const recordedHistory = await recordHistoryRef(dir, currentCommit.repoHash, currentCommit.commit, historyFrom, refUndo, stagedCommits);
+      const recordedHistory = await recordHistoryRef(dir, currentCommit.repoHash, currentCommit.commit, historyFrom, refUndo);
       if (recordedHistory && !unchanged) {
         await rollbackRefs(dir, refUndo);
         return recordedHistory;
@@ -1809,7 +1789,6 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
       await restoreRefreshState();
       return rewritten(tip);
     }
-    const stagedCommits = await stagedCommitOids(dir, stageDir);
     try {
       await migrateStagedObjects(stageDir, targetObjectsDir, movedObjects);
     } catch (error) {
@@ -1851,54 +1830,55 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
       return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} changed checkout HEAD while loading` };
     }
     const { localAliases: refreshAliases, clearAliases: clearRefreshAliases } = localAliasPlan(afterRefreshIdentity.localInfo, effectiveDigest);
-    const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest }, verifiedHistoryFrom, refreshAliases, clearRefreshAliases, stagedCommits);
+    const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest }, verifiedHistoryFrom, refreshAliases, clearRefreshAliases);
     if (saveError) {
       const restored = await rollbackCheckout();
       await restoreRefreshState(restored);
       return { state: "failed", say: `could not record ${branch} of ${ref.repo} at ${tip.slice(0, 12)}: ${saveError}` };
     }
-    await updateRemoteTrackingRefs(dir, repo, head, tip);
+    await syncRemoteTrackingRefs(dir, repo, head, tip, stageDir, targetObjectsDir);
     return { state: "moved", commit: tip, source: { ref, dir, packs: loaded.packs } };
   } finally {
     await rm(stageDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
-async function updateRemoteTrackingRefs(dir: string, repo: string, headRef: string, tip: string): Promise<void> {
-  if (!repo || repo.startsWith("-")) return;
+function formatAlternatesPath(path: string): string {
+  if (!path.startsWith('"') && !path.startsWith("#") && !/[\r\n\\]/.test(path)) return path;
+  return `"${path.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r")}"`;
+}
+
+async function syncRemoteTrackingRefs(dir: string, repo: string, headRef: string, tip: string, stageDir: string, targetObjectsDir: string): Promise<void> {
+  if (!repo || repo.startsWith("-") || /[\0\r\n=]/.test(repo)) return;
   const configured = await git(dir, "config", "--get-all", `remote.${repo}.fetch`);
   if (!configured.ok || !configured.stdout) return;
   const specs = configured.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
-  const matchesPattern = (ref: string, pattern: string): string | undefined => {
-    const star = pattern.indexOf("*");
-    if (star === -1) return ref === pattern ? "" : undefined;
-    const prefix = pattern.slice(0, star);
-    const suffix = pattern.slice(star + 1);
-    if (ref.length >= prefix.length + suffix.length && ref.startsWith(prefix) && ref.endsWith(suffix)) {
-      return ref.slice(prefix.length, ref.length - suffix.length);
-    }
-    return undefined;
-  };
-  const negative = specs.filter((s) => s.startsWith("^")).map((s) => s.slice(1));
-  if (negative.some((pattern) => matchesPattern(headRef, pattern) !== undefined)) return;
-  for (const rawSpec of specs) {
-    if (rawSpec.startsWith("^")) continue;
-    const force = rawSpec.startsWith("+");
-    const spec = force ? rawSpec.slice(1) : rawSpec;
-    const colon = spec.indexOf(":");
-    if (colon <= 0 || colon === spec.length - 1) continue;
-    const src = spec.slice(0, colon);
-    const dst = spec.slice(colon + 1);
-    const matched = matchesPattern(headRef, src);
-    if (matched === undefined) continue;
-    const targetRef = dst.includes("*") ? dst.replace("*", matched) : dst;
-    if (!targetRef.startsWith("refs/")) continue;
-    if (!force) {
-      const cur = await git(dir, "rev-parse", "--verify", "--quiet", targetRef);
-      if (cur.ok && cur.stdout && !(await git(dir, "merge-base", "--is-ancestor", cur.stdout, tip)).ok) continue;
-    }
-    await git(dir, "update-ref", targetRef, tip);
-  }
+  if (!specs.length) return;
+  const syncDir = join(stageDir, "sync-remote");
+  try {
+    await mkdir(syncDir, { recursive: true });
+    const initArgs = ["init", "--bare", "-q", ...(tip.length === 64 ? ["--object-format=sha256"] : [])];
+    const initialized = await git(syncDir, ...initArgs);
+    if (!initialized.ok) return;
+    await writeFile(join(syncDir, "objects", "info", "alternates"), `${formatAlternatesPath(targetObjectsDir)}\n`);
+    const updated = await gitAt(syncDir, syncDir, "update-ref", headRef, tip);
+    if (!updated.ok) return;
+    const syncRemote = `hedge-sync-${crypto.randomUUID()}`;
+    const cfgArgs = [
+      "-c", "gc.auto=0",
+      "-c", "maintenance.auto=false",
+      "-c", "fetch.writeCommitGraph=false",
+      "-c", `remote.${syncRemote}.url=${syncDir}`,
+      ...specs.flatMap((spec) => ["-c", `remote.${syncRemote}.fetch=${spec}`]),
+    ];
+    const res = await git(dir, ...cfgArgs, "fetch", "-q", "--no-tags", "--no-prune", "--no-write-fetch-head", syncRemote);
+    if (res.ok) return;
+    const unsupportedNoWrite = (res.code === 129 || /unknown option.*no-write-fetch-head/i.test(res.fullStderr)) && /no-write-fetch-head/i.test(res.fullStderr);
+    if (!unsupportedNoWrite) return;
+    const savedFetchHead = await snapshotFetchHead(dir);
+    await git(dir, ...cfgArgs, "fetch", "-q", "--no-tags", "--no-prune", syncRemote);
+    await restoreFetchHead(dir, savedFetchHead);
+  } catch {}
 }
 
 export async function cachedSource(ref: SourceRef, cacheRoot: string, clock: Clock = realClock): Promise<FetchedSource> {
