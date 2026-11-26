@@ -1,6 +1,6 @@
 import { closeSync, writeSync } from "node:fs";
 import { bunScript } from "../../../src/runner/bun.ts";
-import { createPipe, discoverTargets, discoverTargetsLinux, discoverTargetsSync, drainControlFd, emptySpared, enableChildSubreaper, graceMs, interruptGraceMs, killDeadSession, killDeadSessionSync, killTargetSessionSync, mergeSpared, ownTag, type PidIdentity, pidIdentityNow, probeGraceEnvVar, probeResultReported, type ProcTargets, readFdChunk, redirectAllStdioToNull, redirectStdioOutputsToNull, reportSpared, setCloexec, shieldGroupSignals, signalDeadTargets, signalTargets, spareEnvVar, startSpareServer, type StopSignal, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { createPipe, discoverTargets, discoverTargetsLinux, discoverTargetsSync, drainControlFd, emptySpared, enableChildSubreaper, graceMs, interruptGraceMs, killDeadSession, killDeadSessionSync, killTargetSessionSync, mergeSpared, ownTag, type PidIdentity, pidIdentityNow, probeGraceEnvVar, probeResultReported, type ProcTargets, readFdChunk, reapAdoptedChildren, redirectAllStdioToNull, redirectStdioOutputsToNull, reportSpared, setCloexec, shieldGroupSignals, signalDeadTargets, signalTargets, spareEnvVar, startSpareServer, type StopSignal, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
 type StartConfig = {
   argv: string[];
@@ -35,6 +35,31 @@ if (parsedLockCount === undefined || ipcFd === undefined) {
 }
 
 const runTag = ownTag(process.env[tagEnvVar]);
+
+const writeResult = (
+  fd: number,
+  payload:
+    | { spare: { pids: number[]; sids: number[] } }
+    | { targetPid: number; targetStartTime?: string }
+    | { code: number }
+    | { error: string; code?: string }
+    | { killed: true }
+    | { saved: true }
+    | { spareError: string; code?: string },
+) => {
+  const bytes = new TextEncoder().encode(JSON.stringify(payload) + "\n");
+  try {
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const written = writeSync(fd, bytes, offset, bytes.byteLength - offset);
+      if (written <= 0) break;
+      offset += written;
+    }
+  } catch {}
+};
+
+const hasRemainingTargets = (targets: ProcTargets | undefined): boolean =>
+  Boolean(targets && (targets.pids.length || targets.groups.length || targets.orphanPids.length));
 
 if (process.platform === "linux" && Bun.argv[5] !== "inner") {
   const holderAlive = createPipe();
@@ -78,7 +103,8 @@ if (process.platform === "linux" && Bun.argv[5] !== "inner") {
       closeQuiet(innerMeta.writeFd);
     }
     if (inner) {
-      for (const fd of [...lockFds, ipcFd, ...(configFd !== undefined ? [configFd] : []), holderAlive.readFd, innerDone.writeFd, innerMeta.writeFd]) {
+      setCloexec(ipcFd, true);
+      for (const fd of [...lockFds, ...(configFd !== undefined ? [configFd] : []), holderAlive.readFd, innerDone.writeFd, innerMeta.writeFd]) {
         closeQuiet(fd);
       }
       redirectAllStdioToNull();
@@ -132,14 +158,37 @@ if (process.platform === "linux" && Bun.argv[5] !== "inner") {
       closeQuiet(innerMeta.readFd);
       closeQuiet(holderAlive.writeFd);
       if (reported) {
+        closeQuiet(ipcFd);
         process.exit(inner.signalCode ? 137 : code);
       }
-      killDeadSessionSync(inner.pid, runTag, true, holderSpared);
-      if (holderTargetPid !== undefined) {
-        killTargetSessionSync(holderTargetPid, holderTargetStartTime, runTag, holderSpared);
+      let converged = false;
+      for (let pass = 0; pass < 5; pass++) {
+        reapAdoptedChildren();
+        killDeadSessionSync(inner.pid, runTag, true, holderSpared);
+        if (holderTargetPid !== undefined) {
+          killTargetSessionSync(holderTargetPid, holderTargetStartTime, runTag, holderSpared);
+        }
+        reapAdoptedChildren();
+        const adopted = discoverTargetsLinux(process.pid, runTag, undefined, holderSpared);
+        if (hasRemainingTargets(adopted)) {
+          signalDeadTargets(adopted, process.pid, undefined, runTag, holderSpared);
+          await Bun.sleep(5);
+          reapAdoptedChildren();
+          continue;
+        }
+        const innerLeft = discoverTargetsLinux(inner.pid, runTag, true, holderSpared);
+        const targetLeft =
+          holderTargetPid !== undefined && (!holderTargetStartTime || pidIdentityNow(holderTargetPid)?.startTime === holderTargetStartTime || !pidIdentityNow(holderTargetPid))
+            ? discoverTargetsLinux(holderTargetPid, runTag, !pidIdentityNow(holderTargetPid), holderSpared)
+            : undefined;
+        if (!hasRemainingTargets(innerLeft) && !hasRemainingTargets(targetLeft)) {
+          converged = true;
+          break;
+        }
+        await Bun.sleep(5);
       }
-      const adopted = discoverTargetsLinux(process.pid, runTag, undefined, holderSpared);
-      signalDeadTargets(adopted, process.pid, undefined, runTag, holderSpared);
+      if (converged) writeResult(ipcFd, { killed: true });
+      closeQuiet(ipcFd);
       process.exit(inner.signalCode ? 137 : code);
     }
   } else {
@@ -211,28 +260,6 @@ const clearGraceTimers = () => {
     clearTimeout(graceTimer);
     graceTimer = undefined;
   }
-};
-
-const writeResult = (
-  fd: number,
-  payload:
-    | { spare: { pids: number[]; sids: number[] } }
-    | { targetPid: number; targetStartTime?: string }
-    | { code: number }
-    | { error: string; code?: string }
-    | { killed: true }
-    | { saved: true }
-    | { spareError: string; code?: string },
-) => {
-  const bytes = new TextEncoder().encode(JSON.stringify(payload) + "\n");
-  try {
-    let offset = 0;
-    while (offset < bytes.byteLength) {
-      const written = writeSync(fd, bytes, offset, bytes.byteLength - offset);
-      if (written <= 0) break;
-      offset += written;
-    }
-  } catch {}
 };
 
 const spareServer = startSpareServer(async (pids, sids) => {
@@ -381,22 +408,52 @@ const killAll = () => {
   if (killing) return;
   killing = true;
   spareServer?.close();
-  const finish = () => {
-    if (target && !targetReaped) {
-      try {
-        target.kill("SIGKILL");
-      } catch {}
+  const underHolder = holderAliveFd !== undefined;
+  void (async () => {
+    try {
+      const first = signalBoth("SIGKILL");
+      if (first && typeof (first as Promise<void>).then === "function") await first;
+      if (target && !targetReaped) {
+        try {
+          target.kill("SIGKILL");
+        } catch {}
+        await Promise.race([target.exited.catch(() => {}), Bun.sleep(50)]);
+      }
+      if (underHolder) return;
+      for (let pass = 0; pass < 3; pass++) {
+        const selfAfter =
+          process.platform === "linux"
+            ? discoverTargetsLinux(process.pid, runTag, undefined, localSpared)
+            : await discoverTargets(process.pid, runTag, localSpared);
+        const targetAfter =
+          targetDetached && targetPid !== undefined
+            ? targetReaped
+              ? !pidIdentityNow(targetPid)
+                ? process.platform === "linux"
+                  ? discoverTargetsLinux(targetPid, undefined, true, localSpared)
+                  : await discoverTargets(targetPid, undefined, localSpared)
+                : undefined
+              : process.platform === "linux"
+                ? discoverTargetsLinux(targetPid, undefined, undefined, localSpared)
+                : await discoverTargets(targetPid, undefined, localSpared)
+            : undefined;
+        if (!hasRemainingTargets(selfAfter) && !hasRemainingTargets(targetAfter)) {
+          if (target === undefined || targetReaped) writeResult(ipcFd, { killed: true });
+          return;
+        }
+        const next = signalBoth("SIGKILL");
+        if (next && typeof (next as Promise<void>).then === "function") await next;
+        if (target && !targetReaped) {
+          try {
+            target.kill("SIGKILL");
+          } catch {}
+          await Promise.race([target.exited.catch(() => {}), Bun.sleep(25)]);
+        }
+      }
+    } finally {
+      process.exit(137);
     }
-    writeResult(ipcFd, { killed: true });
-    markInnerDone();
-    process.exit(137);
-  };
-  const done = signalBoth("SIGKILL");
-  if (done && typeof (done as Promise<void>).then === "function") {
-    void (done as Promise<void>).finally(finish);
-    return;
-  }
-  finish();
+  })();
 };
 
 const armGraceful = (sig: StopSignal) => {

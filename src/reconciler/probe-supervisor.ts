@@ -454,6 +454,13 @@ function getPosixLib(): PosixLib | null {
   return posixLib;
 }
 
+export function reapAdoptedChildren(): void {
+  const lib = getPosixLib();
+  if (!lib) return;
+  const status = new Int32Array(1);
+  while (lib.waitpid(-1, ptr(status), 1) > 0) {}
+}
+
 const commonErrnoCodes: Record<number, string> = {
   1: "EPERM",
   2: "ENOENT",
@@ -1046,6 +1053,66 @@ function sessionIdDarwin(pid: number): number | undefined {
   return sid > 0 ? sid : undefined;
 }
 
+type DarwinBsdInfo = {
+  ppid: number;
+  pgid: number;
+  status: number;
+  startSec: bigint;
+  startUsec: bigint;
+  startTime: string;
+};
+
+type DarwinRow = {
+  pid: number;
+  ppid: number;
+  pgid: number;
+  sid: number;
+  startSec: bigint;
+  startUsec: bigint;
+  startTime: string;
+  envTag?: string;
+};
+
+function bsdInfoDarwin(lib: DarwinLib, pid: number): DarwinBsdInfo | undefined {
+  const buf = new Uint8Array(136);
+  const n = lib.proc_pidinfo(pid, 3, 0n, ptr(buf), 136);
+  if (n < 136) return undefined;
+  const view = new DataView(buf.buffer);
+  if (view.getUint32(12, true) !== pid) return undefined;
+  const status = view.getUint32(4, true);
+  const ppid = view.getUint32(16, true);
+  const pgid = view.getUint32(100, true);
+  const startSec = view.getBigUint64(120, true);
+  const startUsec = view.getBigUint64(128, true);
+  return { ppid, pgid, status, startSec, startUsec, startTime: `${startSec}:${startUsec}` };
+}
+
+function readDarwinRow(lib: DarwinLib, pid: number, wantEnvTag: boolean): DarwinRow | undefined {
+  const before = bsdInfoDarwin(lib, pid);
+  if (!before) return undefined;
+  const sid = lib.getsid(pid);
+  const envTag = wantEnvTag ? readEnvTagDarwin(pid) : undefined;
+  const after = bsdInfoDarwin(lib, pid);
+  if (!after || after.startTime !== before.startTime) return undefined;
+  return {
+    pid,
+    ppid: after.ppid,
+    pgid: after.pgid,
+    sid,
+    startSec: after.startSec,
+    startUsec: after.startUsec,
+    startTime: after.startTime,
+    ...(envTag ? { envTag } : {}),
+  };
+}
+
+function startedAtOrAfter(
+  child: { startSec: bigint; startUsec: bigint },
+  parent: { startSec: bigint; startUsec: bigint },
+): boolean {
+  return child.startSec > parent.startSec || (child.startSec === parent.startSec && child.startUsec >= parent.startUsec);
+}
+
 function buildTargetsFromPs(
   self: number,
   sessionId: number | undefined,
@@ -1058,27 +1125,30 @@ function buildTargetsFromPs(
   const spared = resolveSpareInput(spareInput);
   const effectiveTag = ownGroupOnly ? undefined : tag;
   const includeDetached = Boolean(effectiveTag);
-  const rows: Array<{ pid: number; ppid: number; pgid: number; envTag?: string }> = [];
+  const lib = getDarwinLib();
+  const sessionInfo = lib && sessionId !== undefined ? bsdInfoDarwin(lib, sessionId) : undefined;
+  const rows: DarwinRow[] = [];
+  const rowByPid = new Map<number, DarwinRow>();
   const matched = new Set<number>();
   const activeTags = new Set<string>(effectiveTag ? [effectiveTag] : []);
   if (sessionId !== undefined) matched.add(sessionId);
-  if (treeText) {
+  if (treeText && lib) {
+    const seen = new Set<number>();
     for (const line of treeText.split("\n")) {
       const parts = line.trim().split(/\s+/);
       if (parts.length < 3) continue;
       const pid = Number(parts[0]);
-      const ppid = Number(parts[1]);
-      const pgid = Number(parts[2]);
-      if (!Number.isFinite(pid) || !Number.isFinite(ppid) || !Number.isFinite(pgid)) continue;
-      if (excludePids.has(pid)) continue;
-      const envTag = effectiveTag && pid !== self ? readEnvTagDarwin(pid) : undefined;
-      rows.push({ pid, ppid, pgid, ...(envTag ? { envTag } : {}) });
-      const sid = sessionIdDarwin(pid);
-      const isSpared = spared.pids.has(pid) || (sid !== undefined && sid > 0 && sid !== sessionId && sid !== self && spared.sids.has(sid));
-      const inScope = sessionId !== undefined && (ownGroupOnly ? pgid === sessionId : pgid === sessionId || sid === sessionId);
+      if (!Number.isFinite(pid) || pid <= 0 || seen.has(pid) || excludePids.has(pid)) continue;
+      seen.add(pid);
+      const row = readDarwinRow(lib, pid, Boolean(effectiveTag && pid !== self));
+      if (!row) continue;
+      rows.push(row);
+      rowByPid.set(pid, row);
+      const isSpared = spared.pids.has(pid) || (row.sid > 0 && row.sid !== sessionId && row.sid !== self && spared.sids.has(row.sid));
+      const inScope = sessionId !== undefined && (ownGroupOnly ? row.pgid === sessionId : row.pgid === sessionId || row.sid === sessionId);
       if (!isSpared && inScope) {
         matched.add(pid);
-      } else if (!isSpared && effectiveTag && envTag && envMatchesTag(envTag, effectiveTag)) {
+      } else if (!isSpared && effectiveTag && row.envTag && envMatchesTag(row.envTag, effectiveTag)) {
         matched.add(pid);
       }
     }
@@ -1098,15 +1168,16 @@ function buildTargetsFromPs(
       }
       for (const row of rows) {
         if (matched.has(row.pid)) continue;
-        const sid = sessionIdDarwin(row.pid);
-        const isSpared = spared.pids.has(row.pid) || (sid !== undefined && sid > 0 && sid !== sessionId && sid !== self && spared.sids.has(sid));
+        const isSpared = spared.pids.has(row.pid) || (row.sid > 0 && row.sid !== sessionId && row.sid !== self && spared.sids.has(row.sid));
         if (isSpared) continue;
         if (row.envTag && envMatchesAnyTag(row.envTag, activeTags)) {
           matched.add(row.pid);
           grew = true;
-        } else if (matched.has(row.ppid)) {
+        } else if (row.ppid > 0 && matched.has(row.ppid)) {
+          const parentInfo = rowByPid.get(row.ppid) ?? (row.ppid === sessionId ? sessionInfo : undefined);
+          if (parentInfo && !startedAtOrAfter(row, parentInfo)) continue;
           const foreignCompleted = Boolean(
-            effectiveTag && row.envTag && sid !== undefined && sid > 0 && sid !== sessionId && sid !== self && !envMatchesAnyTag(row.envTag, activeTags),
+            effectiveTag && row.envTag && row.sid > 0 && row.sid !== sessionId && row.sid !== self && !envMatchesAnyTag(row.envTag, activeTags),
           );
           if (!foreignCompleted) {
             matched.add(row.pid);
@@ -1116,39 +1187,34 @@ function buildTargetsFromPs(
       }
     }
   }
-  const pids = [...matched].filter((pid) => pid !== self && pid !== sessionId);
+  const pids: number[] = [];
   const groups = new Set<number>();
   const sids = new Set<number>();
-  const pgidByPid = new Map<number, number>();
-  for (const row of rows) pgidByPid.set(row.pid, row.pgid);
   const orphanPids: number[] = [];
   const groupMembers = new Map<number, PidIdentity[]>();
   const pidIdentities = new Map<number, PidIdentity>();
-  const lib = getDarwinLib();
   const addGroupMember = (pgrp: number, identity: PidIdentity) => {
     const list = groupMembers.get(pgrp);
     if (list) list.push(identity);
     else groupMembers.set(pgrp, [identity]);
   };
   let hasSessionGroup = false;
-  for (const pid of pids) {
-    const sid = sessionIdDarwin(pid);
-    if (sid !== undefined && sid > 0 && sid !== sessionId && sid !== self) sids.add(sid);
-    const pgid = pgidByPid.get(pid);
-    const startTime = lib ? startTimeDarwin(lib, pid) : undefined;
-    const identity = startTime && pgid !== undefined ? { pid, startTime, pgid } : undefined;
-    if (!identity) continue;
-    pidIdentities.set(pid, identity);
+  for (const row of rows) {
+    if (!matched.has(row.pid) || row.pid === self || row.pid === sessionId) continue;
+    pids.push(row.pid);
+    if (row.sid > 0 && row.sid !== sessionId && row.sid !== self) sids.add(row.sid);
+    const identity: PidIdentity = { pid: row.pid, startTime: row.startTime, pgid: row.pgid };
+    pidIdentities.set(row.pid, identity);
     if (sessionId === undefined) {
-      orphanPids.push(pid);
-    } else if (pgid !== undefined && pgid > 0 && pgid !== sessionId && pgid !== self) {
-      groups.add(pgid);
-      addGroupMember(pgid, identity);
-    } else if (pgid === sessionId) {
+      orphanPids.push(row.pid);
+    } else if (row.pgid > 0 && row.pgid !== sessionId && row.pgid !== self) {
+      groups.add(row.pgid);
+      addGroupMember(row.pgid, identity);
+    } else if (row.pgid === sessionId) {
       hasSessionGroup = true;
       addGroupMember(sessionId, identity);
     } else {
-      orphanPids.push(pid);
+      orphanPids.push(row.pid);
     }
   }
   return { pids, groups: [...groups], orphanPids, sids: [...sids], hasSessionGroup, groupMembers, pidIdentities };
@@ -1201,18 +1267,8 @@ function isDeadLeaderRecycledDarwin(lib: DarwinLib, pid: number, reaped: boolean
   return status !== 5;
 }
 
-function ppidDarwin(lib: DarwinLib, pid: number): number {
-  const buf = new Uint8Array(136);
-  const n = lib.proc_pidinfo(pid, 3, 0n, ptr(buf), 136);
-  return n >= 20 ? new DataView(buf.buffer).getUint32(16, true) : 0;
-}
-
 function startTimeDarwin(lib: DarwinLib, pid: number): string | undefined {
-  const buf = new Uint8Array(136);
-  const n = lib.proc_pidinfo(pid, 3, 0n, ptr(buf), 136);
-  if (n < 136) return undefined;
-  const view = new DataView(buf.buffer);
-  return `${view.getBigUint64(120, true)}:${view.getBigUint64(128, true)}`;
+  return bsdInfoDarwin(lib, pid)?.startTime;
 }
 
 export function discoverTargetsSync(
@@ -1250,21 +1306,22 @@ export function discoverTargetsSync(
     }
     if (effectiveSessionId === undefined && !effectiveTag) return { pids: [], groups: [], orphanPids: [], sids: [], hasSessionGroup: false };
   }
+  const sessionInfo = effectiveSessionId !== undefined && deadLeaderReaped === undefined ? bsdInfoDarwin(lib, effectiveSessionId) : undefined;
   const activeTags = new Set<string>(effectiveTag ? [effectiveTag] : []);
-  const rows: Array<{ pid: number; ppid: number; sid: number; pgid: number; envTag?: string }> = [];
+  const rows: DarwinRow[] = [];
+  const rowByPid = new Map<number, DarwinRow>();
   const matched = new Set<number>();
   if (effectiveSessionId !== undefined) matched.add(effectiveSessionId);
   for (let i = 0; i < limit; i++) {
     const pid = buf[i]!;
-    if (pid <= 0 || pid === self || pid === effectiveSessionId) continue;
-    const ppid = effectiveTag || (!ownGroupOnly && effectiveSessionId === undefined) ? ppidDarwin(lib, pid) : 0;
-    const sid = lib.getsid(pid);
-    const pgid = lib.getpgid(pid);
-    const envTag = effectiveTag ? readEnvTagDarwin(pid) : undefined;
-    rows.push({ pid, ppid, sid, pgid, ...(envTag ? { envTag } : {}) });
-    const isSpared = spared.pids.has(pid) || (sid > 0 && sid !== effectiveSessionId && sid !== self && spared.sids.has(sid));
-    const inSession = effectiveSessionId !== undefined && (ownGroupOnly ? pgid === effectiveSessionId : sid === effectiveSessionId || pgid === effectiveSessionId);
-    if (!isSpared && (inSession || (effectiveTag && envTag && envMatchesTag(envTag, effectiveTag)))) {
+    if (pid <= 0 || pid === self || pid === effectiveSessionId || rowByPid.has(pid)) continue;
+    const row = readDarwinRow(lib, pid, Boolean(effectiveTag));
+    if (!row) continue;
+    rows.push(row);
+    rowByPid.set(pid, row);
+    const isSpared = spared.pids.has(pid) || (row.sid > 0 && row.sid !== effectiveSessionId && row.sid !== self && spared.sids.has(row.sid));
+    const inSession = effectiveSessionId !== undefined && (ownGroupOnly ? row.pgid === effectiveSessionId : row.sid === effectiveSessionId || row.pgid === effectiveSessionId);
+    if (!isSpared && (inSession || (effectiveTag && row.envTag && envMatchesTag(row.envTag, effectiveTag)))) {
       matched.add(pid);
     }
   }
@@ -1289,6 +1346,8 @@ export function discoverTargetsSync(
           matched.add(row.pid);
           grew = true;
         } else if (row.ppid > 0 && matched.has(row.ppid)) {
+          const parentInfo = rowByPid.get(row.ppid) ?? (row.ppid === effectiveSessionId ? sessionInfo : undefined);
+          if (parentInfo && !startedAtOrAfter(row, parentInfo)) continue;
           const foreignCompleted = Boolean(
             effectiveTag && row.envTag && row.sid > 0 && row.sid !== effectiveSessionId && row.sid !== self && !envMatchesAnyTag(row.envTag, activeTags),
           );
@@ -1318,10 +1377,8 @@ export function discoverTargetsSync(
   for (const row of rows) {
     if (!matched.has(row.pid)) continue;
     pids.push(row.pid);
-    const startTime = startTimeDarwin(lib, row.pid);
-    const identity = startTime ? { pid: row.pid, startTime, pgid: row.pgid } : undefined;
+    const identity: PidIdentity = { pid: row.pid, startTime: row.startTime, pgid: row.pgid };
     if (row.sid > 0 && row.sid !== effectiveSessionId && row.sid !== self) sids.add(row.sid);
-    if (!identity) continue;
     pidIdentities.set(row.pid, identity);
     if (effectiveSessionId === undefined) {
       orphanPids.push(row.pid);

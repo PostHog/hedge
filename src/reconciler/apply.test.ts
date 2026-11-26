@@ -698,20 +698,23 @@ describe("humanStepsLeft", () => {
 
   test("preserves an already-completed real probe failure and its background helper when the deadline fires while marking a timed-out real probe unchecked and stopping it", async () => {
     const home = temp.make("home-busy-deadline-");
-    const [childReady, childGone, slowReady, slowGone, afterReady] = [
+    const [childReady, childGone, childPing, childPong, slowReady, slowGone, afterReady] = [
       join(home, "child-ready"),
       join(home, "child-gone"),
+      join(home, "child-ping"),
+      join(home, "child-pong"),
       join(home, "slow-ready"),
       join(home, "slow-gone"),
       join(home, "after-ready"),
     ];
-    expect(Bun.spawnSync(["mkfifo", childReady, childGone, slowReady, slowGone, afterReady]).exitCode).toBe(0);
+    expect(Bun.spawnSync(["mkfifo", childReady, childGone, childPing, childPong, slowReady, slowGone, afterReady]).exitCode).toBe(0);
     const childStarted = Bun.file(childReady).text();
     const childClosed = Bun.file(childGone).text();
+    const childPonged = Bun.file(childPong).text();
     const slowStarted = Bun.file(slowReady).text();
     const slowClosed = Bun.file(slowGone).text();
     const afterStarted = Bun.file(afterReady).text();
-    const failScript = `const c = Bun.spawn(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "child", ${JSON.stringify(childGone)}, ${JSON.stringify(childReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    const failScript = `const c = Bun.spawn(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; read _ < "$3"; echo alive > "$4"; exec sleep 30', "child", ${JSON.stringify(childGone)}, ${JSON.stringify(childReady)}, ${JSON.stringify(childPing)}, ${JSON.stringify(childPong)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 c.unref();
 process.exit(1);`;
     let fireDeadline!: () => void;
@@ -757,11 +760,13 @@ process.exit(1);`;
       expect(res.failing.map((item) => item.id)).toEqual(["quick-fail"]);
       expect(res.unchecked.map((item) => item.id)).toContain("slow-real");
       expect(await slowClosed).toBe("");
-      expect(() => process.kill(childPid, 0)).not.toThrow();
+      writeFileSync(childPing, "ping\n");
+      expect((await childPonged).trim()).toBe("alive");
     } finally {
       if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
       if (slowPid > 0) try { process.kill(slowPid, "SIGKILL"); } catch {}
       await childClosed.catch(() => {});
+      await childPonged.catch(() => {});
     }
   });
 

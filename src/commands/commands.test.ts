@@ -287,37 +287,40 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
 
   test("reports a failing human step that exits nonzero while leaving its background helper running and stopping a slow probe at the deadline", async () => {
     const { home } = await machineWithProfile();
-    const [childReady, ready, gone, slowReady, slowGone, allowDone] = [
+    const [childReady, ready, gone, slowReady, slowGone, allowDone, ping, pong] = [
       join(home, "child-ready"),
       join(home, "ready"),
       join(home, "gone"),
       join(home, "slow-ready"),
       join(home, "slow-gone"),
       join(home, "allow-done"),
+      join(home, "ping"),
+      join(home, "pong"),
     ];
-    expect(Bun.spawnSync(["mkfifo", childReady, ready, gone, slowReady, slowGone, allowDone]).exitCode).toBe(0);
+    expect(Bun.spawnSync(["mkfifo", childReady, ready, gone, slowReady, slowGone, allowDone, ping, pong]).exitCode).toBe(0);
     const childBin = join(home, "helper-child.sh");
     writeFileSync(
       childBin,
-      '#!/bin/sh\nexec 3>"$1"\necho $$ > "$2"\nexec sleep 30\n',
+      '#!/bin/sh\nexec 3>"$1"\necho $$ > "$2"\nread _ < "$3"\necho alive > "$4"\nexec sleep 30\n',
       { mode: 0o755 },
     );
     const fillers = Array.from({ length: 6 }, (_, i) => humanStep(`hold-${i}`, "exec sleep 30"));
     await withTeamPack(home, {
       workflows: [flow("allowlist"), flow("slow")],
       human: [
-        humanStep("allowlist", `${JSON.stringify(childBin)} "$HOME/gone" "$HOME/child-ready" & pid=$(cat "$HOME/child-ready"); echo "$pid" > "$HOME/ready"; exit 7`, "allowlist"),
+        humanStep("allowlist", `${JSON.stringify(childBin)} "$HOME/gone" "$HOME/child-ready" "$HOME/ping" "$HOME/pong" & pid=$(cat "$HOME/child-ready"); echo "$pid" > "$HOME/ready"; exit 7`, "allowlist"),
         humanStep("slow", 'exec 3>"$HOME/slow-gone"; echo $$ > "$HOME/slow-ready"; exec sleep 30', "slow"),
         ...fillers,
         humanStep("after-allow", 'echo done > "$HOME/allow-done"; exec sleep 30'),
       ],
     });
-    const [started, holderGone, slowStarted, slowClosed, allowFinished] = [
+    const [started, holderGone, slowStarted, slowClosed, allowFinished, ponged] = [
       fifoRead(ready),
       fifoRead(gone),
       fifoRead(slowReady),
       fifoRead(slowGone),
       fifoRead(allowDone),
+      fifoRead(pong),
     ];
     const deadlineAfterAllowDone = {
       now: () => 0,
@@ -330,11 +333,13 @@ describe("hedge packs on a machine that has not finished a pack's setup", () => 
       expect(await slowClosed).toBe("");
       const helperPid = Number((await started).trim());
       expect(helperPid).toBeGreaterThan(0);
-      expect(() => process.kill(helperPid, 0)).not.toThrow();
+      writeFileSync(ping, "ping\n");
+      expect((await ponged).trim()).toBe("alive");
     } finally {
       await endHolder(started);
       await endHolder(slowStarted);
       await holderGone.catch(() => {});
+      await ponged.catch(() => {});
     }
   });
 
