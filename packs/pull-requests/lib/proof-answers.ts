@@ -21,7 +21,8 @@ export function unlinked(text: string) {
 function closingParenthesis(text: string, from: number) {
   let depth = 1;
   let quote: string | undefined;
-  for (let index = from; index < text.length; index++) {
+  const bracketed = text[from] === "<" ? text.indexOf(">", from) : -1;
+  for (let index = bracketed < 0 ? from : bracketed + 1; index < text.length; index++) {
     const char = text[index]!;
     if (char === "\\") { index++; continue; }
     if (quote) { if (char === quote) quote = undefined; continue; }

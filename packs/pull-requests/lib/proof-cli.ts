@@ -851,6 +851,7 @@ const roundStep = async <T>(directory: string, context: CommandContext, step: ()
 
 async function takeOverride(directory: string, options: Map<string, string>, head: ProofIdentity, context: CommandContext) {
   const reservation = await readReservation(directory);
+  if (reservation) requireSameRequest({ reservation, directory }, options, context.run);
   if (!options.has("--override") || !reservation?.decision || reservation.recorded || reservation.decision.mark !== "🤖") return;
   const { decision, once = (step) => step() } = await decisionOf(options, head, context);
   await once(() => writeJson(join(directory, "round.json"), { ...reservation, decision } satisfies Reservation));

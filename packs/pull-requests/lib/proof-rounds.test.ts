@@ -208,6 +208,7 @@ const linkShapes: [string, string][] = [
   ["a title in parentheses", `[example/product#42](${pull42} (PR))`],
   ["balanced parentheses in the URL", `[example/product#42](${pull42}?q=(a))`],
   ["an apostrophe in the URL", `[example/product#42](${pull42}?who=it's)`],
+  ["an angle-bracket destination with a parenthesis", `[example/product#42](<${pull42}?q=(draft>)`],
 ];
 
 test.each(linkShapes)("an answer to a round question that links the PR as %s starts the round", async (_, link) => {
