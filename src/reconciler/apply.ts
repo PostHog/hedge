@@ -257,7 +257,7 @@ export type HumanStepsLeft = { failing: Array<Owned<HumanStep>>; unchecked: Arra
 const probeConcurrency = 8;
 const supervisorSpawnFailed = -1;
 
-export async function humanStepsLeft(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void>; graceMs?: number; interruptGraceMs?: number }): Promise<HumanStepsLeft> {
+export async function humanStepsLeft(plan: Plan, options: { home: string; run?: Runner; giveUp: Promise<void>; graceMs?: number; interruptGraceMs?: number; clockFd?: number }): Promise<HumanStepsLeft> {
   const reported = new WeakMap<AbortSignal, number>();
   const waiters = new WeakMap<AbortSignal, (code: number) => void>();
   const probeBySignal = new WeakMap<AbortSignal, LiveProbe>();
@@ -280,6 +280,7 @@ export async function humanStepsLeft(plan: Plan, options: { home: string; run?: 
         live,
         probeBySignal,
         options.interruptGraceMs,
+        options.clockFd,
       ),
   );
   let timedOut = false;
@@ -533,7 +534,7 @@ function viaEngine(plan: Plan, run: Runner): Runner {
 const undoRunner = (run: Runner, step: LedgerStep): Runner => (command) => run(command, { [undoVariable]: ledgerKey(step) });
 
 /** Runs commands with the plan's home directory as HOME, so a step installs into the home it applies to, and with the plan's profile, so a nested hedge reads the profile this run applies or checks. */
-function spawnRunner(home: string, profileDir: string | undefined, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number, live?: Set<LiveProbe>, probeBySignal?: WeakMap<AbortSignal, LiveProbe>, stopInterruptGraceMs?: number): Runner {
+function spawnRunner(home: string, profileDir: string | undefined, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number, live?: Set<LiveProbe>, probeBySignal?: WeakMap<AbortSignal, LiveProbe>, stopInterruptGraceMs?: number, clockFd?: number): Runner {
   return async (command, env = {}, signal) => {
     const childEnv = withLegacyNames({ ...Bun.env, HOME: home, ...(profileDir ? { HEDGE_PROFILE_DIR: profileDir } : {}), ...env });
     if (!signal) {
@@ -543,7 +544,7 @@ function spawnRunner(home: string, profileDir: string | undefined, onResult?: (s
         return 127;
       }
     }
-    return await runDetached(command, childEnv, signal, onResult, cleanupGraceMs, live, probeBySignal, stopInterruptGraceMs);
+    return await runDetached(command, childEnv, signal, onResult, cleanupGraceMs, live, probeBySignal, stopInterruptGraceMs, clockFd);
   };
 }
 
@@ -891,7 +892,7 @@ async function readSupervisorResult(
   return { code, cleanup, stopped };
 }
 
-async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number, live?: Set<LiveProbe>, probeBySignal?: WeakMap<AbortSignal, LiveProbe>, stopInterruptGraceMs?: number) {
+async function runDetached(command: string[], env: Record<string, string | undefined>, signal: AbortSignal, onResult?: (signal: AbortSignal, code: number) => void, cleanupGraceMs?: number, live?: Set<LiveProbe>, probeBySignal?: WeakMap<AbortSignal, LiveProbe>, stopInterruptGraceMs?: number, clockFd?: number) {
   if (!command.length) return 127;
   let child: ReturnType<typeof Bun.spawn> | undefined;
   let probe: LiveProbe | undefined;
@@ -1005,6 +1006,12 @@ async function runDetached(command: string[], env: Record<string, string | undef
       payloadSpareFd = 4 + extraStdio.length;
       extraStdio.push(sparePipe.writeFd);
     }
+    let payloadClockFd: number | undefined;
+    if (clockFd !== undefined) {
+      payloadClockFd = 4 + extraStdio.length;
+      extraStdio.push(clockFd);
+      setCloexec(clockFd, false);
+    }
     const payload = {
       command,
       env: targetEnv,
@@ -1016,15 +1023,20 @@ async function runDetached(command: string[], env: Record<string, string | undef
       ...(payloadResultFd !== undefined ? { resultFd: payloadResultFd } : {}),
       ...(payloadGuardFd !== undefined ? { guardFd: payloadGuardFd } : {}),
       ...(payloadHolderExitFd !== undefined ? { holderExitFd: payloadHolderExitFd } : {}),
+      ...(payloadClockFd !== undefined ? { clockFd: payloadClockFd } : {}),
       ...(cleanupGraceMs === undefined ? {} : { graceMs: cleanupGraceMs }),
       ...(stopInterruptGraceMs === undefined ? {} : { interruptGraceMs: stopInterruptGraceMs }),
     };
     const encoded = JSON.stringify(payload);
-    child = Bun.spawn(bunScript(probeSupervisor), {
-      stdio: [new TextEncoder().encode(encoded), "pipe", "ignore", "pipe", ...extraStdio],
-      env: useLinuxHolder ? (env[tagEnvVar] ? supervisorEnv(env[tagEnvVar]) : watchdogEnv()) : supervisorEnv(fullTag),
-      detached: true,
-    });
+    try {
+      child = Bun.spawn(bunScript(probeSupervisor), {
+        stdio: [new TextEncoder().encode(encoded), "pipe", "ignore", "pipe", ...extraStdio],
+        env: useLinuxHolder ? (env[tagEnvVar] ? supervisorEnv(env[tagEnvVar]) : watchdogEnv()) : supervisorEnv(fullTag),
+        detached: true,
+      });
+    } finally {
+      if (clockFd !== undefined) setCloexec(clockFd, true);
+    }
     closeResultWrite();
     closeGuardWrite();
     closeHolderExitWrite();

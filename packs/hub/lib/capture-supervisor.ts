@@ -1,5 +1,5 @@
 import { closeSync, writeSync } from "node:fs";
-import { discoverTargets, discoverTargetsLinux, discoverTargetsSync, drainControlFd, enableChildSubreaper, graceMs, interruptGraceMs, killDeadSession, killSession, ownTag, probeGraceEnvVar, readFdChunk, recordSparedProcess, redirectStdioOutputsToNull, removeSpareFile, setCloexec, shieldGroupSignals, signalTargets, spareEnvVar, spareFilePath, type StopSignal, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { discoverTargets, discoverTargetsLinux, discoverTargetsSync, drainControlFd, enableChildSubreaper, graceMs, interruptGraceMs, killDeadSession, ownTag, type OwnGroupChild, probeGraceEnvVar, readFdChunk, recordSparedProcess, redirectStdioOutputsToNull, removeSpareFile, setCloexec, shieldGroupSignals, signalTargets, spareEnvVar, spareFilePath, spawnInOwnGroup, type StopSignal, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
 type StartConfig = { argv: string[]; env?: Record<string, string>; envEntries?: Array<[string, string]>; spareTag?: string; spareHome?: string };
 
@@ -16,8 +16,9 @@ const stopSignalsSet = new Set<StopSignal>(["SIGINT", "SIGTERM", "SIGHUP", "SIGQ
 const rawProbeGrace = Number(process.env[probeGraceEnvVar]);
 const probeGraceMs = Number.isFinite(rawProbeGrace) && rawProbeGrace >= 0 ? rawProbeGrace : graceMs;
 let sparePath = process.env[spareEnvVar];
-let target: ReturnType<typeof Bun.spawn> | undefined;
+let target: OwnGroupChild | ReturnType<typeof Bun.spawn> | undefined;
 let targetPid: number | undefined;
+let targetDetached = false;
 let targetReaped = false;
 let targetCode: number | undefined;
 let confirmedDone = false;
@@ -46,9 +47,9 @@ const discoverAllSync = () => {
   if (selfFound) {
     for (const p of selfFound.pids) pids.add(p);
     for (const s of selfFound.sids ?? []) sids.add(s);
-    if (selfFound.hasSessionGroup) sids.add(process.pid);
+    if (selfFound.hasSessionGroup || selfFound.pids.length > 0) sids.add(process.pid);
   }
-  if (targetPid !== undefined) {
+  if (targetDetached && targetPid !== undefined) {
     const targetFound = discoverTargetsSync(targetPid, undefined, targetReaped ? true : undefined, sparePath);
     if (targetFound) {
       for (const p of targetFound.pids) pids.add(p);
@@ -62,7 +63,7 @@ const discoverAllSync = () => {
 const hasSurvivingTarget = async (): Promise<boolean> => {
   const selfTargets = await discoverTargets(process.pid, runTag, sparePath, false);
   if (!selfTargets || selfTargets.pids.length > 0) return true;
-  if (targetPid !== undefined) {
+  if (targetDetached && targetPid !== undefined) {
     const tTargets = await discoverTargets(targetPid, undefined, sparePath, false);
     if (!tTargets || tTargets.pids.length > 0) return true;
   }
@@ -92,19 +93,19 @@ const applyMergedSignal = (
 const signalBoth = (sig: NodeJS.Signals, removeOwnSpare = false): void | Promise<void> => {
   if (process.platform === "linux") {
     const selfTargets = discoverTargetsLinux(process.pid, runTag, undefined, sparePath);
-    const targetTargets = targetPid !== undefined && !targetReaped ? discoverTargetsLinux(targetPid, undefined, undefined, sparePath) : undefined;
+    const targetTargets = targetDetached && targetPid !== undefined && !targetReaped ? discoverTargetsLinux(targetPid, undefined, undefined, sparePath) : undefined;
     applyMergedSignal(selfTargets, targetTargets, sig, removeOwnSpare);
-    if (targetPid !== undefined && targetReaped && sig === "SIGKILL") {
+    if (targetDetached && targetPid !== undefined && targetReaped && sig === "SIGKILL") {
       killDeadSession(targetPid, undefined, true, sparePath);
     }
     return;
   }
   return Promise.all([
     discoverTargets(process.pid, runTag, sparePath),
-    targetPid !== undefined && !targetReaped ? discoverTargets(targetPid, undefined, sparePath) : Promise.resolve(undefined),
+    targetDetached && targetPid !== undefined && !targetReaped ? discoverTargets(targetPid, undefined, sparePath) : Promise.resolve(undefined),
   ]).then(async ([selfTargets, targetTargets]) => {
     applyMergedSignal(selfTargets, targetTargets, sig, removeOwnSpare);
-    if (targetPid !== undefined && targetReaped && sig === "SIGKILL") {
+    if (targetDetached && targetPid !== undefined && targetReaped && sig === "SIGKILL") {
       await killDeadSession(targetPid, undefined, true, sparePath);
     }
   });
@@ -148,13 +149,10 @@ const killAll = (removeOwnSpare = false) => {
   finish();
 };
 
-const forwardGraceful = (sig: StopSignal) => {
+const armGraceful = (sig: StopSignal) => {
   if (killing || confirmedDone) return;
   gracefulSignal = sig;
-  if (!receivedSignals.has(sig)) {
-    receivedSignals.add(sig);
-    void signalBoth(sig);
-  }
+  receivedSignals.add(sig);
   if (sig === "SIGTERM" || sig === "SIGHUP") {
     if (interruptTimer) {
       clearTimeout(interruptTimer);
@@ -164,7 +162,7 @@ const forwardGraceful = (sig: StopSignal) => {
       graceTimer = setTimeout(() => {
         graceTimer = undefined;
         killAll(false);
-      }, probeGraceMs);
+      }, probeGraceMs + 100);
     }
     return;
   }
@@ -172,15 +170,11 @@ const forwardGraceful = (sig: StopSignal) => {
     interruptTimer = setTimeout(() => {
       interruptTimer = undefined;
       if (killing || confirmedDone) return;
-      if (!receivedSignals.has("SIGTERM")) {
-        receivedSignals.add("SIGTERM");
-        void signalBoth("SIGTERM");
-      }
       if (!graceTimer) {
         graceTimer = setTimeout(() => {
           graceTimer = undefined;
           killAll(false);
-        }, probeGraceMs);
+        }, probeGraceMs + 100);
       }
     }, interruptGraceMs);
   }
@@ -188,7 +182,7 @@ const forwardGraceful = (sig: StopSignal) => {
 
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
   process.on(sig, () => {
-    if (inProbe) forwardGraceful(sig);
+    if (inProbe) armGraceful(sig);
     else receivedSignals.add(sig);
   });
 }
@@ -233,9 +227,9 @@ const watchControl = (fd: number, initialBuf = "") => {
           confirmedDone = true;
           exitDone();
         }
-        if (line.startsWith("sig:")) {
-          const sig = line.slice(4) as StopSignal;
-          if (stopSignalsSet.has(sig)) forwardGraceful(sig);
+        if (line.startsWith("grace:") || line.startsWith("sig:")) {
+          const sig = line.slice(line.indexOf(":") + 1) as StopSignal;
+          if (stopSignalsSet.has(sig)) armGraceful(sig);
         }
         return false;
       };
@@ -293,7 +287,7 @@ if (configFd !== undefined) setCloexec(configFd, true);
 
 const lockFds = Array.from({ length: lockCount }, (_, index) => index + 3);
 const drained = drainControlFd(ipcFd);
-if (drained.closed || drained.lines.includes("kill") || drained.lines.some((line) => line.startsWith("sig:"))) {
+if (drained.closed || drained.lines.includes("kill") || drained.lines.some((line) => line.startsWith("grace:") || line.startsWith("sig:"))) {
   for (const fd of [...lockFds, ...(configFd !== undefined ? [configFd] : [])]) closeQuiet(fd);
   redirectStdioOutputsToNull();
   process.exit(137);
@@ -345,7 +339,14 @@ if (!parsed || killing || gracefulSignal) {
   }
   const stdio: [number, number, number, ...number[]] = [0, 1, 2, ...lockFds];
   try {
-    target = Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio, detached: true });
+    const grouped = spawnInOwnGroup(argv, targetEnv);
+    if (grouped) {
+      target = grouped;
+      targetDetached = false;
+    } else {
+      target = Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio, detached: true });
+      targetDetached = true;
+    }
     targetPid = target.pid;
   } catch (error) {
     for (const fd of lockFds) closeQuiet(fd);

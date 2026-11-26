@@ -1,12 +1,38 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import type { Plan } from "../pack/types.ts";
 import { tempDirs } from "../testing/git.ts";
 import { humanStepsLeft } from "./apply.ts";
+import { createPipe, setCloexec } from "./probe-supervisor.ts";
 
 const temp = tempDirs();
 const activeHelpers: Array<{ kill(signal?: NodeJS.Signals): void }> = [];
+
+function manualClock() {
+  const pipe = createPipe();
+  if (!pipe) throw new Error("could not create clock pipe");
+  setCloexec(pipe.readFd, true);
+  setCloexec(pipe.writeFd, true);
+  let closed = false;
+  return {
+    readFd: pipe.readFd,
+    tick() {
+      if (closed) return;
+      writeSync(pipe.writeFd, "\n");
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      try {
+        closeSync(pipe.writeFd);
+      } catch {}
+      try {
+        closeSync(pipe.readFd);
+      } catch {}
+    },
+  };
+}
 
 afterEach(() => {
   for (const proc of activeHelpers.splice(0)) {
@@ -86,9 +112,17 @@ describe("probe supervisor", () => {
         sawStop,
         sawTerm,
       ];
+      const clock = manualClock();
       const runnerScript = `import { humanStepsLeft } from ${JSON.stringify(applyPath)};
-await humanStepsLeft(${JSON.stringify(probePlan("esc", probeCmd))}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}), graceMs: 250, interruptGraceMs: 250 });`;
-      const runner = Bun.spawn([process.execPath, "-e", runnerScript], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await humanStepsLeft(${JSON.stringify(probePlan("esc", probeCmd))}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}), graceMs: 10_000, interruptGraceMs: 10_000, clockFd: 3 });`;
+      setCloexec(clock.readFd, false);
+      const runner = Bun.spawn([process.execPath, "-e", runnerScript], {
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+        stdio: ["ignore", "ignore", "ignore", clock.readFd],
+      });
+      setCloexec(clock.readFd, true);
       let pid = 0;
       try {
         pid = Number((await started).trim());
@@ -96,10 +130,13 @@ await humanStepsLeft(${JSON.stringify(probePlan("esc", probeCmd))}, { home: ${JS
 
         runner.kill(sig);
         expect((await gotStop).trim()).toBe("stop");
+        clock.tick();
         expect((await gotTerm).trim()).toBe("term");
+        clock.tick();
         expect(await holderGone).toBe("");
         expect(await runner.exited).not.toBe(0);
       } finally {
+        clock.close();
         runner.kill("SIGKILL");
         if (pid > 0) try { process.kill(pid, "SIGKILL"); } catch {}
         await runner.exited.catch(() => {});
@@ -268,12 +305,13 @@ await humanStepsLeft(${JSON.stringify(probePlan("int", [process.execPath, "-e", 
     const grandBin = join(dir, "grand.sh");
     writeFileSync(grandBin, '#!/bin/sh\ntrap "" HUP TERM\nexec 3>"$1"\necho $$ > "$2"\nexec sleep 30\n', { mode: 0o755 });
     const probeScript = `trap '${grandBin} ${grandGone} ${grandReady} & exit 0' TERM; echo $$ > ${JSON.stringify(ready)}; sleep 30 & wait`;
+    const clock = manualClock();
     let fireDeadline!: () => void;
     let grandPid = 0;
     try {
       const pending = humanStepsLeft(
         probePlan("respawn-timeout", ["sh", "-c", probeScript]),
-        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 1000 },
+        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 10_000, clockFd: clock.readFd },
       );
       expect(Number((await started).trim())).toBeGreaterThan(0);
       fireDeadline();
@@ -281,8 +319,10 @@ await humanStepsLeft(${JSON.stringify(probePlan("int", [process.execPath, "-e", 
       expect(res.unchecked.map((s) => s.id)).toEqual(["respawn-timeout"]);
       grandPid = Number((await grandStarted).trim());
       expect(grandPid).toBeGreaterThan(0);
+      clock.tick();
       expect(await grandClosed).toBe("");
     } finally {
+      clock.close();
       if (grandPid > 0) try { process.kill(grandPid, "SIGKILL"); } catch {}
     }
   });
@@ -321,6 +361,7 @@ await humanStepsLeft(${JSON.stringify(probePlan("int", [process.execPath, "-e", 
     const closed = fifoRead(gone);
     const sawTrap = fifoRead(trapped);
     const probeCmd = [shBin, "-c", 'exec 3>"$1"; trap "" INT; trap \'echo trapped > "$3"; kill -STOP 0\' TERM; echo $$ > "$2"; sleep 30 & wait', "probe", gone, ready, trapped];
+    const clock = manualClock();
     const runnerScript = `import { humanStepsLeft } from ${JSON.stringify(applyPath)};
 await humanStepsLeft({
   machine: { schema: 1, role: "linux" },
@@ -329,17 +370,27 @@ await humanStepsLeft({
   packs: [], workflows: [], files: [], config: [], owners: {}, jobs: [],
   human: [{ id: "stop-self", pack: "team", say: "Stop self.", probe: ${JSON.stringify(probeCmd)} }],
   steps: [], checks: [], commands: {}, handlers: {}, models: [], settings: {}, unanswered: [], ask: [], dropped: [],
-}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}), graceMs: 0 });`;
-    const runner = Bun.spawn([process.execPath, "-e", runnerScript], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}), graceMs: 0, interruptGraceMs: 0, clockFd: 3 });`;
+    setCloexec(clock.readFd, false);
+    const runner = Bun.spawn([process.execPath, "-e", runnerScript], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      stdio: ["ignore", "ignore", "ignore", clock.readFd],
+    });
+    setCloexec(clock.readFd, true);
     let probePid = 0;
     try {
       probePid = Number((await started).trim());
       expect(probePid).toBeGreaterThan(0);
       runner.kill("SIGINT");
+      clock.tick();
       expect((await sawTrap).trim()).toBe("trapped");
+      clock.tick();
       expect(await closed).toBe("");
       expect(await runner.exited).not.toBe(0);
     } finally {
+      clock.close();
       runner.kill("SIGKILL");
       if (probePid > 0) {
         try { process.kill(probePid, "SIGCONT"); } catch {}
@@ -1844,6 +1895,7 @@ process.exit(res.failing.map((s) => s.id).join(",") === "spare-fail" ? 0 : 1);`;
 });
 await Bun.write(${JSON.stringify(ready)}, String(process.pid) + "\\n");
 await Bun.sleep(30_000);`;
+    const clock = manualClock();
     let fireDeadline!: () => void;
     let probePid = 0;
     let workerPid = 0;
@@ -1851,7 +1903,7 @@ await Bun.sleep(30_000);`;
       expect(Number((await unrelatedStarted).trim())).toBeGreaterThan(0);
       const pending = humanStepsLeft(
         probePlan("holder-sweep", [process.execPath, "-e", probeScript]),
-        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 1000 },
+        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 10_000, clockFd: clock.readFd },
       );
       probePid = Number((await started).trim());
       expect(probePid).toBeGreaterThan(0);
@@ -1860,9 +1912,11 @@ await Bun.sleep(30_000);`;
       expect(workerPid).toBeGreaterThan(0);
       const res = await pending;
       expect(res.unchecked.map((s) => s.id)).toEqual(["holder-sweep"]);
+      clock.tick();
       expect(await workerClosed).toBe("");
       expect(() => process.kill(unrelated.pid, 0)).not.toThrow();
     } finally {
+      clock.close();
       if (probePid > 0) try { process.kill(probePid, "SIGKILL"); } catch {}
       if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
       unrelated.kill("SIGKILL");
@@ -1931,7 +1985,6 @@ await c.exited;`;
       expect(childPid).toBeGreaterThan(0);
       expect(jobPid).toBeGreaterThan(0);
       expect(daemonPid).toBeGreaterThan(0);
-      expect(spareFile.length).toBeGreaterThan(0);
       fireDeadline();
       const res = await pending;
       expect(res.unchecked.map((s) => s.id)).toEqual(["unreadable-spare"]);

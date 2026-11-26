@@ -298,6 +298,22 @@ type PosixLib = {
   socketpair: (domain: number, type: number, protocol: number, fds: ReturnType<typeof ptr>) => number;
   fcntl: (fd: number, cmd: number, arg: number) => number;
   dup2: (oldfd: number, newfd: number) => number;
+  posix_spawn: (
+    pid: ReturnType<typeof ptr>,
+    path: ReturnType<typeof ptr>,
+    fileActions: null,
+    attr: ReturnType<typeof ptr>,
+    argv: ReturnType<typeof ptr>,
+    envp: ReturnType<typeof ptr>,
+  ) => number;
+  posix_spawnattr_init: (attr: ReturnType<typeof ptr>) => number;
+  posix_spawnattr_destroy: (attr: ReturnType<typeof ptr>) => number;
+  posix_spawnattr_setflags: (attr: ReturnType<typeof ptr>, flags: number) => number;
+  posix_spawnattr_setpgroup: (attr: ReturnType<typeof ptr>, pgroup: number) => number;
+  posix_spawnattr_setsigmask: (attr: ReturnType<typeof ptr>, mask: ReturnType<typeof ptr>) => number;
+  posix_spawnattr_setsigdefault: (attr: ReturnType<typeof ptr>, mask: ReturnType<typeof ptr>) => number;
+  waitpid: (pid: number, status: ReturnType<typeof ptr>, options: number) => number;
+  strerror: (errnum: number) => string;
 };
 
 let posixLib: PosixLib | null | undefined;
@@ -314,6 +330,18 @@ function getPosixLib(): PosixLib | null {
         socketpair: { args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.pointer], returns: FFIType.i32 },
         fcntl: { args: [FFIType.i32, FFIType.i32, FFIType.i32], returns: FFIType.i32 },
         dup2: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+        posix_spawn: {
+          args: [FFIType.pointer, FFIType.pointer, FFIType.pointer, FFIType.pointer, FFIType.pointer, FFIType.pointer],
+          returns: FFIType.i32,
+        },
+        posix_spawnattr_init: { args: [FFIType.pointer], returns: FFIType.i32 },
+        posix_spawnattr_destroy: { args: [FFIType.pointer], returns: FFIType.i32 },
+        posix_spawnattr_setflags: { args: [FFIType.pointer, FFIType.i16], returns: FFIType.i32 },
+        posix_spawnattr_setpgroup: { args: [FFIType.pointer, FFIType.i32], returns: FFIType.i32 },
+        posix_spawnattr_setsigmask: { args: [FFIType.pointer, FFIType.pointer], returns: FFIType.i32 },
+        posix_spawnattr_setsigdefault: { args: [FFIType.pointer, FFIType.pointer], returns: FFIType.i32 },
+        waitpid: { args: [FFIType.i32, FFIType.pointer, FFIType.i32], returns: FFIType.i32 },
+        strerror: { args: [FFIType.i32], returns: FFIType.cstring },
       });
       posixLib = {
         poll: (fds, nfds, timeout) => lib.symbols.poll(fds, nfds, timeout),
@@ -321,12 +349,157 @@ function getPosixLib(): PosixLib | null {
         socketpair: (domain, type, protocol, fds) => lib.symbols.socketpair(domain, type, protocol, fds),
         fcntl: (fd, cmd, arg) => lib.symbols.fcntl(fd, cmd, arg),
         dup2: (oldfd, newfd) => lib.symbols.dup2(oldfd, newfd),
+        posix_spawn: (pid, path, fileActions, attr, argv, envp) => lib.symbols.posix_spawn(pid, path, fileActions, attr, argv, envp),
+        posix_spawnattr_init: (attr) => lib.symbols.posix_spawnattr_init(attr),
+        posix_spawnattr_destroy: (attr) => lib.symbols.posix_spawnattr_destroy(attr),
+        posix_spawnattr_setflags: (attr, flags) => lib.symbols.posix_spawnattr_setflags(attr, flags),
+        posix_spawnattr_setpgroup: (attr, pgroup) => lib.symbols.posix_spawnattr_setpgroup(attr, pgroup),
+        posix_spawnattr_setsigmask: (attr, mask) => lib.symbols.posix_spawnattr_setsigmask(attr, mask),
+        posix_spawnattr_setsigdefault: (attr, mask) => lib.symbols.posix_spawnattr_setsigdefault(attr, mask),
+        waitpid: (pid, status, options) => lib.symbols.waitpid(pid, status, options),
+        strerror: (errnum) => String(lib.symbols.strerror(errnum) ?? ""),
       };
     } catch {
       posixLib = null;
     }
   }
   return posixLib;
+}
+
+const commonErrnoCodes: Record<number, string> = {
+  1: "EPERM",
+  2: "ENOENT",
+  7: "E2BIG",
+  8: "ENOEXEC",
+  12: "ENOMEM",
+  13: "EACCES",
+  20: "ENOTDIR",
+  21: "EISDIR",
+  23: "ENFILE",
+  24: "EMFILE",
+  26: "ETXTBSY",
+};
+
+const platformErrnoCodes: Record<number, string> =
+  process.platform === "darwin" ? { 35: "EAGAIN", 62: "ELOOP", 63: "ENAMETOOLONG" } : { 11: "EAGAIN", 36: "ENAMETOOLONG", 40: "ELOOP" };
+
+export type OwnGroupChild = {
+  pid: number;
+  exited: Promise<number>;
+  kill: (signal?: NodeJS.Signals) => void;
+};
+
+export function spawnInOwnGroup(argv: string[], env?: Record<string, string>): OwnGroupChild | undefined {
+  const lib = getPosixLib();
+  if (!lib) return undefined;
+  const cmd = argv[0];
+  if (!cmd || cmd.includes("\0")) {
+    const err = new Error(`Executable not found: ${JSON.stringify(cmd ?? "")}`) as NodeJS.ErrnoException;
+    err.code = "ENOENT";
+    throw err;
+  }
+  let execPath: string;
+  if (cmd.includes("/")) {
+    execPath = cmd;
+  } else {
+    const searchPath = env ? ("PATH" in env ? env.PATH : "/bin:/usr/bin") : (process.env.PATH ?? "/bin:/usr/bin");
+    const found = searchPath ? Bun.which(cmd, { PATH: searchPath }) : null;
+    if (!found) {
+      const err = new Error(`Executable not found in $PATH: "${cmd}"`) as NodeJS.ErrnoException;
+      err.code = "ENOENT";
+      throw err;
+    }
+    execPath = found;
+  }
+  const enc = new TextEncoder();
+  const keep: Uint8Array[] = [];
+  const toCString = (value: string): bigint => {
+    const buf = enc.encode(`${value}\0`);
+    keep.push(buf);
+    return BigInt(ptr(buf));
+  };
+  const pathBuf = enc.encode(`${execPath}\0`);
+  keep.push(pathBuf);
+  const argvPtrs = new BigUint64Array(argv.length + 1);
+  for (let i = 0; i < argv.length; i++) argvPtrs[i] = toCString(argv[i]!);
+  argvPtrs[argv.length] = 0n;
+  const envPairs = env
+    ? Object.entries(env)
+    : (Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  const envPtrs = new BigUint64Array(envPairs.length + 1);
+  for (let i = 0; i < envPairs.length; i++) envPtrs[i] = toCString(`${envPairs[i]![0]}=${envPairs[i]![1]}`);
+  envPtrs[envPairs.length] = 0n;
+
+  const attr = new Uint8Array(512);
+  const sigsetSize = process.platform === "darwin" ? 4 : 128;
+  const emptyMask = new Uint8Array(sigsetSize);
+  const fullMask = new Uint8Array(sigsetSize).fill(0xff);
+  const pidOut = new Int32Array(1);
+  const statusBuf = new Int32Array(1);
+  let resolveExit!: (code: number) => void;
+  const exited = new Promise<number>((resolve) => {
+    resolveExit = resolve;
+  });
+  let done = false;
+  let poll: ReturnType<typeof setInterval> | undefined;
+  let spawnedPid = 0;
+  const tryReap = () => {
+    if (done || spawnedPid <= 0) return;
+    const w = lib.waitpid(spawnedPid, ptr(statusBuf), 1);
+    if (w === spawnedPid || w < 0) {
+      done = true;
+      process.off("SIGCHLD", onChld);
+      if (poll) {
+        clearInterval(poll);
+        poll = undefined;
+      }
+      if (w < 0) {
+        resolveExit(128);
+        return;
+      }
+      const st = statusBuf[0]!;
+      const sig = st & 0x7f;
+      resolveExit(sig === 0 ? (st >> 8) & 0xff : 128 + sig);
+    }
+  };
+  const onChld = () => tryReap();
+  process.on("SIGCHLD", onChld);
+
+  let rc = -1;
+  if (lib.posix_spawnattr_init(ptr(attr)) !== 0) {
+    process.off("SIGCHLD", onChld);
+    return undefined;
+  }
+  try {
+    lib.posix_spawnattr_setflags(ptr(attr), 0x02 | 0x04 | 0x08);
+    lib.posix_spawnattr_setpgroup(ptr(attr), 0);
+    lib.posix_spawnattr_setsigmask(ptr(attr), ptr(emptyMask));
+    lib.posix_spawnattr_setsigdefault(ptr(attr), ptr(fullMask));
+    rc = lib.posix_spawn(ptr(pidOut), ptr(pathBuf), null, ptr(attr), ptr(argvPtrs), ptr(envPtrs));
+  } finally {
+    lib.posix_spawnattr_destroy(ptr(attr));
+  }
+  void keep.length;
+  if (rc !== 0) {
+    process.off("SIGCHLD", onChld);
+    const err = new Error(lib.strerror(rc) || `posix_spawn failed (${rc})`) as NodeJS.ErrnoException;
+    const code = commonErrnoCodes[rc] ?? platformErrnoCodes[rc];
+    if (code) err.code = code;
+    throw err;
+  }
+  spawnedPid = pidOut[0]!;
+  tryReap();
+  if (!done) poll = setInterval(tryReap, 25);
+  return {
+    pid: spawnedPid,
+    exited,
+    kill: (signal: NodeJS.Signals = "SIGTERM") => {
+      if (done) return;
+      try {
+        process.kill(spawnedPid, signal);
+      } catch {}
+    },
+  };
 }
 
 export function redirectStdioOutputsToNull(): void {
@@ -1390,6 +1563,7 @@ if (import.meta.main) {
   let holderFd: number | undefined;
   let holderExitFd: number | undefined;
   let innerResultFd: number | undefined;
+  let clockFd: number | undefined;
   try {
     const raw = Bun.argv[2] ?? (await Bun.stdin.text());
     const parsed = JSON.parse(raw) as unknown;
@@ -1412,6 +1586,7 @@ if (import.meta.main) {
         holderFd?: unknown;
         holderExitFd?: unknown;
         innerResultFd?: unknown;
+        clockFd?: unknown;
       };
       if (record.command.every((arg) => typeof arg === "string")) command = record.command as string[];
       if (record.env && typeof record.env === "object" && !Array.isArray(record.env)) {
@@ -1434,6 +1609,7 @@ if (import.meta.main) {
       if (typeof record.holderFd === "number" && Number.isInteger(record.holderFd) && record.holderFd >= 3) holderFd = record.holderFd;
       if (typeof record.holderExitFd === "number" && Number.isInteger(record.holderExitFd) && record.holderExitFd >= 3) holderExitFd = record.holderExitFd;
       if (typeof record.innerResultFd === "number" && Number.isInteger(record.innerResultFd) && record.innerResultFd >= 3) innerResultFd = record.innerResultFd;
+      if (typeof record.clockFd === "number" && Number.isInteger(record.clockFd) && record.clockFd >= 3) clockFd = record.clockFd;
     }
   } catch {}
   if (spareFd !== undefined) setCloexec(spareFd, true);
@@ -1497,6 +1673,7 @@ if (import.meta.main) {
     const childGuardFd = addFd(guardFd);
     const childHolderFd = addFd(holderAlive?.readFd);
     const childInnerResultFd = addFd(innerResult?.writeFd);
+    const childClockFd = addFd(clockFd);
     const innerPayload = {
       command,
       ...(targetEnv ? { env: targetEnv } : {}),
@@ -1508,6 +1685,7 @@ if (import.meta.main) {
       ...(childGuardFd !== undefined ? { guardFd: childGuardFd } : {}),
       ...(childHolderFd !== undefined ? { holderFd: childHolderFd } : {}),
       ...(childInnerResultFd !== undefined ? { innerResultFd: childInnerResultFd } : {}),
+      ...(childClockFd !== undefined ? { clockFd: childClockFd } : {}),
     };
     const runTag = spareTag ?? ownTag(process.env[tagEnvVar]);
     const innerEnv = runTag ? supervisorEnv(appendTag(process.env[tagEnvVar], runTag)) : watchdogEnv();
@@ -1526,6 +1704,7 @@ if (import.meta.main) {
       closeFd(controlFd);
       closeFd(resultFd);
       closeFd(guardFd);
+      closeFd(clockFd);
       removeSpareFile(spareFile);
       process.exit(127);
     }
@@ -1534,6 +1713,7 @@ if (import.meta.main) {
     closeFd(controlFd);
     closeFd(resultFd);
     closeFd(guardFd);
+    closeFd(clockFd);
     redirectStdioOutputsToNull();
     const code = await inner.exited;
     const reported = innerResult ? probeResultReported(innerResult.readFd) === "reported" : false;
@@ -1553,6 +1733,51 @@ if (import.meta.main) {
   if (guardFd !== undefined) setCloexec(guardFd, true);
   if (holderFd !== undefined) setCloexec(holderFd, true);
   if (innerResultFd !== undefined) setCloexec(innerResultFd, true);
+  if (clockFd !== undefined) setCloexec(clockFd, true);
+  const fdTimer = (fd: number): Timer => {
+    const queue: Array<() => void> = [];
+    let pendingTicks = 0;
+    let closed = false;
+    const drain = () => {
+      while ((closed || pendingTicks > 0) && queue.length > 0) {
+        if (pendingTicks > 0) pendingTicks--;
+        const next = queue.shift();
+        if (next) next();
+      }
+    };
+    void (async () => {
+      const chunk = new Uint8Array(64);
+      for (;;) {
+        const n = await readFdChunk(fd, chunk);
+        if (n <= 0) break;
+        for (let i = 0; i < n; i++) {
+          if (chunk[i] === 0x0a) pendingTicks++;
+        }
+        drain();
+      }
+      closed = true;
+      drain();
+    })();
+    return (_ms, fire) => {
+      let cancelled = false;
+      const run = () => {
+        if (!cancelled) fire();
+      };
+      if (closed || pendingTicks > 0) {
+        if (pendingTicks > 0) pendingTicks--;
+        queueMicrotask(run);
+        return () => {
+          cancelled = true;
+        };
+      }
+      queue.push(run);
+      return () => {
+        cancelled = true;
+        const idx = queue.indexOf(run);
+        if (idx !== -1) queue.splice(idx, 1);
+      };
+    };
+  };
   let reported = false;
   let targetHandle: { kill?: (signal?: NodeJS.Signals) => void } | undefined;
   const markResultFd = () => {
@@ -1654,7 +1879,7 @@ if (import.meta.main) {
     killGroup: (signal, includeTagged) =>
       killSession(process.pid, signal, includeTagged ? runTag : undefined, includeTagged ? rememberedDetached : undefined, spareFile, !includeTagged),
     hasGroupMembers: () => hasOtherGroupMember(),
-    timer: realTimer,
+    timer: clockFd !== undefined ? fdTimer(clockFd) : realTimer,
     onSignal: (signal, handler) => {
       handlers.set(signal, handler);
       for (let i = pendingStops.length - 1; i >= 0; i--) {

@@ -365,7 +365,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       if (inProbe && child && !supervisorReaped && !ipcParentClosed) {
         pendingProbeInterrupt = name;
         try {
-          writeSync(ipcPair.parentFd, `sig:${name}\n`);
+          writeSync(ipcPair.parentFd, `grace:${name}\n`);
         } catch {}
         if (!probeInterruptHooked) {
           probeInterruptHooked = true;
