@@ -218,23 +218,47 @@ async function waitUpTo(promise: Promise<unknown>, ms: number): Promise<void> {
   }
 }
 
+let activeCaptures = 0;
+const fdSlotWaiters: Array<() => void> = [];
+
+function notifyFdSlot() {
+  const next = fdSlotWaiters.shift();
+  if (next) next();
+}
+
+function isFdExhausted(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "EMFILE" || code === "ENFILE";
+}
+
 export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorGraceMs): Capture {
   return async (argv, { env, stdin, timeoutMs, inherit = false }) => {
     const output = inherit ? "inherit" : "pipe";
     const locks = heldLocks();
     const input = stdin === undefined ? "ignore" : new TextEncoder().encode(stdin);
-    const ipcPair = createSocketPair();
-    if (!ipcPair) throw new Error("could not create supervisor socket");
-    setCloexec(ipcPair.parentFd, true);
+    let ipcPair: { parentFd: number; childFd: number } | undefined;
     let ipcParentClosed = false;
     let ipcChildClosed = false;
+    let acquired = false;
+    let wokenBySlot = false;
+    let slotReleased = true;
+    const releaseSlot = () => {
+      if (slotReleased) return;
+      slotReleased = true;
+      activeCaptures--;
+      notifyFdSlot();
+    };
     const closeIpcParent = () => {
-      if (ipcParentClosed) return;
+      if (!ipcPair || ipcParentClosed) {
+        releaseSlot();
+        return;
+      }
       ipcParentClosed = true;
       try { closeSync(ipcPair.parentFd); } catch {}
+      releaseSlot();
     };
     const closeIpcChild = () => {
-      if (ipcChildClosed) return;
+      if (!ipcPair || ipcChildClosed) return;
       ipcChildClosed = true;
       try { closeSync(ipcPair.childFd); } catch {}
     };
@@ -259,6 +283,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     const inheritedSpare = env?.[spareEnvVar] || process.env[spareEnvVar] || undefined;
     const spared = emptySpared();
     let stopped = false;
+    let wakePendingSlot: (() => void) | undefined;
     let supervisorReaped = false;
     let confirmedDone = false;
     let pendingProbeInterrupt: NodeJS.Signals | undefined;
@@ -285,7 +310,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       let tempPipe: { readFd: number; writeFd: number } | undefined;
       let fd: number;
       let ownsTempFd = false;
-      if (!supervisorReaped && !ipcParentClosed) {
+      if (!supervisorReaped && ipcPair && !ipcParentClosed) {
         fd = ipcPair.parentFd;
       } else {
         tempPipe = createPipe();
@@ -334,9 +359,10 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     };
     const stopChild = () => {
       stopped = true;
+      wakePendingSlot?.();
       if (!child) return;
       if (!supervisorReaped) {
-        if (!ipcParentClosed) {
+        if (ipcPair && !ipcParentClosed) {
           try {
             writeSync(ipcPair.parentFd, "kill\n");
           } catch {}
@@ -349,7 +375,8 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       if (!tagSweep) tagSweep = runOutOfProcessSweep();
     };
     const interrupted = (name: NodeJS.Signals) => {
-      if (inProbe && child && !supervisorReaped && !ipcParentClosed) {
+      wakePendingSlot?.();
+      if (inProbe && child && !supervisorReaped && ipcPair && !ipcParentClosed) {
         pendingProbeInterrupt = name;
         try {
           writeSync(ipcPair.parentFd, `grace:${name}\n`);
@@ -370,7 +397,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         return;
       }
       stopChild();
-      if (child && !supervisorReaped && !ipcParentClosed) {
+      if (child && !supervisorReaped && ipcPair && !ipcParentClosed) {
         const fd = ipcPair.parentFd;
         setCloexec(fd, false);
         let handedOff = false;
@@ -453,40 +480,124 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       const configBytes = new TextEncoder().encode(configJson);
       let inlineConfig = configBytes.byteLength <= 16_384 && envByteSize(supEnv) + configBytes.byteLength <= 32_768 && !configJson.includes("\0");
       const ipcFdIndex = 3 + locks.length;
-      const spawnSupervisor = () => {
-        if (!inlineConfig) {
-          configPipe = createPipe();
-          if (!configPipe) throw new Error("could not create supervisor config pipe");
-          setCloexec(configPipe.writeFd, true);
-          delete supEnv.HEDGE_CAPTURE_CONFIG;
-        } else {
-          supEnv.HEDGE_CAPTURE_CONFIG = configJson;
-        }
-        const configFdArg = configPipe ? String(ipcFdIndex + 1) : "-";
-        const extraStdio = configPipe ? [configPipe.readFd] : [];
-        return Bun.spawn(
-          bunScript(captureSupervisor, String(locks.length), String(ipcFdIndex), configFdArg),
-          {
-            env: supEnv,
-            stdio: [input, output, output, ...locks, ipcPair.childFd, ...extraStdio],
-            detached: true,
-          },
-        );
+      const waitForFdSlot = () =>
+        new Promise<void>((resolve) => {
+          wokenBySlot = false;
+          let settled = false;
+          const finish = (fromSlot: boolean) => {
+            if (settled) return;
+            settled = true;
+            wakePendingSlot = undefined;
+            if (fromSlot) wokenBySlot = true;
+            const idx = fdSlotWaiters.indexOf(onSlot);
+            if (idx !== -1) fdSlotWaiters.splice(idx, 1);
+            resolve();
+          };
+          const onSlot = () => finish(true);
+          wakePendingSlot = () => finish(false);
+          fdSlotWaiters.push(onSlot);
+        });
+      let onTimeout = () => {
+        wakePendingSlot?.();
       };
-      try {
-        child = spawnSupervisor();
-      } catch (error) {
-        if (inlineConfig && (error as NodeJS.ErrnoException)?.code === "E2BIG") {
-          inlineConfig = false;
+      cancel = timer(timeoutMs, () => {
+        expired = true;
+        onTimeout();
+      });
+      const resetAttemptFds = () => {
+        closeIpcChild();
+        closeConfigRead();
+        closeConfigWrite();
+        configPipe = undefined;
+        configReadClosed = false;
+        configWriteClosed = false;
+        closeIpcParent();
+        ipcPair = undefined;
+        ipcParentClosed = false;
+        ipcChildClosed = false;
+      };
+      for (;;) {
+        if (expired) {
+          return timeoutResult(timeoutMs, "");
+        }
+        if (stopped) {
+          return { code: 143, stdout: "", stderr: "" };
+        }
+        const pair = createSocketPair();
+        if (!pair) {
+          if (activeCaptures > 0) {
+            await waitForFdSlot();
+            continue;
+          }
+          throw new Error("could not create supervisor socket");
+        }
+        ipcPair = pair;
+        ipcParentClosed = false;
+        ipcChildClosed = false;
+        setCloexec(ipcPair.parentFd, true);
+        const spawnSupervisor = () => {
+          if (!inlineConfig) {
+            const pipe = createPipe();
+            if (!pipe) {
+              const err = new Error("could not create supervisor config pipe") as NodeJS.ErrnoException;
+              err.code = "EMFILE";
+              throw err;
+            }
+            configPipe = pipe;
+            configReadClosed = false;
+            configWriteClosed = false;
+            setCloexec(configPipe.writeFd, true);
+            delete supEnv.HEDGE_CAPTURE_CONFIG;
+          } else {
+            supEnv.HEDGE_CAPTURE_CONFIG = configJson;
+          }
+          const configFdArg = configPipe ? String(ipcFdIndex + 1) : "-";
+          const extraStdio = configPipe ? [configPipe.readFd] : [];
+          return Bun.spawn(
+            bunScript(captureSupervisor, String(locks.length), String(ipcFdIndex), configFdArg),
+            {
+              env: supEnv,
+              stdio: [input, output, output, ...locks, ipcPair!.childFd, ...extraStdio],
+              detached: true,
+            },
+          );
+        };
+        try {
           child = spawnSupervisor();
-        } else {
+          activeCaptures++;
+          acquired = true;
+          slotReleased = false;
+          break;
+        } catch (error) {
+          if (inlineConfig && (error as NodeJS.ErrnoException)?.code === "E2BIG") {
+            inlineConfig = false;
+            try {
+              child = spawnSupervisor();
+              activeCaptures++;
+              acquired = true;
+              slotReleased = false;
+              break;
+            } catch (retryError) {
+              resetAttemptFds();
+              if (isFdExhausted(retryError) && activeCaptures > 0) {
+                await waitForFdSlot();
+                continue;
+              }
+              throw retryError;
+            }
+          }
+          resetAttemptFds();
+          if (isFdExhausted(error) && activeCaptures > 0) {
+            await waitForFdSlot();
+            continue;
+          }
           throw error;
         }
       }
       closeIpcChild();
       closeConfigRead();
       const live = child;
-      const reader = createResultReader(ipcPair.parentFd, stopStream.signal);
+      const reader = createResultReader(ipcPair!.parentFd, stopStream.signal);
       resultReader = reader;
       resultRead = (async () => {
         for (;;) {
@@ -523,8 +634,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         settle({ code });
       });
       let forceExpired = false;
-      cancel = timer(timeoutMs, () => {
-        expired = true;
+      onTimeout = () => {
         stopChild();
         hardKill = setTimeout(() => {
           forceExpired = true;
@@ -535,7 +645,10 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           if (hardKill) clearTimeout(hardKill);
           stopStream.abort();
         });
-      });
+      };
+      if (expired) {
+        onTimeout();
+      }
       if (stopped || expired) {
         closeConfigWrite();
         stopChild();
@@ -584,7 +697,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         return { code: status.code ?? 143, stdout, stderr };
       }
       confirmedDone = true;
-      if (!supervisorReaped && !ipcParentClosed) {
+      if (!supervisorReaped && ipcPair && !ipcParentClosed) {
         try {
           writeSync(ipcPair.parentFd, "done\n");
         } catch {}
@@ -666,6 +779,9 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         void resultReader.done.finally(() => closeIpcParent());
       } else {
         closeIpcParent();
+      }
+      if (!acquired && (wokenBySlot || activeCaptures === 0)) {
+        notifyFdSlot();
       }
       release();
     }

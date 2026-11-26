@@ -806,11 +806,11 @@ test("captures large environments alongside held box locks without IPC descripto
   expect(result).toEqual({ code: 0, stdout: String(chunk.length * 4), stderr: "" });
 });
 
-test("runs 48 concurrent captures under a 256 file-descriptor limit without EMFILE", async () => {
+test("runs 64 concurrent captures under a 256 file-descriptor limit without EMFILE", async () => {
   const coderPath = join(import.meta.dir, "coder.ts");
   const script = `import { capture } from ${JSON.stringify(coderPath)};
-const results = await Promise.all(Array.from({ length: 48 }, (_, i) => capture(["sh", "-c", \`printf '%s' \${i}\`], { timeoutMs: 10_000 })));
-const ok = results.length === 48 && results.every((r, i) => r.code === 0 && r.stdout === String(i));
+const results = await Promise.all(Array.from({ length: 64 }, (_, i) => capture(["sh", "-c", \`printf '%s' \${i}\`], { timeoutMs: 10_000 })));
+const ok = results.length === 64 && results.every((r, i) => r.code === 0 && r.stdout === String(i));
 process.exit(ok ? 0 : 1);`;
   const proc = Bun.spawn(["sh", "-c", 'ulimit -n 256 && exec "$1" -e "$2"', "fd-cap", process.execPath, script], {
     stdin: "ignore",

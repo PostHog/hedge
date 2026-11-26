@@ -437,11 +437,12 @@ await humanStepsLeft(${JSON.stringify(probePlan("dead-caller", [process.execPath
   test("leaves an intentionally detached daemon alive on normal probe exit through humanStepsLeft while still killing detached workers on deadline", async () => {
     const dir = temp.make("sup-detached-normal-");
     const shBin = Bun.which("sh") ?? "/bin/sh";
-    const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
-    mkfifo(ready, gone);
+    const [ready, ping, pong, gone] = [join(dir, "ready"), join(dir, "ping"), join(dir, "pong"), join(dir, "gone")];
+    mkfifo(ready, ping, pong, gone);
     const started = fifoRead(ready);
+    const ponged = fifoRead(pong);
     const closed = fifoRead(gone);
-    const daemonScript = `const c = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    const daemonScript = `const c = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; read _ < "$3"; echo alive > "$4"; exec sleep 30', "daemon", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}, ${JSON.stringify(ping)}, ${JSON.stringify(pong)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 c.unref();
 process.exit(0);`;
     let daemonPid = 0;
@@ -454,7 +455,8 @@ process.exit(0);`;
       daemonPid = Number((await started).trim());
       expect(daemonPid).toBeGreaterThan(0);
       expect(await pending).toEqual({ failing: [], unchecked: [] });
-      expect(() => process.kill(daemonPid, 0)).not.toThrow();
+      await fifoWrite(ping, "check\n");
+      expect((await ponged).trim()).toBe("alive");
     } finally {
       if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
       await closed.catch(() => {});

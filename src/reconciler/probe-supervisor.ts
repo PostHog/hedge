@@ -1110,6 +1110,14 @@ function ppidDarwin(lib: DarwinLib, pid: number): number {
   return n >= 20 ? new DataView(buf.buffer).getUint32(16, true) : 0;
 }
 
+function startTimeDarwin(lib: DarwinLib, pid: number): string | undefined {
+  const buf = new Uint8Array(136);
+  const n = lib.proc_pidinfo(pid, 3, 0n, ptr(buf), 136);
+  if (n < 136) return undefined;
+  const view = new DataView(buf.buffer);
+  return `${view.getBigUint64(120, true)}:${view.getBigUint64(128, true)}`;
+}
+
 export function discoverTargetsSync(
   sessionId?: number,
   tag?: string,
@@ -1432,7 +1440,7 @@ export function killSession(
   sessionId: number | undefined,
   signal: NodeJS.Signals,
   tag?: string,
-  remembered?: Map<number, number>,
+  remembered?: Map<number, { pgid: number; startTime: string }>,
   spareInput?: SpareInput,
   ownGroupOnly = false,
 ): void | Promise<void> {
@@ -1455,7 +1463,8 @@ export function killSession(
       for (const pid of targets.pids) {
         if (isSparedPid(pid)) continue;
         const pgid = lib.getpgid(pid);
-        if (pgid > 0 && pgid !== sessionId && pgid !== process.pid) remembered.set(pid, pgid);
+        const startTime = pgid > 0 && pgid !== sessionId && pgid !== process.pid ? startTimeDarwin(lib, pid) : undefined;
+        if (startTime) remembered.set(pid, { pgid, startTime });
       }
       const seenGroups = new Set(targets.groups);
       const seenOrphans = new Set(targets.orphanPids);
@@ -1464,24 +1473,25 @@ export function killSession(
         for (const sp of spared.pids) if (lib.getpgid(sp) === pgid) return true;
         return false;
       };
-      for (const [pid, savedPgid] of remembered) {
+      for (const [pid, saved] of remembered) {
         if (isSparedPid(pid)) {
           remembered.delete(pid);
           continue;
         }
         const currentPgid = lib.getpgid(pid);
-        if (currentPgid !== savedPgid) {
+        const currentStart = currentPgid === saved.pgid ? startTimeDarwin(lib, pid) : undefined;
+        if (currentPgid !== saved.pgid || !currentStart || currentStart !== saved.startTime) {
           remembered.delete(pid);
           continue;
         }
-        if (sessionId === undefined || sparedPgid(savedPgid)) {
+        if (sessionId === undefined || sparedPgid(saved.pgid)) {
           if (!seenOrphans.has(pid)) {
             seenOrphans.add(pid);
             targets.orphanPids.push(pid);
           }
-        } else if (!seenGroups.has(savedPgid)) {
-          seenGroups.add(savedPgid);
-          targets.groups.push(savedPgid);
+        } else if (!seenGroups.has(saved.pgid)) {
+          seenGroups.add(saved.pgid);
+          targets.groups.push(saved.pgid);
         }
       }
     }
@@ -2007,7 +2017,7 @@ if (import.meta.main) {
       dispatchStop("SIGTERM");
     })();
   }
-  const rememberedDetached = new Map<number, number>();
+  const rememberedDetached = new Map<number, { pgid: number; startTime: string }>();
   await supervise(command, {
     spawn: (argv) => {
       const child =

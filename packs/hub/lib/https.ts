@@ -1,5 +1,4 @@
-import { mkdtempSync } from "node:fs";
-import { chmod, mkdir, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { changedFiles, ownedFiles, readIfThere, removeUnits, requireInstalled, writeFiles, type Managed } from "./managed.ts";
@@ -157,12 +156,18 @@ async function trusted(hub: HttpsHub): Promise<number> {
   if (!certificatePattern.test(certificate)) return hub.print(`${hub.alias} gave no public root certificate: ${(answer.stderr || answer.stdout).trim()}`), 1;
   let folder: string | undefined;
   let stopped: NodeJS.Signals | undefined;
+  let reRaised = false;
   let removePromise: Promise<void> | undefined;
+  let resolveMkdtemp!: () => void;
+  const mkdtempDone = new Promise<void>((resolve) => {
+    resolveMkdtemp = resolve;
+  });
   const removeAsync = () => {
-    if (!folder) return Promise.resolve();
     if (!removePromise) {
-      const target = folder;
-      removePromise = rm(target, { recursive: true, force: true }).catch(() => {});
+      removePromise = mkdtempDone.then(() => {
+        if (!folder) return;
+        return rm(folder, { recursive: true, force: true }).catch(() => {});
+      });
     }
     return removePromise;
   };
@@ -183,6 +188,8 @@ async function trusted(hub: HttpsHub): Promise<number> {
     for (const name of stopSignals) process.off(name, interrupted);
   };
   const reRaise = (signal: NodeJS.Signals) => {
+    if (reRaised) return;
+    reRaised = true;
     release();
     if (!process.listenerCount(signal)) {
       if (signal === "SIGQUIT") process.exit(131);
@@ -196,10 +203,15 @@ async function trusted(hub: HttpsHub): Promise<number> {
   };
   for (const name of stopSignals) process.on(name, interrupted);
   try {
-    folder = mkdtempSync(join(tmpdir(), "hedge-hub-ca-"));
+    try {
+      folder = await mkdtemp(join(tmpdir(), "hedge-hub-ca-"));
+    } finally {
+      resolveMkdtemp();
+    }
     if (stopped) return 1;
     const path = join(folder, "hub-ca.crt");
     await writePrivateFile(path, certificate);
+    if (stopped) return 1;
     return (await hub.run(["security", "verify-cert", "-l", "-L", "-p", "ssl", "-c", path], { timeoutMs: trustProbeLimitMs })).code === 0 ? 0 : 1;
   } finally {
     await waitRemove(stopped ? 200 : 5_000);
