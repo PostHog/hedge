@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
@@ -6,7 +6,7 @@ import { advanceSource, cachedSource, fetchSource, followsBranch } from "./sourc
 
 isolateGit();
 const temp = tempDirs();
-afterAll(() => temp.cleanup());
+afterEach(() => temp.cleanup());
 
 async function packRepo(summary: string) {
   const dir = temp.make("pack-repo-");
@@ -40,7 +40,7 @@ async function commitTag(dir: string, tag: string, files: Record<string, string>
   await spawnGit(dir, "tag", tag);
 }
 
-describe.concurrent("fetchSource legacy caches, branches, and hardening", () => {
+describe("fetchSource legacy caches, branches, and hardening", () => {
   async function legacyPinnedCache(cache: string, name: string, repo: string, commit: string, extra: Record<string, string> = {}) {
     const dir = join(cache, name);
     mkdirSync(dir, { recursive: true });

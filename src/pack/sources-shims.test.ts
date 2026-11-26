@@ -62,7 +62,7 @@ case "$host" in
   *) echo "unexpected host: $host" >&2; exit 1 ;;
 esac
 case "$cmd" in
-  *"git-upload-pack"*"/repo.git"*) exec git-upload-pack "$dest" ;;
+  "git-upload-pack '/repo.git'"|"git-upload-pack /repo.git") exec git-upload-pack "$dest" ;;
   *) echo "unexpected command: $cmd" >&2; exit 1 ;;
 esac
 `,
@@ -128,7 +128,7 @@ case "$host" in
   *) echo "unexpected host: $host" >&2; exit 1 ;;
 esac
 case "$cmd" in
-  *"git-upload-pack"*"/repo.git"*) exec git-upload-pack "$dest" ;;
+  "git-upload-pack '/repo.git'"|"git-upload-pack /repo.git") exec git-upload-pack "$dest" ;;
   *) echo "unexpected command: $cmd" >&2; exit 1 ;;
 esac
 `,
