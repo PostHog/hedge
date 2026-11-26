@@ -590,25 +590,46 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         } catch {}
       }
       if (inheritedSpare && status.error === undefined && resultReader) {
-        let ackTimer: ReturnType<typeof setTimeout> | undefined;
-        const spareAck = await Promise.race([
-          resultReader.nextLine().then((line) => ({ timedOut: false as const, line })),
-          new Promise<{ timedOut: true; line: string }>((resolve) => {
-            ackTimer = setTimeout(() => resolve({ timedOut: true, line: "" }), 2_000);
-          }),
-        ]);
-        if (ackTimer !== undefined) clearTimeout(ackTimer);
-        if (spareAck.timedOut) {
-          stopStream.abort();
-          if (!tagSweep) tagSweep = runOutOfProcessSweep();
-          await tagSweep;
-          throw new Error("timed out confirming spare-file persistence");
-        }
+        const ackDeadline = performance.now() + 2_000;
         let parsedAck: { saved?: unknown; spareError?: unknown; code?: unknown } | undefined;
-        if (spareAck.line.trim()) {
+        for (;;) {
+          const remaining = ackDeadline - performance.now();
+          if (remaining <= 0) {
+            stopStream.abort();
+            if (!tagSweep) tagSweep = runOutOfProcessSweep();
+            await tagSweep;
+            throw new Error("timed out confirming spare-file persistence");
+          }
+          let ackTimer: ReturnType<typeof setTimeout> | undefined;
+          const spareAck = await Promise.race([
+            resultReader.nextLine().then((line) => ({ timedOut: false as const, line })),
+            new Promise<{ timedOut: true; line: string }>((resolve) => {
+              ackTimer = setTimeout(() => resolve({ timedOut: true, line: "" }), remaining);
+            }),
+          ]);
+          if (ackTimer !== undefined) clearTimeout(ackTimer);
+          if (spareAck.timedOut) {
+            stopStream.abort();
+            if (!tagSweep) tagSweep = runOutOfProcessSweep();
+            await tagSweep;
+            throw new Error("timed out confirming spare-file persistence");
+          }
+          const trimmed = spareAck.line.trim();
+          if (!trimmed) break;
+          let record: { spare?: { pids?: unknown; sids?: unknown }; saved?: unknown; spareError?: unknown; code?: unknown } | undefined;
           try {
-            parsedAck = JSON.parse(spareAck.line.trim()) as { saved?: unknown; spareError?: unknown; code?: unknown };
-          } catch {}
+            record = JSON.parse(trimmed) as { spare?: { pids?: unknown; sids?: unknown }; saved?: unknown; spareError?: unknown; code?: unknown };
+          } catch {
+            break;
+          }
+          if (record.spare && typeof record.spare === "object") {
+            const pids = Array.isArray(record.spare.pids) ? record.spare.pids.filter((n): n is number => typeof n === "number") : [];
+            const sids = Array.isArray(record.spare.sids) ? record.spare.sids.filter((n): n is number => typeof n === "number") : [];
+            mergeSpared(spared, pids, sids);
+            continue;
+          }
+          parsedAck = record;
+          break;
         }
         if (typeof parsedAck?.spareError === "string") {
           const err = new Error(parsedAck.spareError) as NodeJS.ErrnoException;

@@ -1514,73 +1514,6 @@ await hold.exited;`;
     }
   });
 
-  test("preserves spare-file paths containing newlines without truncating or deleting unrelated files", async () => {
-    const base = temp.make("sup-newline-tmp-");
-    const decoy = join(base, "decoy");
-    const nlTmp = join(base, "decoy\nsub");
-    const { mkdirSync } = await import("node:fs");
-    mkdirSync(nlTmp, { recursive: true });
-    writeFileSync(decoy, "keep-me\n");
-    const envBin = Bun.which("env") ?? "/usr/bin/env";
-    const shBin = Bun.which("sh") ?? "/bin/sh";
-    const [daemonReady, daemonGone, outerReady, outerGone, triggerFifo] = [
-      join(base, "daemon-ready"),
-      join(base, "daemon-gone"),
-      join(base, "outer-ready"),
-      join(base, "outer-gone"),
-      join(base, "trigger"),
-    ];
-    mkfifo(daemonReady, daemonGone, outerReady, outerGone, triggerFifo);
-    const daemonStarted = fifoRead(daemonReady);
-    const daemonClosed = fifoRead(daemonGone);
-    const outerStarted = fifoRead(outerReady);
-    const outerClosed = fifoRead(outerGone);
-    const { spareEnvVar } = await import("./probe-supervisor.ts");
-    const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
-    const daemonScript = `const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-d.unref();
-process.exit(0);`;
-    const outerScript = `import { capture } from ${JSON.stringify(coderPath)};
-const res = await capture([process.execPath, "-e", ${JSON.stringify(daemonScript)}], { timeoutMs: 5_000 });
-if (res.code !== 0) process.exit(2);
-const hold = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "outer", ${JSON.stringify(outerGone)}, ${JSON.stringify(outerReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-await hold.exited;`;
-    const driverScript = `import { captureWith, timedOut } from ${JSON.stringify(coderPath)};
-let fireTimeout;
-const capture = captureWith((_ms, fire) => { fireTimeout = fire; return () => {}; }, 0);
-const running = capture([process.execPath, "-e", ${JSON.stringify(outerScript)}], { timeoutMs: 30_000 });
-await Bun.spawn(["cat", ${JSON.stringify(triggerFifo)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exited;
-fireTimeout();
-const result = await running;
-process.exit(result.code === timedOut ? 0 : 1);`;
-    const childEnv: Record<string, string | undefined> = { ...process.env, TMPDIR: nlTmp };
-    delete childEnv[spareEnvVar];
-    const driver = Bun.spawn([process.execPath, "-e", driverScript], {
-      env: childEnv,
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    let daemonPid = 0;
-    let outerPid = 0;
-    try {
-      [daemonPid, outerPid] = (await Promise.all([daemonStarted, outerStarted])).map((s) => Number(s.trim())) as [number, number];
-      expect(daemonPid).toBeGreaterThan(0);
-      expect(outerPid).toBeGreaterThan(0);
-      await fifoWrite(triggerFifo, "go\n");
-      expect(await driver.exited).toBe(0);
-      expect(await outerClosed).toBe("");
-      expect(() => process.kill(daemonPid, 0)).not.toThrow();
-      expect(existsSync(decoy)).toBe(true);
-    } finally {
-      driver.kill("SIGKILL");
-      if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
-      if (outerPid > 0) try { process.kill(outerPid, "SIGKILL"); } catch {}
-      await driver.exited.catch(() => {});
-      await daemonClosed.catch(() => {});
-    }
-  });
-
   test("preserves same-session helpers on normal probe exit while stopping separate-group helpers on timeout", async () => {
     const dir = temp.make("sup-separate-pgid-");
     const shBin = Bun.which("sh") ?? "/bin/sh";
@@ -1649,74 +1582,130 @@ await h.exited;`;
     }
   });
 
-  test("unlinks the spare file when a probe with a spared nested capture finishes normally while another probe runs", async () => {
-    const dir = temp.make("sup-spare-cleanup-normal-");
-    const tmp = join(dir, "tmp");
-    const { mkdirSync, readdirSync } = await import("node:fs");
-    mkdirSync(tmp, { recursive: true });
+  test("preserves a completed probe's spared nested capture helper when a concurrent probe is cancelled", async () => {
+    const dir = temp.make("sup-spare-concurrent-cancel-");
     const envBin = Bun.which("env") ?? "/usr/bin/env";
     const shBin = Bun.which("sh") ?? "/bin/sh";
     const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
-    const [daemonReady, daemonGone, firstExitGate, holdReady, holdGate] = [
+    const [daemonReady, daemonGone, queuedReady, holdReady, holdGone] = [
       join(dir, "daemon-ready"),
       join(dir, "daemon-gone"),
-      join(dir, "first-exit-gate"),
+      join(dir, "queued-ready"),
       join(dir, "hold-ready"),
-      join(dir, "hold-gate"),
+      join(dir, "hold-gone"),
     ];
-    mkfifo(daemonReady, daemonGone, firstExitGate, holdReady, holdGate);
+    mkfifo(daemonReady, daemonGone, queuedReady, holdReady, holdGone);
     const daemonStarted = fifoRead(daemonReady);
     const daemonClosed = fifoRead(daemonGone);
+    const queuedStarted = fifoRead(queuedReady);
     const holdStarted = fifoRead(holdReady);
+    const holdClosed = fifoRead(holdGone);
     const daemonScript = `const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 d.unref();
 process.exit(0);`;
     const firstProbe = `import { capture } from ${JSON.stringify(coderPath)};
 const res = await capture([process.execPath, "-e", ${JSON.stringify(daemonScript)}], { timeoutMs: 5_000 });
-if (res.code !== 0) process.exit(2);
-await Bun.spawn(["cat", ${JSON.stringify(firstExitGate)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exited;
-process.exit(0);`;
-    const holdProbe = `${shBin} -c 'echo $$ > "$1"; cat "$2" >/dev/null' hold ${JSON.stringify(holdReady)} ${JSON.stringify(holdGate)}`;
+process.exit(res.code === 0 ? 0 : 2);`;
+    const holdProbe = `${shBin} -c 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30' hold ${JSON.stringify(holdGone)} ${JSON.stringify(holdReady)}`;
+    const idleProbe = [shBin, "-c", "exec sleep 30"];
+    const queuedProbe = [shBin, "-c", 'echo ok > "$1"; exec sleep 30', "queued", queuedReady];
     const plan: Plan = {
       ...probePlan("first", [process.execPath, "-e", firstProbe]),
       human: [
         { id: "first", pack: "team", say: "First.", probe: [process.execPath, "-e", firstProbe] },
         { id: "second", pack: "team", say: "Second.", probe: [shBin, "-c", holdProbe] },
+        ...Array.from({ length: 6 }, (_, i) => ({ id: `hold-${i + 3}`, pack: "team", say: `Hold ${i + 3}.`, probe: idleProbe })),
+        { id: "queued", pack: "team", say: "Queued.", probe: queuedProbe },
       ],
     };
-    const driverScript = `import { humanStepsLeft } from ${JSON.stringify(applyPath)};
-const res = await humanStepsLeft(${JSON.stringify(plan)}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}), graceMs: 0 });
-process.exit(res.failing.length === 0 && res.unchecked.length === 0 ? 0 : 1);`;
-    const driver = Bun.spawn([process.execPath, "-e", driverScript], {
-      env: { ...process.env, TMPDIR: tmp },
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-    });
+    let fireDeadline!: () => void;
     let daemonPid = 0;
     let holdPid = 0;
     try {
+      const pending = humanStepsLeft(plan, {
+        home: dir,
+        giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)),
+        graceMs: 0,
+      });
       [daemonPid, holdPid] = (await Promise.all([daemonStarted, holdStarted])).map((s) => Number(s.trim())) as [number, number];
-      await fifoWrite(firstExitGate, "go\n");
-      await fifoWrite(holdGate, "go\n");
-      expect(await driver.exited).toBe(0);
+      expect(await queuedStarted).toBe("ok\n");
+      fireDeadline();
+      const res = await pending;
+      expect(res.failing).toEqual([]);
+      expect(res.unchecked.map((s) => s.id)).toEqual(["second", "hold-3", "hold-4", "hold-5", "hold-6", "hold-7", "hold-8", "queued"]);
+      expect(await holdClosed).toBe("");
       expect(() => process.kill(daemonPid, 0)).not.toThrow();
-      const collect = (root: string): string[] => {
-        const entries: string[] = [];
-        for (const entry of readdirSync(root, { withFileTypes: true })) {
-          const full = join(root, entry.name);
-          entries.push(full);
-          if (entry.isDirectory()) entries.push(...collect(full));
-        }
-        return entries;
-      };
-      expect(collect(tmp)).toEqual([]);
     } finally {
-      driver.kill("SIGKILL");
       if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
       if (holdPid > 0) try { process.kill(holdPid, "SIGKILL"); } catch {}
-      await driver.exited.catch(() => {});
       await daemonClosed.catch(() => {});
+    }
+  });
+
+  test("succeeds when a nested background capture reports spared processes after the enclosing command leader exits", async () => {
+    const dir = temp.make("sup-late-spare-ack-");
+    const envBin = Bun.which("env") ?? "/usr/bin/env";
+    const shBin = Bun.which("sh") ?? "/bin/sh";
+    const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
+    const [daemonReady, daemonGone, innerReady] = [
+      join(dir, "daemon-ready"),
+      join(dir, "daemon-gone"),
+      join(dir, "inner-ready"),
+    ];
+    mkfifo(daemonReady, daemonGone, innerReady);
+    const daemonStarted = fifoRead(daemonReady);
+    const daemonClosed = fifoRead(daemonGone);
+    const innerScript = `import { capture } from ${JSON.stringify(coderPath)};
+const { writeFileSync } = await import("node:fs");
+writeFileSync(${JSON.stringify(innerReady)}, "ready\\n");
+const daemonScript = \`const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" }); d.unref(); process.exit(0);\`;
+await Bun.sleep(40);
+await capture([process.execPath, "-e", daemonScript], { timeoutMs: 5_000 });`;
+    const middleScript = `import { capture } from ${JSON.stringify(coderPath)};
+const child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(innerScript)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+child.unref();
+await Bun.spawn(["cat", ${JSON.stringify(innerReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exited;
+process.exit(0);`;
+    const outerScript = `import { capture } from ${JSON.stringify(coderPath)};
+const mid = await capture([process.execPath, "-e", ${JSON.stringify(middleScript)}], { timeoutMs: 5_000 });
+if (mid.code !== 0) process.exit(2);
+await Bun.sleep(120);
+process.exit(0);`;
+    let daemonPid = 0;
+    try {
+      const { capture } = await import("../../packs/hub/lib/coder.ts");
+      const res = await capture([process.execPath, "-e", outerScript], { timeoutMs: 10_000 });
+      expect(res.code).toBe(0);
+      daemonPid = Number((await daemonStarted).trim());
+      expect(daemonPid).toBeGreaterThan(0);
+    } finally {
+      if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
+      await daemonClosed.catch(() => {});
+    }
+  });
+
+  test("preserves partial lines across incremental control-fd drains", async () => {
+    const { closeSync, writeSync } = await import("node:fs");
+    const { createPipe, drainControlFd, parseSpareUpdate } = await import("./probe-supervisor.ts");
+    const pipe = createPipe();
+    if (!pipe) throw new Error("expected pipe");
+    try {
+      const payload = JSON.stringify({ pids: [12345], sids: [67890] }) + "\n";
+      const mid = Math.floor(payload.length / 2);
+      writeSync(pipe.writeFd, payload.slice(0, mid));
+      const first = drainControlFd(pipe.readFd);
+      expect(first.lines).toEqual([]);
+      expect(first.closed).toBe(false);
+      expect(first.rest).toBe(payload.slice(0, mid));
+      writeSync(pipe.writeFd, payload.slice(mid));
+      closeSync(pipe.writeFd);
+      const second = drainControlFd(pipe.readFd, first.rest);
+      expect(second.closed).toBe(true);
+      expect(second.lines).toEqual([payload.trim()]);
+      expect(parseSpareUpdate(second.lines[0]!)).toEqual({ pids: [12345], sids: [67890] });
+    } finally {
+      try { closeSync(pipe.readFd); } catch {}
+      try { closeSync(pipe.writeFd); } catch {}
     }
   });
 

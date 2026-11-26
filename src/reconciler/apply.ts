@@ -553,15 +553,17 @@ const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
 let activeSupervisors = 0;
 const supervisorWaiters: Array<() => void> = [];
 
-type LiveProbe = { pid: number; runnerPid?: number; tag: string; spared: SparedSet; spareFd?: number; handedOff?: boolean; targetPid?: number; targetExited?: boolean; aliveFd?: number; resultFd?: number; guardFd?: number; holderExitFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
+type LiveProbe = { pid: number; runnerPid?: number; tag: string; spared: SparedSet; spareFd?: number; spareRest: string; handedOff?: boolean; targetPid?: number; targetExited?: boolean; aliveFd?: number; resultFd?: number; guardFd?: number; holderExitFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
 type ActiveRunner = { stop: (name: NodeJS.Signals) => void };
 const activeRunners = new Set<ActiveRunner>();
 const allLiveProbes = new Set<LiveProbe>();
 let interruptHandlersAttached = false;
+let spareDrainTimer: ReturnType<typeof setInterval> | undefined;
 
 function drainProbeSpared(probe: LiveProbe): SparedSet {
   if (probe.spareFd !== undefined) {
-    const drained = drainControlFd(probe.spareFd);
+    const drained = drainControlFd(probe.spareFd, probe.spareRest);
+    probe.spareRest = drained.rest;
     for (const line of drained.lines) {
       const update = parseSpareUpdate(line);
       if (update) mergeSpared(probe.spared, update.pids, update.sids);
@@ -571,13 +573,45 @@ function drainProbeSpared(probe: LiveProbe): SparedSet {
         closeSync(probe.spareFd);
       } catch {}
       probe.spareFd = undefined;
+      probe.spareRest = "";
     }
   }
   return probe.spared;
 }
 
+function syncSpareDrainer() {
+  let hasSpareFd = false;
+  for (const probe of allLiveProbes) {
+    if (probe.spareFd !== undefined) {
+      hasSpareFd = true;
+      break;
+    }
+  }
+  if (hasSpareFd && !spareDrainTimer) {
+    spareDrainTimer = setInterval(() => {
+      let any = false;
+      for (const probe of allLiveProbes) {
+        if (probe.spareFd !== undefined) {
+          drainProbeSpared(probe);
+          if (probe.spareFd !== undefined) any = true;
+        }
+      }
+      if (!any && spareDrainTimer) {
+        clearInterval(spareDrainTimer);
+        spareDrainTimer = undefined;
+      }
+    }, 10);
+    if (typeof spareDrainTimer === "object" && spareDrainTimer && "unref" in spareDrainTimer && typeof spareDrainTimer.unref === "function") {
+      spareDrainTimer.unref();
+    }
+  } else if (!hasSpareFd && spareDrainTimer) {
+    clearInterval(spareDrainTimer);
+    spareDrainTimer = undefined;
+  }
+}
+
 function handOffWatchdog(probes: Iterable<LiveProbe>) {
-  const batch: Array<{ pid: number; holderPid?: number; holderFd?: number; tag: string; spared: SparedSet; spareFd?: number; probe: LiveProbe; targetPid?: number; targetExited?: boolean; fd: number; resultFd?: number; delayMs: number }> = [];
+  const batch: Array<{ pid: number; holderPid?: number; holderFd?: number; tag: string; spared: SparedSet; spareFd?: number; spareRest: string; probe: LiveProbe; targetPid?: number; targetExited?: boolean; fd: number; resultFd?: number; delayMs: number }> = [];
   for (const probe of probes) {
     if (probe.aliveFd === undefined) continue;
     let targetExited = Boolean(probe.targetExited);
@@ -590,7 +624,9 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
     }
     const spared = drainProbeSpared(probe);
     const spareFd = probe.spareFd;
+    const spareRest = probe.spareRest;
     probe.spareFd = undefined;
+    probe.spareRest = "";
     const holderPid = probe.runnerPid !== undefined || holderFd !== undefined ? probe.pid : undefined;
     batch.push({
       pid: probe.runnerPid ?? probe.pid,
@@ -599,6 +635,7 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
       tag: probe.tag,
       spared,
       ...(spareFd !== undefined ? { spareFd } : {}),
+      spareRest,
       probe,
       ...(probe.targetPid !== undefined ? { targetPid: probe.targetPid } : {}),
       ...(targetExited ? { targetExited: true } : {}),
@@ -608,6 +645,7 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
     });
     probe.aliveFd = undefined;
   }
+  syncSpareDrainer();
   if (!batch.length) return;
   const extraFds: number[] = [];
   const payload = JSON.stringify(
@@ -636,6 +674,7 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
         ...(entry.targetExited ? { reported: true } : { tag: entry.tag }),
         ...(entry.spared.pids.size || entry.spared.sids.size ? { spared: serializeSpared(entry.spared) } : {}),
         ...(spareFd !== undefined ? { spareFd } : {}),
+        ...(spareFd !== undefined && entry.spareRest ? { spareRest: entry.spareRest } : {}),
         fd,
         ...(resultFd !== undefined ? { resultFd } : {}),
         delayMs: entry.delayMs,
@@ -660,7 +699,7 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
     if (!handedOff) {
       for (const entry of batch) {
         if (entry.spareFd !== undefined) {
-          const drained = drainControlFd(entry.spareFd);
+          const drained = drainControlFd(entry.spareFd, entry.spareRest);
           for (const line of drained.lines) {
             const update = parseSpareUpdate(line);
             if (update) mergeSpared(entry.spared, update.pids, update.sids);
@@ -798,9 +837,14 @@ function syncInterruptHandlers() {
   } else if (!needed && interruptHandlersAttached) {
     detachInterruptHandlers();
   }
+  syncSpareDrainer();
 }
 
 function detachInterruptHandlers() {
+  if (spareDrainTimer) {
+    clearInterval(spareDrainTimer);
+    spareDrainTimer = undefined;
+  }
   if (!interruptHandlersAttached) return;
   interruptHandlersAttached = false;
   for (const name of stopSignals) process.off(name, handleProcessInterrupt);
@@ -1034,6 +1078,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
       pid: child.pid,
       tag,
       spared: emptySpared(),
+      spareRest: "",
       aliveFd,
       ...(resultPipe ? { resultFd: resultPipe.readFd } : {}),
       ...(guardPipe ? { guardFd: guardPipe.readFd } : {}),

@@ -10,6 +10,7 @@ export type WatchEntry = {
   resultFd?: number;
   spared?: SerializedSpared;
   spareFd?: number;
+  spareRest?: string;
   holderPid?: number;
   holderFd?: number;
 };
@@ -45,11 +46,13 @@ export async function watchEntries(
   const runnerReported = new Map<WatchEntry, boolean>();
   const resultState = new Map<WatchEntry, "reported" | "closed">();
   const sparedByEntry = new Map<WatchEntry, SparedSet>();
+  const spareRestByEntry = new Map<WatchEntry, string>();
   for (const entry of entries) {
     if (entry.reported) resultState.set(entry, "reported");
     const set = emptySpared();
     if (entry.spared) mergeSpared(set, entry.spared.pids, entry.spared.sids);
     sparedByEntry.set(entry, set);
+    if (entry.spareRest) spareRestByEntry.set(entry, entry.spareRest);
   }
   const resultReported = (entry: WatchEntry): boolean => {
     const known = resultState.get(entry);
@@ -72,7 +75,8 @@ export async function watchEntries(
   const drainSpared = (entry: WatchEntry): SparedSet => {
     const set = sparedByEntry.get(entry) ?? emptySpared();
     if (entry.spareFd !== undefined) {
-      const drained = drainControlFd(entry.spareFd);
+      const drained = drainControlFd(entry.spareFd, spareRestByEntry.get(entry) ?? "");
+      spareRestByEntry.set(entry, drained.rest);
       for (const line of drained.lines) {
         const update = parseSpareUpdate(line);
         if (update) mergeSpared(set, update.pids, update.sids);
@@ -80,6 +84,7 @@ export async function watchEntries(
       if (drained.closed) {
         close(entry.spareFd);
         entry.spareFd = undefined;
+        spareRestByEntry.delete(entry);
       }
     }
     return set;
@@ -305,6 +310,7 @@ if (import.meta.main) {
           ((item as WatchEntry).reported === undefined || typeof (item as WatchEntry).reported === "boolean") &&
           ((item as WatchEntry).resultFd === undefined || typeof (item as WatchEntry).resultFd === "number") &&
           ((item as WatchEntry).spareFd === undefined || typeof (item as WatchEntry).spareFd === "number") &&
+          ((item as WatchEntry).spareRest === undefined || typeof (item as WatchEntry).spareRest === "string") &&
           ((item as WatchEntry).holderPid === undefined || typeof (item as WatchEntry).holderPid === "number") &&
           ((item as WatchEntry).holderFd === undefined || typeof (item as WatchEntry).holderFd === "number"),
       );

@@ -602,11 +602,21 @@ export function shieldGroupSignals(): void {
   }
 }
 
-export function drainControlFd(fd: number): { lines: string[]; rest: string; closed: boolean } {
+function writeAllSync(fd: number, text: string): void {
+  const buf = Buffer.from(text, "utf8");
+  let offset = 0;
+  while (offset < buf.byteLength) {
+    const n = writeSync(fd, buf, offset, buf.byteLength - offset);
+    if (n <= 0) break;
+    offset += n;
+  }
+}
+
+export function drainControlFd(fd: number, initialRest = ""): { lines: string[]; rest: string; closed: boolean } {
   const lines: string[] = [];
-  let rest = "";
+  let rest = initialRest;
   let closed = false;
-  const chunk = Buffer.allocUnsafe(256);
+  const chunk = Buffer.allocUnsafe(4096);
   const decoder = new TextDecoder();
   for (;;) {
     const revents = pollFd(fd);
@@ -1541,6 +1551,7 @@ if (import.meta.main) {
   let controlFd: number | undefined;
   let resultFd: number | undefined;
   let spareFd: number | undefined;
+  let callerSpareFd: number | undefined;
   let spareTag: string | undefined;
   let holder = false;
   let guardFd: number | undefined;
@@ -1562,6 +1573,7 @@ if (import.meta.main) {
         controlFd?: unknown;
         resultFd?: unknown;
         spareFd?: unknown;
+        callerSpareFd?: unknown;
         spareTag?: unknown;
         holder?: unknown;
         guardFd?: unknown;
@@ -1583,6 +1595,7 @@ if (import.meta.main) {
       if (typeof record.controlFd === "number" && Number.isInteger(record.controlFd) && record.controlFd >= 3) controlFd = record.controlFd;
       if (typeof record.resultFd === "number" && Number.isInteger(record.resultFd) && record.resultFd >= 3) resultFd = record.resultFd;
       if (typeof record.spareFd === "number" && Number.isInteger(record.spareFd) && record.spareFd >= 3) spareFd = record.spareFd;
+      if (typeof record.callerSpareFd === "number" && Number.isInteger(record.callerSpareFd) && record.callerSpareFd >= 3) callerSpareFd = record.callerSpareFd;
       if (typeof record.spareTag === "string" && record.spareTag) spareTag = record.spareTag;
       if (record.holder === true) holder = true;
       if (typeof record.guardFd === "number" && Number.isInteger(record.guardFd) && record.guardFd >= 3) guardFd = record.guardFd;
@@ -1593,6 +1606,7 @@ if (import.meta.main) {
     }
   } catch {}
   if (spareFd !== undefined) setCloexec(spareFd, true);
+  if (callerSpareFd !== undefined) setCloexec(callerSpareFd, true);
   if (!holder) {
     const envObj: Record<string, string | undefined> = targetEnv ?? Object.create(null);
     if (!targetEnv) {
@@ -1634,12 +1648,14 @@ if (import.meta.main) {
     const childInnerResultFd = addFd(innerResult?.writeFd);
     const childClockFd = addFd(clockFd);
     const childSpareFd = addFd(holderSpare?.writeFd);
+    const childCallerSpareFd = addFd(spareFd);
     const innerPayload = {
       command,
       ...(targetEnv ? { env: targetEnv } : {}),
       graceMs: cleanupGraceMs,
       interruptGraceMs: stopInterruptGraceMs,
       ...(childSpareFd !== undefined ? { spareFd: childSpareFd } : {}),
+      ...(childCallerSpareFd !== undefined ? { callerSpareFd: childCallerSpareFd } : {}),
       ...(childControlFd !== undefined ? { controlFd: childControlFd } : {}),
       ...(childResultFd !== undefined ? { resultFd: childResultFd } : {}),
       ...(childGuardFd !== undefined ? { guardFd: childGuardFd } : {}),
@@ -1677,22 +1693,18 @@ if (import.meta.main) {
     closeFd(resultFd);
     closeFd(guardFd);
     closeFd(clockFd);
+    closeFd(spareFd);
     redirectStdioOutputsToNull();
     const recordSpareLine = (line: string) => {
       const update = parseSpareUpdate(line);
       if (!update) return;
       mergeSpared(holderSpared, update.pids, update.sids);
-      if (spareFd !== undefined) {
-        try {
-          writeSync(spareFd, encodeSpareUpdate(update.pids, update.sids));
-        } catch {}
-      }
     };
     let spareRest = "";
     const sparePump = holderSpare
       ? (async () => {
           const decoder = new TextDecoder();
-          const chunk = new Uint8Array(512);
+          const chunk = new Uint8Array(4096);
           for (;;) {
             const n = await readFdChunk(holderSpare.readFd, chunk);
             if (n <= 0) break;
@@ -1715,7 +1727,6 @@ if (import.meta.main) {
     const reported = innerResult ? probeResultReported(innerResult.readFd) === "reported" : false;
     closeFd(innerResult?.readFd);
     closeFd(holderAlive?.writeFd);
-    closeFd(spareFd);
     if (reported) {
       process.exit(inner.signalCode ? 137 : code);
     }
@@ -1730,12 +1741,25 @@ if (import.meta.main) {
   if (holderFd !== undefined) setCloexec(holderFd, true);
   if (innerResultFd !== undefined) setCloexec(innerResultFd, true);
   if (clockFd !== undefined) setCloexec(clockFd, true);
+  shieldGroupSignals();
+  const closeSpareFds = () => {
+    for (const fd of [spareFd, callerSpareFd]) {
+      if (fd === undefined) continue;
+      try {
+        closeSync(fd);
+      } catch {}
+    }
+    spareFd = undefined;
+    callerSpareFd = undefined;
+  };
   const runnerSpared = emptySpared();
   const spareServer = startSpareServer((pids, sids) => {
     mergeSpared(runnerSpared, pids, sids);
-    if (spareFd !== undefined) {
+    const line = encodeSpareUpdate(pids, sids);
+    for (const fd of [spareFd, callerSpareFd]) {
+      if (fd === undefined) continue;
       try {
-        writeSync(spareFd, encodeSpareUpdate(pids, sids));
+        writeAllSync(fd, line);
       } catch {}
     }
     return true;
@@ -1816,11 +1840,11 @@ if (import.meta.main) {
       else process.exit(128);
     });
   }
-  shieldGroupSignals();
   enableChildSubreaper();
   const runTag = ownTag(process.env[tagEnvVar]);
   const onHolderDead = () => {
     spareServer?.close();
+    closeSpareFds();
     if (reported) process.exit(0);
     const targets = discoverTargetsLinux(process.pid, runTag, undefined, runnerSpared, false);
     signalDeadTargets(targets, process.pid);
@@ -1860,6 +1884,7 @@ if (import.meta.main) {
       writeSync(1, "stopped\n");
     } catch {}
     spareServer?.close();
+    closeSpareFds();
     process.exit(128);
   }
   if (controlFd !== undefined) {
@@ -1927,11 +1952,7 @@ if (import.meta.main) {
     },
     exit: (code) => {
       spareServer?.close();
-      if (spareFd !== undefined) {
-        try {
-          closeSync(spareFd);
-        } catch {}
-      }
+      closeSpareFds();
       process.exit(code);
     },
   }, cleanupGraceMs, stopInterruptGraceMs);
