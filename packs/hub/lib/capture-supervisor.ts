@@ -321,20 +321,36 @@ const applyMergedSignal = (
 const signalBoth = (sig: NodeJS.Signals): void | Promise<void> => {
   if (process.platform === "linux") {
     const selfTargets = discoverTargetsLinux(process.pid, runTag, undefined, localSpared);
-    const targetTargets = targetDetached && targetPid !== undefined ? discoverTargetsLinux(targetPid, undefined, targetReaped ? true : undefined, localSpared) : undefined;
+    const targetTargets = targetDetached && targetPid !== undefined && !targetReaped ? discoverTargetsLinux(targetPid, undefined, undefined, localSpared) : undefined;
     applyMergedSignal(selfTargets, targetTargets, sig);
-    if (targetDetached && targetPid !== undefined && targetReaped && sig === "SIGKILL") {
-      killDeadSession(targetPid, undefined, true, localSpared);
+    if (targetDetached && targetPid !== undefined && targetReaped) {
+      const deadPid = targetPid;
+      if (sig === "SIGKILL") {
+        killDeadSession(deadPid, undefined, true, localSpared);
+      } else if (!pidIdentityNow(deadPid)) {
+        const deadFound = discoverTargetsLinux(deadPid, undefined, true, localSpared);
+        if (!deadFound.leaderSeenLive && !pidIdentityNow(deadPid)) {
+          signalDeadTargets(deadFound, deadPid, () => !pidIdentityNow(deadPid), undefined, localSpared, sig);
+        }
+      }
     }
     return;
   }
   return Promise.all([
     discoverTargets(process.pid, runTag, localSpared),
-    targetDetached && targetPid !== undefined ? discoverTargets(targetPid, undefined, localSpared) : Promise.resolve(undefined),
+    targetDetached && targetPid !== undefined && !targetReaped ? discoverTargets(targetPid, undefined, localSpared) : Promise.resolve(undefined),
   ]).then(async ([selfTargets, targetTargets]) => {
     applyMergedSignal(selfTargets, targetTargets, sig);
-    if (targetDetached && targetPid !== undefined && targetReaped && sig === "SIGKILL") {
-      await killDeadSession(targetPid, undefined, true, localSpared);
+    if (targetDetached && targetPid !== undefined && targetReaped) {
+      const deadPid = targetPid;
+      if (sig === "SIGKILL") {
+        await killDeadSession(deadPid, undefined, true, localSpared);
+      } else if (!pidIdentityNow(deadPid)) {
+        const deadFound = await discoverTargets(deadPid, undefined, localSpared);
+        if (deadFound && !deadFound.leaderSeenLive && !pidIdentityNow(deadPid)) {
+          signalDeadTargets(deadFound, deadPid, () => !pidIdentityNow(deadPid), undefined, localSpared, sig);
+        }
+      }
     }
   });
 };

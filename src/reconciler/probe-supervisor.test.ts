@@ -2029,37 +2029,100 @@ process.exit(res.failing.length === 0 && res.unchecked.length === 0 ? 0 : 1);`;
     expect(code).toBe(0);
   });
 
-  test("refuses to signal an unverified process group or PID whose member identity was missing", async () => {
+  test("keeps an unrelated process responsive when a timed-out probe spawns short-lived exiting groups", async () => {
     if (process.platform === "win32") return;
-    const { signalDeadTargets, signalTargets } = await import("./probe-supervisor.ts");
     const shBin = Bun.which("sh") ?? "/bin/sh";
-    const dir = temp.make("sup-unverified-pgrp-");
-    const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
-    mkfifo(ready, gone);
-    const started = fifoRead(ready);
-    const closed = fifoRead(gone);
+    const dir = temp.make("sup-churn-unrelated-");
+    const [uReady, uPing, uPong, uGone, pReady, pGone] = [
+      join(dir, "u-ready"),
+      join(dir, "u-ping"),
+      join(dir, "u-pong"),
+      join(dir, "u-gone"),
+      join(dir, "p-ready"),
+      join(dir, "p-gone"),
+    ];
+    mkfifo(uReady, uPing, uPong, uGone, pReady, pGone);
+    const uStarted = fifoRead(uReady);
+    const uPonged = fifoRead(uPong);
+    const uClosed = fifoRead(uGone);
+    const pStarted = fifoRead(pReady);
+    const pClosed = fifoRead(pGone);
     const unrelated = Bun.spawn(
-      [shBin, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "unrelated", gone, ready],
+      [shBin, "-c", 'exec 3>"$1"; echo $$ > "$2"; read _ < "$3"; echo alive > "$4"; exec sleep 30', "unrelated", uGone, uReady, uPing, uPong],
       { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" },
     );
+    const probeScript = `import { writeFileSync } from "node:fs";
+const child = Bun.spawn([${JSON.stringify(shBin)}, "-c", "exit 0"], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await child.exited;
+const hold = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "hold", ${JSON.stringify(pGone)}, ${JSON.stringify(pReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await hold.exited;`;
+    let fireDeadline!: () => void;
+    let holdPid = 0;
     try {
-      const pid = Number((await started).trim());
-      expect(pid).toBe(unrelated.pid);
-      const unverified = {
-        pids: [pid],
-        groups: [pid],
-        orphanPids: [pid],
-        hasSessionGroup: true,
-        groupMembers: new Map(),
-        pidIdentities: new Map(),
-      };
-      signalTargets(unverified, "SIGKILL", undefined, undefined);
-      signalDeadTargets(unverified, pid, undefined, undefined);
-      expect(() => process.kill(pid, 0)).not.toThrow();
+      expect(Number((await uStarted).trim())).toBe(unrelated.pid);
+      const pending = humanStepsLeft(probePlan("churn-safe", [process.execPath, "-e", probeScript]), {
+        home: dir,
+        giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)),
+        graceMs: 0,
+      });
+      holdPid = Number((await pStarted).trim());
+      expect(holdPid).toBeGreaterThan(0);
+      fireDeadline();
+      const res = await pending;
+      expect(res.unchecked.map((s) => s.id)).toEqual(["churn-safe"]);
+      expect(await pClosed).toBe("");
+      await fifoWrite(uPing, "check\n");
+      expect((await uPonged).trim()).toBe("alive");
     } finally {
+      if (holdPid > 0) try { process.kill(holdPid, "SIGKILL"); } catch {}
       unrelated.kill("SIGKILL");
       await unrelated.exited.catch(() => {});
-      await closed.catch(() => {});
+      await uClosed.catch(() => {});
     }
+  });
+
+  test("runs a small probe under a 256 KiB stack limit even when ambient environment is near ARG_MAX", async () => {
+    if (process.platform !== "linux") return;
+    const trueBin = Bun.which("true") ?? "/bin/true";
+    const dir = temp.make("sup-ambient-env-limit-");
+    const script = `import { humanStepsLeft } from ${JSON.stringify(applyPath)};
+const baseEnv = { ...process.env, HOME: ${JSON.stringify(dir)} };
+const baseBytes = Object.entries(baseEnv).reduce((sum, [k, v]) => sum + k.length + (v?.length ?? 0) + 10, 0);
+const pad = Math.floor((131_072 - baseBytes - ${trueBin.length} - 200) / 2);
+process.env.AMBIENT_A = "a".repeat(pad);
+process.env.AMBIENT_B = "b".repeat(pad);
+const direct = Bun.spawnSync([${JSON.stringify(trueBin)}], { env: { ...process.env, HOME: ${JSON.stringify(dir)} } });
+if (direct.exitCode !== 0) process.exit(2);
+const res = await humanStepsLeft({
+  machine: { schema: 1, role: "linux" },
+  os: "linux",
+  ai: "both",
+  packs: [],
+  workflows: [],
+  files: [],
+  config: [],
+  owners: {},
+  jobs: [],
+  human: [{ id: "ambient-limit", pack: "team", say: "Ambient limit.", probe: [${JSON.stringify(trueBin)}] }],
+  steps: [],
+  checks: [],
+  commands: {},
+  handlers: {},
+  models: [],
+  settings: {},
+  unanswered: [],
+  ask: [],
+  dropped: [],
+}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}) });
+process.exit(res.failing.length === 0 && res.unchecked.length === 0 ? 0 : 1);`;
+    const proc = Bun.spawn(["sh", "-c", 'ulimit -s 256 && exec "$1" -e "$2"', "probe-ambient-limit", process.execPath, script], {
+      env: { PATH: "/usr/bin:/bin", HOME: dir },
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
   });
 });

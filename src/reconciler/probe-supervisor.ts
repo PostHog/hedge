@@ -262,12 +262,40 @@ export function ownTag(value: string | undefined): string | undefined {
   return last || undefined;
 }
 
+const minimalHelperEnvKeys = new Set([
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "PATH",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "LANG",
+  "TZ",
+  "XDG_RUNTIME_DIR",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "XDG_CACHE_HOME",
+  "BUN_RUNTIME_TRANSPILER_CACHE_PATH",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "LD_LIBRARY_PATH",
+  "DYLD_LIBRARY_PATH",
+  "DYLD_FALLBACK_LIBRARY_PATH",
+  "SYSTEMROOT",
+  "COMSPEC",
+  probeGraceEnvVar,
+]);
+
 export function watchdogEnv(): Record<string, string> {
   const clean: Record<string, string> = Object.create(null);
   for (const [key, value] of Object.entries(process.env)) {
-    if (key === "BUN_OPTIONS" || value === undefined) continue;
-    if (key === "PATH" && value.length > 4096) {
-      clean.PATH = "/usr/local/bin:/usr/bin:/bin";
+    if (value === undefined || key === "BUN_OPTIONS" || key === tagEnvVar || key === spareEnvVar) continue;
+    if (!minimalHelperEnvKeys.has(key) && !key.startsWith("LC_")) continue;
+    if (value.length > 4096) {
+      if (key === "PATH") clean.PATH = "/usr/local/bin:/usr/bin:/bin";
       continue;
     }
     clean[key] = value;
@@ -1481,23 +1509,24 @@ export function signalDeadTargets(
   guard?: () => boolean,
   tag?: string,
   spared?: SparedSet,
+  signal: NodeJS.Signals = "SIGKILL",
 ): void {
   for (const pgrp of targets.groups) {
     if (pgrp === deadSessionId) continue;
     if (guard && !guard()) return;
     if (!groupStillLive(pgrp, targets.groupMembers?.get(pgrp), deadSessionId, tag, spared)) continue;
-    signalOneGroup(pgrp, "SIGKILL");
+    signalOneGroup(pgrp, signal);
   }
   for (const pid of targets.orphanPids) {
     if (pid === deadSessionId || pid === process.pid) continue;
     if (guard && !guard()) return;
     if (!pidStillLive(pid, targets.pidIdentities?.get(pid))) continue;
-    signalOnePid(pid, "SIGKILL");
+    signalOnePid(pid, signal);
   }
   if (deadSessionId !== undefined && targets.hasSessionGroup) {
     if (guard && !guard()) return;
     if (!groupStillLive(deadSessionId, targets.groupMembers?.get(deadSessionId), deadSessionId, tag, spared)) return;
-    signalOneGroup(deadSessionId, "SIGKILL");
+    signalOneGroup(deadSessionId, signal);
   }
 }
 
