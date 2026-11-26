@@ -1,6 +1,5 @@
 import { closeSync, existsSync, readdirSync, writeSync } from "node:fs";
-import { rm, rmdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { install, plan as planFiles } from "../files/install.ts";
 import { packName } from "../pack/manifest.ts";
 import { cannotTell, waitsForPerson } from "../pack/types.ts";
@@ -11,7 +10,7 @@ import { hublessReason, listedPack } from "./resolve.ts";
 import { wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
 import { withLegacyNames } from "../legacy.ts";
 import { bunScript } from "../runner/bun.ts";
-import { appendTag, createPipe, discoverTargetsSync, drainControlFd, graceMs, interruptGraceMs, killDeadSession, killDeadSessionSync, killSessionSync, parseSpareLine, probeResultReported, setCloexec, signalTargets, supervisorEnv, tagEnvVar, waitForFdClosed, watchdogEnv } from "./probe-supervisor.ts";
+import { appendTag, createPipe, discoverTargetsSync, drainControlFd, emptySpared, graceMs, interruptGraceMs, killDeadSessionSync, killSessionSync, mergeSpared, parseSpareUpdate, probeResultReported, serializeSpared, setCloexec, signalTargets, type SparedSet, supervisorEnv, tagEnvVar, waitForFdClosed, watchdogEnv } from "./probe-supervisor.ts";
 
 export type AdapterContext = { home: string; dryRun: boolean; adopt: string[]; adoptFrom?: string[] };
 export type AdapterResult = { actions: Action[]; findings: Finding[]; blocked?: boolean; failed?: boolean };
@@ -554,41 +553,31 @@ const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
 let activeSupervisors = 0;
 const supervisorWaiters: Array<() => void> = [];
 
-type LiveProbe = { pid: number; runnerPid?: number; tag: string; spareFile?: string; spareFd?: number; handedOff?: boolean; spareHandedOff?: boolean; targetPid?: number; targetExited?: boolean; aliveFd?: number; resultFd?: number; guardFd?: number; holderExitFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
+type LiveProbe = { pid: number; runnerPid?: number; tag: string; spared: SparedSet; spareFd?: number; handedOff?: boolean; targetPid?: number; targetExited?: boolean; aliveFd?: number; resultFd?: number; guardFd?: number; holderExitFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
 type ActiveRunner = { stop: (name: NodeJS.Signals) => void };
 const activeRunners = new Set<ActiveRunner>();
 const allLiveProbes = new Set<LiveProbe>();
 let interruptHandlersAttached = false;
 
-function resolveProbeSpare(probe: LiveProbe): string | undefined {
-  if (!probe.spareFile && probe.spareFd !== undefined) {
+function drainProbeSpared(probe: LiveProbe): SparedSet {
+  if (probe.spareFd !== undefined) {
     const drained = drainControlFd(probe.spareFd);
-    const path = drained.lines.map(parseSpareLine).find((p) => p !== undefined);
-    if (path) {
-      probe.spareFile = path;
-      try {
-        closeSync(probe.spareFd);
-      } catch {}
-      probe.spareFd = undefined;
-    } else if (drained.closed) {
+    for (const line of drained.lines) {
+      const update = parseSpareUpdate(line);
+      if (update) mergeSpared(probe.spared, update.pids, update.sids);
+    }
+    if (drained.closed) {
       try {
         closeSync(probe.spareFd);
       } catch {}
       probe.spareFd = undefined;
     }
   }
-  return probe.spareFile;
-}
-
-function removeSpareAsync(filePath: string | undefined): void {
-  if (!filePath) return;
-  void rm(filePath, { force: true })
-    .catch(() => {})
-    .then(() => rmdir(dirname(filePath)).catch(() => {}));
+  return probe.spared;
 }
 
 function handOffWatchdog(probes: Iterable<LiveProbe>) {
-  const batch: Array<{ pid: number; holderPid?: number; holderFd?: number; tag: string; spareFile?: string; spareFd?: number; probe: LiveProbe; targetPid?: number; targetExited?: boolean; fd: number; resultFd?: number; delayMs: number }> = [];
+  const batch: Array<{ pid: number; holderPid?: number; holderFd?: number; tag: string; spared: SparedSet; spareFd?: number; probe: LiveProbe; targetPid?: number; targetExited?: boolean; fd: number; resultFd?: number; delayMs: number }> = [];
   for (const probe of probes) {
     if (probe.aliveFd === undefined) continue;
     let targetExited = Boolean(probe.targetExited);
@@ -599,16 +588,16 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
     if (!targetExited && resultFd !== undefined && probeResultReported(resultFd) === "reported") {
       targetExited = true;
     }
-    const spareFile = resolveProbeSpare(probe);
-    const spareFd = spareFile ? undefined : probe.spareFd;
-    if (spareFd !== undefined) probe.spareFd = undefined;
+    const spared = drainProbeSpared(probe);
+    const spareFd = probe.spareFd;
+    probe.spareFd = undefined;
     const holderPid = probe.runnerPid !== undefined || holderFd !== undefined ? probe.pid : undefined;
     batch.push({
       pid: probe.runnerPid ?? probe.pid,
       ...(holderPid !== undefined ? { holderPid } : {}),
       ...(holderFd !== undefined ? { holderFd } : {}),
       tag: probe.tag,
-      ...(spareFile ? { spareFile } : {}),
+      spared,
       ...(spareFd !== undefined ? { spareFd } : {}),
       probe,
       ...(probe.targetPid !== undefined ? { targetPid: probe.targetPid } : {}),
@@ -636,7 +625,7 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
         extraFds.push(entry.holderFd);
       }
       let spareFd: number | undefined;
-      if (!entry.spareFile && entry.spareFd !== undefined) {
+      if (entry.spareFd !== undefined) {
         spareFd = extraFds.length + 3;
         extraFds.push(entry.spareFd);
       }
@@ -645,7 +634,7 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
         ...(entry.holderPid !== undefined ? { holderPid: entry.holderPid } : {}),
         ...(holderFd !== undefined ? { holderFd } : {}),
         ...(entry.targetExited ? { reported: true } : { tag: entry.tag }),
-        ...(entry.spareFile ? { spareFile: entry.spareFile } : {}),
+        ...(entry.spared.pids.size || entry.spared.sids.size ? { spared: serializeSpared(entry.spared) } : {}),
         ...(spareFd !== undefined ? { spareFd } : {}),
         fd,
         ...(resultFd !== undefined ? { resultFd } : {}),
@@ -665,15 +654,17 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
     handedOff = true;
     for (const entry of batch) {
       entry.probe.handedOff = true;
-      if (entry.spareFile || entry.spareFd !== undefined) entry.probe.spareHandedOff = true;
     }
   } catch {
   } finally {
     if (!handedOff) {
       for (const entry of batch) {
-        let spare = entry.spareFile;
-        if (!spare && entry.spareFd !== undefined) {
-          spare = drainControlFd(entry.spareFd).lines.map(parseSpareLine).find((p) => p !== undefined);
+        if (entry.spareFd !== undefined) {
+          const drained = drainControlFd(entry.spareFd);
+          for (const line of drained.lines) {
+            const update = parseSpareUpdate(line);
+            if (update) mergeSpared(entry.spared, update.pids, update.sids);
+          }
         }
         const completed = Boolean(entry.targetExited);
         if (!completed) {
@@ -683,17 +674,17 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
             stillAlive = true;
           } catch {}
           if (stillAlive) {
-            killSessionSync(entry.pid, "SIGKILL", entry.tag, spare, false);
+            killSessionSync(entry.pid, "SIGKILL", entry.tag, entry.spared, false);
             try {
               process.kill(entry.pid, "SIGKILL");
             } catch {}
           } else {
-            killDeadSessionSync(entry.pid, entry.tag, false, spare, false);
+            killDeadSessionSync(entry.pid, entry.tag, false, entry.spared, false);
           }
           if (entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
             const isHolderAlive = () => entry.holderFd !== undefined && !drainControlFd(entry.holderFd).closed;
             if (isHolderAlive()) {
-              const holderTargets = discoverTargetsSync(entry.holderPid, entry.tag, undefined, spare, false);
+              const holderTargets = discoverTargetsSync(entry.holderPid, entry.tag, undefined, entry.spared, false);
               if (isHolderAlive()) {
                 if (holderTargets) signalTargets(holderTargets, "SIGKILL", entry.holderPid);
                 try {
@@ -701,10 +692,9 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
                 } catch {}
               }
             }
-            killDeadSessionSync(entry.holderPid, entry.tag, false, spare, false);
+            killDeadSessionSync(entry.holderPid, entry.tag, false, entry.spared, false);
           }
         }
-        removeSpareAsync(spare);
       }
     }
     for (const entry of batch) {
@@ -730,14 +720,14 @@ function handOffWatchdog(probes: Iterable<LiveProbe>) {
   }
 }
 
-async function sweepCrashedProbe(owned: LiveProbe, spareFile: string | undefined): Promise<void> {
+async function sweepCrashedProbe(owned: LiveProbe, spared: SparedSet): Promise<void> {
   const tempPipe = createPipe();
   const pid = owned.runnerPid ?? owned.pid;
   const holderPid = owned.runnerPid !== undefined ? owned.pid : undefined;
   const fallback = () => {
-    killDeadSessionSync(owned.pid, owned.tag, true, spareFile, false);
+    killDeadSessionSync(owned.pid, owned.tag, true, spared, false);
     if (owned.runnerPid !== undefined) {
-      killDeadSessionSync(owned.runnerPid, owned.tag, false, spareFile, false);
+      killDeadSessionSync(owned.runnerPid, owned.tag, false, spared, false);
     }
   };
   if (!tempPipe) {
@@ -755,7 +745,7 @@ async function sweepCrashedProbe(owned: LiveProbe, spareFile: string | undefined
         pid,
         ...(holderPid !== undefined ? { holderPid } : {}),
         tag: owned.tag,
-        ...(spareFile ? { spareFile } : {}),
+        ...(spared.pids.size || spared.sids.size ? { spared: serializeSpared(spared) } : {}),
         fd: 3,
         delayMs: 0,
       },
@@ -765,7 +755,6 @@ async function sweepCrashedProbe(owned: LiveProbe, spareFile: string | undefined
       stdio: ["ignore", "ignore", "ignore", tempPipe.writeFd],
       detached: true,
     });
-    owned.spareHandedOff = true;
   } catch {
     fallback();
   } finally {
@@ -1017,7 +1006,6 @@ async function runDetached(command: string[], env: Record<string, string | undef
       env: targetEnv,
       controlFd: 3,
       spareTag: tag,
-      ...(env.HOME ? { spareHome: env.HOME } : {}),
       ...(payloadSpareFd !== undefined ? { spareFd: payloadSpareFd } : {}),
       ...(useLinuxHolder ? { holder: true } : {}),
       ...(payloadResultFd !== undefined ? { resultFd: payloadResultFd } : {}),
@@ -1045,6 +1033,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
     probe = {
       pid: child.pid,
       tag,
+      spared: emptySpared(),
       aliveFd,
       ...(resultPipe ? { resultFd: resultPipe.readFd } : {}),
       ...(guardPipe ? { guardFd: guardPipe.readFd } : {}),
@@ -1073,17 +1062,15 @@ async function runDetached(command: string[], env: Record<string, string | undef
         owned.runnerPid = pid;
       },
     );
-    let sawCleanExit = false;
     const cleanupDone = child.exited.then(
       async (supCode) => {
         reaped = true;
         await statusPromise.catch(() => {});
         const sawResult = reportedResult || Boolean(owned.targetExited) || (owned.resultFd !== undefined && probeResultReported(owned.resultFd) === "reported");
-        sawCleanExit = sawResult && child?.signalCode === null;
         if (!sawResult && (child?.signalCode !== null || (supCode !== 128 && supCode !== 143))) {
           if (owned.guardFd !== undefined) await waitForFdClosed(owned.guardFd, 500);
-          const spareFile = resolveProbeSpare(owned);
-          await sweepCrashedProbe(owned, spareFile);
+          const spared = drainProbeSpared(owned);
+          await sweepCrashedProbe(owned, spared);
         }
       },
       () => {
@@ -1113,9 +1100,6 @@ async function runDetached(command: string[], env: Record<string, string | undef
           closeSync(owned.holderExitFd);
         } catch {}
         owned.holderExitFd = undefined;
-      }
-      if (!owned.spareHandedOff && !sawCleanExit) {
-        removeSpareAsync(resolveProbeSpare(owned));
       }
       if (owned.spareFd !== undefined) {
         try {

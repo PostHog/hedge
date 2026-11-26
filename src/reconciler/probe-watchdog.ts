@@ -1,8 +1,5 @@
 import { closeSync, writeSync } from "node:fs";
-import { rm, rmdir } from "node:fs/promises";
-import { dirname } from "node:path";
-import { bunScript } from "../runner/bun.ts";
-import { discoverTargets, drainControlFd, killDeadSession, parseSpareLine, probeResultReported, readSparedChecked, signalTargets, type SparedSet, waitForFdClosed, watchdogEnv } from "./probe-supervisor.ts";
+import { discoverTargets, drainControlFd, emptySpared, killDeadSession, mergeSpared, parseSpareUpdate, probeResultReported, type SerializedSpared, signalTargets, type SparedSet, waitForFdClosed } from "./probe-supervisor.ts";
 
 export type WatchEntry = {
   pid: number;
@@ -11,71 +8,12 @@ export type WatchEntry = {
   tag?: string;
   reported?: boolean;
   resultFd?: number;
-  spareFile?: string;
+  spared?: SerializedSpared;
   spareFd?: number;
-  keepSpareFile?: boolean;
   holderPid?: number;
   holderFd?: number;
 };
 export type WatchClock = { now: () => number; sleep: (ms: number) => Promise<void> };
-
-const emptySpared = (): SparedSet => ({ pids: new Set<number>(), sids: new Set<number>() });
-
-export async function readSparedBounded(filePath: string | undefined, limitMs = 200): Promise<SparedSet | undefined> {
-  if (!filePath) return emptySpared();
-  let helper: ReturnType<typeof Bun.spawn> | undefined;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    helper = Bun.spawn(bunScript(import.meta.filename, "--read-spare", filePath), {
-      env: watchdogEnv(),
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "ignore",
-      timeout: limitMs,
-      killSignal: "SIGKILL",
-    });
-    const out = await Promise.race([
-      Promise.all([new Response(helper.stdout as ReadableStream<Uint8Array>).text(), helper.exited]).then(([text, code]) => (code === 0 ? text : undefined)),
-      new Promise<undefined>((resolve) => {
-        timer = setTimeout(() => {
-          try {
-            helper?.kill("SIGKILL");
-          } catch {}
-          resolve(undefined);
-        }, limitMs + 50);
-      }),
-    ]);
-    if (timer) clearTimeout(timer);
-    if (out === undefined || !out.trim()) return undefined;
-    const parsed = JSON.parse(out.trim()) as { pids?: unknown; sids?: unknown };
-    const pids = new Set<number>();
-    const sids = new Set<number>();
-    if (Array.isArray(parsed.pids)) for (const n of parsed.pids) if (typeof n === "number" && Number.isInteger(n) && n > 0) pids.add(n);
-    if (Array.isArray(parsed.sids)) for (const n of parsed.sids) if (typeof n === "number" && Number.isInteger(n) && n > 0) sids.add(n);
-    return { pids, sids };
-  } catch {
-    if (timer) clearTimeout(timer);
-    try {
-      helper?.kill("SIGKILL");
-    } catch {}
-    return undefined;
-  }
-}
-
-async function removeSpareBounded(filePath: string | undefined, limitMs = 200): Promise<void> {
-  if (!filePath) return;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const work = rm(filePath, { force: true })
-    .catch(() => {})
-    .then(() => rmdir(dirname(filePath)).catch(() => {}));
-  await Promise.race([
-    work,
-    new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, limitMs);
-    }),
-  ]);
-  if (timer) clearTimeout(timer);
-}
 
 const alive = (fd: number) => {
   try {
@@ -100,15 +38,18 @@ const realClock: WatchClock = {
 export async function watchEntries(
   entries: WatchEntry[],
   clock: WatchClock = realClock,
-  readSpare: (filePath: string | undefined) => Promise<SparedSet | undefined> = readSparedBounded,
 ): Promise<void> {
   const started = clock.now();
   const pending = new Set(entries);
   const runnerDead = new Set<WatchEntry>();
   const runnerReported = new Map<WatchEntry, boolean>();
   const resultState = new Map<WatchEntry, "reported" | "closed">();
+  const sparedByEntry = new Map<WatchEntry, SparedSet>();
   for (const entry of entries) {
     if (entry.reported) resultState.set(entry, "reported");
+    const set = emptySpared();
+    if (entry.spared) mergeSpared(set, entry.spared.pids, entry.spared.sids);
+    sparedByEntry.set(entry, set);
   }
   const resultReported = (entry: WatchEntry): boolean => {
     const known = resultState.get(entry);
@@ -128,20 +69,20 @@ export async function watchEntries(
     }
     return false;
   };
-  const resolveSpare = (entry: WatchEntry): string | undefined => {
-    if (!entry.spareFile && entry.spareFd !== undefined) {
+  const drainSpared = (entry: WatchEntry): SparedSet => {
+    const set = sparedByEntry.get(entry) ?? emptySpared();
+    if (entry.spareFd !== undefined) {
       const drained = drainControlFd(entry.spareFd);
-      const path = drained.lines.map(parseSpareLine).find((p) => p !== undefined);
-      if (path) {
-        entry.spareFile = path;
-        close(entry.spareFd);
-        entry.spareFd = undefined;
-      } else if (drained.closed) {
+      for (const line of drained.lines) {
+        const update = parseSpareUpdate(line);
+        if (update) mergeSpared(set, update.pids, update.sids);
+      }
+      if (drained.closed) {
         close(entry.spareFd);
         entry.spareFd = undefined;
       }
     }
-    return entry.spareFile;
+    return set;
   };
   const closeEntry = (entry: WatchEntry) => {
     if (entry.fd >= 0) {
@@ -157,16 +98,12 @@ export async function watchEntries(
       entry.holderFd = undefined;
     }
     if (entry.spareFd !== undefined) {
-      resolveSpare(entry);
+      drainSpared(entry);
       if (entry.spareFd !== undefined) {
         close(entry.spareFd);
         entry.spareFd = undefined;
       }
     }
-  };
-  const removeSpare = async (entry: WatchEntry) => {
-    const spare = resolveSpare(entry);
-    if (!entry.keepSpareFile) await removeSpareBounded(spare);
   };
   const holderAlive = (entry: WatchEntry): boolean => {
     if (entry.holderFd === undefined) return false;
@@ -177,16 +114,9 @@ export async function watchEntries(
     }
     return true;
   };
-  const sweepHolderAndSpare = async (entry: WatchEntry, reported: boolean) => {
-    try {
-      if (!reported && entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
-        const spared = await readSpare(resolveSpare(entry));
-        const skipDetached = spared === undefined;
-        const sweepTag = skipDetached ? undefined : entry.tag;
-        await killDeadSession(entry.holderPid, sweepTag, false, spared, false, skipDetached);
-      }
-    } finally {
-      await removeSpare(entry);
+  const sweepHolder = async (entry: WatchEntry, reported: boolean) => {
+    if (!reported && entry.holderPid !== undefined && entry.holderPid !== entry.pid) {
+      await killDeadSession(entry.holderPid, entry.tag, false, drainSpared(entry), false);
     }
   };
   const killLiveHolder = async (entry: WatchEntry, reported: boolean) => {
@@ -199,51 +129,41 @@ export async function watchEntries(
             } catch {}
           }
         } else {
-          const spared = await readSpare(resolveSpare(entry));
-          const skipDetached = spared === undefined;
-          const sweepTag = skipDetached ? undefined : entry.tag;
-          const targets = await discoverTargets(entry.holderPid, sweepTag, spared, false, skipDetached);
+          const spared = drainSpared(entry);
+          const targets = await discoverTargets(entry.holderPid, entry.tag, spared, false);
           if (holderAlive(entry)) {
             signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.holderPid);
             try {
               process.kill(entry.holderPid, "SIGKILL");
             } catch {}
           }
-          await killDeadSession(entry.holderPid, sweepTag, false, spared, false, skipDetached);
+          await killDeadSession(entry.holderPid, entry.tag, false, spared, false);
         }
       }
     } finally {
       closeEntry(entry);
-      await removeSpare(entry);
     }
   };
   const sweepDead = async (entry: WatchEntry, reported: boolean, waitHolder = false) => {
-    try {
-      if (reported) {
-        if (waitHolder && entry.holderFd !== undefined && holderAlive(entry)) {
-          await waitForFdClosed(entry.holderFd, 200);
-          if (holderAlive(entry)) {
-            await killLiveHolder(entry, true);
-            return;
-          }
-        }
-        return;
-      }
-      const spared = await readSpare(resolveSpare(entry));
-      const skipDetached = spared === undefined;
-      const sweepTag = skipDetached ? undefined : entry.tag;
-      await killDeadSession(entry.pid, sweepTag, false, spared, false, skipDetached);
+    if (reported) {
       if (waitHolder && entry.holderFd !== undefined && holderAlive(entry)) {
         await waitForFdClosed(entry.holderFd, 200);
         if (holderAlive(entry)) {
-          await killLiveHolder(entry, reported);
-          return;
+          await killLiveHolder(entry, true);
         }
       }
-      await sweepHolderAndSpare(entry, reported);
-    } finally {
-      await removeSpare(entry);
+      return;
     }
+    const spared = drainSpared(entry);
+    await killDeadSession(entry.pid, entry.tag, false, spared, false);
+    if (waitHolder && entry.holderFd !== undefined && holderAlive(entry)) {
+      await waitForFdClosed(entry.holderFd, 200);
+      if (holderAlive(entry)) {
+        await killLiveHolder(entry, reported);
+        return;
+      }
+    }
+    await sweepHolder(entry, reported);
   };
   while (pending.size > 0) {
     const elapsed = clock.now() - started;
@@ -254,6 +174,7 @@ export async function watchEntries(
     const deadRunners: Array<{ entry: WatchEntry; reported: boolean }> = [];
     const deadHolders: Array<{ entry: WatchEntry; reported: boolean }> = [];
     for (const entry of [...pending]) {
+      drainSpared(entry);
       if (runnerDead.has(entry)) {
         const reported = runnerReported.get(entry) ?? false;
         if (!holderAlive(entry)) {
@@ -311,10 +232,7 @@ export async function watchEntries(
       await Promise.all(
         deadRunners.map(async ({ entry, reported }) => {
           if (reported) return;
-          const spared = await readSpare(resolveSpare(entry));
-          const skipDetached = spared === undefined;
-          const sweepTag = skipDetached ? undefined : entry.tag;
-          await killDeadSession(entry.pid, sweepTag, false, spared, false, skipDetached);
+          await killDeadSession(entry.pid, entry.tag, false, drainSpared(entry), false);
         }),
       );
     }
@@ -322,7 +240,7 @@ export async function watchEntries(
       await Promise.all(dead.map(({ entry, reported }) => sweepDead(entry, reported)));
     }
     if (deadHolders.length > 0) {
-      await Promise.all(deadHolders.map(({ entry, reported }) => sweepHolderAndSpare(entry, reported)));
+      await Promise.all(deadHolders.map(({ entry, reported }) => sweepHolder(entry, reported)));
     }
     if (dueHolders.length > 0) {
       await Promise.all(dueHolders.map(({ entry, reported }) => killLiveHolder(entry, reported)));
@@ -330,21 +248,17 @@ export async function watchEntries(
     if (due.length > 0) {
       await Promise.all(
         due.map(async (entry) => {
-          let sweptDead = false;
           try {
             if (alive(entry.fd)) {
               const initialReported = resultReported(entry);
               if (!initialReported) {
-                const spared = await readSpare(resolveSpare(entry));
-                const skipDetached = spared === undefined;
-                const initialTag = skipDetached ? undefined : entry.tag;
-                const targets = await discoverTargets(entry.pid, initialTag, spared, false, skipDetached);
+                const spared = drainSpared(entry);
+                const targets = await discoverTargets(entry.pid, entry.tag, spared, false);
                 if (alive(entry.fd) && !resultReported(entry)) {
                   signalTargets(targets ?? { pids: [], groups: [], orphanPids: [] }, "SIGKILL", entry.pid);
                   try {
                     process.kill(entry.pid, "SIGKILL");
                   } catch {}
-                  sweptDead = true;
                   await sweepDead(entry, resultReported(entry), true);
                 } else {
                   if (alive(entry.fd)) {
@@ -352,7 +266,6 @@ export async function watchEntries(
                       process.kill(entry.pid, "SIGKILL");
                     } catch {}
                   }
-                  sweptDead = true;
                   await sweepDead(entry, resultReported(entry), true);
                 }
               } else {
@@ -361,16 +274,13 @@ export async function watchEntries(
                     process.kill(entry.pid, "SIGKILL");
                   } catch {}
                 }
-                sweptDead = true;
                 await sweepDead(entry, true, true);
               }
             } else {
-              sweptDead = true;
               await sweepDead(entry, resultReported(entry), true);
             }
           } finally {
             closeEntry(entry);
-            if (!sweptDead) await removeSpare(entry);
           }
         }),
       );
@@ -381,14 +291,6 @@ export async function watchEntries(
 }
 
 if (import.meta.main) {
-  if (Bun.argv[2] === "--read-spare") {
-    const res = readSparedChecked(Bun.argv[3]);
-    if (!res.ok) process.exit(1);
-    try {
-      writeSync(1, JSON.stringify({ pids: [...res.spared.pids], sids: [...res.spared.sids] }) + "\n");
-    } catch {}
-    process.exit(0);
-  }
   let entries: WatchEntry[] = [];
   try {
     const parsed = JSON.parse(Bun.argv[2] ?? "[]") as unknown;
@@ -402,9 +304,7 @@ if (import.meta.main) {
           typeof (item as WatchEntry).delayMs === "number" &&
           ((item as WatchEntry).reported === undefined || typeof (item as WatchEntry).reported === "boolean") &&
           ((item as WatchEntry).resultFd === undefined || typeof (item as WatchEntry).resultFd === "number") &&
-          ((item as WatchEntry).spareFile === undefined || typeof (item as WatchEntry).spareFile === "string") &&
           ((item as WatchEntry).spareFd === undefined || typeof (item as WatchEntry).spareFd === "number") &&
-          ((item as WatchEntry).keepSpareFile === undefined || typeof (item as WatchEntry).keepSpareFile === "boolean") &&
           ((item as WatchEntry).holderPid === undefined || typeof (item as WatchEntry).holderPid === "number") &&
           ((item as WatchEntry).holderFd === undefined || typeof (item as WatchEntry).holderFd === "number"),
       );

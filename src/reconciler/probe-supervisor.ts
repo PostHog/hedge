@@ -1,7 +1,5 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
-import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, read, readdirSync, readFileSync, readSync, rmdirSync, rmSync, statSync, writeSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { closeSync, existsSync, openSync, read, readdirSync, readFileSync, readSync, writeSync } from "node:fs";
 import { bunScript } from "../runner/bun.ts";
 
 export type StopSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT";
@@ -13,18 +11,178 @@ export const tagEnvVar = "HEDGE_SUPERVISOR_TAG";
 export const spareEnvVar = "HEDGE_SUPERVISOR_SPARE";
 export const probeGraceEnvVar = "HEDGE_PROBE_GRACE_MS";
 
-export function encodeSpareLine(filePath: string): string {
-  return `${JSON.stringify(filePath)}\n`;
+export type SparedSet = { pids: Set<number>; sids: Set<number> };
+export type SpareInput = SparedSet | undefined;
+export type SerializedSpared = { pids: number[]; sids: number[] };
+
+export function emptySpared(): SparedSet {
+  return { pids: new Set<number>(), sids: new Set<number>() };
 }
 
-export function parseSpareLine(line: string): string | undefined {
+export function mergeSpared(target: SparedSet, pids: Iterable<number>, sids: Iterable<number>): void {
+  for (const n of pids) if (Number.isInteger(n) && n > 0) target.pids.add(n);
+  for (const n of sids) if (Number.isInteger(n) && n > 0) target.sids.add(n);
+}
+
+export function serializeSpared(spared: SparedSet): SerializedSpared {
+  return { pids: [...spared.pids], sids: [...spared.sids] };
+}
+
+export function encodeSpareUpdate(pids: number[], sids: number[]): string {
+  return `${JSON.stringify({ pids, sids })}\n`;
+}
+
+export function parseSpareUpdate(line: string): SerializedSpared | undefined {
   if (!line) return undefined;
   try {
-    const parsed = JSON.parse(line) as unknown;
-    return typeof parsed === "string" && parsed.length > 0 ? parsed : undefined;
+    const parsed = JSON.parse(line) as { pids?: unknown; sids?: unknown };
+    if (!parsed || typeof parsed !== "object") return undefined;
+    const pids: number[] = [];
+    const sids: number[] = [];
+    if (Array.isArray(parsed.pids)) for (const n of parsed.pids) if (typeof n === "number" && Number.isInteger(n) && n > 0) pids.push(n);
+    if (Array.isArray(parsed.sids)) for (const n of parsed.sids) if (typeof n === "number" && Number.isInteger(n) && n > 0) sids.push(n);
+    return { pids, sids };
   } catch {
     return undefined;
   }
+}
+
+export type SpareServer = { endpoint: string; close: () => void };
+
+export function startSpareServer(
+  onUpdate: (pids: number[], sids: number[]) => Promise<boolean> | boolean,
+): SpareServer | undefined {
+  const nonce = crypto.randomUUID().replaceAll("-", "");
+  try {
+    const server = Bun.listen<{ buf: string; done: boolean }>({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: {
+        open(socket) {
+          socket.data = { buf: "", done: false };
+        },
+        data(socket, chunk) {
+          if (socket.data.done) return;
+          socket.data.buf += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+          if (socket.data.buf.length > 65_536) {
+            socket.data.done = true;
+            try {
+              socket.write("err\n");
+              socket.end();
+            } catch {}
+            return;
+          }
+          const nl = socket.data.buf.indexOf("\n");
+          if (nl === -1) return;
+          socket.data.done = true;
+          const line = socket.data.buf.slice(0, nl).trim();
+          const space = line.indexOf(" ");
+          if (space <= 0 || line.slice(0, space) !== nonce) {
+            try {
+              socket.write("err\n");
+              socket.end();
+            } catch {}
+            return;
+          }
+          const parsed = parseSpareUpdate(line.slice(space + 1));
+          if (!parsed) {
+            try {
+              socket.write("err\n");
+              socket.end();
+            } catch {}
+            return;
+          }
+          void Promise.resolve(onUpdate(parsed.pids, parsed.sids))
+            .then((ok) => {
+              try {
+                socket.write(ok ? "ok\n" : "err\n");
+                socket.end();
+              } catch {}
+            })
+            .catch(() => {
+              try {
+                socket.write("err\n");
+                socket.end();
+              } catch {}
+            });
+        },
+        error() {},
+      },
+    });
+    server.unref();
+    return {
+      endpoint: `127.0.0.1:${server.port}:${nonce}`,
+      close: () => {
+        try {
+          server.stop(true);
+        } catch {}
+      },
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+export async function reportSpared(
+  endpoint: string,
+  pids: number[],
+  sids: number[],
+  timeoutMs = 1500,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const cleanPids = [...new Set(pids.filter((n) => Number.isInteger(n) && n > 0))];
+  const cleanSids = [...new Set(sids.filter((n) => Number.isInteger(n) && n > 0))];
+  if (!cleanPids.length && !cleanSids.length) return { ok: true };
+  const parts = endpoint.split(":");
+  const host = parts[0];
+  const port = Number(parts[1]);
+  const nonce = parts[2];
+  if (host !== "127.0.0.1" || !Number.isInteger(port) || port <= 0 || port > 65535 || !nonce) {
+    return { ok: false, error: "invalid spare endpoint" };
+  }
+  const payload = `${nonce} ${JSON.stringify({ pids: cleanPids, sids: cleanSids })}\n`;
+  return await new Promise<{ ok: true } | { ok: false; error: string }>((resolve) => {
+    let settled = false;
+    let buf = "";
+    let sock: { end?: () => void } | undefined;
+    const finish = (res: { ok: true } | { ok: false; error: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        sock?.end?.();
+      } catch {}
+      resolve(res);
+    };
+    const timer = setTimeout(() => finish({ ok: false, error: "timed out reporting spared processes" }), timeoutMs);
+    void Bun.connect({
+      hostname: host,
+      port,
+      socket: {
+        open(socket) {
+          sock = socket;
+          socket.write(payload);
+        },
+        data(_socket, chunk) {
+          buf += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+          const nl = buf.indexOf("\n");
+          if (nl === -1) return;
+          const reply = buf.slice(0, nl).trim();
+          finish(reply === "ok" ? { ok: true } : { ok: false, error: "ancestor rejected spare report" });
+        },
+        close() {
+          finish({ ok: false, error: "spare channel closed before acknowledgement" });
+        },
+        error(_socket, err) {
+          finish({ ok: false, error: err?.message ?? String(err) });
+        },
+        connectError(_socket, err) {
+          finish({ ok: false, error: err?.message ?? String(err) });
+        },
+      },
+    }).catch((err: unknown) => {
+      finish({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    });
+  });
 }
 
 export function readFdChunk(fd: number, buf: Uint8Array): Promise<number> {
@@ -35,179 +193,8 @@ export function readFdChunk(fd: number, buf: Uint8Array): Promise<number> {
   });
 }
 
-function canUseSpareDir(dir: string): boolean {
-  try {
-    const info = lstatSync(dir);
-    if (!info.isDirectory() || info.isSymbolicLink()) return false;
-    if (typeof process.getuid === "function" && info.uid !== process.getuid()) return false;
-    accessSync(dir, constants.W_OK | constants.X_OK);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") return false;
-  }
-  let current = dirname(dir);
-  for (;;) {
-    try {
-      const info = statSync(current);
-      if (!info.isDirectory()) return false;
-      accessSync(current, constants.W_OK | constants.X_OK);
-      return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") return false;
-    }
-    const parent = dirname(current);
-    if (parent === current) return false;
-    current = parent;
-  }
-}
-
-export function spareFilePath(tag: string, home?: string): string {
-  const uid = typeof process.getuid === "function" ? String(process.getuid()) : "u";
-  const dirName = `hedge-sup-${uid}`;
-  const seen = new Set<string>();
-  const candidates: string[] = [];
-  const add = (dir: string) => {
-    if (!seen.has(dir)) {
-      seen.add(dir);
-      candidates.push(dir);
-    }
-  };
-  add(join(tmpdir(), dirName));
-  if (home) add(join(home, ".local", "state", "hedge", `sup-${uid}`));
-  if (process.env.HOME && process.env.HOME !== home) add(join(process.env.HOME, ".local", "state", "hedge", `sup-${uid}`));
-  add(join("/tmp", dirName));
-  add(join("/var/tmp", dirName));
-  if (process.platform === "linux") add(join("/dev/shm", dirName));
-  for (const dir of candidates) {
-    if (canUseSpareDir(dir)) return join(dir, `${tag}.spare`);
-  }
-  return join(tmpdir(), dirName, `${tag}.spare`);
-}
-
-function isOwnedDirectory(dir: string): boolean {
-  try {
-    const info = lstatSync(dir);
-    if (!info.isDirectory() || info.isSymbolicLink()) return false;
-    if (typeof process.getuid === "function" && info.uid !== process.getuid()) return false;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export type SpareRecordResult = { ok: true } | { ok: false; error: string; code?: string };
-
-export function recordSparedProcess(filePath: string, pids: number[], sids: number[]): SpareRecordResult {
-  if (!pids.length && !sids.length) return { ok: true };
-  const dir = dirname(filePath);
-  const flags = constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
-  const lines: string[] = [];
-  for (const pid of new Set(pids)) if (Number.isInteger(pid) && pid > 0) lines.push(`pid:${pid}`);
-  for (const sid of new Set(sids)) if (Number.isInteger(sid) && sid > 0) lines.push(`sid:${sid}`);
-  if (!lines.length) return { ok: true };
-  const payload = new TextEncoder().encode(lines.join("\n") + "\n");
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try {
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      if (!isOwnedDirectory(dir)) return { ok: false, error: `spare directory ${dir} is not owned by the current user`, code: "EPERM" };
-      const fd = openSync(filePath, flags, 0o600);
-      try {
-        const stat = fstatSync(fd);
-        if (!stat.isFile()) return { ok: false, error: `spare path ${filePath} is not a regular file`, code: "EPERM" };
-        if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
-          return { ok: false, error: `spare file ${filePath} is not owned by the current user`, code: "EPERM" };
-        }
-        let offset = 0;
-        while (offset < payload.byteLength) {
-          const written = writeSync(fd, payload, offset, payload.byteLength - offset);
-          if (written <= 0) return { ok: false, error: `short write to spare file ${filePath}`, code: "EIO" };
-          offset += written;
-        }
-        return { ok: true };
-      } finally {
-        try {
-          closeSync(fd);
-        } catch {}
-      }
-    } catch (error) {
-      const err = error as NodeJS.ErrnoException;
-      if (err?.code === "ENOENT" && attempt < 3) continue;
-      return { ok: false, error: err?.message ?? String(error), ...(err?.code ? { code: err.code } : {}) };
-    }
-  }
-  return { ok: false, error: `could not record spared processes in ${filePath}`, code: "ENOENT" };
-}
-
-export type SparedSet = { pids: Set<number>; sids: Set<number> };
-export type SpareInput = string | SparedSet | undefined;
-export type SpareReadResult = { ok: true; spared: SparedSet } | { ok: false };
-
-const emptySparedSet = (): SparedSet => ({ pids: new Set<number>(), sids: new Set<number>() });
-
-export function readSparedChecked(filePath: string | undefined): SpareReadResult {
-  if (!filePath) return { ok: true, spared: emptySparedSet() };
-  const dir = dirname(filePath);
-  try {
-    const dirInfo = lstatSync(dir);
-    if (!dirInfo.isDirectory() || dirInfo.isSymbolicLink()) return { ok: true, spared: emptySparedSet() };
-    if (typeof process.getuid === "function" && dirInfo.uid !== process.getuid()) return { ok: true, spared: emptySparedSet() };
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException)?.code;
-    return code === "ENOENT" ? { ok: true, spared: emptySparedSet() } : { ok: false };
-  }
-  const pids = new Set<number>();
-  const sids = new Set<number>();
-  let fd: number | undefined;
-  try {
-    const flags = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
-    fd = openSync(filePath, flags);
-    const stat = fstatSync(fd);
-    if (!stat.isFile()) return { ok: true, spared: { pids, sids } };
-    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return { ok: true, spared: { pids, sids } };
-    const raw = readFileSync(fd, "utf8");
-    for (const line of raw.split("\n")) {
-      if (line.startsWith("pid:")) {
-        const n = Number(line.slice(4));
-        if (Number.isInteger(n) && n > 0) pids.add(n);
-      } else if (line.startsWith("sid:")) {
-        const n = Number(line.slice(4));
-        if (Number.isInteger(n) && n > 0) sids.add(n);
-      }
-    }
-    return { ok: true, spared: { pids, sids } };
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException)?.code;
-    if (code === "ENOENT" || code === "ELOOP") return { ok: true, spared: { pids, sids } };
-    return { ok: false };
-  } finally {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd);
-      } catch {}
-    }
-  }
-}
-
-export function readSpared(filePath: SpareInput): SparedSet {
-  if (filePath && typeof filePath !== "string") return filePath;
-  const res = readSparedChecked(filePath);
-  return res.ok ? res.spared : emptySparedSet();
-}
-
-function resolveSpareInput(sparePath: SpareInput): { spared: SparedSet; unreadable: boolean } {
-  if (sparePath && typeof sparePath !== "string") return { spared: sparePath, unreadable: false };
-  const res = readSparedChecked(sparePath);
-  return res.ok ? { spared: res.spared, unreadable: false } : { spared: emptySparedSet(), unreadable: true };
-}
-
-export function removeSpareFile(filePath: string | undefined): void {
-  if (!filePath) return;
-  try {
-    rmSync(filePath, { force: true });
-  } catch {}
-  try {
-    rmdirSync(dirname(filePath));
-  } catch {}
+function resolveSpareInput(spareInput: SpareInput): SparedSet {
+  return spareInput ?? emptySpared();
 }
 
 export function appendTag(existing: string | undefined, tag: string): string {
@@ -667,14 +654,12 @@ export function discoverTargetsLinux(
   sessionId?: number,
   tag?: string,
   deadLeaderReaped?: boolean,
-  sparePath?: SpareInput,
+  spareInput?: SpareInput,
   ownGroupOnly = false,
-  skipDetached = false,
 ): ProcTargets {
   const self = process.pid;
-  const { spared, unreadable } = resolveSpareInput(sparePath);
-  const blockDetached = ownGroupOnly || skipDetached || unreadable;
-  const effectiveTag = blockDetached ? undefined : tag;
+  const spared = resolveSpareInput(spareInput);
+  const effectiveTag = ownGroupOnly ? undefined : tag;
   const includeDetached = Boolean(effectiveTag);
   const rows: Array<{ pid: number; ppid: number; pgrp: number; sid: number; envTag?: string }> = [];
   const matched = new Set<number>();
@@ -713,7 +698,7 @@ export function discoverTargetsLinux(
       }
     }
   } catch {}
-  if (includeDetached || (!blockDetached && sessionId === undefined)) {
+  if (includeDetached || (!ownGroupOnly && sessionId === undefined)) {
     let grew = true;
     while (grew) {
       grew = false;
@@ -903,13 +888,11 @@ function buildTargetsFromPs(
   tag: string | undefined,
   treeText: string | undefined,
   excludePids: Set<number>,
-  sparePath?: SpareInput,
+  spareInput?: SpareInput,
   ownGroupOnly = false,
-  skipDetached = false,
 ): ProcTargets {
-  const { spared, unreadable } = resolveSpareInput(sparePath);
-  const blockDetached = ownGroupOnly || skipDetached || unreadable;
-  const effectiveTag = blockDetached ? undefined : tag;
+  const spared = resolveSpareInput(spareInput);
+  const effectiveTag = ownGroupOnly ? undefined : tag;
   const includeDetached = Boolean(effectiveTag);
   const rows: Array<{ pid: number; ppid: number; pgid: number; envTag?: string }> = [];
   const matched = new Set<number>();
@@ -936,7 +919,7 @@ function buildTargetsFromPs(
       }
     }
   }
-  if (includeDetached || (!blockDetached && sessionId === undefined)) {
+  if (includeDetached || (!ownGroupOnly && sessionId === undefined)) {
     let grew = true;
     while (grew) {
       grew = false;
@@ -1050,14 +1033,12 @@ export function discoverTargetsSync(
   sessionId?: number,
   tag?: string,
   deadLeaderReaped?: boolean,
-  sparePath?: SpareInput,
+  spareInput?: SpareInput,
   ownGroupOnly = false,
-  skipDetached = false,
 ): ProcTargets | undefined {
-  if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag, deadLeaderReaped, sparePath, ownGroupOnly, skipDetached);
-  const { spared, unreadable } = resolveSpareInput(sparePath);
-  const blockDetached = ownGroupOnly || skipDetached || unreadable;
-  const effectiveTag = blockDetached ? undefined : tag;
+  if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag, deadLeaderReaped, spareInput, ownGroupOnly);
+  const spared = resolveSpareInput(spareInput);
+  const effectiveTag = ownGroupOnly ? undefined : tag;
   if (sessionId === undefined && !effectiveTag) return undefined;
   const lib = getDarwinLib();
   if (!lib) return undefined;
@@ -1090,7 +1071,7 @@ export function discoverTargetsSync(
   for (let i = 0; i < limit; i++) {
     const pid = buf[i]!;
     if (pid <= 0 || pid === self || pid === effectiveSessionId) continue;
-    const ppid = effectiveTag || (!blockDetached && effectiveSessionId === undefined) ? ppidDarwin(lib, pid) : 0;
+    const ppid = effectiveTag || (!ownGroupOnly && effectiveSessionId === undefined) ? ppidDarwin(lib, pid) : 0;
     const sid = lib.getsid(pid);
     const pgid = lib.getpgid(pid);
     const envTag = effectiveTag ? readEnvTagDarwin(pid) : undefined;
@@ -1101,7 +1082,7 @@ export function discoverTargetsSync(
       matched.add(pid);
     }
   }
-  if (effectiveTag || (!blockDetached && effectiveSessionId === undefined)) {
+  if (effectiveTag || (!ownGroupOnly && effectiveSessionId === undefined)) {
     let grew = true;
     while (grew) {
       grew = false;
@@ -1134,7 +1115,7 @@ export function discoverTargetsSync(
     }
   }
   if (deadLeaderReaped !== undefined && effectiveSessionId !== undefined && isDeadLeaderRecycledDarwin(lib, effectiveSessionId, deadLeaderReaped)) {
-    return effectiveTag ? discoverTargetsSync(undefined, effectiveTag, undefined, sparePath) : { pids: [], groups: [], orphanPids: [], sids: [], hasSessionGroup: false };
+    return effectiveTag ? discoverTargetsSync(undefined, effectiveTag, undefined, spared) : { pids: [], groups: [], orphanPids: [], sids: [], hasSessionGroup: false };
   }
   const pids: number[] = [];
   const groups = new Set<number>();
@@ -1206,14 +1187,13 @@ async function runBoundedPs(args: string[]): Promise<{ pid: number; text: string
 export async function discoverTargets(
   sessionId?: number,
   tag?: string,
-  sparePath?: SpareInput,
+  spareInput?: SpareInput,
   ownGroupOnly = false,
-  skipDetached = false,
 ): Promise<ProcTargets | undefined> {
-  if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag, undefined, sparePath, ownGroupOnly, skipDetached);
+  if (process.platform === "linux") return discoverTargetsLinux(sessionId, tag, undefined, spareInput, ownGroupOnly);
   const treeRes = await runBoundedPs(["-Ao", "pid=,ppid=,pgid="]);
-  if (!treeRes) return discoverTargetsSync(sessionId, tag, undefined, sparePath, ownGroupOnly, skipDetached);
-  return buildTargetsFromPs(process.pid, sessionId, tag, treeRes.text, new Set([treeRes.pid]), sparePath, ownGroupOnly, skipDetached);
+  if (!treeRes) return discoverTargetsSync(sessionId, tag, undefined, spareInput, ownGroupOnly);
+  return buildTargetsFromPs(process.pid, sessionId, tag, treeRes.text, new Set([treeRes.pid]), spareInput, ownGroupOnly);
 }
 
 function signalOneGroup(pgrp: number, signal: NodeJS.Signals): void {
@@ -1271,18 +1251,16 @@ function sweepDeadLinux(
   deadSessionId: number,
   tag: string | undefined,
   reaped: boolean,
-  sparePath?: SpareInput,
+  spareInput?: SpareInput,
   ownGroupOnly = false,
-  skipDetached = false,
 ): void {
-  const { spared, unreadable } = resolveSpareInput(sparePath);
-  const blockDetached = ownGroupOnly || skipDetached || unreadable;
-  const effectiveTag = blockDetached ? undefined : tag;
+  const spared = resolveSpareInput(spareInput);
+  const effectiveTag = ownGroupOnly ? undefined : tag;
   if (isDeadLeaderRecycledLinux(deadSessionId, reaped)) {
     if (effectiveTag) signalDeadTargets(discoverTargetsLinux(undefined, effectiveTag, undefined, spared), undefined);
     return;
   }
-  const targets = discoverTargetsLinux(deadSessionId, effectiveTag, reaped, spared, ownGroupOnly, blockDetached);
+  const targets = discoverTargetsLinux(deadSessionId, effectiveTag, reaped, spared, ownGroupOnly);
   if (targets.leaderSeenLive || isDeadLeaderRecycledLinux(deadSessionId, reaped)) {
     if (effectiveTag) signalDeadTargets(discoverTargetsLinux(undefined, effectiveTag, undefined, spared), undefined);
     return;
@@ -1294,18 +1272,16 @@ export function killDeadSessionSync(
   deadSessionId: number,
   tag?: string,
   reaped = false,
-  sparePath?: SpareInput,
+  spareInput?: SpareInput,
   ownGroupOnly = false,
-  skipDetached = false,
 ): void {
   if (process.platform === "linux") {
-    sweepDeadLinux(deadSessionId, tag, reaped, sparePath, ownGroupOnly, skipDetached);
+    sweepDeadLinux(deadSessionId, tag, reaped, spareInput, ownGroupOnly);
     return;
   }
-  const { spared, unreadable } = resolveSpareInput(sparePath);
-  const blockDetached = ownGroupOnly || skipDetached || unreadable;
-  const effectiveTag = blockDetached ? undefined : tag;
-  const found = discoverTargetsSync(deadSessionId, effectiveTag, reaped, spared, ownGroupOnly, blockDetached);
+  const spared = resolveSpareInput(spareInput);
+  const effectiveTag = ownGroupOnly ? undefined : tag;
+  const found = discoverTargetsSync(deadSessionId, effectiveTag, reaped, spared, ownGroupOnly);
   if (!found) return;
   const lib = getDarwinLib();
   if (lib && isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped)) {
@@ -1320,24 +1296,22 @@ export function killDeadSession(
   deadSessionId: number,
   tag?: string,
   reaped = false,
-  sparePath?: SpareInput,
+  spareInput?: SpareInput,
   ownGroupOnly = false,
-  skipDetached = false,
 ): void | Promise<void> {
   if (process.platform === "linux") {
     if (!reaped && isDeadLeaderRecycledLinux(deadSessionId, false)) {
-      return Bun.sleep(15).then(() => sweepDeadLinux(deadSessionId, tag, reaped, sparePath, ownGroupOnly, skipDetached));
+      return Bun.sleep(15).then(() => sweepDeadLinux(deadSessionId, tag, reaped, spareInput, ownGroupOnly));
     }
-    sweepDeadLinux(deadSessionId, tag, reaped, sparePath, ownGroupOnly, skipDetached);
+    sweepDeadLinux(deadSessionId, tag, reaped, spareInput, ownGroupOnly);
     return;
   }
-  const { spared, unreadable } = resolveSpareInput(sparePath);
-  const blockDetached = ownGroupOnly || skipDetached || unreadable;
-  const effectiveTag = blockDetached ? undefined : tag;
+  const spared = resolveSpareInput(spareInput);
+  const effectiveTag = ownGroupOnly ? undefined : tag;
   return (async () => {
     let treeRes = await runBoundedPs(["-Ao", "pid=,ppid=,pgid=,stat="]);
     if (!treeRes) {
-      killDeadSessionSync(deadSessionId, effectiveTag, reaped, spared, ownGroupOnly, blockDetached);
+      killDeadSessionSync(deadSessionId, effectiveTag, reaped, spared, ownGroupOnly);
       return;
     }
     let stat = psPidStat(treeRes.text, deadSessionId);
@@ -1345,7 +1319,7 @@ export function killDeadSession(
       await Bun.sleep(15);
       treeRes = await runBoundedPs(["-Ao", "pid=,ppid=,pgid=,stat="]);
       if (!treeRes) {
-        killDeadSessionSync(deadSessionId, effectiveTag, reaped, spared, ownGroupOnly, blockDetached);
+        killDeadSessionSync(deadSessionId, effectiveTag, reaped, spared, ownGroupOnly);
         return;
       }
       stat = psPidStat(treeRes.text, deadSessionId);
@@ -1354,7 +1328,7 @@ export function killDeadSession(
     const recycled = (stat !== undefined && (reaped || !stat.includes("Z"))) || (lib !== null && isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped));
     const sid = recycled ? undefined : deadSessionId;
     if (sid === undefined && !effectiveTag) return;
-    const targets = buildTargetsFromPs(process.pid, sid, effectiveTag, treeRes.text, new Set([treeRes.pid]), spared, ownGroupOnly, blockDetached);
+    const targets = buildTargetsFromPs(process.pid, sid, effectiveTag, treeRes.text, new Set([treeRes.pid]), spared, ownGroupOnly);
     if (sid !== undefined && lib && isDeadLeaderRecycledDarwin(lib, deadSessionId, reaped)) {
       if (effectiveTag) signalDeadTargets(buildTargetsFromPs(process.pid, undefined, effectiveTag, treeRes.text, new Set([treeRes.pid]), spared), undefined);
       return;
@@ -1367,11 +1341,10 @@ export function killSessionSync(
   sessionId: number | undefined,
   signal: NodeJS.Signals,
   tag?: string,
-  sparePath?: SpareInput,
+  spareInput?: SpareInput,
   ownGroupOnly = false,
-  skipDetached = false,
 ): void {
-  signalTargets(discoverTargetsSync(sessionId, tag, undefined, sparePath, ownGroupOnly, skipDetached) ?? { pids: [], groups: [], orphanPids: [] }, signal, sessionId);
+  signalTargets(discoverTargetsSync(sessionId, tag, undefined, spareInput, ownGroupOnly) ?? { pids: [], groups: [], orphanPids: [] }, signal, sessionId);
 }
 
 export function killSession(
@@ -1379,20 +1352,19 @@ export function killSession(
   signal: NodeJS.Signals,
   tag?: string,
   remembered?: Map<number, number>,
-  sparePath?: SpareInput,
+  spareInput?: SpareInput,
   ownGroupOnly = false,
-  skipDetached = false,
 ): void | Promise<void> {
   if (process.platform === "linux") {
-    signalTargets(discoverTargetsLinux(sessionId, tag, undefined, sparePath, ownGroupOnly, skipDetached), signal, sessionId);
+    signalTargets(discoverTargetsLinux(sessionId, tag, undefined, spareInput, ownGroupOnly), signal, sessionId);
     return;
   }
-  return discoverTargets(sessionId, tag, sparePath, ownGroupOnly, skipDetached).then((found) => {
+  return discoverTargets(sessionId, tag, spareInput, ownGroupOnly).then((found) => {
     const targets: ProcTargets = found
       ? { pids: [...found.pids], groups: [...found.groups], orphanPids: [...found.orphanPids] }
       : { pids: [], groups: [], orphanPids: [] };
     const lib = getDarwinLib();
-    if (!ownGroupOnly && !skipDetached && remembered && lib) {
+    if (!ownGroupOnly && remembered && lib) {
       for (const pid of targets.pids) {
         const pgid = lib.getpgid(pid);
         if (pgid > 0 && pgid !== sessionId && pgid !== process.pid) remembered.set(pid, pgid);
@@ -1568,10 +1540,8 @@ if (import.meta.main) {
   let stopInterruptGraceMs = interruptGraceMs;
   let controlFd: number | undefined;
   let resultFd: number | undefined;
-  let spareFile: string | undefined;
   let spareFd: number | undefined;
   let spareTag: string | undefined;
-  let spareHome: string | undefined;
   let holder = false;
   let guardFd: number | undefined;
   let holderFd: number | undefined;
@@ -1591,10 +1561,8 @@ if (import.meta.main) {
         interruptGraceMs?: unknown;
         controlFd?: unknown;
         resultFd?: unknown;
-        spareFile?: unknown;
         spareFd?: unknown;
         spareTag?: unknown;
-        spareHome?: unknown;
         holder?: unknown;
         guardFd?: unknown;
         holderFd?: unknown;
@@ -1614,10 +1582,8 @@ if (import.meta.main) {
       if (typeof record.interruptGraceMs === "number" && record.interruptGraceMs >= 0) stopInterruptGraceMs = record.interruptGraceMs;
       if (typeof record.controlFd === "number" && Number.isInteger(record.controlFd) && record.controlFd >= 3) controlFd = record.controlFd;
       if (typeof record.resultFd === "number" && Number.isInteger(record.resultFd) && record.resultFd >= 3) resultFd = record.resultFd;
-      if (typeof record.spareFile === "string" && record.spareFile) spareFile = record.spareFile;
       if (typeof record.spareFd === "number" && Number.isInteger(record.spareFd) && record.spareFd >= 3) spareFd = record.spareFd;
       if (typeof record.spareTag === "string" && record.spareTag) spareTag = record.spareTag;
-      if (typeof record.spareHome === "string" && record.spareHome) spareHome = record.spareHome;
       if (record.holder === true) holder = true;
       if (typeof record.guardFd === "number" && Number.isInteger(record.guardFd) && record.guardFd >= 3) guardFd = record.guardFd;
       if (typeof record.holderFd === "number" && Number.isInteger(record.holderFd) && record.holderFd >= 3) holderFd = record.holderFd;
@@ -1627,30 +1593,6 @@ if (import.meta.main) {
     }
   } catch {}
   if (spareFd !== undefined) setCloexec(spareFd, true);
-  if (!spareFile && spareTag) {
-    spareFile = spareFilePath(spareTag, spareHome);
-    if (spareFd !== undefined) {
-      try {
-        writeSync(spareFd, encodeSpareLine(spareFile));
-      } catch {}
-      try {
-        closeSync(spareFd);
-      } catch {}
-      spareFd = undefined;
-    }
-    const envObj: Record<string, string | undefined> = targetEnv ?? Object.create(null);
-    if (!targetEnv) {
-      for (const [k, v] of Object.entries(process.env)) if (v !== undefined) envObj[k] = v;
-      targetEnv = envObj;
-    }
-    envObj[spareEnvVar] = spareFile;
-  }
-  if (spareFd !== undefined) {
-    try {
-      closeSync(spareFd);
-    } catch {}
-    spareFd = undefined;
-  }
   if (!holder) {
     const envObj: Record<string, string | undefined> = targetEnv ?? Object.create(null);
     if (!targetEnv) {
@@ -1672,8 +1614,11 @@ if (import.meta.main) {
     };
     const holderAlive = createPipe();
     const innerResult = createPipe();
+    const holderSpare = createPipe();
     if (holderAlive) setCloexec(holderAlive.writeFd, true);
     if (innerResult) setCloexec(innerResult.readFd, true);
+    if (holderSpare) setCloexec(holderSpare.readFd, true);
+    const holderSpared = emptySpared();
     const extraFds: number[] = [];
     const addFd = (fd: number | undefined): number | undefined => {
       if (fd === undefined) return undefined;
@@ -1688,12 +1633,13 @@ if (import.meta.main) {
     const childHolderFd = addFd(holderAlive?.readFd);
     const childInnerResultFd = addFd(innerResult?.writeFd);
     const childClockFd = addFd(clockFd);
+    const childSpareFd = addFd(holderSpare?.writeFd);
     const innerPayload = {
       command,
       ...(targetEnv ? { env: targetEnv } : {}),
       graceMs: cleanupGraceMs,
       interruptGraceMs: stopInterruptGraceMs,
-      ...(spareFile ? { spareFile } : {}),
+      ...(childSpareFd !== undefined ? { spareFd: childSpareFd } : {}),
       ...(childControlFd !== undefined ? { controlFd: childControlFd } : {}),
       ...(childResultFd !== undefined ? { resultFd: childResultFd } : {}),
       ...(childGuardFd !== undefined ? { guardFd: childGuardFd } : {}),
@@ -1715,30 +1661,66 @@ if (import.meta.main) {
       closeFd(holderAlive?.writeFd);
       closeFd(innerResult?.readFd);
       closeFd(innerResult?.writeFd);
+      closeFd(holderSpare?.readFd);
+      closeFd(holderSpare?.writeFd);
       closeFd(controlFd);
       closeFd(resultFd);
       closeFd(guardFd);
       closeFd(clockFd);
-      removeSpareFile(spareFile);
+      closeFd(spareFd);
       process.exit(127);
     }
     closeFd(holderAlive?.readFd);
     closeFd(innerResult?.writeFd);
+    closeFd(holderSpare?.writeFd);
     closeFd(controlFd);
     closeFd(resultFd);
     closeFd(guardFd);
     closeFd(clockFd);
     redirectStdioOutputsToNull();
+    const recordSpareLine = (line: string) => {
+      const update = parseSpareUpdate(line);
+      if (!update) return;
+      mergeSpared(holderSpared, update.pids, update.sids);
+      if (spareFd !== undefined) {
+        try {
+          writeSync(spareFd, encodeSpareUpdate(update.pids, update.sids));
+        } catch {}
+      }
+    };
+    let spareRest = "";
+    const sparePump = holderSpare
+      ? (async () => {
+          const decoder = new TextDecoder();
+          const chunk = new Uint8Array(512);
+          for (;;) {
+            const n = await readFdChunk(holderSpare.readFd, chunk);
+            if (n <= 0) break;
+            spareRest += decoder.decode(chunk.subarray(0, n), { stream: true });
+            for (let nl = spareRest.indexOf("\n"); nl !== -1; nl = spareRest.indexOf("\n")) {
+              recordSpareLine(spareRest.slice(0, nl).trim());
+              spareRest = spareRest.slice(nl + 1);
+            }
+          }
+          if (spareRest.trim()) recordSpareLine(spareRest.trim());
+        })().catch(() => {})
+      : Promise.resolve();
     const code = await inner.exited;
+    await sparePump;
+    if (holderSpare) {
+      const rem = drainControlFd(holderSpare.readFd);
+      for (const line of rem.lines) recordSpareLine(line);
+      closeFd(holderSpare.readFd);
+    }
     const reported = innerResult ? probeResultReported(innerResult.readFd) === "reported" : false;
     closeFd(innerResult?.readFd);
     closeFd(holderAlive?.writeFd);
+    closeFd(spareFd);
     if (reported) {
-      removeSpareFile(spareFile);
       process.exit(inner.signalCode ? 137 : code);
     }
-    killDeadSessionSync(inner.pid, runTag, true, spareFile);
-    const adopted = discoverTargetsLinux(process.pid, runTag, undefined, spareFile);
+    killDeadSessionSync(inner.pid, runTag, true, holderSpared);
+    const adopted = discoverTargetsLinux(process.pid, runTag, undefined, holderSpared);
     signalDeadTargets(adopted, process.pid);
     process.exit(inner.signalCode ? 137 : code);
   }
@@ -1748,6 +1730,24 @@ if (import.meta.main) {
   if (holderFd !== undefined) setCloexec(holderFd, true);
   if (innerResultFd !== undefined) setCloexec(innerResultFd, true);
   if (clockFd !== undefined) setCloexec(clockFd, true);
+  const runnerSpared = emptySpared();
+  const spareServer = startSpareServer((pids, sids) => {
+    mergeSpared(runnerSpared, pids, sids);
+    if (spareFd !== undefined) {
+      try {
+        writeSync(spareFd, encodeSpareUpdate(pids, sids));
+      } catch {}
+    }
+    return true;
+  });
+  if (spareServer) {
+    const envObj: Record<string, string | undefined> = targetEnv ?? Object.create(null);
+    if (!targetEnv) {
+      for (const [k, v] of Object.entries(process.env)) if (v !== undefined) envObj[k] = v;
+      targetEnv = envObj;
+    }
+    envObj[spareEnvVar] = spareServer.endpoint;
+  }
   const fdTimer = (fd: number): Timer => {
     const queue: Array<() => void> = [];
     let pendingTicks = 0;
@@ -1820,8 +1820,9 @@ if (import.meta.main) {
   enableChildSubreaper();
   const runTag = ownTag(process.env[tagEnvVar]);
   const onHolderDead = () => {
+    spareServer?.close();
     if (reported) process.exit(0);
-    const targets = discoverTargetsLinux(process.pid, runTag, undefined, spareFile, false);
+    const targets = discoverTargetsLinux(process.pid, runTag, undefined, runnerSpared, false);
     signalDeadTargets(targets, process.pid);
     if (targetHandle) {
       try {
@@ -1858,7 +1859,7 @@ if (import.meta.main) {
     try {
       writeSync(1, "stopped\n");
     } catch {}
-    removeSpareFile(spareFile);
+    spareServer?.close();
     process.exit(128);
   }
   if (controlFd !== undefined) {
@@ -1883,7 +1884,6 @@ if (import.meta.main) {
     })();
   }
   const rememberedDetached = new Map<number, number>();
-  let stopReported = false;
   await supervise(command, {
     spawn: (argv) => {
       const child = Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio: ["ignore", "ignore", "ignore"] });
@@ -1891,7 +1891,7 @@ if (import.meta.main) {
       return child;
     },
     killGroup: (signal, includeTagged) =>
-      killSession(process.pid, signal, includeTagged ? runTag : undefined, includeTagged ? rememberedDetached : undefined, spareFile, !includeTagged),
+      killSession(process.pid, signal, includeTagged ? runTag : undefined, includeTagged ? rememberedDetached : undefined, runnerSpared, !includeTagged),
     hasGroupMembers: () => hasOtherGroupMember(),
     timer: clockFd !== undefined ? fdTimer(clockFd) : realTimer,
     onSignal: (signal, handler) => {
@@ -1909,7 +1909,6 @@ if (import.meta.main) {
       } catch {}
     },
     reportStop: () => {
-      stopReported = true;
       try {
         writeSync(1, "stopped\n");
       } catch {}
@@ -1927,7 +1926,12 @@ if (import.meta.main) {
       redirectStdioOutputsToNull();
     },
     exit: (code) => {
-      if (holderFd === undefined && reported && !stopReported) removeSpareFile(spareFile);
+      spareServer?.close();
+      if (spareFd !== undefined) {
+        try {
+          closeSync(spareFd);
+        } catch {}
+      }
       process.exit(code);
     },
   }, cleanupGraceMs, stopInterruptGraceMs);

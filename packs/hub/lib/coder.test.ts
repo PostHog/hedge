@@ -828,15 +828,14 @@ test("makes the captured command its own process-group leader like direct detach
   expect(res.code).toBe(0);
 });
 
-test("kills the direct target on timeout when the inherited spare file is unreadable", async () => {
+test("kills the direct target on timeout even when TMPDIR is read-only", async () => {
   if (process.getuid?.() === 0) return;
-  const { chmodSync, writeFileSync } = await import("node:fs");
-  const dir = temp.make("hedge-capture-unreadable-spare-");
+  const { chmodSync, mkdirSync } = await import("node:fs");
+  const dir = temp.make("hedge-capture-readonly-tmp-");
+  const roTmp = join(dir, "ro-tmp");
+  mkdirSync(roTmp, { recursive: true, mode: 0o500 });
   const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
   expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
-  const spareFile = join(dir, "locked.spare");
-  writeFileSync(spareFile, "", { mode: 0o600 });
-  chmodSync(spareFile, 0o000);
   const started = Bun.file(ready).text();
   const closed = Bun.file(gone).text();
   let childPid = 0;
@@ -846,7 +845,7 @@ test("kills the direct target on timeout when the inherited spare file is unread
       return () => {};
     });
     const res = await run(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "target", gone, ready], {
-      env: { ...process.env, HEDGE_SUPERVISOR_SPARE: spareFile },
+      env: { ...process.env, TMPDIR: roTmp },
       timeoutMs: 5_000,
     });
     expect(res.code).toBe(124);
@@ -854,7 +853,7 @@ test("kills the direct target on timeout when the inherited spare file is unread
     expect(childPid).toBeGreaterThan(0);
     expect(await closed).toBe("");
   } finally {
-    try { chmodSync(spareFile, 0o600); } catch {}
+    try { chmodSync(roTmp, 0o700); } catch {}
     if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
   }
 });
@@ -934,7 +933,7 @@ await humanStepsLeft(${JSON.stringify(plan)}, { home: ${JSON.stringify(dir)}, gi
   }
 });
 
-test("stops a captured env -i target on caller death and unexpected intermediate-parent crash", async () => {
+test("stops a captured env -i target on caller death and timeout", async () => {
   const envBin = Bun.which("env") ?? "/usr/bin/env";
   const shBin = Bun.which("sh") ?? "/bin/sh";
   const coderPath = join(import.meta.dir, "coder.ts");
@@ -964,7 +963,7 @@ test("stops a captured env -i target on caller death and unexpected intermediate
     if (targetPid1 > 0) try { process.kill(targetPid1, "SIGKILL"); } catch {}
   }
 
-  const dir2 = temp.make("hedge-capture-sup-kill-envi-");
+  const dir2 = temp.make("hedge-capture-timeout-envi-");
   const [ready2, gone2] = [join(dir2, "ready"), join(dir2, "gone")];
   expect(Bun.spawnSync(["mkfifo", ready2, gone2]).exitCode).toBe(0);
   const started2 = Bun.file(ready2).text();
@@ -978,16 +977,9 @@ test("stops a captured env -i target on caller death and unexpected intermediate
     );
     targetPid2 = Number((await started2).trim());
     expect(targetPid2).toBeGreaterThan(0);
-    const parentPid = Number(Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(targetPid2)]).stdout.toString().trim());
-    if (parentPid > 1 && parentPid !== process.pid) {
-      process.kill(parentPid, "SIGKILL");
-      const res = await running;
-      expect(res.code).toBe(137);
-    } else {
-      clock.fire();
-      const res = await running;
-      expect(res.code).toBe(124);
-    }
+    clock.fire();
+    const res = await running;
+    expect(res.code).toBe(124);
     expect(await closed2).toBe("");
   } finally {
     if (targetPid2 > 0) try { process.kill(targetPid2, "SIGKILL"); } catch {}

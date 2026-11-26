@@ -1,9 +1,8 @@
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, write, writeSync } from "node:fs";
-import { rm, rmdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { boxPrefix } from "../../../src/hub/names.ts";
-import { appendTag, createPipe, createSocketPair, killDeadSessionSync, killSessionSync, readFdChunk, setCloexec, spareEnvVar, supervisorEnv, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
+import { appendTag, createPipe, createSocketPair, emptySpared, killDeadSessionSync, killSessionSync, mergeSpared, readFdChunk, serializeSpared, setCloexec, spareEnvVar, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
 import { bunScript } from "../../../src/runner/bun.ts";
 import { heldLocks } from "./box-lock.ts";
 
@@ -101,13 +100,6 @@ const writeFd = (fd: number, data: Uint8Array, offset: number): Promise<number> 
       else resolve(written);
     });
   });
-
-function removeSpareAsync(filePath: string | undefined): void {
-  if (!filePath) return;
-  void rm(filePath, { force: true })
-    .catch(() => {})
-    .then(() => rmdir(dirname(filePath)).catch(() => {}));
-}
 
 function createResultReader(fd: number, stop: AbortSignal) {
   const decoder = new TextDecoder("utf-8");
@@ -265,8 +257,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     const keepAliveOnSignal = locks.length > 0 && !inProbe;
     const tag = inProbe ? `probe-${crypto.randomUUID()}` : crypto.randomUUID();
     const inheritedSpare = env?.[spareEnvVar] || process.env[spareEnvVar] || undefined;
-    let spareFile: string | undefined = inheritedSpare;
-    let spareHandedOff = Boolean(inheritedSpare);
+    const spared = emptySpared();
     let stopped = false;
     let supervisorReaped = false;
     let confirmedDone = false;
@@ -280,18 +271,16 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     const runOutOfProcessSweep = async (): Promise<void> => {
       if (!child) return;
       const pid = child.pid;
-      const spare = spareFile;
-      const fallbackCleanup = (fallbackSpare: string | undefined) => {
+      const fallbackCleanup = () => {
         if (!child) return;
         if (!supervisorReaped) {
-          killSessionSync(pid, "SIGKILL", tag, fallbackSpare);
+          killSessionSync(pid, "SIGKILL", tag, spared);
           try {
             child.kill("SIGKILL");
           } catch {}
         } else {
-          killDeadSessionSync(pid, tag, true, fallbackSpare);
+          killDeadSessionSync(pid, tag, true, spared);
         }
-        if (!inheritedSpare) removeSpareAsync(fallbackSpare);
       };
       let tempPipe: { readFd: number; writeFd: number } | undefined;
       let fd: number;
@@ -301,7 +290,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       } else {
         tempPipe = createPipe();
         if (!tempPipe) {
-          fallbackCleanup(spare);
+          fallbackCleanup();
           return;
         }
         try {
@@ -317,8 +306,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           {
             pid,
             tag,
-            ...(spare ? { spareFile: spare } : {}),
-            ...(inheritedSpare ? { keepSpareFile: true } : {}),
+            ...(spared.pids.size || spared.sids.size ? { spared: serializeSpared(spared) } : {}),
             fd: 3,
             delayMs: 0,
           },
@@ -328,9 +316,8 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           stdio: ["ignore", "ignore", "ignore", fd],
           detached: true,
         });
-        if (spare) spareHandedOff = true;
       } catch {
-        fallbackCleanup(spare);
+        fallbackCleanup();
       } finally {
         if (ownsTempFd) {
           try {
@@ -383,7 +370,6 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         return;
       }
       stopChild();
-      const spare = spareFile;
       if (child && !supervisorReaped && !ipcParentClosed) {
         const fd = ipcPair.parentFd;
         setCloexec(fd, false);
@@ -393,8 +379,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
             {
               pid: child.pid,
               tag,
-              ...(spare ? { spareFile: spare } : {}),
-              ...(inheritedSpare ? { keepSpareFile: true } : {}),
+              ...(spared.pids.size || spared.sids.size ? { spared: serializeSpared(spared) } : {}),
               fd: 3,
               delayMs: supervisorGraceMs,
             },
@@ -406,28 +391,25 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           });
           watchdog.unref();
           handedOff = true;
-          if (spare) spareHandedOff = true;
         } catch {
         } finally {
           setCloexec(fd, true);
           if (!handedOff) {
-            killSessionSync(child.pid, "SIGKILL", tag, spare);
+            killSessionSync(child.pid, "SIGKILL", tag, spared);
             try {
               child.kill("SIGKILL");
             } catch {}
-            if (!inheritedSpare) removeSpareAsync(spare);
           }
         }
       } else if (child) {
         if (supervisorReaped) {
-          killDeadSessionSync(child.pid, tag, true, spare);
+          killDeadSessionSync(child.pid, tag, true, spared);
         } else {
-          killSessionSync(child.pid, "SIGKILL", tag, spare);
+          killSessionSync(child.pid, "SIGKILL", tag, spared);
           try {
             child.kill("SIGKILL");
           } catch {}
         }
-        if (!inheritedSpare) removeSpareAsync(spare);
       }
       release();
       if (!process.listenerCount(name)) {
@@ -466,7 +448,6 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       const configJson = JSON.stringify({
         argv: command,
         envEntries,
-        ...(!inheritedSpare ? { spareTag: tag, ...(childEnv.HOME ? { spareHome: childEnv.HOME } : {}) } : {}),
       });
       const supEnv = minimalSupervisorEnv(fullTag, inheritedSpare);
       const configBytes = new TextEncoder().encode(configJson);
@@ -513,9 +494,11 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           const line = raw.trim();
           if (!line) return undefined;
           try {
-            const record = JSON.parse(line) as { spareFile?: unknown; code?: unknown; error?: unknown };
-            if (typeof record.spareFile === "string" && record.spareFile.length > 0) {
-              if (!spareFile) spareFile = record.spareFile;
+            const record = JSON.parse(line) as { spare?: { pids?: unknown; sids?: unknown }; code?: unknown; error?: unknown };
+            if (record.spare && typeof record.spare === "object") {
+              const pids = Array.isArray(record.spare.pids) ? record.spare.pids.filter((n): n is number => typeof n === "number") : [];
+              const sids = Array.isArray(record.spare.sids) ? record.spare.sids.filter((n): n is number => typeof n === "number") : [];
+              mergeSpared(spared, pids, sids);
               continue;
             }
             if (typeof record.error === "string") {
@@ -662,9 +645,6 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         void resultReader.done.finally(() => closeIpcParent());
       } else {
         closeIpcParent();
-      }
-      if (!spareHandedOff && (expired || !confirmedDone)) {
-        removeSpareAsync(spareFile);
       }
       release();
     }
