@@ -1831,7 +1831,13 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
       const message = error instanceof Error ? error.message : String(error);
       return { state: "failed", say: `could not store fetched objects for ${ref.name}: ${message}` };
     }
+    const editsNow = await localEdits(dir);
+    if (editsNow.length) {
+      await restoreRefreshState(true);
+      return { state: "edited", say: `${ref.name} moved, but Hedge ${editsReason(ref, dir, editsNow)}.` };
+    }
     const before = await currentCheckout(dir);
+    const beforeHead = (await git(dir, "rev-parse", "--verify", "--quiet", "HEAD")).stdout.toLowerCase();
     const refsBeforeCheckout = await snapshotRepoRefs(dir, gitDir);
     const rollbackCheckout = async (): Promise<boolean> => {
       const checkoutOk = before
@@ -1843,7 +1849,11 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     };
     const moved = await git(dir, "checkout", "-q", "--detach", `${tip}^{commit}`);
     if (!moved.ok) {
-      const restored = await rollbackCheckout();
+      const afterHead = (await git(dir, "rev-parse", "--verify", "--quiet", "HEAD")).stdout.toLowerCase();
+      const movedHead = Boolean(afterHead && afterHead === tip && afterHead !== beforeHead);
+      const restored = movedHead
+        ? await rollbackCheckout()
+        : refsBeforeCheckout !== undefined && (await snapshotRepoRefs(dir, gitDir)) === refsBeforeCheckout;
       await restoreRefreshState(restored);
       return { state: "failed", say: `could not check out ${tip.slice(0, 12)} of ${ref.name}: ${moved.stderr}` };
     }

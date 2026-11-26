@@ -618,28 +618,77 @@ describe("fetchSource staged refresh and rollback", () => {
     expect(await spawnGit(join(cache, "team"), "status", "--porcelain")).toBe("");
   });
 
-  test("preserves tracked edits created while a fetch is in progress instead of hard-resetting them on checkout failure", async () => {
+  test("preserves tracked edits created at the fetch or checkout boundary during fetchSource and advanceSource", async () => {
     if (process.platform === "win32") return;
-    const root = temp.make("git-concurrent-edit-");
-    const repo = join(root, "repo");
-    await initRepo(repo);
-    const c1 = await commitPack(repo, "team", "Concurrent edit v1.");
-    const c2 = await commitPack(repo, "team", "Concurrent edit v2.");
-    const cache = temp.make("cache-concurrent-edit-");
-    expect("error" in (await fetchSource({ name: "team", repo, ref: c1 }, cache))).toBe(false);
-    let calls = 0;
-    const probeThatEdits = async (dir: string, effective: string) => {
-      calls++;
-      if (calls === 2) {
-        writeFileSync(join(cache, "team", "packs", "team", "pack.json"), JSON.stringify({ schema: 1, name: "team", summary: "User concurrent edit." }));
+    const realGit = Bun.which("git");
+    if (!realGit) throw new Error("git not found");
+    const withGitEditShim = async (trigger: "fetch" | "checkout", targetFile: string, editBody: string, fn: () => Promise<void>) => {
+      const shimDir = temp.make("git-edit-shim-");
+      const marker = join(shimDir, "triggered");
+      const script = [
+        "#!/bin/sh",
+        `REAL_GIT=${JSON.stringify(realGit)}`,
+        `TRIGGER=${JSON.stringify(trigger)}`,
+        `TARGET=${JSON.stringify(targetFile)}`,
+        `MARKER=${JSON.stringify(marker)}`,
+        `BODY=${JSON.stringify(editBody)}`,
+        'matched=0',
+        'for arg in "$@"; do',
+        '  if [ "$arg" = "$TRIGGER" ]; then matched=1; break; fi',
+        'done',
+        'if [ "$TRIGGER" = "checkout" ] && [ "$matched" = "1" ] && [ ! -f "$MARKER" ]; then',
+        '  : > "$MARKER"',
+        '  printf "%s" "$BODY" > "$TARGET"',
+        'fi',
+        '"$REAL_GIT" "$@"',
+        'rc=$?',
+        'if [ "$TRIGGER" = "fetch" ] && [ "$matched" = "1" ] && [ "$rc" -eq 0 ] && [ ! -f "$MARKER" ]; then',
+        '  : > "$MARKER"',
+        '  printf "%s" "$BODY" > "$TARGET"',
+        'fi',
+        'exit "$rc"',
+      ].join("\n") + "\n";
+      writeFileSync(join(shimDir, "git"), script, { mode: 0o755 });
+      const prevPath = process.env.PATH ?? "";
+      process.env.PATH = `${shimDir}:${prevPath}`;
+      try {
+        await fn();
+      } finally {
+        process.env.PATH = prevPath;
       }
-      return probeLocalRepoInfo(dir, effective);
     };
-    const res = await fetchSource({ name: "team", repo, ref: c2 }, cache, undefined, undefined, probeThatEdits);
-    if ("error" in res) throw new Error(res.error);
-    expect(res.packs[0]?.manifest.summary).toBe("User concurrent edit.");
-    expect(readFileSync(join(cache, "team", "packs", "team", "pack.json"), "utf8")).toContain("User concurrent edit.");
-    expect(await spawnGit(join(cache, "team"), "rev-parse", "HEAD")).toBe(c1);
+
+    for (const trigger of ["fetch", "checkout"] as const) {
+      const root = temp.make(`git-concurrent-${trigger}-`);
+      const repo = join(root, "repo");
+      await initRepo(repo);
+      const c1 = await commitPack(repo, "team", "Concurrent edit v1.");
+      const c2 = await commitPack(repo, "team", "Concurrent edit v2.");
+      const cache = temp.make(`cache-concurrent-${trigger}-`);
+      expect("error" in (await fetchSource({ name: "team", repo, ref: c1 }, cache))).toBe(false);
+      const editedJson = JSON.stringify({ schema: 1, name: "team", summary: `User concurrent fetchSource ${trigger}.` });
+      await withGitEditShim(trigger, join(cache, "team", "packs", "team", "pack.json"), editedJson, async () => {
+        const res = await fetchSource({ name: "team", repo, ref: c2 }, cache);
+        if ("error" in res) throw new Error(res.error);
+        expect(res.packs[0]?.manifest.summary).toBe(`User concurrent fetchSource ${trigger}.`);
+      });
+      expect(readFileSync(join(cache, "team", "packs", "team", "pack.json"), "utf8")).toBe(editedJson);
+      expect(await spawnGit(join(cache, "team"), "rev-parse", "HEAD")).toBe(c1);
+
+      const refreshCache = temp.make(`cache-refresh-concurrent-${trigger}-`);
+      const refreshRepo = join(root, "refresh-repo");
+      await initRepo(refreshRepo);
+      const r1 = await commitPack(refreshRepo, "team", "Refresh v1.");
+      expect("error" in (await fetchSource({ name: "team", repo: refreshRepo, ref: "main" }, refreshCache))).toBe(false);
+      await commitPack(refreshRepo, "team", "Refresh v2.");
+      const refreshEditedJson = JSON.stringify({ schema: 1, name: "team", summary: `User concurrent refresh ${trigger}.` });
+      await withGitEditShim(trigger, join(refreshCache, "team", "packs", "team", "pack.json"), refreshEditedJson, async () => {
+        const refreshed = await advanceSource({ name: "team", repo: refreshRepo, ref: "main" }, refreshCache, r1);
+        expect(refreshed.state).toBe(trigger === "fetch" ? "edited" : "failed");
+      });
+      expect(readFileSync(join(refreshCache, "team", "packs", "team", "pack.json"), "utf8")).toBe(refreshEditedJson);
+      expect(await spawnGit(join(refreshCache, "team"), "rev-parse", "HEAD")).toBe(r1);
+    }
   });
 
 });

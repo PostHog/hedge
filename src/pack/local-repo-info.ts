@@ -202,8 +202,10 @@ function parseGitDirFileBytes(fileBuf: Buffer, baseDir: Buffer, access?: AccessS
     const start = gitdirPrefixBuf.length;
     let end = slice.length;
     while (end > start && (slice[end - 1] === 0x0a || slice[end - 1] === 0x0d)) end--;
+    const nul = slice.indexOf(0, start);
+    if (nul !== -1 && nul < end) end = nul;
     if (end <= start) return undefined;
-    return resolvePosixPathBytes(baseDir, slice.subarray(start, end));
+    return resolvePosixPathBytes(baseDir, slice.subarray(start, end), true, access);
   } catch (error) {
     recordAccessError(error, access);
     return undefined;
@@ -288,6 +290,8 @@ function nestedCommonKeyBytes(gitDirBuf: Buffer): Buffer | undefined {
   if (!rawCommon) return Buffer.from("oversized");
   let end = rawCommon.length;
   while (end > 0 && (rawCommon[end - 1] === 0x0a || rawCommon[end - 1] === 0x0d)) end--;
+  const nul = rawCommon.indexOf(0);
+  if (nul !== -1 && nul < end) end = nul;
   if (end === 0) return Buffer.from("empty");
   return resolvePosixPathBytes(gitDirBuf, rawCommon.subarray(0, end)) ?? Buffer.concat([Buffer.from("raw:"), rawCommon.subarray(0, end)]);
 }
@@ -329,8 +333,10 @@ function resolvedCommonDirBytes(dirBuf: Buffer, access?: AccessState): Buffer | 
       if (!rawCommon) return undefined;
       let end = rawCommon.length;
       while (end > 0 && (rawCommon[end - 1] === 0x0a || rawCommon[end - 1] === 0x0d)) end--;
+      const nul = rawCommon.indexOf(0);
+      if (nul !== -1 && nul < end) end = nul;
       if (end > 0) {
-        const resolvedCommon = resolvePosixPathBytes(dirBuf, rawCommon.subarray(0, end));
+        const resolvedCommon = resolvePosixPathBytes(dirBuf, rawCommon.subarray(0, end), true, access);
         if (!resolvedCommon) return undefined;
         commonDir = resolvedCommon;
       }

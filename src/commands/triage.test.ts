@@ -590,6 +590,57 @@ describe("hedge triage", () => {
     expect(issue.input).not.toContain("confidential-packs");
     expect(issue.input).toContain("unreachable sources: <private source>");
   });
+
+  test("preserves full private repo path redaction when a path contains unreachable sources wording", async () => {
+    const home = temp.make("home-path-unreachable-");
+    const privatePath = join(home, "secret-org", "unreachable sources: team-alpha");
+    const profileDir = join(home, "profile");
+    mkdirSync(profileDir, { recursive: true });
+    writeFileSync(
+      join(profileDir, "hedge.json"),
+      JSON.stringify({
+        schema: 1,
+        engine: { repo: "PostHog/hedge", ref: "v1", channel: "release" },
+        sources: [{ name: "team", repo: privatePath, ref: "main" }],
+        packs: [],
+        plan: "both",
+        settings: {},
+        workflows: {},
+      }),
+    );
+    mkdirSync(join(home, ".config/hedge"), { recursive: true });
+    writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "linux", name: "box", profileDir }));
+    const logs = join(home, ".local/state/hedge/logs");
+    mkdirSync(logs, { recursive: true });
+    writeFileSync(join(logs, "setup.log"), `failed cloning ${privatePath}\n`);
+    const sent: Sent[] = [];
+    const io = scripted([]);
+    const ghOnly = capture(sent);
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      if (command[0] === "git") {
+        const proc = Bun.spawn(command, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+        const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+        return { code, stdout, stderr };
+      }
+      return ghOnly(command, options);
+    };
+    const code = await main(["triage", "--send", "--note", "path wording check"], {
+      home,
+      engineRoot,
+      platform: "linux",
+      env: {},
+      print: io.terminal.print,
+      terminal: io.terminal,
+      capture: runRealGit,
+      hostname: () => "box.local",
+      run: async () => 0,
+    });
+    expect(code).toBe(0);
+    const issue = sent.find((call) => call.command[1] === "issue")!;
+    expect(issue.input).not.toContain("secret-org");
+    expect(issue.input).not.toContain("team-alpha");
+    expect(issue.input).toContain("failed cloning <team source>");
+  });
 });
 
 describe("hedge setup and triage", () => {

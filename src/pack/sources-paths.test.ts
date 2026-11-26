@@ -757,4 +757,39 @@ describe("fetchSource local path resolution", () => {
     expect("error" in (await fetchSource({ name: "team", repo: plain, ref: targetSha }, cacheOver))).toBe(true);
     expect("error" in (await fetchSource({ name: "team", repo: sibling, ref: targetSha }, cacheOver))).toBe(true);
   });
+
+  test("truncates gitdir and commondir pointer files at the first NUL byte like Git alongside a .git sibling", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-nul-pointer-");
+    const targetA = join(root, "target-a");
+    const plain = join(root, "packs");
+    const sibling = join(root, "packs.git");
+    await initRepo(targetA);
+    const shaA = await commitPack(targetA, "team", "NUL gitdir target A.");
+    await initRepo(sibling);
+    await commitPack(sibling, "team", "NUL sibling B.");
+    mkdirSync(plain, { recursive: true });
+    writeFileSync(join(plain, ".git"), Buffer.from(`gitdir: ${join(targetA, ".git")}\0ignored\n`));
+
+    const cache = temp.make("cache-nul-gitdir-");
+    const loaded = await fetchSource({ name: "team", repo: plain, ref: shaA }, cache);
+    if ("error" in loaded) throw new Error(loaded.error);
+    expect([loaded.packs[0]?.manifest.summary, loaded.stale]).toEqual(["NUL gitdir target A.", undefined]);
+    rmSync(sibling, { recursive: true, force: true });
+    expect("error" in (await fetchSource({ name: "team", repo: sibling, ref: shaA }, cache))).toBe(true);
+
+    const commonDirHost = join(root, "commondir-host");
+    const commonSibling = join(root, "commondir-host.git");
+    await initRepo(commonSibling);
+    await commitPack(commonSibling, "team", "Common sibling.");
+    mkdirSync(join(commonDirHost, ".git"), { recursive: true });
+    writeFileSync(join(commonDirHost, ".git", "HEAD"), "ref: refs/heads/main\n");
+    writeFileSync(join(commonDirHost, ".git", "commondir"), Buffer.from(`${join(targetA, ".git")}\0ignored\n`));
+    const commonCache = temp.make("cache-nul-commondir-");
+    const loadedCommon = await fetchSource({ name: "team", repo: commonDirHost, ref: shaA }, commonCache);
+    if ("error" in loadedCommon) throw new Error(loadedCommon.error);
+    expect([loadedCommon.packs[0]?.manifest.summary, loadedCommon.stale]).toEqual(["NUL gitdir target A.", undefined]);
+    rmSync(commonSibling, { recursive: true, force: true });
+    expect("error" in (await fetchSource({ name: "team", repo: commonSibling, ref: shaA }, commonCache))).toBe(true);
+  });
 });
