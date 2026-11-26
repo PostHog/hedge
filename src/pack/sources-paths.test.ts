@@ -792,4 +792,35 @@ describe("fetchSource local path resolution", () => {
     rmSync(commonSibling, { recursive: true, force: true });
     expect("error" in (await fetchSource({ name: "team", repo: commonSibling, ref: shaA }, commonCache))).toBe(true);
   });
+
+  test("keys a .git symlink to a gitfile by its parsed gitdir target so repointing the gitfile invalidates offline hits", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-dotgit-sym-gitfile-");
+    const repoA = join(root, "repo-a");
+    const repoB = join(root, "repo-b");
+    const host = join(root, "host");
+    const gitfile = join(root, "shared-gitfile");
+    await initRepo(repoA);
+    const shaA = await commitPack(repoA, "team", "Symlink gitfile A.");
+    await initRepo(repoB);
+    const shaB = await commitPack(repoB, "team", "Symlink gitfile B.");
+    mkdirSync(host, { recursive: true });
+    writeFileSync(gitfile, `gitdir: ${join(repoA, ".git")}\n`);
+    symlinkSync(gitfile, join(host, ".git"));
+
+    const cache = temp.make("cache-dotgit-sym-gitfile-");
+    const loadedA = await fetchSource({ name: "team", repo: host, ref: shaA }, cache);
+    if ("error" in loadedA) throw new Error(loadedA.error);
+    expect([loadedA.packs[0]?.manifest.summary, loadedA.stale]).toEqual(["Symlink gitfile A.", undefined]);
+    expect("error" in (await fetchSource({ name: "team", repo: repoB, ref: shaB }, cache))).toBe(false);
+
+    writeFileSync(gitfile, `gitdir: ${join(root, "missing-repo", ".git")}\n`);
+    expect("error" in (await fetchSource({ name: "team", repo: host, ref: shaA }, cache))).toBe(true);
+
+    writeFileSync(gitfile, `gitdir: ${join(repoA, ".git")}\n`);
+    rmSync(repoA, { recursive: true, force: true });
+    const offlineA = await fetchSource({ name: "team", repo: host, ref: shaA }, cache);
+    if ("error" in offlineA) throw new Error(offlineA.error);
+    expect([offlineA.packs[0]?.manifest.summary, offlineA.stale]).toEqual(["Symlink gitfile A.", undefined]);
+  });
 });

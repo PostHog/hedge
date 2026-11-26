@@ -182,7 +182,7 @@ describe("fetchSource staged refresh and rollback", () => {
     expect("error" in (await fetchSource({ name: "team", repo: impPath, ref: impShaA }, impCache))).toBe(true);
   });
 
-  test("cleans up failed fresh post-checkout hooks so a later apply recovers", async () => {
+  test("ignores template post-checkout hooks during fresh cache checkouts", async () => {
     if (process.platform === "win32") return;
     const root = temp.make("git-hook-recovery-");
     const hookRepo = join(root, "hook-repo");
@@ -191,21 +191,20 @@ describe("fetchSource staged refresh and rollback", () => {
     const templateDir = join(root, "git-template");
     const hooksDir = join(templateDir, "hooks");
     mkdirSync(hooksDir, { recursive: true });
-    const hookFile = join(hooksDir, "post-checkout");
-    writeFileSync(hookFile, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const marker = join(root, "hook-ran");
+    writeFileSync(join(hooksDir, "post-checkout"), `#!/bin/sh\necho ran > ${JSON.stringify(marker)}\nexit 1\n`, { mode: 0o755 });
     const hookCache = temp.make("cache-hook-recovery-");
     const savedTemplate = process.env.GIT_TEMPLATE_DIR;
     process.env.GIT_TEMPLATE_DIR = templateDir;
     try {
-      const failedFresh = await fetchSource({ name: "team", repo: hookRepo, ref: hookSha }, hookCache);
-      expect("error" in failedFresh).toBe(true);
+      const fresh = await fetchSource({ name: "team", repo: hookRepo, ref: hookSha }, hookCache);
+      if ("error" in fresh) throw new Error(fresh.error);
+      expect([fresh.packs[0]?.manifest.summary, fresh.stale]).toEqual(["Post-checkout recovery.", undefined]);
     } finally {
       if (savedTemplate === undefined) delete process.env.GIT_TEMPLATE_DIR;
       else process.env.GIT_TEMPLATE_DIR = savedTemplate;
     }
-    const recoveredHook = await fetchSource({ name: "team", repo: hookRepo, ref: hookSha }, hookCache);
-    if ("error" in recoveredHook) throw new Error(recoveredHook.error);
-    expect([recoveredHook.packs[0]?.manifest.summary, recoveredHook.stale]).toEqual(["Post-checkout recovery.", undefined]);
+    expect(existsSync(marker)).toBe(false);
   });
 
   test("retains intermediate commits after a failed refresh is retried and succeeds", async () => {
@@ -527,7 +526,7 @@ describe("fetchSource staged refresh and rollback", () => {
     expect([fixed.packs[0]?.manifest.summary, fixed.stale]).toEqual(["Fixed non-utf8.", undefined]);
   });
 
-  test("rolls back HEAD and tracked files when a post-checkout hook dirties a manifest during a failed offline retained-pin switch", async () => {
+  test("ignores cache post-checkout hooks during offline retained-pin switches", async () => {
     if (process.platform === "win32") return;
     const root = temp.make("git-offline-hook-rollback-");
     const repoA = join(root, "repo-a");
@@ -545,17 +544,19 @@ describe("fetchSource staged refresh and rollback", () => {
     rmSync(repoB, { recursive: true, force: true });
     const hooksDir = join(cache, "team", ".git", "hooks");
     mkdirSync(hooksDir, { recursive: true });
-    writeFileSync(join(hooksDir, "post-checkout"), "#!/bin/sh\nprintf '{broken-json' > packs/team/pack.json\n", { mode: 0o755 });
+    const marker = join(root, "offline-hook-ran");
+    writeFileSync(join(hooksDir, "post-checkout"), `#!/bin/sh\necho ran > ${JSON.stringify(marker)}\nprintf '{broken-json' > packs/team/pack.json\nexit 1\n`, { mode: 0o755 });
     const sameRepo = await fetchSource({ name: "team", repo: repoA, ref: a2 }, cache);
     if ("error" in sameRepo) throw new Error(sameRepo.error);
-    expect(sameRepo.packs[0]?.manifest.summary).toBe("Hook rollback A1.");
-    expect(sameRepo.stale).toContain("does not load");
-    expect(await spawnGit(join(cache, "team"), "rev-parse", "HEAD")).toBe(a1);
+    expect([sameRepo.packs[0]?.manifest.summary, sameRepo.stale]).toEqual(["Hook rollback A2.", undefined]);
+    expect(await spawnGit(join(cache, "team"), "rev-parse", "HEAD")).toBe(a2);
     expect(await spawnGit(join(cache, "team"), "status", "--porcelain")).toBe("");
     const crossRepo = await fetchSource({ name: "team", repo: repoB, ref: b1 }, cache);
-    expect("error" in crossRepo).toBe(true);
-    expect(await spawnGit(join(cache, "team"), "rev-parse", "HEAD")).toBe(a1);
+    if ("error" in crossRepo) throw new Error(crossRepo.error);
+    expect([crossRepo.packs[0]?.manifest.summary, crossRepo.stale]).toEqual(["Hook rollback B1.", undefined]);
+    expect(await spawnGit(join(cache, "team"), "rev-parse", "HEAD")).toBe(b1);
     expect(await spawnGit(join(cache, "team"), "status", "--porcelain")).toBe("");
+    expect(existsSync(marker)).toBe(false);
   });
 
   test("preserves untracked files instead of overwriting them during offline last-good fallback", async () => {
@@ -594,28 +595,53 @@ describe("fetchSource staged refresh and rollback", () => {
     expect(await unpinnedSources([{ name: "team", repo: weirdRepo, ref: `+${sha}` }], root, cache)).toEqual([]);
   });
 
-  test("restores identical tracked files modified by a post-checkout hook and handles nonzero hook exit during cached checkout", async () => {
+  test("preserves a user edit saved to an identical tracked file during checkout when a malformed pack rolls back", async () => {
     if (process.platform === "win32") return;
-    const root = temp.make("git-hook-carried-edit-");
+    const realGit = Bun.which("git");
+    if (!realGit) throw new Error("git not found");
+    const root = temp.make("git-carried-user-edit-");
     const repo = join(root, "repo");
     await initRepo(repo);
-    const c1 = await commitPack(repo, "team", "Carried edit same manifest.");
-    writeFileSync(join(repo, "extra.txt"), "v2\n");
-    await spawnGit(repo, "add", ".");
-    await spawnGit(repo, "commit", "-q", "-m", "v2 same manifest");
-    const c2 = await spawnGit(repo, "rev-parse", "HEAD");
-    const cache = temp.make("cache-hook-carried-edit-");
-    expect("error" in (await fetchSource({ name: "team", repo, ref: c2 }, cache))).toBe(false);
+    writeFileSync(join(repo, "shared.txt"), "shared v1\n");
+    const c1 = await commitPack(repo, "team", "Carried edit v1.");
+    const cache = temp.make("cache-carried-user-edit-");
     expect("error" in (await fetchSource({ name: "team", repo, ref: c1 }, cache))).toBe(false);
-    rmSync(repo, { recursive: true, force: true });
-    const hooksDir = join(cache, "team", ".git", "hooks");
-    mkdirSync(hooksDir, { recursive: true });
-    writeFileSync(join(hooksDir, "post-checkout"), "#!/bin/sh\nprintf '{broken-json' > packs/team/pack.json\nexit 1\n", { mode: 0o755 });
-    const fallback = await fetchSource({ name: "team", repo, ref: c2 }, cache);
-    if ("error" in fallback) throw new Error(fallback.error);
-    expect(fallback.packs[0]?.manifest.summary).toBe("Carried edit same manifest.");
+
+    writeFileSync(join(repo, "packs", "team", "pack.json"), "{broken-json");
+    await spawnGit(repo, "add", ".");
+    await spawnGit(repo, "commit", "-q", "-m", "broken v2 keeping shared.txt");
+    const c2 = await spawnGit(repo, "rev-parse", "HEAD");
+
+    const sharedInCache = join(cache, "team", "shared.txt");
+    const shimDir = temp.make("git-checkout-carry-shim-");
+    const marker = join(shimDir, "triggered");
+    const script = [
+      "#!/bin/sh",
+      `REAL_GIT=${JSON.stringify(realGit)}`,
+      `TARGET=${JSON.stringify(sharedInCache)}`,
+      `MARKER=${JSON.stringify(marker)}`,
+      'matched=0',
+      'for arg in "$@"; do',
+      '  if [ "$arg" = "checkout" ]; then matched=1; break; fi',
+      'done',
+      'if [ "$matched" = "1" ] && [ ! -f "$MARKER" ]; then',
+      '  : > "$MARKER"',
+      '  printf "user edit during checkout\\n" > "$TARGET"',
+      'fi',
+      'exec "$REAL_GIT" "$@"',
+    ].join("\n") + "\n";
+    writeFileSync(join(shimDir, "git"), script, { mode: 0o755 });
+    const prevPath = process.env.PATH ?? "";
+    process.env.PATH = `${shimDir}:${prevPath}`;
+    try {
+      const fallback = await fetchSource({ name: "team", repo, ref: c2 }, cache);
+      if ("error" in fallback) throw new Error(fallback.error);
+      expect(fallback.packs[0]?.manifest.summary).toBe("Carried edit v1.");
+    } finally {
+      process.env.PATH = prevPath;
+    }
     expect(await spawnGit(join(cache, "team"), "rev-parse", "HEAD")).toBe(c1);
-    expect(await spawnGit(join(cache, "team"), "status", "--porcelain")).toBe("");
+    expect(readFileSync(sharedInCache, "utf8")).toBe("user edit during checkout\n");
   });
 
   test("preserves tracked edits created at the fetch or checkout boundary during fetchSource and advanceSource", async () => {

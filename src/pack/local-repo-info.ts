@@ -356,6 +356,19 @@ function explicitPointerKeyBytes(pathBuf: Buffer, lexicalPath: Buffer, asFileUrl
     const linkInfo = lstatSync(dotGit);
     if (linkInfo.isSymbolicLink()) {
       const resolvedTarget = resolvePosixPathBytes(pathBuf, dotGitBuf);
+      if (resolvedTarget) {
+        let isFile = false;
+        try {
+          isFile = statSync(resolvedTarget).isFile();
+        } catch {}
+        if (isFile) {
+          const target = parseGitDirFileBytes(resolvedTarget, pathBuf);
+          const keyBuf = target
+            ? withNestedCommonBytes(Buffer.concat([lexicalPath, zeroByteBuf, Buffer.from("dotgit-link-file:"), resolvedTarget, zeroByteBuf]), target)
+            : Buffer.concat([lexicalPath, zeroByteBuf, Buffer.from("dotgit-link-file:"), resolvedTarget, zeroByteBuf, Buffer.from("invalid")]);
+          return encodeCanonicalLocal(keyBuf, asFileUrl);
+        }
+      }
       const keyBuf = resolvedTarget
         ? withNestedCommonBytes(Buffer.concat([lexicalPath, zeroByteBuf, Buffer.from("dotgit-link:")]), resolvedTarget)
         : Buffer.concat([lexicalPath, zeroByteBuf, Buffer.from("dotgit-link:raw:"), readlinkSync(dotGit, "buffer")]);
