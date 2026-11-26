@@ -824,7 +824,13 @@ process.exit(ok ? 0 : 1);`;
 
 test("makes the captured command its own session and process-group leader like direct detached spawn", async () => {
   if (process.platform === "win32") return;
-  const info = await capture(["sh", "-c", 'ps -o pid=,pgid=,sid= -p "$$"'], { timeoutMs: 5_000 });
+  const checkIds = `import { dlopen, FFIType } from "bun:ffi";
+const libc = dlopen(process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6", {
+  getpgid: { args: [FFIType.i32], returns: FFIType.i32 },
+  getsid: { args: [FFIType.i32], returns: FFIType.i32 },
+});
+console.log(process.pid, libc.symbols.getpgid(0), libc.symbols.getsid(0));`;
+  const info = await capture([process.execPath, "-e", checkIds], { timeoutMs: 5_000 });
   expect(info.code).toBe(0);
   const [pid, pgid, sid] = info.stdout.trim().split(/\s+/).map(Number);
   expect(pid).toBeGreaterThan(0);
@@ -1026,4 +1032,17 @@ if (res.code !== 0 || res.stdout !== "31000") {
   const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
   expect(stderr).toBe("");
   expect(code).toBe(0);
+});
+
+test("ignores oversized ambient HEDGE_* environment variables when capturing with a small explicit env", async () => {
+  const trueBin = Bun.which("true") ?? "/usr/bin/true";
+  const prev = process.env.HEDGE_OVERSIZED_AMBIENT_TEST;
+  process.env.HEDGE_OVERSIZED_AMBIENT_TEST = "x".repeat(131_072);
+  try {
+    const res = await capture([trueBin], { env: { PATH: "/usr/bin:/bin" }, timeoutMs: 5_000 });
+    expect(res).toEqual({ code: 0, stdout: "", stderr: "" });
+  } finally {
+    if (prev === undefined) delete process.env.HEDGE_OVERSIZED_AMBIENT_TEST;
+    else process.env.HEDGE_OVERSIZED_AMBIENT_TEST = prev;
+  }
 });

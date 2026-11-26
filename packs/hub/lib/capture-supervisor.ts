@@ -1,5 +1,5 @@
 import { closeSync, writeSync } from "node:fs";
-import { discoverTargets, discoverTargetsLinux, discoverTargetsSync, drainControlFd, emptySpared, enableChildSubreaper, graceMs, interruptGraceMs, killDeadSession, mergeSpared, ownTag, probeGraceEnvVar, readFdChunk, redirectStdioOutputsToNull, reportSpared, setCloexec, shieldGroupSignals, signalTargets, spareEnvVar, startSpareServer, type StopSignal, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { discoverTargets, discoverTargetsLinux, discoverTargetsSync, drainControlFd, emptySpared, enableChildSubreaper, graceMs, interruptGraceMs, killDeadSession, mergeSpared, ownTag, type PidIdentity, probeGraceEnvVar, type ProcTargets, readFdChunk, redirectStdioOutputsToNull, reportSpared, setCloexec, shieldGroupSignals, signalTargets, spareEnvVar, startSpareServer, type StopSignal, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
 type StartConfig = { argv: string[]; env?: Record<string, string>; envEntries?: Array<[string, string]> };
 
@@ -116,21 +116,39 @@ const hasSurvivingTarget = async (): Promise<boolean> => {
 };
 
 const applyMergedSignal = (
-  selfTargets: { pids: number[]; groups: number[]; orphanPids: number[] } | undefined,
-  targetTargets: { pids: number[]; groups: number[]; orphanPids: number[]; hasSessionGroup?: boolean; leaderSeenLive?: boolean } | undefined,
+  selfTargets: ProcTargets | undefined,
+  targetTargets: ProcTargets | undefined,
   sig: NodeJS.Signals,
 ) => {
   const groups = new Set<number>();
   const orphanPids = new Set<number>();
-  const addTargets = (found: { groups: number[]; orphanPids: number[] } | undefined) => {
+  const groupMembers = new Map<number, PidIdentity[]>();
+  const pidIdentities = new Map<number, PidIdentity>();
+  const addTargets = (found: ProcTargets | undefined) => {
     if (!found) return;
     for (const g of found.groups) if (g !== process.pid) groups.add(g);
     for (const p of found.orphanPids) if (p !== process.pid) orphanPids.add(p);
+    if (found.groupMembers) {
+      for (const [g, members] of found.groupMembers) {
+        if (g === process.pid) continue;
+        const list = groupMembers.get(g);
+        if (list) list.push(...members);
+        else groupMembers.set(g, [...members]);
+      }
+    }
+    if (found.pidIdentities) {
+      for (const [p, identity] of found.pidIdentities) {
+        if (p !== process.pid) pidIdentities.set(p, identity);
+      }
+    }
   };
   addTargets(targetTargets);
   addTargets(selfTargets);
-  if (targetPid !== undefined && !targetReaped) groups.add(targetPid);
-  signalTargets({ pids: [], groups: [...groups], orphanPids: [...orphanPids] }, sig, undefined);
+  if (targetPid !== undefined && !targetReaped) {
+    groups.add(targetPid);
+    groupMembers.delete(targetPid);
+  }
+  signalTargets({ pids: [], groups: [...groups], orphanPids: [...orphanPids], groupMembers, pidIdentities }, sig, undefined);
 };
 
 const signalBoth = (sig: NodeJS.Signals): void | Promise<void> => {

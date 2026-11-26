@@ -221,11 +221,16 @@ async function trusted(hub: HttpsHub): Promise<number> {
     bodyFailed = true;
     throw error;
   } finally {
-    await waitRemove(stopped ? 200 : 5_000);
-    if (stopped) reRaise(stopped);
-    else {
-      release();
-      if (!bodyFailed && removeError !== undefined) throw removeError;
+    if (stopped) {
+      await waitRemove(200);
+      reRaise(stopped);
+    } else {
+      await removeAsync();
+      if (stopped) reRaise(stopped);
+      else {
+        release();
+        if (!bodyFailed && removeError !== undefined) throw removeError;
+      }
     }
   }
 }

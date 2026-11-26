@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { Plan } from "../pack/types.ts";
 import { tempDirs } from "../testing/git.ts";
 import { humanStepsLeft } from "./apply.ts";
-import { createPipe, setCloexec } from "./probe-supervisor.ts";
+import { createPipe, setCloexec, signalTargets } from "./probe-supervisor.ts";
 
 const temp = tempDirs();
 const activeHelpers: Array<{ kill(signal?: NodeJS.Signals): void }> = [];
@@ -1952,5 +1952,39 @@ process.exit(res.ok ? 1 : 0);`;
     const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
     expect(stderr).toBe("");
     expect(code).toBe(0);
+  });
+
+  test("signalTargets skips signaling a process group whose member startTime no longer matches", async () => {
+    if (process.platform === "win32") return;
+    const dir = temp.make("sup-pgid-reuse-");
+    const [ready, ping, pong, gone] = [join(dir, "ready"), join(dir, "ping"), join(dir, "pong"), join(dir, "gone")];
+    mkfifo(ready, ping, pong, gone);
+    const started = fifoRead(ready);
+    const ponged = fifoRead(pong);
+    const closed = fifoRead(gone);
+    const shBin = Bun.which("sh") ?? "/bin/sh";
+    const child = Bun.spawn(
+      [shBin, "-c", 'exec 3>"$1"; echo $$ > "$2"; read _ < "$3"; echo alive > "$4"; exec sleep 30', "group", gone, ready, ping, pong],
+      { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+    );
+    try {
+      const pid = Number((await started).trim());
+      expect(pid).toBe(child.pid);
+      signalTargets(
+        {
+          pids: [pid],
+          groups: [pid],
+          orphanPids: [],
+          groupMembers: new Map([[pid, [{ pid, startTime: "stale-start-time", pgid: pid }]]]),
+        },
+        "SIGKILL",
+      );
+      await fifoWrite(ping, "check\n");
+      expect((await ponged).trim()).toBe("alive");
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited.catch(() => {});
+      await closed.catch(() => {});
+    }
   });
 });

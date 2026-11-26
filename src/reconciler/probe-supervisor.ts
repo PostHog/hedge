@@ -290,7 +290,17 @@ export type SupervisorHost = {
   exit: (code: number) => void;
 };
 
-type ProcTargets = { pids: number[]; groups: number[]; orphanPids: number[]; sids?: number[]; hasSessionGroup?: boolean; leaderSeenLive?: boolean };
+export type PidIdentity = { pid: number; startTime: string; pgid: number };
+export type ProcTargets = {
+  pids: number[];
+  groups: number[];
+  orphanPids: number[];
+  sids?: number[];
+  hasSessionGroup?: boolean;
+  leaderSeenLive?: boolean;
+  groupMembers?: Map<number, PidIdentity[]>;
+  pidIdentities?: Map<number, PidIdentity>;
+};
 
 function envMatchesTag(value: string, tag: string): boolean {
   return value.split(",").includes(tag);
@@ -773,7 +783,7 @@ export function discoverTargetsLinux(
   const spared = resolveSpareInput(spareInput);
   const effectiveTag = ownGroupOnly ? undefined : tag;
   const includeDetached = Boolean(effectiveTag);
-  const rows: Array<{ pid: number; ppid: number; pgrp: number; sid: number; envTag?: string }> = [];
+  const rows: Array<{ pid: number; ppid: number; pgrp: number; sid: number; startTime?: string; envTag?: string }> = [];
   const matched = new Set<number>();
   const activeTags = new Set<string>(effectiveTag ? [effectiveTag] : []);
   let leaderSeenLive = false;
@@ -799,8 +809,9 @@ export function discoverTargetsLinux(
       const ppid = Number(fields[1]);
       const pgrp = Number(fields[2]);
       const sid = Number(fields[3]);
+      const startTime = fields[19] || undefined;
       const envTag = effectiveTag && pid !== self ? readEnvTagLinux(pid) : undefined;
-      rows.push({ pid, ppid, pgrp, sid, ...(envTag ? { envTag } : {}) });
+      rows.push({ pid, ppid, pgrp, sid, ...(startTime ? { startTime } : {}), ...(envTag ? { envTag } : {}) });
       const isSpared = spared.pids.has(pid) || (sid !== sessionId && sid !== self && spared.sids.has(sid));
       const inScope = sessionId !== undefined && (ownGroupOnly ? pgrp === sessionId : sid === sessionId || pgrp === sessionId);
       if (!isSpared && inScope) {
@@ -846,22 +857,33 @@ export function discoverTargetsLinux(
   const groups = new Set<number>();
   const sids = new Set<number>();
   const orphanPids: number[] = [];
+  const groupMembers = new Map<number, PidIdentity[]>();
+  const pidIdentities = new Map<number, PidIdentity>();
   let hasSessionGroup = false;
+  const addGroupMember = (pgrp: number, identity: PidIdentity) => {
+    const list = groupMembers.get(pgrp);
+    if (list) list.push(identity);
+    else groupMembers.set(pgrp, [identity]);
+  };
   for (const row of rows) {
     if (!matched.has(row.pid) || row.pid === self || row.pid === sessionId) continue;
     pids.push(row.pid);
+    const identity = row.startTime ? { pid: row.pid, startTime: row.startTime, pgid: row.pgrp } : undefined;
+    if (identity) pidIdentities.set(row.pid, identity);
     if (row.sid > 0 && row.sid !== sessionId && row.sid !== self) sids.add(row.sid);
     if (sessionId === undefined) {
       orphanPids.push(row.pid);
     } else if (row.pgrp > 0 && row.pgrp !== sessionId && row.pgrp !== self) {
       groups.add(row.pgrp);
+      if (identity) addGroupMember(row.pgrp, identity);
     } else if (row.pgrp === sessionId) {
       hasSessionGroup = true;
+      if (identity) addGroupMember(sessionId, identity);
     } else {
       orphanPids.push(row.pid);
     }
   }
-  return { pids, groups: [...groups], orphanPids, sids: [...sids], hasSessionGroup, leaderSeenLive };
+  return { pids, groups: [...groups], orphanPids, sids: [...sids], hasSessionGroup, leaderSeenLive, groupMembers, pidIdentities };
 }
 
 const psLookupLimitMs = 200;
@@ -1070,22 +1092,35 @@ function buildTargetsFromPs(
   const pgidByPid = new Map<number, number>();
   for (const row of rows) pgidByPid.set(row.pid, row.pgid);
   const orphanPids: number[] = [];
+  const groupMembers = new Map<number, PidIdentity[]>();
+  const pidIdentities = new Map<number, PidIdentity>();
+  const lib = getDarwinLib();
+  const addGroupMember = (pgrp: number, identity: PidIdentity) => {
+    const list = groupMembers.get(pgrp);
+    if (list) list.push(identity);
+    else groupMembers.set(pgrp, [identity]);
+  };
   let hasSessionGroup = false;
   for (const pid of pids) {
     const sid = sessionIdDarwin(pid);
     if (sid !== undefined && sid > 0 && sid !== sessionId && sid !== self) sids.add(sid);
     const pgid = pgidByPid.get(pid);
+    const startTime = lib ? startTimeDarwin(lib, pid) : undefined;
+    const identity = startTime && pgid !== undefined ? { pid, startTime, pgid } : undefined;
+    if (identity) pidIdentities.set(pid, identity);
     if (sessionId === undefined) {
       orphanPids.push(pid);
     } else if (pgid !== undefined && pgid > 0 && pgid !== sessionId && pgid !== self) {
       groups.add(pgid);
+      if (identity) addGroupMember(pgid, identity);
     } else if (pgid === sessionId) {
       hasSessionGroup = true;
+      if (identity) addGroupMember(sessionId, identity);
     } else {
       orphanPids.push(pid);
     }
   }
-  return { pids, groups: [...groups], orphanPids, sids: [...sids], hasSessionGroup };
+  return { pids, groups: [...groups], orphanPids, sids: [...sids], hasSessionGroup, groupMembers, pidIdentities };
 }
 
 function psPidStat(treeText: string, targetPid: number): string | undefined {
@@ -1241,22 +1276,34 @@ export function discoverTargetsSync(
   const groups = new Set<number>();
   const sids = new Set<number>();
   const orphanPids: number[] = [];
+  const groupMembers = new Map<number, PidIdentity[]>();
+  const pidIdentities = new Map<number, PidIdentity>();
+  const addGroupMember = (pgrp: number, identity: PidIdentity) => {
+    const list = groupMembers.get(pgrp);
+    if (list) list.push(identity);
+    else groupMembers.set(pgrp, [identity]);
+  };
   let hasSessionGroup = false;
   for (const row of rows) {
     if (!matched.has(row.pid)) continue;
     pids.push(row.pid);
+    const startTime = startTimeDarwin(lib, row.pid);
+    const identity = startTime ? { pid: row.pid, startTime, pgid: row.pgid } : undefined;
+    if (identity) pidIdentities.set(row.pid, identity);
     if (row.sid > 0 && row.sid !== effectiveSessionId && row.sid !== self) sids.add(row.sid);
     if (effectiveSessionId === undefined) {
       orphanPids.push(row.pid);
     } else if (row.pgid > 0 && row.pgid !== effectiveSessionId && row.pgid !== self) {
       groups.add(row.pgid);
+      if (identity) addGroupMember(row.pgid, identity);
     } else if (row.pgid === effectiveSessionId) {
       hasSessionGroup = true;
+      if (identity) addGroupMember(effectiveSessionId, identity);
     } else {
       orphanPids.push(row.pid);
     }
   }
-  return { pids, groups: [...groups], orphanPids, sids: [...sids], hasSessionGroup };
+  return { pids, groups: [...groups], orphanPids, sids: [...sids], hasSessionGroup, groupMembers, pidIdentities };
 }
 
 async function runBoundedPs(args: string[]): Promise<{ pid: number; text: string } | undefined> {
@@ -1338,13 +1385,56 @@ function signalOnePid(pid: number, signal: NodeJS.Signals): void {
   } catch {}
 }
 
+function pidIdentityLinux(pid: number): PidIdentity | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const closeParen = stat.lastIndexOf(")");
+    if (closeParen === -1) return undefined;
+    const fields = stat.slice(closeParen + 2).split(" ");
+    const pgid = Number(fields[2]);
+    const startTime = fields[19];
+    if (!Number.isFinite(pgid) || pgid <= 0 || !startTime) return undefined;
+    return { pid, startTime, pgid };
+  } catch {
+    return undefined;
+  }
+}
+
+function pidIdentityNow(pid: number): PidIdentity | undefined {
+  if (process.platform === "linux") return pidIdentityLinux(pid);
+  const lib = getDarwinLib();
+  if (!lib) return undefined;
+  const pgid = lib.getpgid(pid);
+  if (pgid <= 0) return undefined;
+  const startTime = startTimeDarwin(lib, pid);
+  if (!startTime) return undefined;
+  return { pid, startTime, pgid };
+}
+
+function groupStillLive(pgrp: number, members: PidIdentity[] | undefined): boolean {
+  if (!members || !members.length) return true;
+  for (const member of members) {
+    const now = pidIdentityNow(member.pid);
+    if (now && now.startTime === member.startTime && now.pgid === pgrp) return true;
+  }
+  return false;
+}
+
+function pidStillLive(pid: number, expected: PidIdentity | undefined): boolean {
+  if (!expected) return true;
+  const now = pidIdentityNow(pid);
+  return now !== undefined && now.startTime === expected.startTime;
+}
+
 export function signalTargets(targets: ProcTargets, signal: NodeJS.Signals, sessionId?: number): void {
   for (const pgrp of targets.groups) {
     if (pgrp === sessionId) continue;
+    if (!groupStillLive(pgrp, targets.groupMembers?.get(pgrp))) continue;
     signalOneGroup(pgrp, signal);
   }
   for (const pid of targets.orphanPids) {
     if (pid === sessionId || pid === process.pid) continue;
+    if (!pidStillLive(pid, targets.pidIdentities?.get(pid))) continue;
     signalOnePid(pid, signal);
   }
   if (sessionId !== undefined) signalOneGroup(sessionId, signal);
@@ -1354,15 +1444,18 @@ function signalDeadTargets(targets: ProcTargets, deadSessionId?: number, guard?:
   for (const pgrp of targets.groups) {
     if (pgrp === deadSessionId) continue;
     if (guard && !guard()) return;
+    if (!groupStillLive(pgrp, targets.groupMembers?.get(pgrp))) continue;
     signalOneGroup(pgrp, "SIGKILL");
   }
   for (const pid of targets.orphanPids) {
     if (pid === deadSessionId || pid === process.pid) continue;
     if (guard && !guard()) return;
+    if (!pidStillLive(pid, targets.pidIdentities?.get(pid))) continue;
     signalOnePid(pid, "SIGKILL");
   }
   if (deadSessionId !== undefined && targets.hasSessionGroup) {
     if (guard && !guard()) return;
+    if (!groupStillLive(deadSessionId, targets.groupMembers?.get(deadSessionId))) return;
     signalOneGroup(deadSessionId, "SIGKILL");
   }
 }
@@ -1480,9 +1573,14 @@ export function killSession(
     return;
   }
   return discoverTargets(sessionId, tag, spareInput, ownGroupOnly).then((found) => {
+    const groupMembers = new Map<number, PidIdentity[]>();
+    if (found?.groupMembers) {
+      for (const [pgid, members] of found.groupMembers) groupMembers.set(pgid, [...members]);
+    }
+    const pidIdentities = new Map<number, PidIdentity>(found?.pidIdentities);
     const targets: ProcTargets = found
-      ? { pids: [...found.pids], groups: [...found.groups], orphanPids: [...found.orphanPids] }
-      : { pids: [], groups: [], orphanPids: [] };
+      ? { pids: [...found.pids], groups: [...found.groups], orphanPids: [...found.orphanPids], groupMembers, pidIdentities }
+      : { pids: [], groups: [], orphanPids: [], groupMembers, pidIdentities };
     const lib = getDarwinLib();
     if (!ownGroupOnly && remembered && lib) {
       const spared = resolveSpareInput(spareInput);
@@ -1515,14 +1613,21 @@ export function killSession(
           remembered.delete(pid);
           continue;
         }
+        const identity = { pid, startTime: saved.startTime, pgid: saved.pgid };
+        pidIdentities.set(pid, identity);
         if (sessionId === undefined || sparedPgid(saved.pgid)) {
           if (!seenOrphans.has(pid)) {
             seenOrphans.add(pid);
             targets.orphanPids.push(pid);
           }
-        } else if (!seenGroups.has(saved.pgid)) {
-          seenGroups.add(saved.pgid);
-          targets.groups.push(saved.pgid);
+        } else {
+          const list = groupMembers.get(saved.pgid);
+          if (list) list.push(identity);
+          else groupMembers.set(saved.pgid, [identity]);
+          if (!seenGroups.has(saved.pgid)) {
+            seenGroups.add(saved.pgid);
+            targets.groups.push(saved.pgid);
+          }
         }
       }
     }

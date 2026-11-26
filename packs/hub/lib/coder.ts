@@ -2,7 +2,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, re
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { boxPrefix } from "../../../src/hub/names.ts";
-import { appendTag, createPipe, createSocketPair, emptySpared, killDeadSessionSync, killSessionSync, mergeSpared, readFdChunk, serializeSpared, setCloexec, spareEnvVar, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
+import { appendTag, createPipe, createSocketPair, emptySpared, killDeadSessionSync, killSessionSync, mergeSpared, probeGraceEnvVar, readFdChunk, serializeSpared, setCloexec, spareEnvVar, tagEnvVar, watchdogEnv } from "../../../src/reconciler/probe-supervisor.ts";
 import { bunScript } from "../../../src/runner/bun.ts";
 import { heldLocks } from "./box-lock.ts";
 
@@ -182,13 +182,15 @@ const minimalSupEnvKeys = new Set([
   "SSL_CERT_DIR",
   "SYSTEMROOT",
   "COMSPEC",
+  probeGraceEnvVar,
 ]);
 
-function minimalSupervisorEnv(fullTag: string, inheritedSpare?: string): Record<string, string> {
+function minimalSupervisorEnv(fullTag: string, inheritedSpare?: string, compact = false): Record<string, string> {
   const clean: Record<string, string> = Object.create(null);
   for (const [key, value] of Object.entries(process.env)) {
     if (value === undefined || key === "BUN_OPTIONS" || key === "HEDGE_CAPTURE_CONFIG" || key === tagEnvVar || key === spareEnvVar) continue;
-    if (minimalSupEnvKeys.has(key) || key.startsWith("LC_") || key.startsWith("LD_") || key.startsWith("DYLD_") || key.startsWith("HEDGE_")) {
+    if (minimalSupEnvKeys.has(key) || key.startsWith("LC_") || key.startsWith("LD_") || key.startsWith("DYLD_")) {
+      if (compact && key !== "PATH" && value.length > 4096) continue;
       clean[key] = value;
     }
   }
@@ -476,7 +478,8 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         argv: command,
         envEntries,
       });
-      const supEnv = minimalSupervisorEnv(fullTag, inheritedSpare);
+      let compactSupEnv = false;
+      let supEnv = minimalSupervisorEnv(fullTag, inheritedSpare, compactSupEnv);
       const configBytes = new TextEncoder().encode(configJson);
       let inlineConfig = configBytes.byteLength <= 16_384 && envByteSize(supEnv) + configBytes.byteLength <= 32_768 && !configJson.includes("\0");
       const ipcFdIndex = 3 + locks.length;
@@ -569,8 +572,10 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
           slotReleased = false;
           break;
         } catch (error) {
-          if (inlineConfig && (error as NodeJS.ErrnoException)?.code === "E2BIG") {
+          if ((inlineConfig || !compactSupEnv) && (error as NodeJS.ErrnoException)?.code === "E2BIG") {
             inlineConfig = false;
+            compactSupEnv = true;
+            supEnv = minimalSupervisorEnv(fullTag, inheritedSpare, true);
             try {
               child = spawnSupervisor();
               activeCaptures++;
