@@ -96,26 +96,34 @@ function isOwnedDirectory(dir: string): boolean {
 
 export function recordSparedProcess(filePath: string, pids: number[], sids: number[]): void {
   if (!pids.length && !sids.length) return;
-  try {
-    const dir = dirname(filePath);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    if (!isOwnedDirectory(dir)) return;
-    const flags = constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
-    const fd = openSync(filePath, flags, 0o600);
+  const dir = dirname(filePath);
+  const flags = constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
+  const lines: string[] = [];
+  for (const pid of new Set(pids)) if (Number.isInteger(pid) && pid > 0) lines.push(`pid:${pid}`);
+  for (const sid of new Set(sids)) if (Number.isInteger(sid) && sid > 0) lines.push(`sid:${sid}`);
+  if (!lines.length) return;
+  const payload = lines.join("\n") + "\n";
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      const stat = fstatSync(fd);
-      if (!stat.isFile()) return;
-      if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return;
-      const lines: string[] = [];
-      for (const pid of new Set(pids)) if (Number.isInteger(pid) && pid > 0) lines.push(`pid:${pid}`);
-      for (const sid of new Set(sids)) if (Number.isInteger(sid) && sid > 0) lines.push(`sid:${sid}`);
-      if (lines.length) writeSync(fd, lines.join("\n") + "\n");
-    } finally {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      if (!isOwnedDirectory(dir)) return;
+      const fd = openSync(filePath, flags, 0o600);
       try {
-        closeSync(fd);
-      } catch {}
+        const stat = fstatSync(fd);
+        if (!stat.isFile()) return;
+        if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return;
+        writeSync(fd, payload);
+        return;
+      } finally {
+        try {
+          closeSync(fd);
+        } catch {}
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT" && attempt < 3) continue;
+      return;
     }
-  } catch {}
+  }
 }
 
 function readSpared(filePath: string | undefined): { pids: Set<number>; sids: Set<number> } {

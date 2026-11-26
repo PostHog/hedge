@@ -918,7 +918,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
     } catch {}
   };
   try {
-    const tag = crypto.randomUUID();
+    const tag = `probe-${crypto.randomUUID()}`;
     const fullTag = appendTag(env[tagEnvVar], tag);
     const targetEnv: Record<string, string> = Object.create(null);
     for (const [k, v] of Object.entries(env)) if (v !== undefined) targetEnv[k] = v;

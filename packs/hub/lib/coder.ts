@@ -198,7 +198,8 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
     };
     let child: ReturnType<typeof Bun.spawn> | undefined;
     const parentTag = env?.[tagEnvVar] ?? process.env[tagEnvVar];
-    const keepAliveOnSignal = locks.length > 0 && !parentTag;
+    const inProbe = (parentTag ?? "").split(",").some((part) => part.trim().startsWith("probe-"));
+    const keepAliveOnSignal = locks.length > 0 && !inProbe;
     const tag = crypto.randomUUID();
     const inheritedSpare = env?.[spareEnvVar] || process.env[spareEnvVar] || undefined;
     const sparePipe = inheritedSpare ? undefined : createPipe();
@@ -251,6 +252,18 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       if (!child) return;
       const pid = child.pid;
       const spare = resolveSpareFile();
+      const fallbackCleanup = (fallbackSpare: string | undefined) => {
+        if (!child) return;
+        if (!supervisorReaped) {
+          killSessionSync(pid, "SIGKILL", tag, fallbackSpare);
+          try {
+            child.kill("SIGKILL");
+          } catch {}
+        } else {
+          killDeadSessionSync(pid, tag, true, fallbackSpare);
+        }
+        if (!inheritedSpare) removeSpareAsync(fallbackSpare);
+      };
       let tempPipe: { readFd: number; writeFd: number } | undefined;
       let fd: number;
       if (!supervisorReaped && controlFd !== undefined) {
@@ -259,11 +272,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       } else {
         tempPipe = createPipe();
         if (!tempPipe) {
-          if (!supervisorReaped) {
-            try {
-              child.kill("SIGKILL");
-            } catch {}
-          }
+          fallbackCleanup(spare);
           return;
         }
         try {
@@ -299,11 +308,12 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         });
         if (spare || watchdogSpareFd !== undefined) spareHandedOff = true;
       } catch {
-        if (!supervisorReaped) {
-          try {
-            child.kill("SIGKILL");
-          } catch {}
-        }
+        const fallbackSpare =
+          spare ??
+          (watchdogSpareFd !== undefined && sparePipe
+            ? drainControlFd(sparePipe.readFd).lines.map(parseSpareLine).find((p) => p !== undefined)
+            : undefined);
+        fallbackCleanup(fallbackSpare);
       } finally {
         for (const extra of extraFds) {
           try {

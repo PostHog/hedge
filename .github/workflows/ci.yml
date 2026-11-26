@@ -20,6 +20,16 @@ jobs:
       - run: bun run test
       - run: bun run typecheck
       - run: shellcheck get.sh hedge fleet templates/profile/install.sh scripts/*.sh packs/*/hooks/*.sh packs/*/lib/*.sh packs/*/sync/*.sh proof/*.sh
+  test-macos:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun test --timeout 15000 src/reconciler/probe-supervisor.test.ts packs/hub/lib/https.test.ts
   install-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 30

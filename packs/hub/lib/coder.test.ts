@@ -1,7 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, symlinkSync, watch, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, symlinkSync, watch, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { watchEntries, type WatchClock } from "../../../src/reconciler/probe-watchdog.ts";
 import { tempDirs } from "../../../src/testing/git.ts";
 import { withBoxLock } from "./box-lock.ts";
 import { capture, captureWith, Coder, grant, reap, type Box, type Capture, type Timer } from "./coder.ts";
@@ -667,114 +666,88 @@ await fastCapture(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; while true; do kill
   }
 });
 
-test("watchdog kills a real stopped process group when its controlled clock reaches delayMs and exits early when the supervisor dies", async () => {
-  const supervisorPath = join(import.meta.dir, "../../../src/reconciler/probe-supervisor.ts");
-  const dir = temp.make("hedge-watchdog-clock-");
+test("kills a repeatedly self-stopping subprocess when its capture deadline expires", async () => {
+  const dir = temp.make("hedge-capture-self-stop-");
   const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
   expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
   const started = Bun.file(ready).text();
   const holderGone = Bun.file(gone).text();
-  const payload = JSON.stringify({
-    command: ["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; while true; do kill -STOP 0; done', "probe", gone, ready],
-    controlFd: 3,
-  });
-  const sup = Bun.spawn([process.execPath, supervisorPath, payload], {
-    stdio: ["ignore", "pipe", "ignore", "pipe"],
-    detached: true,
-  });
-  const aliveFd = sup.stdio[3] as number;
-  let now = 0;
-  let reachedBeforeDeadline!: () => void;
-  const beforeDeadline = new Promise<void>((resolve) => (reachedBeforeDeadline = resolve));
-  let releaseDeadline!: () => void;
-  const deadlineGate = new Promise<void>((resolve) => (releaseDeadline = resolve));
-  const clock: WatchClock = {
-    now: () => now,
-    sleep: async (ms) => {
-      if (now + ms >= 150) {
-        reachedBeforeDeadline();
-        await deadlineGate;
-      }
-      now += ms;
-    },
-  };
+  const clock = handTimer();
   let targetPid = 0;
   try {
+    const running = captureWith(clock.timer, 0)(
+      ["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; while true; do kill -STOP 0; done', "probe", gone, ready],
+      { timeoutMs: 150 },
+    );
     targetPid = Number((await started).trim());
     expect(targetPid).toBeGreaterThan(0);
-    const watching = watchEntries([{ pid: sup.pid, fd: aliveFd, delayMs: 150 }], clock);
-    await beforeDeadline;
     expect(() => process.kill(targetPid, 0)).not.toThrow();
-    releaseDeadline();
-    await watching;
+    clock.fire();
+    expect(await running).toEqual({ code: 124, stdout: "", stderr: "timed out after 150 ms" });
     expect(await holderGone).toBe("");
-    expect(await sup.exited).not.toBe(0);
   } finally {
-    try { closeSync(aliveFd); } catch {}
-    try { process.kill(-sup.pid, "SIGCONT"); } catch {}
-    try { process.kill(-sup.pid, "SIGKILL"); } catch {}
     if (targetPid > 0) {
       try { process.kill(targetPid, "SIGCONT"); } catch {}
       try { process.kill(targetPid, "SIGKILL"); } catch {}
     }
-    try { sup.kill("SIGKILL"); } catch {}
-  }
-
-  const fastPayload = JSON.stringify({ command: ["sh", "-c", "exit 0"], controlFd: 3 });
-  const fastSup = Bun.spawn([process.execPath, supervisorPath, fastPayload], {
-    stdio: ["ignore", "pipe", "ignore", "pipe"],
-    detached: true,
-  });
-  const fastFd = fastSup.stdio[3] as number;
-  try {
-    expect(await fastSup.exited).toBe(0);
-    await watchEntries([{ pid: fastSup.pid, fd: fastFd, delayMs: 60_000 }], {
-      now: () => 0,
-      sleep: () => new Promise<void>(() => {}),
-    });
-  } finally {
-    try { closeSync(fastFd); } catch {}
-    try { fastSup.kill("SIGKILL"); } catch {}
   }
 });
 
-test("lets a box-locked command finish its work when the caller receives SIGTERM outside a probe", async () => {
+test("lets a box-locked command finish its work when the caller receives SIGTERM outside a probe, including under an enclosing capture", async () => {
   const lockHome = temp.make("hedge-lock-sigterm-");
   const dir = temp.make("hedge-lock-sigterm-work-");
-  const [ready, gate, doneFile] = [join(dir, "ready"), join(dir, "gate"), join(dir, "done")];
-  expect(Bun.spawnSync(["mkfifo", ready, gate]).exitCode).toBe(0);
-  const started = Bun.file(ready).text();
   const boxLockPath = join(import.meta.dir, "box-lock.ts");
   const coderPath = join(import.meta.dir, "coder.ts");
-  const callerScript = `import { withBoxLock } from ${JSON.stringify(boxLockPath)};
+  for (const nested of [false, true]) {
+    const suffix = nested ? "nested" : "direct";
+    const [ready, gate, doneFile, innerPidFile] = [
+      join(dir, `ready-${suffix}`),
+      join(dir, `gate-${suffix}`),
+      join(dir, `done-${suffix}`),
+      join(dir, `inner-${suffix}`),
+    ];
+    expect(Bun.spawnSync(["mkfifo", ready, gate, innerPidFile]).exitCode).toBe(0);
+    const started = Bun.file(ready).text();
+    const innerScript = `import { writeFileSync } from "node:fs";
+import { withBoxLock } from ${JSON.stringify(boxLockPath)};
 import { capture } from ${JSON.stringify(coderPath)};
+writeFileSync(${JSON.stringify(innerPidFile)}, String(process.pid) + "\\n");
 await withBoxLock(${JSON.stringify(lockHome)}, "box-1", { waitMs: 0 }, () =>
   capture(["sh", "-c", 'echo $$ > "$1"; cat "$2" >/dev/null; echo finished > "$3"', "locked", ${JSON.stringify(ready)}, ${JSON.stringify(gate)}, ${JSON.stringify(doneFile)}], { timeoutMs: 30_000 }),
 );`;
-  const caller = Bun.spawn([process.execPath, "-e", callerScript], {
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore",
-  });
-  let workerPid = 0;
-  try {
-    workerPid = Number((await started).trim());
-    expect(workerPid).toBeGreaterThan(0);
-    caller.kill("SIGTERM");
-    expect(await caller.exited).not.toBe(0);
-    expect(() => process.kill(workerPid, 0)).not.toThrow();
-    await expect(withBoxLock(lockHome, "box-1", { waitMs: 0 }, async () => "free")).rejects.toThrow("is busy");
-    const writer = Bun.spawn(["sh", "-c", 'printf "go\\n" > "$1"', "writer", gate], {
+    const outerScript = nested
+      ? `import { capture } from ${JSON.stringify(coderPath)};
+const r = await capture([process.execPath, "-e", ${JSON.stringify(innerScript)}], { timeoutMs: 30_000 });
+process.exit(r.code);`
+      : innerScript;
+    const innerPidRead = Bun.file(innerPidFile).text();
+    const caller = Bun.spawn([process.execPath, "-e", outerScript], {
       stdin: "ignore",
       stdout: "ignore",
       stderr: "ignore",
     });
-    await writer.exited;
-    expect(await withBoxLock(lockHome, "box-1", { waitMs: 5_000 }, async () => "acquired")).toBe("acquired");
-    expect(readFileSync(doneFile, "utf8").trim()).toBe("finished");
-  } finally {
-    caller.kill("SIGKILL");
-    if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
+    let workerPid = 0;
+    let innerPid = 0;
+    try {
+      [innerPid, workerPid] = (await Promise.all([innerPidRead, started])).map((s) => Number(s.trim())) as [number, number];
+      expect(innerPid).toBeGreaterThan(0);
+      expect(workerPid).toBeGreaterThan(0);
+      process.kill(innerPid, "SIGTERM");
+      expect(await caller.exited).not.toBe(0);
+      expect(() => process.kill(workerPid, 0)).not.toThrow();
+      await expect(withBoxLock(lockHome, "box-1", { waitMs: 0 }, async () => "free")).rejects.toThrow("is busy");
+      const writer = Bun.spawn(["sh", "-c", 'printf "go\\n" > "$1"', "writer", gate], {
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      await writer.exited;
+      expect(await withBoxLock(lockHome, "box-1", { waitMs: 5_000 }, async () => "acquired")).toBe("acquired");
+      expect(readFileSync(doneFile, "utf8").trim()).toBe("finished");
+    } finally {
+      caller.kill("SIGKILL");
+      if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
+    }
   }
 });
 

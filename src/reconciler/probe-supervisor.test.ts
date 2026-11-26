@@ -1,11 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { closeSync, existsSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Plan } from "../pack/types.ts";
 import { tempDirs } from "../testing/git.ts";
 import { humanStepsLeft } from "./apply.ts";
-import { createPipe, discoverTargets, setCloexec, tagEnvVar } from "./probe-supervisor.ts";
-import { watchEntries } from "./probe-watchdog.ts";
 
 const temp = tempDirs();
 const activeHelpers: Array<{ kill(signal?: NodeJS.Signals): void }> = [];
@@ -459,121 +457,98 @@ await humanStepsLeft(${JSON.stringify(probePlan("int", [process.execPath, "-e", 
     }
   });
 
-  test("watchdog kills a probe whose TERM cleanup suspends its whole process group when the controlled clock reaches the deadline", async () => {
+  test("stops a probe whose TERM cleanup suspends its whole process group when the caller exits via SIGINT", async () => {
     const dir = temp.make("sup-watchdog-stop-");
+    const shBin = Bun.which("sh") ?? "/bin/sh";
     const [ready, gone, trapped] = [join(dir, "ready"), join(dir, "gone"), join(dir, "trapped")];
     mkfifo(ready, gone, trapped);
     const started = fifoRead(ready);
     const closed = fifoRead(gone);
     const sawTrap = fifoRead(trapped);
-    const payload = JSON.stringify({
-      command: ["sh", "-c", 'exec 3>"$1"; trap \'echo trapped > "$3"; kill -STOP 0\' TERM; echo $$ > "$2"; sleep 30 & wait', "probe", gone, ready, trapped],
-      controlFd: 3,
-    });
-    const sup = Bun.spawn([process.execPath, supervisorPath, payload], {
-      stdio: ["ignore", "pipe", "ignore", "pipe"],
-      detached: true,
-    });
-    const aliveFd = sup.stdio[3] as number;
-    let clockNow = 0;
-    let wakeSleep: (() => void) | undefined;
-    let sleepingResolve: (() => void) | undefined;
-    const sleeping = new Promise<void>((resolve) => (sleepingResolve = resolve));
-    const watchDone = watchEntries([{ pid: sup.pid, fd: aliveFd, delayMs: 250 }], {
-      now: () => clockNow,
-      sleep: () => {
-        sleepingResolve?.();
-        return new Promise<void>((resolve) => (wakeSleep = resolve));
-      },
-    });
+    const probeCmd = [shBin, "-c", 'exec 3>"$1"; trap \'echo trapped > "$3"; kill -STOP 0\' TERM; echo $$ > "$2"; sleep 30 & wait', "probe", gone, ready, trapped];
+    const runnerScript = `import { humanStepsLeft } from ${JSON.stringify(applyPath)};
+await humanStepsLeft({
+  machine: { schema: 1, role: "linux" },
+  os: process.platform === "darwin" ? "darwin" : "linux",
+  ai: "both",
+  packs: [], workflows: [], files: [], config: [], owners: {}, jobs: [],
+  human: [{ id: "stop-self", pack: "team", say: "Stop self.", probe: ${JSON.stringify(probeCmd)} }],
+  steps: [], checks: [], commands: {}, handlers: {}, models: [], settings: {}, unanswered: [], ask: [], dropped: [],
+}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}), graceMs: 0 });`;
+    const runner = Bun.spawn([process.execPath, "-e", runnerScript], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    let probePid = 0;
     try {
-      const probePid = Number((await started).trim());
+      probePid = Number((await started).trim());
       expect(probePid).toBeGreaterThan(0);
-      await sleeping;
-      writeSync(aliveFd, "SIGTERM\n");
+      runner.kill("SIGTERM");
       expect((await sawTrap).trim()).toBe("trapped");
-      expect(() => process.kill(probePid, 0)).not.toThrow();
-      clockNow = 250;
-      wakeSleep?.();
-      await watchDone;
       expect(await closed).toBe("");
-      expect(await sup.exited).not.toBe(0);
+      expect(await runner.exited).not.toBe(0);
     } finally {
-      try {
-        process.kill(-sup.pid, "SIGKILL");
-      } catch {}
-      sup.kill("SIGKILL");
-      try {
-        closeSync(aliveFd);
-      } catch {}
+      runner.kill("SIGKILL");
+      if (probePid > 0) {
+        try { process.kill(probePid, "SIGCONT"); } catch {}
+        try { process.kill(probePid, "SIGKILL"); } catch {}
+      }
     }
   });
 
-  test("watchdog still kills a tagged detached child when the supervisor dies and closes its control pipe early", async () => {
+  test("kills a detached worker when the probe supervisor dies unexpectedly during humanStepsLeft", async () => {
     const dir = temp.make("sup-watchdog-dead-");
-    const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
-    mkfifo(ready, gone);
+    const shBin = Bun.which("sh") ?? "/bin/sh";
+    const [ready, gone, supPidFile] = [join(dir, "ready"), join(dir, "gone"), join(dir, "sup-pid")];
+    mkfifo(ready, gone, supPidFile);
     const started = fifoRead(ready);
     const closed = fifoRead(gone);
-    const tag = crypto.randomUUID();
-    const detachedScript = `const c = Bun.spawn(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "worker", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" }); c.unref(); await Bun.sleep(30_000);`;
-    const payload = JSON.stringify({
-      command: [process.execPath, "-e", detachedScript],
-      controlFd: 3,
-    });
-    const sup = Bun.spawn([process.execPath, supervisorPath, payload], {
-      stdio: ["ignore", "pipe", "ignore", "pipe"],
-      env: { ...process.env, [tagEnvVar]: tag },
-      detached: true,
-    });
-    const aliveFd = sup.stdio[3] as number;
+    const supReady = fifoRead(supPidFile);
+    const detachedScript = `const c = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "worker", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+c.unref();
+await Bun.write(${JSON.stringify(supPidFile)}, String(process.ppid) + "\\n");
+await Bun.sleep(30_000);`;
     let workerPid = 0;
     try {
-      workerPid = Number((await started).trim());
-      expect(workerPid).toBeGreaterThan(0);
-      sup.kill("SIGKILL");
-      await sup.exited;
-      await watchEntries([{ pid: sup.pid, fd: aliveFd, delayMs: 250, tag }], {
-        now: () => 0,
-        sleep: async () => {},
+      const pending = humanStepsLeft(probePlan("dead-sup", [process.execPath, "-e", detachedScript]), {
+        home: dir,
+        giveUp: new Promise<void>(() => {}),
+        graceMs: 0,
       });
+      const [rawWorker, rawSup] = await Promise.all([started, supReady]);
+      workerPid = Number(rawWorker.trim());
+      const supPid = Number(rawSup.trim());
+      expect(workerPid).toBeGreaterThan(0);
+      expect(supPid).toBeGreaterThan(1);
+      process.kill(supPid, "SIGKILL");
+      const res = await pending;
+      expect(res.unchecked.map((s) => s.id)).toEqual(["dead-sup"]);
       expect(await closed).toBe("");
     } finally {
       if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
-      sup.kill("SIGKILL");
-      try {
-        closeSync(aliveFd);
-      } catch {}
     }
   });
 
-  test("leaves an intentionally detached daemon alive on normal probe exit while still killing detached workers on stop", async () => {
+  test("leaves an intentionally detached daemon alive on normal probe exit through humanStepsLeft while still killing detached workers on deadline", async () => {
     const dir = temp.make("sup-detached-normal-");
+    const shBin = Bun.which("sh") ?? "/bin/sh";
     const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
     mkfifo(ready, gone);
     const started = fifoRead(ready);
     const closed = fifoRead(gone);
-    const tag = crypto.randomUUID();
-    const daemonScript = `const c = Bun.spawn(["sh", "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" }); c.unref(); process.exit(0);`;
-    const payload = JSON.stringify({ command: [process.execPath, "-e", daemonScript], controlFd: 3 });
-    const sup = Bun.spawn([process.execPath, supervisorPath], {
-      stdio: [new TextEncoder().encode(payload), "pipe", "ignore", "pipe"],
-      env: { ...process.env, [tagEnvVar]: tag },
-      detached: true,
-    });
-    const aliveFd = sup.stdio[3] as number;
+    const daemonScript = `const c = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+c.unref();
+process.exit(0);`;
     let daemonPid = 0;
     try {
+      const pending = humanStepsLeft(probePlan("normal-daemon", [process.execPath, "-e", daemonScript]), {
+        home: dir,
+        giveUp: new Promise<void>(() => {}),
+        graceMs: 0,
+      });
       daemonPid = Number((await started).trim());
       expect(daemonPid).toBeGreaterThan(0);
-      expect(await sup.exited).toBe(0);
+      expect(await pending).toEqual({ failing: [], unchecked: [] });
       expect(() => process.kill(daemonPid, 0)).not.toThrow();
     } finally {
       if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
-      sup.kill("SIGKILL");
-      try {
-        closeSync(aliveFd);
-      } catch {}
       await closed.catch(() => {});
     }
   });
@@ -771,7 +746,7 @@ await Bun.sleep(30_000);`;
     expect(usr1Res).toEqual({ failing: [], unchecked: [] });
   });
 
-  test("stops a detached tagged worker with oversized argv and a detached clean-env child on SIGTERM while sparing unrelated processes whose argv or other env mentions the tag", async () => {
+  test("stops a detached worker with oversized argv and a detached clean-env child on deadline while sparing unrelated processes", async () => {
     const dir = temp.make("sup-real-detached-tag-");
     const envBin = Bun.which("env") ?? "/usr/bin/env";
     const shBin = Bun.which("sh") ?? "/bin/sh";
@@ -790,15 +765,9 @@ await Bun.sleep(30_000);`;
     const taggedClosed = fifoRead(taggedGone);
     const cleanStarted = fifoRead(cleanReady);
     const cleanClosed = fifoRead(cleanGone);
-    const tag = crypto.randomUUID();
-    const unrelatedEnv: Record<string, string> = Object.create(null);
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && k !== tagEnvVar) unrelatedEnv[k] = v;
-    }
-    unrelatedEnv.OTHER = `prefix ${tagEnvVar}=${tag}`;
     const unrelated = Bun.spawn(
-      [shBin, "-c", 'exec 3>"$1"; echo $$ > "$2"; sleep 30 3>&- & wait', "unrelated", unrelatedGone, unrelatedReady, `${tagEnvVar}=${tag}`],
-      { env: unrelatedEnv, detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+      [shBin, "-c", 'exec 3>"$1"; echo $$ > "$2"; sleep 30 3>&- & wait', "unrelated", unrelatedGone, unrelatedReady],
+      { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" },
     );
     const largeArg = "x".repeat(70_000);
     const probeScript = `const tagged = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; sleep 30 3>&- & wait', "tagged", ${JSON.stringify(taggedGone)}, ${JSON.stringify(taggedReady)}, ${JSON.stringify(largeArg)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
@@ -807,35 +776,31 @@ const clean = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin
 clean.unref();
 process.on("SIGTERM", () => process.exit(0));
 await Bun.sleep(30_000);`;
-    const payload = JSON.stringify({ command: [process.execPath, "-e", probeScript], controlFd: 3, graceMs: 0 });
-    const sup = Bun.spawn([process.execPath, supervisorPath], {
-      stdio: [new TextEncoder().encode(payload), "pipe", "ignore", "pipe"],
-      env: { ...process.env, [tagEnvVar]: tag },
-      detached: true,
-    });
-    const aliveFd = sup.stdio[3] as number;
+    let fireDeadline!: () => void;
     let unrelatedPid = 0;
     let taggedPid = 0;
     let cleanPid = 0;
     try {
+      const pending = humanStepsLeft(probePlan("oversized-clean", [process.execPath, "-e", probeScript]), {
+        home: dir,
+        giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)),
+        graceMs: 0,
+      });
       [unrelatedPid, taggedPid, cleanPid] = (await Promise.all([unrelatedStarted, taggedStarted, cleanStarted])).map((s) => Number(s.trim())) as [number, number, number];
       expect(unrelatedPid).toBeGreaterThan(0);
       expect(taggedPid).toBeGreaterThan(0);
       expect(cleanPid).toBeGreaterThan(0);
-      writeSync(aliveFd, "SIGTERM\n");
+      fireDeadline();
+      const res = await pending;
+      expect(res.unchecked.map((s) => s.id)).toEqual(["oversized-clean"]);
       expect(await taggedClosed).toBe("");
       expect(await cleanClosed).toBe("");
-      expect(await sup.exited).not.toBe(0);
       expect(() => process.kill(unrelatedPid, 0)).not.toThrow();
     } finally {
       if (unrelatedPid > 0) try { process.kill(unrelatedPid, "SIGKILL"); } catch {}
       if (taggedPid > 0) try { process.kill(taggedPid, "SIGKILL"); } catch {}
       if (cleanPid > 0) try { process.kill(cleanPid, "SIGKILL"); } catch {}
       unrelated.kill("SIGKILL");
-      sup.kill("SIGKILL");
-      try {
-        closeSync(aliveFd);
-      } catch {}
       await unrelatedClosed.catch(() => {});
     }
   });
@@ -1338,42 +1303,37 @@ process.exit(res.failing.length === 0 && res.unchecked.length === 0 ? 0 : 1);`;
     expect(await child.exited).toBe(0);
   });
 
-  test("watchdog kills a same-session clean-env worker when the supervisor dies early", async () => {
+  test("kills a same-session clean-env worker when its probe supervisor dies unexpectedly during humanStepsLeft", async () => {
     const dir = temp.make("sup-watchdog-dead-envi-");
     const envBin = Bun.which("env") ?? "/usr/bin/env";
     const shBin = Bun.which("sh") ?? "/bin/sh";
-    const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
-    mkfifo(ready, gone);
+    const [ready, gone, supPidFile] = [join(dir, "ready"), join(dir, "gone"), join(dir, "sup-pid")];
+    mkfifo(ready, gone, supPidFile);
     const started = fifoRead(ready);
     const closed = fifoRead(gone);
-    const tag = crypto.randomUUID();
-    const payload = JSON.stringify({
-      command: [envBin, "-i", shBin, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "worker", gone, ready],
-      controlFd: 3,
-    });
-    const sup = Bun.spawn([process.execPath, supervisorPath], {
-      stdio: [new TextEncoder().encode(payload), "pipe", "ignore", "pipe"],
-      env: { ...process.env, [tagEnvVar]: tag },
-      detached: true,
-    });
-    const aliveFd = sup.stdio[3] as number;
+    const supReady = fifoRead(supPidFile);
+    const probeScript = `const w = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "worker", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+w.unref();
+await Bun.write(${JSON.stringify(supPidFile)}, String(process.ppid) + "\\n");
+await Bun.sleep(30_000);`;
     let workerPid = 0;
     try {
-      workerPid = Number((await started).trim());
-      expect(workerPid).toBeGreaterThan(0);
-      sup.kill("SIGKILL");
-      await sup.exited;
-      await watchEntries([{ pid: sup.pid, fd: aliveFd, delayMs: 250, tag }], {
-        now: () => 0,
-        sleep: async () => {},
+      const pending = humanStepsLeft(probePlan("dead-envi", [process.execPath, "-e", probeScript]), {
+        home: dir,
+        giveUp: new Promise<void>(() => {}),
+        graceMs: 0,
       });
+      const [rawWorker, rawSup] = await Promise.all([started, supReady]);
+      workerPid = Number(rawWorker.trim());
+      const supPid = Number(rawSup.trim());
+      expect(workerPid).toBeGreaterThan(0);
+      expect(supPid).toBeGreaterThan(1);
+      process.kill(supPid, "SIGKILL");
+      const res = await pending;
+      expect(res.unchecked.map((s) => s.id)).toEqual(["dead-envi"]);
       expect(await closed).toBe("");
     } finally {
       if (workerPid > 0) try { process.kill(workerPid, "SIGKILL"); } catch {}
-      sup.kill("SIGKILL");
-      try {
-        closeSync(aliveFd);
-      } catch {}
     }
   });
 

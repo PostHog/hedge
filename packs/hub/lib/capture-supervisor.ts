@@ -7,7 +7,7 @@ enableChildSubreaper();
 shieldGroupSignals();
 
 const runTag = ownTag(process.env[tagEnvVar]);
-const hasParentTag = (process.env[tagEnvVar] ?? "").includes(",");
+const inProbe = (process.env[tagEnvVar] ?? "").split(",").some((part) => part.trim().startsWith("probe-"));
 const inheritedSpare = Boolean(process.env[spareEnvVar]);
 let sparePath = process.env[spareEnvVar];
 let target: ReturnType<typeof Bun.spawn> | undefined;
@@ -122,7 +122,7 @@ const watchControl = (fd: number, initialBuf = "") => {
     } catch {}
     if (!killing) {
       if (confirmedDone) exitDone();
-      if (lockCount > 0 && !targetReaped && !hasParentTag) {
+      if (lockCount > 0 && !targetReaped && !inProbe) {
         if (!inheritedSpare && sparePath) removeSpareFile(sparePath);
         process.exit(0);
       }
