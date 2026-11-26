@@ -838,7 +838,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
   let reaped = false;
   let reportedResult = false;
   const discoverySlackMs = process.platform === "darwin" ? 250 : 0;
-  const delayFor = (name: NodeJS.Signals) => (cleanupGraceMs ?? graceMs) + (name === "SIGINT" || name === "SIGQUIT" ? interruptGraceMs : 0) + discoverySlackMs + 100;
+  const delayFor = (name: NodeJS.Signals) => (cleanupGraceMs ?? graceMs) + (name === "SIGINT" || name === "SIGQUIT" ? (stopInterruptGraceMs ?? interruptGraceMs) : 0) + discoverySlackMs + 100;
   let lastSignal: NodeJS.Signals | undefined;
   const endGroup = (name: NodeJS.Signals = "SIGTERM") => {
     stopSignal ??= name;
@@ -961,7 +961,7 @@ async function runDetached(command: string[], env: Record<string, string | undef
     const encoded = JSON.stringify(payload);
     child = Bun.spawn(bunScript(probeSupervisor), {
       stdio: [new TextEncoder().encode(encoded), "pipe", "ignore", "pipe", ...extraStdio],
-      env: supervisorEnv(fullTag),
+      env: useLinuxHolder ? (env[tagEnvVar] ? supervisorEnv(env[tagEnvVar]) : watchdogEnv()) : supervisorEnv(fullTag),
       detached: true,
     });
     closeResultWrite();

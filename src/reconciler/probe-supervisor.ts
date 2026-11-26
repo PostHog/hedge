@@ -1438,11 +1438,13 @@ if (import.meta.main) {
       ...(childHolderFd !== undefined ? { holderFd: childHolderFd } : {}),
       ...(childInnerResultFd !== undefined ? { innerResultFd: childInnerResultFd } : {}),
     };
+    const runTag = spareTag ?? ownTag(process.env[tagEnvVar]);
+    const innerEnv = runTag ? supervisorEnv(appendTag(process.env[tagEnvVar], runTag)) : watchdogEnv();
     let inner: ReturnType<typeof Bun.spawn> | undefined;
     try {
       inner = Bun.spawn(bunScript(import.meta.filename), {
         stdio: [new TextEncoder().encode(JSON.stringify(innerPayload)), 1, 2, ...extraFds],
-        env: process.env,
+        env: innerEnv,
         detached: true,
       });
     } catch {
@@ -1466,7 +1468,6 @@ if (import.meta.main) {
     const reported = innerResult ? probeResultReported(innerResult.readFd) === "reported" : false;
     closeFd(innerResult?.readFd);
     closeFd(holderAlive?.writeFd);
-    const runTag = ownTag(process.env[tagEnvVar]);
     if (reported) {
       if (inner.signalCode !== null) killDeadSessionSync(inner.pid, undefined, true, spareFile, true);
       removeSpareFile(spareFile);

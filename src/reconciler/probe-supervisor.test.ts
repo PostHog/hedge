@@ -68,7 +68,19 @@ describe("probe supervisor", () => {
     const { supervise } = await import("./probe-supervisor.ts");
     for (const sig of ["SIGINT", "SIGQUIT"] as const) {
       const sent: NodeJS.Signals[] = [];
-      const timers: Array<{ ms: number; fire: () => void; cancelled: boolean; fired: boolean }> = [];
+      let now = 0;
+      const scheduled: Array<{ at: number; fire: () => void; cancelled: boolean; fired: boolean }> = [];
+      const advance = (ms: number) => {
+        now += ms;
+        for (;;) {
+          const next = scheduled
+            .filter((entry) => !entry.cancelled && !entry.fired && entry.at <= now)
+            .sort((a, b) => a.at - b.at)[0];
+          if (!next) break;
+          next.fired = true;
+          next.fire();
+        }
+      };
       const handlers = new Map<string, () => void>();
       let exitCode: number | undefined;
       let resolveExited!: (code: number) => void;
@@ -84,16 +96,8 @@ describe("probe supervisor", () => {
             if (signal === "SIGKILL") resolveExited(137);
           },
           timer: (ms, fire) => {
-            const entry = {
-              ms,
-              fire: () => {
-                entry.fired = true;
-                fire();
-              },
-              cancelled: false,
-              fired: false,
-            };
-            timers.push(entry);
+            const entry = { at: now + ms, fire, cancelled: false, fired: false };
+            scheduled.push(entry);
             return () => {
               entry.cancelled = true;
             };
@@ -111,14 +115,16 @@ describe("probe supervisor", () => {
       handlers.get(sig)?.();
       expect(sent).toEqual([sig]);
       expect(exitCode).toBeUndefined();
-      const first = timers.find((t) => !t.cancelled && !t.fired);
-      expect(first?.ms).toBe(300);
-      first?.fire();
+      advance(299);
+      expect(sent).toEqual([sig]);
+      expect(exitCode).toBeUndefined();
+      advance(1);
       expect(sent).toEqual([sig, "SIGTERM"]);
       expect(exitCode).toBeUndefined();
-      const second = timers.find((t) => !t.cancelled && !t.fired);
-      expect(second?.ms).toBe(150);
-      second?.fire();
+      advance(149);
+      expect(sent).toEqual([sig, "SIGTERM"]);
+      expect(exitCode).toBeUndefined();
+      advance(1);
       expect(sent).toEqual([sig, "SIGTERM", "SIGKILL"]);
       expect(await run).toBe(143);
       expect(exitCode).toBe(143);
@@ -1939,7 +1945,6 @@ await capture([process.execPath, "-e", ${JSON.stringify(innerCapture)}], { timeo
     const tmp = join(dir, "tmp");
     const uid = typeof process.getuid === "function" ? String(process.getuid()) : "u";
     const spareDir = join(tmp, `hedge-sup-${uid}`);
-    const envBin = Bun.which("env") ?? "/usr/bin/env";
     const shBin = Bun.which("sh") ?? "/bin/sh";
     const coderPath = join(import.meta.dir, "../../packs/hub/lib/coder.ts");
     const { chmodSync, mkdirSync } = await import("node:fs");
@@ -1948,7 +1953,7 @@ await capture([process.execPath, "-e", ${JSON.stringify(innerCapture)}], { timeo
     mkfifo(daemonReady, daemonGone, exitGate);
     const daemonStarted = fifoRead(daemonReady);
     const daemonClosed = fifoRead(daemonGone);
-    const daemonScript = `const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    const daemonScript = `const d = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 d.unref();
 await Bun.spawn(["cat", ${JSON.stringify(exitGate)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exited;
 process.exit(0);`;
@@ -1980,6 +1985,99 @@ process.exit(res.failing.map((s) => s.id).join(",") === "spare-fail" ? 0 : 1);`;
       driver.kill("SIGKILL");
       if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
       await driver.exited.catch(() => {});
+      await daemonClosed.catch(() => {});
+    }
+  });
+
+  test("keeps the Linux holder out of inner supervisor target discovery during SIGKILL escalation", async () => {
+    if (process.platform !== "linux") return;
+    const { discoverTargetsLinux, ownTag, tagEnvVar } = await import("./probe-supervisor.ts");
+    const { readFileSync } = await import("node:fs");
+    const dir = temp.make("sup-holder-tag-");
+    const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
+    mkfifo(ready, gone);
+    const started = fifoRead(ready);
+    const closed = fifoRead(gone);
+    let fireDeadline!: () => void;
+    let probePid = 0;
+    try {
+      const pending = humanStepsLeft(
+        probePlan("holder-isolated", ["sh", "-c", 'trap "" TERM; exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "probe", gone, ready]),
+        { home: dir, giveUp: new Promise<void>((resolve) => (fireDeadline = resolve)), graceMs: 0 },
+      );
+      probePid = Number((await started).trim());
+      expect(probePid).toBeGreaterThan(0);
+      const innerPid = Number(Bun.spawnSync(["ps", "-o", "pgid=", "-p", String(probePid)]).stdout.toString().trim());
+      const holderPid = Number(Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(innerPid)]).stdout.toString().trim());
+      expect(holderPid).toBeGreaterThan(0);
+      expect(holderPid).not.toBe(innerPid);
+      const probeEnv = readFileSync(`/proc/${probePid}/environ`, "utf8");
+      const tagEntry = probeEnv.split("\0").find((entry) => entry.startsWith(`${tagEnvVar}=`));
+      const tag = ownTag(tagEntry?.slice(tagEnvVar.length + 1));
+      expect(tag).toBeTruthy();
+      const found = discoverTargetsLinux(innerPid, tag);
+      expect(found.pids).not.toContain(holderPid);
+      expect(found.groups).not.toContain(holderPid);
+      fireDeadline();
+      const res = await pending;
+      expect(res.unchecked.map((s) => s.id)).toEqual(["holder-isolated"]);
+      expect(await closed).toBe("");
+    } finally {
+      if (probePid > 0) try { process.kill(probePid, "SIGKILL"); } catch {}
+    }
+  });
+
+  test("preserves a detached worker when watchdog bounded spare reading fails", async () => {
+    const { watchEntries } = await import("./probe-watchdog.ts");
+    const { createPipe } = await import("./probe-supervisor.ts");
+    const dir = temp.make("wd-spare-fail-");
+    const [childReady, childGone, daemonReady, daemonGone] = [
+      join(dir, "child-ready"),
+      join(dir, "child-gone"),
+      join(dir, "daemon-ready"),
+      join(dir, "daemon-gone"),
+    ];
+    mkfifo(childReady, childGone, daemonReady, daemonGone);
+    const childStarted = fifoRead(childReady);
+    const childClosed = fifoRead(childGone);
+    const daemonStarted = fifoRead(daemonReady);
+    const daemonClosed = fifoRead(daemonGone);
+    const envBin = Bun.which("env") ?? "/usr/bin/env";
+    const shBin = Bun.which("sh") ?? "/bin/sh";
+    const pipe = createPipe();
+    expect(pipe).toBeDefined();
+    let probe: ReturnType<typeof Bun.spawn> | undefined;
+    let daemonPid = 0;
+    try {
+      const script = `const d = Bun.spawn([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "daemon", ${JSON.stringify(daemonGone)}, ${JSON.stringify(daemonReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+d.unref();
+const c = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "child", ${JSON.stringify(childGone)}, ${JSON.stringify(childReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await c.exited;`;
+      probe = Bun.spawn([process.execPath, "-e", script], {
+        detached: true,
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      const childPid = Number((await childStarted).trim());
+      daemonPid = Number((await daemonStarted).trim());
+      expect(childPid).toBeGreaterThan(0);
+      expect(daemonPid).toBeGreaterThan(0);
+      await watchEntries(
+        [{ pid: probe.pid, fd: pipe!.writeFd, delayMs: 0, tag: `probe-${crypto.randomUUID()}`, spareFile: join(dir, "fake.spare"), keepSpareFile: true }],
+        { now: () => 1000, sleep: async () => {} },
+        async () => undefined,
+      );
+      expect(await childClosed).toBe("");
+      expect(() => process.kill(daemonPid, 0)).not.toThrow();
+    } finally {
+      if (pipe) {
+        try { (await import("node:fs")).closeSync(pipe.readFd); } catch {}
+        try { (await import("node:fs")).closeSync(pipe.writeFd); } catch {}
+      }
+      probe?.kill("SIGKILL");
+      if (daemonPid > 0) try { process.kill(daemonPid, "SIGKILL"); } catch {}
+      await probe?.exited.catch(() => {});
       await daemonClosed.catch(() => {});
     }
   });
