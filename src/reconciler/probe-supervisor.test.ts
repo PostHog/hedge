@@ -71,12 +71,17 @@ describe("probe supervisor", () => {
       const timers: Array<{ ms: number; fire: () => void; cancelled: boolean; fired: boolean }> = [];
       const handlers = new Map<string, () => void>();
       let exitCode: number | undefined;
+      let resolveExited!: (code: number) => void;
+      const exited = new Promise<number>((resolve) => {
+        resolveExited = resolve;
+      });
       const run = supervise(
         ["probe"],
         {
-          spawn: () => ({ pid: 42, exited: new Promise<number>(() => {}) }),
+          spawn: () => ({ pid: 42, exited }),
           killGroup: (signal) => {
             sent.push(signal);
+            if (signal === "SIGKILL") resolveExited(137);
           },
           timer: (ms, fire) => {
             const entry = {
