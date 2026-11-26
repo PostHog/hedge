@@ -1272,3 +1272,33 @@ process.exit(res.code === 0 ? 0 : 1);`;
   expect(stderr).toBe("");
   expect(code).toBe(0);
 });
+
+test("forwards SIGTERM to a standalone capture so its cleanup handler runs before bounded escalation", async () => {
+  if (process.platform === "win32") return;
+  const shBin = Bun.which("sh") ?? "/bin/sh";
+  const coderPath = join(import.meta.dir, "coder.ts");
+  const dir = temp.make("hedge-standalone-grace-");
+  const [ready, cleaned, gone] = [join(dir, "ready"), join(dir, "cleaned"), join(dir, "gone")];
+  expect(Bun.spawnSync(["mkfifo", ready, cleaned, gone]).exitCode).toBe(0);
+  const started = Bun.file(ready).text();
+  const sawCleaned = Bun.file(cleaned).text();
+  const closed = Bun.file(gone).text();
+  const targetCmd = `trap 'echo cleaned > ${JSON.stringify(cleaned)}; exit 0' TERM; exec 3>${JSON.stringify(gone)}; echo $$ > ${JSON.stringify(ready)}; sleep 30 3>&- & wait`;
+  const runner = Bun.spawn(
+    [process.execPath, "-e", `import { capture } from ${JSON.stringify(coderPath)}; await capture([${JSON.stringify(shBin)}, "-c", ${JSON.stringify(targetCmd)}], { timeoutMs: 30_000 });`],
+    { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+  );
+  let targetPid = 0;
+  try {
+    targetPid = Number((await started).trim());
+    expect(targetPid).toBeGreaterThan(0);
+    runner.kill("SIGTERM");
+    expect((await sawCleaned).trim()).toBe("cleaned");
+    expect(await closed).toBe("");
+    expect(await runner.exited).not.toBe(0);
+  } finally {
+    runner.kill("SIGKILL");
+    await runner.exited.catch(() => {});
+    if (targetPid > 0) try { process.kill(targetPid, "SIGKILL"); } catch {}
+  }
+});

@@ -2232,7 +2232,8 @@ if (import.meta.main) {
   };
   if (holderFd !== undefined) {
     try {
-      writeSync(reportFd, `runner:${process.pid}\n`);
+      const selfId = pidIdentityNow(process.pid);
+      writeSync(reportFd, `runner:${process.pid}${selfId ? `:${selfId.startTime}` : ""}\n`);
     } catch {}
     const drainedHolder = drainControlFd(holderFd);
     if (drainedHolder.closed) onHolderDead();

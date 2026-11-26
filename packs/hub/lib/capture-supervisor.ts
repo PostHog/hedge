@@ -321,7 +321,7 @@ const applyMergedSignal = (
 const signalBoth = (sig: NodeJS.Signals): void | Promise<void> => {
   if (process.platform === "linux") {
     const selfTargets = discoverTargetsLinux(process.pid, runTag, undefined, localSpared);
-    const targetTargets = targetDetached && targetPid !== undefined && !targetReaped ? discoverTargetsLinux(targetPid, undefined, undefined, localSpared) : undefined;
+    const targetTargets = targetDetached && targetPid !== undefined ? discoverTargetsLinux(targetPid, undefined, targetReaped ? true : undefined, localSpared) : undefined;
     applyMergedSignal(selfTargets, targetTargets, sig);
     if (targetDetached && targetPid !== undefined && targetReaped && sig === "SIGKILL") {
       killDeadSession(targetPid, undefined, true, localSpared);
@@ -330,7 +330,7 @@ const signalBoth = (sig: NodeJS.Signals): void | Promise<void> => {
   }
   return Promise.all([
     discoverTargets(process.pid, runTag, localSpared),
-    targetDetached && targetPid !== undefined && !targetReaped ? discoverTargets(targetPid, undefined, localSpared) : Promise.resolve(undefined),
+    targetDetached && targetPid !== undefined ? discoverTargets(targetPid, undefined, localSpared) : Promise.resolve(undefined),
   ]).then(async ([selfTargets, targetTargets]) => {
     applyMergedSignal(selfTargets, targetTargets, sig);
     if (targetDetached && targetPid !== undefined && targetReaped && sig === "SIGKILL") {
@@ -414,6 +414,32 @@ const armGraceful = (sig: StopSignal) => {
   }
 };
 
+const armStandaloneGrace = (sig: StopSignal) => {
+  if (killing || confirmedDone) return;
+  gracefulSignal = sig;
+  receivedSignals.add(sig);
+  const done = signalBoth(sig);
+  const checkAfter = () => {
+    if (killing || !targetReaped) return;
+    void hasSurvivingTarget().then((alive) => {
+      if (!killing && !alive) {
+        clearGraceTimers();
+        spareServer?.close();
+        markInnerDone();
+        process.exit(targetCode ?? 0);
+      }
+    });
+  };
+  if (done && typeof (done as Promise<void>).then === "function") void (done as Promise<void>).finally(checkAfter);
+  else checkAfter();
+  if (!graceTimer) {
+    graceTimer = setTimeout(() => {
+      graceTimer = undefined;
+      killAll();
+    }, 250);
+  }
+};
+
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) {
   process.on(sig, () => {
     if (inProbe) armGraceful(sig);
@@ -441,9 +467,15 @@ const watchControl = (fd: number, initialBuf = "") => {
           void exitDone();
           return true;
         }
-        if (line.startsWith("grace:") || line.startsWith("sig:")) {
-          const sig = line.slice(line.indexOf(":") + 1) as StopSignal;
+        if (line.startsWith("grace:")) {
+          const sig = line.slice("grace:".length) as StopSignal;
           if (stopSignalsSet.has(sig)) armGraceful(sig);
+        } else if (line.startsWith("sig:")) {
+          const sig = line.slice("sig:".length) as StopSignal;
+          if (stopSignalsSet.has(sig)) {
+            if (inProbe) armGraceful(sig);
+            else armStandaloneGrace(sig);
+          }
         }
         return false;
       };

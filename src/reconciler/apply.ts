@@ -10,7 +10,7 @@ import { hublessReason, listedPack } from "./resolve.ts";
 import { wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
 import { withLegacyNames } from "../legacy.ts";
 import { bunScript } from "../runner/bun.ts";
-import { appendTag, createPipe, discoverTargetsSync, drainControlFd, emptySpared, graceMs, interruptGraceMs, killDeadSessionSync, killSessionSync, mergeSpared, parseSpareUpdate, probeResultReported, serializeSpared, setCloexec, signalTargets, type SparedSet, supervisorEnv, tagEnvVar, waitForFdClosed, watchdogEnv } from "./probe-supervisor.ts";
+import { appendTag, createPipe, discoverTargetsSync, drainControlFd, emptySpared, graceMs, interruptGraceMs, killDeadSessionSync, killSessionSync, mergeSpared, parseSpareUpdate, pidIdentityNow, probeResultReported, serializeSpared, setCloexec, signalTargets, type SparedSet, supervisorEnv, tagEnvVar, waitForFdClosed, watchdogEnv } from "./probe-supervisor.ts";
 
 export type AdapterContext = { home: string; dryRun: boolean; adopt: string[]; adoptFrom?: string[] };
 export type AdapterResult = { actions: Action[]; findings: Finding[]; blocked?: boolean; failed?: boolean };
@@ -553,7 +553,7 @@ const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const;
 let activeSupervisors = 0;
 const supervisorWaiters: Array<() => void> = [];
 
-type LiveProbe = { pid: number; runnerPid?: number; tag: string; spared: SparedSet; spareFd?: number; spareRest: string; handedOff?: boolean; targetPid?: number; targetExited?: boolean; aliveFd?: number; resultFd?: number; guardFd?: number; holderExitFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
+type LiveProbe = { pid: number; runnerPid?: number; runnerStartTime?: string; tag: string; spared: SparedSet; spareFd?: number; spareRest: string; handedOff?: boolean; targetPid?: number; targetExited?: boolean; aliveFd?: number; resultFd?: number; guardFd?: number; holderExitFd?: number; delayMs: number; stop: (name: NodeJS.Signals) => void };
 type ActiveRunner = { stop: (name: NodeJS.Signals) => void };
 const activeRunners = new Set<ActiveRunner>();
 const allLiveProbes = new Set<LiveProbe>();
@@ -884,7 +884,7 @@ async function readSupervisorResult(
   stdout: ReadableStream<Uint8Array>,
   onFirstCode: (code: number) => void,
   onTarget?: (pid: number) => void,
-  onRunner?: (pid: number) => void,
+  onRunner?: (pid: number, startTime?: string) => void,
 ): Promise<{ code?: number; cleanup: boolean; stopped: boolean }> {
   const reader = stdout.getReader();
   const decoder = new TextDecoder();
@@ -901,8 +901,11 @@ async function readSupervisorResult(
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
         if (line.startsWith("runner:")) {
-          const pid = Number(line.slice("runner:".length));
-          if (Number.isInteger(pid) && pid > 0) onRunner?.(pid);
+          const rest = line.slice("runner:".length);
+          const sep = rest.indexOf(":");
+          const pid = Number(sep === -1 ? rest : rest.slice(0, sep));
+          const startTime = sep === -1 ? undefined : rest.slice(sep + 1) || undefined;
+          if (Number.isInteger(pid) && pid > 0) onRunner?.(pid, startTime);
         } else if (line.startsWith("target:")) {
           const pid = Number(line.slice("target:".length));
           if (Number.isInteger(pid) && pid > 0) onTarget?.(pid);
@@ -945,9 +948,17 @@ async function runDetached(command: string[], env: Record<string, string | undef
         writeSync(probe.aliveFd, `${name}\n`);
       } catch {}
     }
-    try {
-      process.kill(-(probe?.runnerPid ?? child.pid), "SIGCONT");
-    } catch {}
+    if (probe?.runnerPid !== undefined) {
+      if (probe.runnerStartTime && pidIdentityNow(probe.runnerPid)?.startTime === probe.runnerStartTime) {
+        try {
+          process.kill(-probe.runnerPid, "SIGCONT");
+        } catch {}
+      }
+    } else {
+      try {
+        process.kill(-child.pid, "SIGCONT");
+      } catch {}
+    }
     if (!live && probe) handOffWatchdog([probe]);
   };
   const onAbort = () => endGroup("SIGTERM");
@@ -1103,8 +1114,9 @@ async function runDetached(command: string[], env: Record<string, string | undef
       (pid) => {
         owned.targetPid = pid;
       },
-      (pid) => {
+      (pid, startTime) => {
         owned.runnerPid = pid;
+        owned.runnerStartTime = startTime ?? pidIdentityNow(pid)?.startTime;
       },
     );
     const cleanupDone = child.exited.then(

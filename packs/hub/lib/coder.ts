@@ -408,8 +408,14 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
         }
         return;
       }
-      stopChild();
       if (child && !supervisorReaped && ipcPair && !ipcParentClosed) {
+        stopped = true;
+        try {
+          writeSync(ipcPair.parentFd, `sig:${name}\n`);
+        } catch {}
+        try {
+          process.kill(-child.pid, "SIGCONT");
+        } catch {}
         const fd = ipcPair.parentFd;
         setCloexec(fd, false);
         let handedOff = false;
@@ -421,7 +427,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
               ...(targetPid !== undefined ? { targetPid, ...(targetStartTime ? { targetStartTime } : {}) } : {}),
               ...(spared.pids.size || spared.sids.size ? { spared: serializeSpared(spared) } : {}),
               fd: 3,
-              delayMs: supervisorGraceMs,
+              delayMs: Math.max(supervisorGraceMs, 350),
             },
           ]);
           const watchdog = Bun.spawn(bunScript(probeWatchdog, payload), {
@@ -444,17 +450,20 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
             }
           }
         }
-      } else if (child) {
-        if (supervisorReaped) {
-          killDeadSessionSync(child.pid, tag, true, spared);
-        } else {
-          killSessionSync(child.pid, "SIGKILL", tag, spared);
-          try {
-            child.kill("SIGKILL");
-          } catch {}
-        }
-        if (targetPid !== undefined && targetPid !== child.pid) {
-          killTargetSessionSync(targetPid, targetStartTime, tag, spared);
+      } else {
+        stopChild();
+        if (child) {
+          if (supervisorReaped) {
+            killDeadSessionSync(child.pid, tag, true, spared);
+          } else {
+            killSessionSync(child.pid, "SIGKILL", tag, spared);
+            try {
+              child.kill("SIGKILL");
+            } catch {}
+          }
+          if (targetPid !== undefined && targetPid !== child.pid) {
+            killTargetSessionSync(targetPid, targetStartTime, tag, spared);
+          }
         }
       }
       release();
