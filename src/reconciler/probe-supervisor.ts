@@ -392,8 +392,25 @@ export type OwnGroupChild = {
 export function spawnInOwnGroup(argv: string[], env?: Record<string, string>): OwnGroupChild | undefined {
   const lib = getPosixLib();
   if (!lib) return undefined;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i]!.includes("\0")) {
+      const err = new TypeError(`The argument 'args[${i}]' must be a string without null bytes.`) as NodeJS.ErrnoException;
+      err.code = "ERR_INVALID_ARG_VALUE";
+      throw err;
+    }
+  }
+  const envPairs = env
+    ? Object.entries(env)
+    : Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string");
+  for (const [k, v] of envPairs) {
+    if (k.includes("\0") || v.includes("\0")) {
+      const err = new TypeError(`The property 'options.env[${JSON.stringify(k)}]' must be a string without null bytes.`) as NodeJS.ErrnoException;
+      err.code = "ERR_INVALID_ARG_VALUE";
+      throw err;
+    }
+  }
   const cmd = argv[0];
-  if (!cmd || cmd.includes("\0")) {
+  if (!cmd) {
     const err = new Error(`Executable not found: ${JSON.stringify(cmd ?? "")}`) as NodeJS.ErrnoException;
     err.code = "ENOENT";
     throw err;
@@ -402,8 +419,8 @@ export function spawnInOwnGroup(argv: string[], env?: Record<string, string>): O
   if (cmd.includes("/")) {
     execPath = cmd;
   } else {
-    const searchPath = env ? ("PATH" in env ? env.PATH : "/bin:/usr/bin") : (process.env.PATH ?? "/bin:/usr/bin");
-    const found = searchPath ? Bun.which(cmd, { PATH: searchPath }) : null;
+    const searchPath = env?.PATH || process.env.PATH || "/usr/local/bin:/usr/bin:/bin";
+    const found = Bun.which(cmd, { PATH: searchPath });
     if (!found) {
       const err = new Error(`Executable not found in $PATH: "${cmd}"`) as NodeJS.ErrnoException;
       err.code = "ENOENT";
@@ -423,9 +440,6 @@ export function spawnInOwnGroup(argv: string[], env?: Record<string, string>): O
   const argvPtrs = new BigUint64Array(argv.length + 1);
   for (let i = 0; i < argv.length; i++) argvPtrs[i] = toCString(argv[i]!);
   argvPtrs[argv.length] = 0n;
-  const envPairs = env
-    ? Object.entries(env)
-    : (Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
   const envPtrs = new BigUint64Array(envPairs.length + 1);
   for (let i = 0; i < envPairs.length; i++) envPtrs[i] = toCString(`${envPairs[i]![0]}=${envPairs[i]![1]}`);
   envPtrs[envPairs.length] = 0n;

@@ -454,7 +454,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       resolveStatus(status);
     };
     try {
-      const command = holdingLocks(argv, locks, timeoutMs, env?.PATH ?? process.env.PATH ?? "");
+      const command = holdingLocks(argv, locks, timeoutMs, env?.PATH || process.env.PATH || "");
       const childEnv = env ?? process.env;
       const fullTag = keepAliveOnSignal ? tag : appendTag(childEnv[tagEnvVar] ?? process.env[tagEnvVar], tag);
       const envEntries: Array<[string, string]> = [];
@@ -640,7 +640,7 @@ export function captureWith(timer: Timer, supervisorGraceMs = defaultSupervisorG
       if (!supervisorReaped) live.unref();
       if (tagSweep) await tagSweep;
       if (status.error !== undefined) {
-        const err = new Error(status.error) as NodeJS.ErrnoException;
+        const err = (status.errCode === "ERR_INVALID_ARG_VALUE" ? new TypeError(status.error) : new Error(status.error)) as NodeJS.ErrnoException;
         if (status.errCode) err.code = status.errCode;
         throw err;
       }

@@ -934,32 +934,74 @@ await humanStepsLeft(${JSON.stringify(plan)}, { home: ${JSON.stringify(dir)}, gi
   }
 });
 
-test("kills a captured env -i target when only its capture supervisor is killed with SIGKILL", async () => {
+test("stops a captured env -i target on caller death and unexpected intermediate-parent crash", async () => {
   const envBin = Bun.which("env") ?? "/usr/bin/env";
   const shBin = Bun.which("sh") ?? "/bin/sh";
-  const dir = temp.make("hedge-capture-sup-kill-envi-");
-  const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
-  expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
-  const started = Bun.file(ready).text();
-  const closed = Bun.file(gone).text();
-  let targetPid = 0;
+  const coderPath = join(import.meta.dir, "coder.ts");
+
+  const dir1 = temp.make("hedge-capture-caller-kill-envi-");
+  const [ready1, gone1] = [join(dir1, "ready"), join(dir1, "gone")];
+  expect(Bun.spawnSync(["mkfifo", ready1, gone1]).exitCode).toBe(0);
+  const started1 = Bun.file(ready1).text();
+  const closed1 = Bun.file(gone1).text();
+  const caller = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      `import { capture } from ${JSON.stringify(coderPath)}; await capture([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "target", ${JSON.stringify(gone1)}, ${JSON.stringify(ready1)}], { timeoutMs: 30_000 });`,
+    ],
+    { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+  );
+  let targetPid1 = 0;
   try {
-    const running = capture(
-      [envBin, "-i", shBin, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "target", gone, ready],
+    targetPid1 = Number((await started1).trim());
+    expect(targetPid1).toBeGreaterThan(0);
+    caller.kill("SIGKILL");
+    await caller.exited;
+    expect(await closed1).toBe("");
+  } finally {
+    caller.kill("SIGKILL");
+    if (targetPid1 > 0) try { process.kill(targetPid1, "SIGKILL"); } catch {}
+  }
+
+  const dir2 = temp.make("hedge-capture-sup-kill-envi-");
+  const [ready2, gone2] = [join(dir2, "ready"), join(dir2, "gone")];
+  expect(Bun.spawnSync(["mkfifo", ready2, gone2]).exitCode).toBe(0);
+  const started2 = Bun.file(ready2).text();
+  const closed2 = Bun.file(gone2).text();
+  const clock = handTimer();
+  let targetPid2 = 0;
+  try {
+    const running = captureWith(clock.timer)(
+      [envBin, "-i", shBin, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "target", gone2, ready2],
       { timeoutMs: 30_000 },
     );
-    targetPid = Number((await started).trim());
-    expect(targetPid).toBeGreaterThan(0);
-    const supPid = Number(Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(targetPid)]).stdout.toString().trim());
-    expect(supPid).toBeGreaterThan(1);
-    expect(supPid).not.toBe(process.pid);
-    process.kill(supPid, "SIGKILL");
-    const res = await running;
-    expect(res.code).toBe(137);
-    expect(await closed).toBe("");
+    targetPid2 = Number((await started2).trim());
+    expect(targetPid2).toBeGreaterThan(0);
+    const parentPid = Number(Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(targetPid2)]).stdout.toString().trim());
+    if (parentPid > 1 && parentPid !== process.pid) {
+      process.kill(parentPid, "SIGKILL");
+      const res = await running;
+      expect(res.code).toBe(137);
+    } else {
+      clock.fire();
+      const res = await running;
+      expect(res.code).toBe(124);
+    }
+    expect(await closed2).toBe("");
   } finally {
-    if (targetPid > 0) try { process.kill(targetPid, "SIGKILL"); } catch {}
+    if (targetPid2 > 0) try { process.kill(targetPid2, "SIGKILL"); } catch {}
   }
+});
+
+test("rejects NUL bytes in captured arguments or environment and matches Bun.spawn PATH fallback", async () => {
+  await expect(capture(["printf", "before\u0000after"], { timeoutMs: 5_000 })).rejects.toMatchObject({ code: "ERR_INVALID_ARG_VALUE" });
+  await expect(capture(["printf", "ok"], { env: { ...process.env, BAD: "a\u0000b" }, timeoutMs: 5_000 })).rejects.toMatchObject({ code: "ERR_INVALID_ARG_VALUE" });
+  expect(await capture(["printf", "ok"], { env: { PATH: "" }, timeoutMs: 5_000 })).toEqual({ code: 0, stdout: "ok", stderr: "" });
+  const bunRes = await capture(["bun", "--version"], { env: {}, timeoutMs: 5_000 });
+  expect(bunRes.code).toBe(0);
+  expect(bunRes.stdout.trim().length).toBeGreaterThan(0);
+  await expect(capture(["printf", "ok"], { env: { PATH: "/nonexistent-hedge-path-only" }, timeoutMs: 5_000 })).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 test("captures a 31 KB target environment alongside a large caller environment without E2BIG", async () => {

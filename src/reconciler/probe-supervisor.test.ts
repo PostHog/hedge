@@ -240,9 +240,17 @@ await humanStepsLeft(${JSON.stringify(probePlan("esc", probeCmd))}, { home: ${JS
     const leaderScript = `import { writeFileSync } from "node:fs";
 process.on("SIGINT", () => { writeFileSync(${JSON.stringify(leaderCleaned)}, "leader-done\\n"); process.exit(130); });
 await Bun.spawn(["sh", "-c", ${JSON.stringify(childScript)}], { stdio: ["ignore", "ignore", "ignore"] }).exited;`;
+    const clock = manualClock();
     const runnerScript = `import { humanStepsLeft } from ${JSON.stringify(applyPath)};
-await humanStepsLeft(${JSON.stringify(probePlan("int", [process.execPath, "-e", leaderScript]))}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}), graceMs: 1_000 });`;
-    const runner = Bun.spawn([process.execPath, "-e", runnerScript], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+await humanStepsLeft(${JSON.stringify(probePlan("int", [process.execPath, "-e", leaderScript]))}, { home: ${JSON.stringify(dir)}, giveUp: new Promise(() => {}), graceMs: 10_000, interruptGraceMs: 10_000, clockFd: 3 });`;
+    setCloexec(clock.readFd, false);
+    const runner = Bun.spawn([process.execPath, "-e", runnerScript], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      stdio: ["ignore", "ignore", "ignore", clock.readFd],
+    });
+    setCloexec(clock.readFd, true);
     let childPid = 0;
     try {
       childPid = Number((await started).trim());
@@ -261,6 +269,7 @@ await humanStepsLeft(${JSON.stringify(probePlan("int", [process.execPath, "-e", 
       expect(existsSync(prematureTerm)).toBe(false);
       expect(await runner.exited).not.toBe(0);
     } finally {
+      clock.close();
       if (childPid > 0) try { process.kill(childPid, "SIGKILL"); } catch {}
       runner.kill("SIGKILL");
       await runner.exited.catch(() => {});
