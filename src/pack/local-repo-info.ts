@@ -186,7 +186,7 @@ function parseGitDirFileBytes(fileBuf: Buffer, baseDir: Buffer, access?: AccessS
     fd = openSync(fileBuf, "r");
     const header = Buffer.allocUnsafe(gitdirPrefixBuf.length);
     if (readSync(fd, header, 0, header.length, 0) !== header.length || !header.equals(gitdirPrefixBuf)) return undefined;
-    if (info.size > 8192) {
+    if (info.size > 1_048_576) {
       if (access) access.inaccessible = true;
       return undefined;
     }
@@ -284,7 +284,7 @@ function nestedCommonKeyBytes(gitDirBuf: Buffer): Buffer | undefined {
     return undefined;
   }
   if (!isFile) return undefined;
-  const rawCommon = readBoundedPrefixBytes(commonPath, 8192, true);
+  const rawCommon = readBoundedPrefixBytes(commonPath, 1_048_576, true);
   if (!rawCommon) return Buffer.from("oversized");
   let end = rawCommon.length;
   while (end > 0 && (rawCommon[end - 1] === 0x0a || rawCommon[end - 1] === 0x0d)) end--;
@@ -325,7 +325,7 @@ function resolvedCommonDirBytes(dirBuf: Buffer, access?: AccessState): Buffer | 
       recordAccessError(error, access);
     }
     if (hasCommonFile) {
-      const rawCommon = readBoundedPrefixBytes(commonPath, 8192, true, access);
+      const rawCommon = readBoundedPrefixBytes(commonPath, 1_048_576, true, access);
       if (!rawCommon) return undefined;
       let end = rawCommon.length;
       while (end > 0 && (rawCommon[end - 1] === 0x0a || rawCommon[end - 1] === 0x0d)) end--;

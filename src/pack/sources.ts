@@ -89,6 +89,9 @@ async function checkoutSafely(dir: string, target: CheckoutState, resetTracked: 
     }
   }
   if (!ok) return false;
+  if (resetTracked && (await localEdits(dir)).length > 0) {
+    if (!(await git(dir, ...hookArgs, "reset", "-q", "--hard", "HEAD")).ok) return false;
+  }
   const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
   if (!head.ok || head.stdout.toLowerCase() !== target.commit.toLowerCase()) return false;
   clearLoadedModules(dir);
@@ -386,9 +389,11 @@ async function fetchLocked(
     ? undefined
     : await checkedOutFromCache(dir, repo, effectiveBeforeDigest, ref, good);
   if (cachedHit) {
-    checkedOutCommit = cachedHit.commit;
-    effectiveDigest = cachedHit.effectiveDigest;
-    touchedWorktree = true;
+    if (cachedHit.touchedWorktree) touchedWorktree = true;
+    if (cachedHit.commit) {
+      checkedOutCommit = cachedHit.commit;
+      effectiveDigest = cachedHit.effectiveDigest;
+    }
   }
   if (!checkedOutCommit && !fetchError) {
     if (beforeIdentity.localInfo.timedOut) {
@@ -1156,7 +1161,7 @@ async function checkedOutFromCache(
   effectiveDigest: string,
   ref: SourceRef,
   good: Good | undefined,
-): Promise<{ commit: string; effectiveDigest: string } | undefined> {
+): Promise<{ commit?: string; effectiveDigest: string; touchedWorktree: boolean } | undefined> {
   if (!existsSync(join(dir, ".git"))) return undefined;
   const oid = stripSourceRefspec(ref.ref).toLowerCase();
   if (!gitHash.test(oid)) return undefined;
@@ -1173,9 +1178,8 @@ async function checkedOutFromCache(
     (goodCommit.commit === oid || (good.peeled === true && stripSourceRefspec(good.ref).toLowerCase() === oid));
   const target = verifiedGoodMatch ? goodCommit.commit : await pinTarget(dir, effectiveDigest, oid);
   if (!target) return undefined;
-  return (await git(dir, "checkout", "-q", "--detach", `${target}^{commit}`)).ok
-    ? { commit: target, effectiveDigest }
-    : undefined;
+  const moved = await git(dir, "checkout", "-q", "--detach", `${target}^{commit}`);
+  return moved.ok ? { commit: target, effectiveDigest, touchedWorktree: true } : { effectiveDigest, touchedWorktree: true };
 }
 
 type SavedFetchHead = { kind: "content"; bytes: Buffer; mode: number } | { kind: "missing" } | { kind: "unreadable" };

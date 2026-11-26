@@ -593,4 +593,28 @@ describe("fetchSource staged refresh and rollback", () => {
     expect(await unpinnedSources([{ name: "team", repo: weirdRepo, ref: `+${sha}` }], root, cache)).toEqual([]);
   });
 
+  test("restores identical tracked files modified by a post-checkout hook and handles nonzero hook exit during cached checkout", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-hook-carried-edit-");
+    const repo = join(root, "repo");
+    await initRepo(repo);
+    const c1 = await commitPack(repo, "team", "Carried edit same manifest.");
+    writeFileSync(join(repo, "extra.txt"), "v2\n");
+    await spawnGit(repo, "add", ".");
+    await spawnGit(repo, "commit", "-q", "-m", "v2 same manifest");
+    const c2 = await spawnGit(repo, "rev-parse", "HEAD");
+    const cache = temp.make("cache-hook-carried-edit-");
+    expect("error" in (await fetchSource({ name: "team", repo, ref: c2 }, cache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo, ref: c1 }, cache))).toBe(false);
+    rmSync(repo, { recursive: true, force: true });
+    const hooksDir = join(cache, "team", ".git", "hooks");
+    mkdirSync(hooksDir, { recursive: true });
+    writeFileSync(join(hooksDir, "post-checkout"), "#!/bin/sh\nprintf '{broken-json' > packs/team/pack.json\nexit 1\n", { mode: 0o755 });
+    const fallback = await fetchSource({ name: "team", repo, ref: c2 }, cache);
+    if ("error" in fallback) throw new Error(fallback.error);
+    expect(fallback.packs[0]?.manifest.summary).toBe("Carried edit same manifest.");
+    expect(await spawnGit(join(cache, "team"), "rev-parse", "HEAD")).toBe(c1);
+    expect(await spawnGit(join(cache, "team"), "status", "--porcelain")).toBe("");
+  });
+
 });
