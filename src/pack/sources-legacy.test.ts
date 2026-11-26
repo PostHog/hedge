@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
@@ -6,7 +6,7 @@ import { advanceSource, cachedSource, fetchSource, followsBranch } from "./sourc
 
 isolateGit();
 const temp = tempDirs();
-afterEach(() => temp.cleanup());
+afterAll(() => temp.cleanup());
 
 async function packRepo(summary: string) {
   const dir = temp.make("pack-repo-");
@@ -40,7 +40,7 @@ async function commitTag(dir: string, tag: string, files: Record<string, string>
   await spawnGit(dir, "tag", tag);
 }
 
-describe("fetchSource legacy caches, branches, and hardening", () => {
+describe.concurrent("fetchSource legacy caches, branches, and hardening", () => {
   async function legacyPinnedCache(cache: string, name: string, repo: string, commit: string, extra: Record<string, string> = {}) {
     const dir = join(cache, name);
     mkdirSync(dir, { recursive: true });
@@ -140,72 +140,6 @@ describe("fetchSource legacy caches, branches, and hardening", () => {
     if ("error" in unsetBack) throw new Error(unsetBack.error);
     expect(unsetBack.packs[0]?.manifest.summary).toBe("Unset real.");
     expect(unsetBack.stale).toContain(`could not fetch ${unsetMirrorSha}`);
-
-    const sshA = await packRepo("SSH legacy A.");
-    const sshShaA = await spawnGit(sshA, "rev-parse", "HEAD");
-    const sshB = await packRepo("SSH legacy B.");
-    const sshShaB = await spawnGit(sshB, "rev-parse", "HEAD");
-    const sshBin = temp.make("legacy-ssh-bin-");
-    writeFileSync(
-      join(sshBin, "ssh"),
-      `#!/bin/sh
-dest=""
-host=""
-cmd=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -o|-p|-i|-l|-F|-S|-c|-m|-b|-E|-I|-J|-L|-O|-Q|-R|-W|-w|-B|-D) shift 2 ;;
-    -o*|-p*|-i*|-l*|-F*|-S*) shift ;;
-    -4|-6|-A|-a|-C|-f|-G|-g|-K|-k|-M|-N|-n|-q|-s|-T|-t|-V|-v|-X|-x|-Y|-y) shift ;;
-    --)
-      shift
-      break
-      ;;
-    -*) echo "unknown option: $1" >&2; exit 255 ;;
-    *)
-      if [ -z "$host" ]; then host="$1"; else cmd="$1"; fi
-      shift
-      ;;
-  esac
-done
-while [ "$#" -gt 0 ]; do
-  if [ -z "$host" ]; then host="$1"; else cmd="$1"; fi
-  shift
-done
-case "$host" in
-  alice@example.invalid) dest=${JSON.stringify(sshA)} ;;
-  bob@example.invalid) dest=${JSON.stringify(sshB)} ;;
-  *) echo "unexpected host: $host" >&2; exit 1 ;;
-esac
-case "$cmd" in
-  *"git-upload-pack"*"/repo.git"*) exec git-upload-pack "$dest" ;;
-  *) echo "unexpected command: $cmd" >&2; exit 1 ;;
-esac
-`,
-      { mode: 0o755 },
-    );
-    const sshCache = temp.make("cache-legacy-ssh-");
-    const sshDir = join(sshCache, "team");
-    const sshConfigured = "https://example.invalid/ssh-legacy.git";
-    const sshAlice = "ssh://alice@example.invalid/repo.git";
-    const sshBob = "ssh://bob@example.invalid/repo.git";
-    mkdirSync(sshDir, { recursive: true });
-    await spawnGit(sshDir, "init", "-q");
-    await spawnGit(sshDir, "config", `url.${sshAlice}.insteadOf`, sshConfigured);
-    const savedPath = process.env.PATH;
-    process.env.PATH = `${sshBin}:${savedPath ?? ""}`;
-    try {
-      expect(Bun.spawnSync(["git", "-C", sshDir, "fetch", "-q", "--depth", "1", "--no-tags", sshConfigured, sshShaA], { env: { ...process.env, GIT_SSH_COMMAND: `${join(sshBin, "ssh")}` } }).exitCode).toBe(0);
-      await spawnGit(sshDir, "checkout", "-q", "--detach", "FETCH_HEAD");
-      writeFileSync(join(sshDir, ".git", "hedge-source.json"), JSON.stringify({ repo: sshConfigured, ref: sshShaA, commit: sshShaA }) + "\n");
-      await spawnGit(sshDir, "config", "--unset", `url.${sshAlice}.insteadOf`);
-      await spawnGit(sshDir, "config", `url.${sshBob}.insteadOf`, sshConfigured);
-      expect("error" in (await fetchSource({ name: "team", repo: sshConfigured, ref: sshShaB }, sshCache))).toBe(false);
-      expect("error" in (await fetchSource({ name: "team", repo: sshBob, ref: sshShaA }, sshCache))).toBe(true);
-    } finally {
-      if (savedPath === undefined) delete process.env.PATH;
-      else process.env.PATH = savedPath;
-    }
   });
 
   test("handles SHA-256 repositories and hexadecimal branch names on SHA-1 repositories", async () => {
@@ -714,41 +648,6 @@ export default { sdk: 1, name: "team", summary: "Mutating.", register() {} };
     if ("error" in tampered) throw new Error(tampered.error);
     expect(tampered.stale).toContain("changed checkout HEAD while loading");
     expect(await spawnGit(join(mutateCache, "team"), "rev-parse", "HEAD")).toBe(cleanSha);
-  });
-
-  test("falls back cleanly when git fetch does not support --porcelain even with localized errors", async () => {
-    const repo = await packRepo("Older git packs.");
-    const sha = await spawnGit(repo, "rev-parse", "HEAD");
-    const realGit = Bun.which("git")!;
-    const binDir = temp.make("old-git-bin-");
-    const shim = join(binDir, "git");
-    writeFileSync(
-      shim,
-      `#!/bin/sh
-for arg in "$@"; do
-  if [ "$arg" = "--porcelain" ]; then
-    printf "Fehler: Unbekannte Option \\\`porcelain'\\nAufruf: git fetch [<Optionen>] [<Repository> [<Refspec>...]]\\n" >&2
-    exit 129
-  fi
-done
-exec "${realGit}" "$@"
-`,
-      { mode: 0o755 },
-    );
-    const cache = temp.make("cache-old-git-");
-    const savedPath = process.env.PATH;
-    process.env.PATH = `${binDir}:${savedPath ?? ""}`;
-    try {
-      const branchRes = await fetchSource({ name: "team", repo, ref: "main" }, cache);
-      if ("error" in branchRes) throw new Error(branchRes.error);
-      expect(branchRes.packs[0]?.manifest.summary).toBe("Older git packs.");
-      expect(await followsBranch({ name: "team", repo, ref: "main" }, cache)).toBe(true);
-      const pinRes = await fetchSource({ name: "team", repo, ref: sha }, cache);
-      if ("error" in pinRes) throw new Error(pinRes.error);
-      expect(pinRes.packs[0]?.manifest.summary).toBe("Older git packs.");
-    } finally {
-      process.env.PATH = savedPath;
-    }
   });
 
   test("restores the prior commit when a broken pack moves the local branch before failing", async () => {

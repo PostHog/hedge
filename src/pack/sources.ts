@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync } from "node:fs";
 import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
@@ -103,7 +103,7 @@ const slashObjectsBuf = Buffer.from("/objects");
 const slashRefsBuf = Buffer.from("/refs");
 const slashReftableBuf = Buffer.from("/reftable");
 const slashCommondirBuf = Buffer.from("/commondir");
-const gitdirPrefixBuf = Buffer.from("gitdir:");
+const gitdirPrefixBuf = Buffer.from("gitdir: ");
 const filePrefixBuf = Buffer.from("file://");
 
 function splitPosixBytes(buf: Buffer): Buffer[] {
@@ -200,19 +200,37 @@ function dirnamePosixBytes(buf: Buffer): Buffer {
 }
 
 function parseGitDirFileBytes(fileBuf: Buffer, baseDir: Buffer): Buffer | undefined {
+  let fd: number | undefined;
   try {
-    if (!statSync(fileBuf).isFile()) return undefined;
-    const raw = readFileSync(fileBuf);
-    if (raw.length < gitdirPrefixBuf.length || !raw.subarray(0, gitdirPrefixBuf.length).equals(gitdirPrefixBuf)) return undefined;
-    let start = gitdirPrefixBuf.length;
-    let end = raw.indexOf(0x0a, start);
-    if (end === -1) end = raw.length;
-    while (start < end && (raw[start] === 0x20 || raw[start] === 0x09)) start++;
-    if (end > start && raw[end - 1] === 0x0d) end--;
+    const info = statSync(fileBuf);
+    if (!info.isFile() || info.size < gitdirPrefixBuf.length) return undefined;
+    fd = openSync(fileBuf, "r");
+    const header = Buffer.allocUnsafe(gitdirPrefixBuf.length);
+    if (readSync(fd, header, 0, header.length, 0) !== header.length || !header.equals(gitdirPrefixBuf)) return undefined;
+    const cap = Math.min(info.size, 8192);
+    const raw = Buffer.allocUnsafe(cap);
+    header.copy(raw, 0);
+    let filled = header.length;
+    while (filled < cap) {
+      const n = readSync(fd, raw, filled, cap - filled, filled);
+      if (n <= 0) break;
+      filled += n;
+    }
+    const slice = raw.subarray(0, filled);
+    const start = gitdirPrefixBuf.length;
+    let end = slice.indexOf(0x0a, start);
+    if (end === -1) end = slice.length;
+    if (end > start && slice[end - 1] === 0x0d) end--;
     if (end <= start) return undefined;
-    return resolvePosixPathBytes(baseDir, raw.subarray(start, end));
+    return resolvePosixPathBytes(baseDir, slice.subarray(start, end));
   } catch {
     return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {}
+    }
   }
 }
 
@@ -297,10 +315,6 @@ function isGitDirBytes(pathBuf: Buffer): boolean {
   return resolveGitIdentityBytes(pathBuf) !== undefined;
 }
 
-function endsWithDotGit(pathBuf: Buffer): boolean {
-  return pathBuf.length >= 4 && pathBuf.subarray(pathBuf.length - 4).equals(dotGitBuf);
-}
-
 function isAsciiHexByte(byte: number): boolean {
   return (byte >= 0x30 && byte <= 0x39) || (byte >= 0x41 && byte <= 0x46) || (byte >= 0x61 && byte <= 0x66);
 }
@@ -363,7 +377,7 @@ function parseLocalRepoBytes(dir: string, effective: string): { base: Buffer; ra
   if (process.platform === "win32") return undefined;
   const rawBytes = effective.startsWith("\0raw:") ? Buffer.from(effective.slice(5), "hex") : Buffer.from(effective, "utf8");
   const asciiHead = rawBytes.subarray(0, 7).toString("latin1");
-  if (/^file:\/\//i.test(asciiHead)) {
+  if (asciiHead === "file://") {
     const afterScheme = rawBytes.subarray(7);
     const firstSlash = afterScheme.indexOf(slashByte);
     if (firstSlash === -1) return undefined;
@@ -383,7 +397,7 @@ function parseLocalRepoBytes(dir: string, effective: string): { base: Buffer; ra
 function canonicalLocalRepoInfo(dir: string, effective: string, goodDigest?: string): { resolved: string; primary: string; usedImplicitDotGit: boolean; isLocal: boolean } {
   if (process.platform === "win32") {
     if (effective.startsWith("\0raw:")) return { resolved: effective, primary: effective, usedImplicitDotGit: false, isLocal: false };
-    if (/^file:\/\//i.test(effective)) {
+    if (effective.startsWith("file://")) {
       try {
         const abs = resolve(fileURLToPath(effective));
         const out = pathToFileURL(existsSync(abs) ? realpathSync(abs) : abs).href;
@@ -422,7 +436,6 @@ function canonicalLocalRepoInfo(dir: string, effective: string, goodDigest?: str
     };
   }
   const trimmedRaw = stripTrailingSlashBytes(rawPath);
-  if (endsWithDotGit(trimmedRaw)) return { resolved: primary, primary, usedImplicitDotGit: false, isLocal: true };
   const dotGitResolved = resolvePosixPathBytes(base, Buffer.concat([trimmedRaw, dotGitBuf]));
   const dotGitInfo = dotGitResolved ? resolveGitIdentityBytes(dotGitResolved) : undefined;
   if (dotGitResolved && dotGitInfo) {
@@ -448,7 +461,6 @@ function implicitDotGitFallback(dir: string, effective: string): string | undefi
   const resolved = resolvePosixPathBytes(base, rawPath);
   if (!resolved || isGitDirBytes(resolved)) return undefined;
   const trimmedRaw = stripTrailingSlashBytes(rawPath);
-  if (endsWithDotGit(trimmedRaw)) return undefined;
   const dotGitResolved = resolvePosixPathBytes(base, Buffer.concat([trimmedRaw, dotGitBuf]));
   if (!dotGitResolved || isGitDirBytes(dotGitResolved)) return undefined;
   return encodeCanonicalLocal(dotGitResolved, asFileUrl);

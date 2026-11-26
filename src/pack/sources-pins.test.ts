@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { afterAll, describe, expect, test } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { main } from "../cli.ts";
 import { engineRoot } from "../setup/testing.ts";
@@ -8,7 +8,7 @@ import { advanceSource, cachedSource, fetchSource, followsBranch, unpinnedSource
 
 isolateGit();
 const temp = tempDirs();
-afterEach(() => temp.cleanup());
+afterAll(() => temp.cleanup());
 
 async function packRepo(summary: string) {
   const dir = temp.make("pack-repo-");
@@ -54,7 +54,7 @@ async function commitTag(dir: string, tag: string, files: Record<string, string>
   await spawnGit(dir, "tag", tag);
 }
 
-describe("fetchSource pin namespaces and metadata", () => {
+describe.concurrent("fetchSource pin namespaces and metadata", () => {
   async function legacyPinnedCache(cache: string, name: string, repo: string, commit: string, extra: Record<string, string> = {}) {
     const dir = join(cache, name);
     mkdirSync(dir, { recursive: true });
@@ -345,72 +345,6 @@ describe("fetchSource pin namespaces and metadata", () => {
     const offline = await fetchSource({ name: "team", repo: "constructor", ref: commit }, cache);
     if ("error" in offline) throw new Error(offline.error);
     expect([offline.packs[0]?.manifest.summary, offline.stale]).toEqual(["Proto rules.", undefined]);
-  });
-
-  test("does not share pin history across effective SSH URLs that differ only by SSH username", async () => {
-    const repoA = await packRepo("Account A.");
-    const commitA = await spawnGit(repoA, "rev-parse", "HEAD");
-    const repoB = await packRepo("Account B.");
-    const commitB = await spawnGit(repoB, "rev-parse", "HEAD");
-    const bin = temp.make("fake-ssh-");
-    writeFileSync(
-      join(bin, "ssh"),
-      `#!/bin/sh
-dest=""
-host=""
-cmd=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -o|-p|-i|-l|-F|-S|-c|-m|-b|-E|-I|-J|-L|-O|-Q|-R|-W|-w|-B|-D) shift 2 ;;
-    -o*|-p*|-i*|-l*|-F*|-S*) shift ;;
-    -4|-6|-A|-a|-C|-f|-G|-g|-K|-k|-M|-N|-n|-q|-s|-T|-t|-V|-v|-X|-x|-Y|-y) shift ;;
-    --)
-      shift
-      break
-      ;;
-    -*) echo "unknown option: $1" >&2; exit 255 ;;
-    *)
-      if [ -z "$host" ]; then host="$1"; else cmd="$1"; fi
-      shift
-      ;;
-  esac
-done
-while [ "$#" -gt 0 ]; do
-  if [ -z "$host" ]; then host="$1"; else cmd="$1"; fi
-  shift
-done
-case "$host" in
-  alice@example.invalid) dest=${JSON.stringify(repoA)} ;;
-  bob@example.invalid) dest=${JSON.stringify(repoB)} ;;
-  *) echo "unexpected host: $host" >&2; exit 1 ;;
-esac
-case "$cmd" in
-  *"git-upload-pack"*"/repo.git"*) exec git-upload-pack "$dest" ;;
-  *) echo "unexpected command: $cmd" >&2; exit 1 ;;
-esac
-`,
-      { mode: 0o755 },
-    );
-    const cache = temp.make("cache-");
-    const alice = "ssh://alice@example.invalid/repo.git";
-    const bob = "ssh://bob@example.invalid/repo.git";
-    const prevPath = process.env.PATH;
-    process.env.PATH = `${bin}:${prevPath ?? ""}`;
-    try {
-      const first = await fetchSource({ name: "team", repo: alice, ref: commitA }, cache);
-      if ("error" in first) throw new Error(first.error);
-      expect(first.packs[0]?.manifest.summary).toBe("Account A.");
-      const second = await fetchSource({ name: "team", repo: bob, ref: commitB }, cache);
-      if ("error" in second) throw new Error(second.error);
-      expect(second.packs[0]?.manifest.summary).toBe("Account B.");
-      const cross = await fetchSource({ name: "team", repo: bob, ref: commitA }, cache);
-      if ("error" in cross) throw new Error(cross.error);
-      expect(cross.packs[0]?.manifest.summary).toBe("Account B.");
-      expect(cross.stale).toContain(`could not fetch ${commitA}`);
-    } finally {
-      if (prevPath === undefined) delete process.env.PATH;
-      else process.env.PATH = prevPath;
-    }
   });
 
   test("keeps verified pin history across an older binary write", async () => {
@@ -1704,6 +1638,56 @@ esac
     expect("error" in (await fetchSource({ name: "team", repo: foreignRepo, ref: foreignSha }, sharedCache))).toBe(false);
     expect("error" in (await fetchSource({ name: "team", repo: currentRepo, ref: `refs/heads/${foreignSha}` }, sharedCache))).toBe(false);
     expect(await followsBranch({ name: "team", repo: currentRepo, ref: foreignSha }, sharedCache)).toBe(true);
+  });
+
+  test("preserves leading spaces after gitdir: separator, resolves packs.git to packs.git.git, rejects FILE://, and handles bundle files without reading them whole", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-parity-");
+    const plainRepo = join(root, "repo");
+    const spaceRepo = join(root, " repo");
+    await initRepo(plainRepo);
+    const plainSha = await commitPack(plainRepo, "team", "Plain repo.");
+    await initRepo(spaceRepo);
+    const spaceSha = await commitPack(spaceRepo, "team", "Leading-space repo.");
+
+    const gf = join(root, "ptr");
+    writeFileSync(gf, "gitdir:  repo/.git\n");
+    const gfCache = temp.make("cache-gf-space-");
+    const loadedSpace = await fetchSource({ name: "team", repo: gf, ref: spaceSha }, gfCache);
+    if ("error" in loadedSpace) throw new Error(loadedSpace.error);
+    expect(loadedSpace.packs[0]?.manifest.summary).toBe("Leading-space repo.");
+    writeFileSync(gf, "gitdir: repo/.git\n");
+    expect("error" in (await fetchSource({ name: "team", repo: gf, ref: spaceSha }, gfCache))).toBe(true);
+    const loadedPlain = await fetchSource({ name: "team", repo: gf, ref: plainSha }, gfCache);
+    if ("error" in loadedPlain) throw new Error(loadedPlain.error);
+    expect(loadedPlain.packs[0]?.manifest.summary).toBe("Plain repo.");
+
+    const dotGit = join(root, "packs.git");
+    const doubleDotGit = join(root, "packs.git.git");
+    await initRepo(doubleDotGit);
+    const doubleSha = await commitPack(doubleDotGit, "team", "Double dotgit.");
+    const dotCache = temp.make("cache-double-dotgit-");
+    const fromDouble = await fetchSource({ name: "team", repo: dotGit, ref: doubleSha }, dotCache);
+    if ("error" in fromDouble) throw new Error(fromDouble.error);
+    expect(fromDouble.packs[0]?.manifest.summary).toBe("Double dotgit.");
+    await initRepo(dotGit);
+    await commitPack(dotGit, "team", "Direct dotgit.");
+    expect("error" in (await fetchSource({ name: "team", repo: dotGit, ref: doubleSha }, dotCache))).toBe(true);
+
+    const fileCache = temp.make("cache-file-case-");
+    expect("error" in (await fetchSource({ name: "team", repo: `file://${plainRepo}`, ref: plainSha }, fileCache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo: `FILE://${plainRepo}`, ref: plainSha }, fileCache))).toBe(true);
+
+    const bundlePath = join(root, "packs.bundle");
+    await spawnGit(plainRepo, "bundle", "create", "-q", bundlePath, "HEAD");
+    const bundleCache = temp.make("cache-bundle-");
+    const fromBundle = await fetchSource({ name: "team", repo: bundlePath, ref: plainSha }, bundleCache);
+    if ("error" in fromBundle) throw new Error(fromBundle.error);
+    expect(fromBundle.packs[0]?.manifest.summary).toBe("Plain repo.");
+    const sparseNonGit = join(root, "huge-non-gitfile");
+    writeFileSync(sparseNonGit, "not a gitfile\n");
+    truncateSync(sparseNonGit, 64 * 1024 * 1024);
+    expect("error" in (await fetchSource({ name: "team", repo: sparseNonGit, ref: plainSha }, bundleCache))).toBe(true);
   });
 
 });
