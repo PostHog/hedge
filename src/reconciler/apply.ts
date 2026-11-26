@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { install, plan as planFiles } from "../files/install.ts";
@@ -252,24 +253,39 @@ export async function humanStepsLeft(
           if (timer !== undefined) clearTimeout(timer);
         }
       }
-      let timedOut = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        const proc = Bun.spawn(command, { stdin: "ignore", stdout: "ignore", stderr: "ignore", env });
+      if (!command.length) return { step, state: "failing" };
+      const state = await new Promise<"ok" | "failing" | "unchecked">((resolve) => {
+        let settled = false;
+        let child: ReturnType<typeof spawn> | undefined;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const finish = (outcome: "ok" | "failing" | "unchecked") => {
+          if (settled) return;
+          settled = true;
+          if (timer !== undefined) clearTimeout(timer);
+          resolve(outcome);
+        };
+        try {
+          child = spawn(command[0]!, command.slice(1), { stdio: "ignore", env, detached: process.platform !== "win32" });
+        } catch {
+          finish("failing");
+          return;
+        }
         timer = setTimeout(() => {
-          timedOut = true;
+          if (child?.pid !== undefined) {
+            try {
+              process.kill(process.platform === "win32" ? child.pid : -child.pid, "SIGKILL");
+            } catch {}
+          }
           try {
-            proc.kill("SIGKILL");
+            child?.kill("SIGKILL");
           } catch {}
+          child?.unref();
+          finish("unchecked");
         }, limitMs);
-        const code = await proc.exited;
-        if (timedOut) return { step, state: "unchecked" };
-        return { step, state: code === 0 ? "ok" : "failing" };
-      } catch {
-        return { step, state: "failing" };
-      } finally {
-        if (timer !== undefined) clearTimeout(timer);
-      }
+        child.once("error", () => finish("failing"));
+        child.once("exit", (code) => finish(code === 0 ? "ok" : "failing"));
+      });
+      return { step, state };
     }),
   );
   return {

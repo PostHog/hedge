@@ -35,7 +35,7 @@ describe("the plan", () => {
   test("every node's catalog holds the hub's gateway at loopback port 3317, and its MCP entries start hedge mcp-connect with no host or key", () => {
     for (const machine of [devbox, mac]) {
       const plan = resolveEngine(sources, { packs: ["mcp-gateway"], hub: "hub-1" }, machine);
-      expect(plan.catalog).toEqual([{ pack: "mcp-gateway", id: "mcp-gateway", port: 3317, health: "/health", after: "mcp-gateway-installed" }]);
+      expect(plan.catalog).toEqual([{ pack: "mcp-gateway", id: "mcp-gateway", port: 3317, health: "/health", after: "mcp-gateway-installed", workflow: "mcp-gateway" }]);
       expect(plan.human.map((step) => step.id)).toEqual(["mcp-gateway-client"]);
       for (const entry of plan.config.filter((item) => item.pack === "mcp-gateway")) {
         const text = JSON.stringify(entry.value);

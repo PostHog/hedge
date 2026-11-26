@@ -642,17 +642,29 @@ describe("a leading hedge in a pack's commands", () => {
 });
 
 describe("humanStepsLeft", () => {
-  test("separates failing probes from timed-out probes and stops a hanging subprocess", async () => {
+  test("separates failing probes from timed-out probes and terminates a hanging probe's process group", async () => {
     const home = temp.make("home-");
     const human = [
       { id: "ok", pack: "team", say: "Ok.", probe: ["sh", "-c", "exit 0"] },
       { id: "missing", pack: "team", say: "Sign in.", probe: ["sh", "-c", "exit 1"] },
-      { id: "slow", pack: "team", say: "Slow.", probe: ["sleep", "30"] },
+      { id: "slow", pack: "team", say: "Slow.", probe: ["sh", "-c", 'sleep 30 & echo $! > "$HOME/child.pid"; wait'] },
     ];
     const started = Date.now();
-    const left = await humanStepsLeft(plan({ human }), { home, timeoutMs: 150 });
+    const left = await humanStepsLeft(plan({ human }), { home, timeoutMs: 250 });
     expect(Date.now() - started).toBeLessThan(2_000);
     expect(left.failing.map((step) => step.id)).toEqual(["missing"]);
     expect(left.unchecked.map((step) => step.id)).toEqual(["slow"]);
+    const pid = Number(readFileSync(join(home, "child.pid"), "utf8").trim());
+    let alive = true;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try {
+        process.kill(pid, 0);
+        await Bun.sleep(25);
+      } catch {
+        alive = false;
+        break;
+      }
+    }
+    expect(alive).toBe(false);
   });
 });
