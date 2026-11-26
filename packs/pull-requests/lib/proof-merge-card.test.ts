@@ -134,13 +134,14 @@ test("a Merge answer is the merge word of the thread that asked: it tells that t
     + "It never passes to another thread, so never hand it on or ask the user to repeat it elsewhere. A new head voids it.";
   const partial = await recordMerge(`Merge example/product#42 at ${head}?`);
   expect(partial).toBe(nextStep("this thread"));
-  expect(await enqueueFrom("mcp:conductor-thread")).not.toContain("was given in thread mcp:thread-1");
   pr.env.T3CODE_THREAD_ID = "mcp:conductor-thread";
   const word = await recordMerge(`Merge example/product#42 at ${head}? An agent accepted ${id} for prod-shape.`, "--thread", "mcp:thread-1");
   expect(word).toBe(nextStep("thread mcp:thread-1"));
   expect(await enqueueFrom("mcp:thread-1")).toBeUndefined();
   expect(await enqueueFrom("thread-1")).toBeUndefined();
-  expect(await enqueueFrom("mcp:conductor-thread")).toBe(`Hedge blocked this merge: the user's Merge answer that lifts the hold of example/product#42 at ${head.slice(0, 12)} was given in thread mcp:thread-1. A merge word counts only in the thread that asked it, so merge from that thread, and do not ask again here.`);
+  const relayed = await enqueueFrom("mcp:conductor-thread");
+  expect(relayed).toContain(`an agent accepted proof gaps of example/product#42 at ${head.slice(0, 12)} (🤖 ${id} for prod-shape) itself`);
+  expect(relayed).toContain("The answer lifts only the decisions its question named that way, only in the T3 thread that asked it");
 });
 
 test("a merge word lifts an agent's gap decision only when its card named every proof kind that decision accepts", async () => {
