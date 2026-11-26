@@ -1068,33 +1068,53 @@ process.exit(ok ? 0 : 1);`;
   expect(code).toBe(0);
 });
 
-test("stops a captured env -i target when its capture supervisor is killed with SIGKILL", async () => {
+test("stops a captured env -i target when its caller is killed with SIGKILL", async () => {
   if (process.platform === "win32") return;
   const envBin = Bun.which("env") ?? "/usr/bin/env";
   const shBin = Bun.which("sh") ?? "/bin/sh";
-  const dir = temp.make("hedge-capture-sup-kill-");
+  const coderPath = join(import.meta.dir, "coder.ts");
+  const dir = temp.make("hedge-capture-caller-kill-");
   const [ready, gone] = [join(dir, "ready"), join(dir, "gone")];
   expect(Bun.spawnSync(["mkfifo", ready, gone]).exitCode).toBe(0);
   const started = Bun.file(ready).text();
   const closed = Bun.file(gone).text();
+  const runnerScript = `import { capture } from ${JSON.stringify(coderPath)};
+await capture([${JSON.stringify(envBin)}, "-i", ${JSON.stringify(shBin)}, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "target", ${JSON.stringify(gone)}, ${JSON.stringify(ready)}], { timeoutMs: 30_000 });`;
+  const runner = Bun.spawn([process.execPath, "-e", runnerScript], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
   let targetPid = 0;
   try {
-    const running = capture(
-      [envBin, "-i", shBin, "-c", 'exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "target", gone, ready],
-      { timeoutMs: 30_000 },
-    );
     targetPid = Number((await started).trim());
     expect(targetPid).toBeGreaterThan(0);
-    const supPid = Number(Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(targetPid)]).stdout.toString().trim());
-    expect(supPid).toBeGreaterThan(1);
-    expect(supPid).not.toBe(process.pid);
-    process.kill(supPid, "SIGKILL");
-    const res = await running;
-    expect(res.code).toBe(137);
+    runner.kill("SIGKILL");
+    await runner.exited;
     expect(await closed).toBe("");
   } finally {
+    runner.kill("SIGKILL");
+    await runner.exited.catch(() => {});
     if (targetPid > 0) try { process.kill(targetPid, "SIGKILL"); } catch {}
   }
+});
+
+test("does not leak ambient loader diagnostics into stderr for clean-env captures", async () => {
+  if (process.platform === "win32") return;
+  const printfBin = Bun.which("printf") ?? "/usr/bin/printf";
+  const coderPath = join(import.meta.dir, "coder.ts");
+  const script = `import { capture } from ${JSON.stringify(coderPath)};
+const res = await capture([${JSON.stringify(printfBin)}, "ok"], { env: {}, timeoutMs: 5_000 });
+console.log(JSON.stringify(res));`;
+  const proc = Bun.spawn([process.execPath, "-e", script], {
+    env: {
+      ...process.env,
+      LD_PRELOAD: "/nonexistent/hedge-missing-preload.so",
+      DYLD_INSERT_LIBRARIES: "/nonexistent/hedge-missing-preload.dylib",
+    },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const [code, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
+  expect(code).toBe(0);
+  expect(JSON.parse(stdout.trim())).toEqual({ code: 0, stdout: "ok", stderr: "" });
 });
 
 test("rejects cleanly through capture when all file descriptors are exhausted", async () => {

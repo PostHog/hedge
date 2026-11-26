@@ -1951,7 +1951,10 @@ await Bun.sleep(30_000);`;
       [shBin, "-c", 'exec 3>"$1"; echo $$ > "$2"; read _ < "$3"; echo alive > "$4"; exec sleep 30', "unrelated", unrelatedGone, unrelatedReady, unrelatedPing, unrelatedPong],
       { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" },
     );
-    const probeScript = `const sub = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'trap "" TERM; sh -c "trap \\"\\" TERM; exec 3>\\"$1\\"; echo \\$\\$ > \\"$2\\"; exec sleep 30" child "$1" "$2" & exit 0', "sub", ${JSON.stringify(childGone)}, ${JSON.stringify(childReady)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    const leaderScript = `const w = Bun.spawn([${JSON.stringify(shBin)}, "-c", 'trap "" HUP TERM; exec 3>"$1"; echo $$ > "$2"; exec sleep 30', "child", ${JSON.stringify(childGone)}, ${JSON.stringify(childReady)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+w.unref();
+process.exit(0);`;
+    const probeScript = `const sub = Bun.spawn([process.execPath, "-e", ${JSON.stringify(leaderScript)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 await sub.exited;
 await Bun.sleep(30_000);`;
     const clock = manualClock();

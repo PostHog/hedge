@@ -176,6 +176,9 @@ const minimalSupEnvKeys = new Set([
   "BUN_RUNTIME_TRANSPILER_CACHE_PATH",
   "SSL_CERT_FILE",
   "SSL_CERT_DIR",
+  "LD_LIBRARY_PATH",
+  "DYLD_LIBRARY_PATH",
+  "DYLD_FALLBACK_LIBRARY_PATH",
   "SYSTEMROOT",
   "COMSPEC",
   probeGraceEnvVar,
@@ -185,7 +188,7 @@ function minimalSupervisorEnv(fullTag: string, inheritedSpare?: string, compact 
   const clean: Record<string, string> = Object.create(null);
   for (const [key, value] of Object.entries(process.env)) {
     if (value === undefined || key === "BUN_OPTIONS" || key === "HEDGE_CAPTURE_CONFIG" || key === tagEnvVar || key === spareEnvVar) continue;
-    if (minimalSupEnvKeys.has(key) || key.startsWith("LC_") || key.startsWith("LD_") || key.startsWith("DYLD_")) {
+    if (minimalSupEnvKeys.has(key) || key.startsWith("LC_")) {
       if (compact && key !== "PATH" && value.length > 4096) continue;
       clean[key] = value;
     }

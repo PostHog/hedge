@@ -903,12 +903,9 @@ function procArgs2EnvTag(buf: Uint8Array): string | undefined {
     while (pos < buf.byteLength && buf[pos] !== 0) pos++;
     pos++;
   }
+  while (pos < buf.byteLength && buf[pos] === 0) pos++;
   const decoder = new TextDecoder();
-  while (pos < buf.byteLength) {
-    if (buf[pos] === 0) {
-      pos++;
-      continue;
-    }
+  while (pos < buf.byteLength && buf[pos] !== 0) {
     const start = pos;
     while (pos < buf.byteLength && buf[pos] !== 0) pos++;
     if (pos - start > tagPrefixBytes.byteLength) {
@@ -995,8 +992,8 @@ function readEnvTagDarwin(pid: number): string | undefined {
   sizeBuf[0] = BigInt(buf.byteLength);
   if (lib.sysctl(ptr(mib), 3, ptr(buf), ptr(sizeBuf), null, 0) === 0) {
     const written = Number(sizeBuf[0]);
-    if (written > 0 && written < buf.byteLength) {
-      return procArgs2EnvTag(buf.subarray(0, written));
+    if (written > 0) {
+      return procArgs2EnvTag(buf.subarray(0, Math.min(written, buf.byteLength)));
     }
   }
   sizeBuf[0] = 0n;
@@ -1499,10 +1496,13 @@ export function killTargetSessionSync(
   const spared = resolveSpareInput(spareInput);
   const now = pidIdentityNow(targetPid);
   if (now) {
-    if (targetStartTime && now.startTime !== targetStartTime) return;
+    if (!targetStartTime || now.startTime !== targetStartTime) {
+      if (tag) killSessionSync(undefined, "SIGKILL", tag, spared);
+      return;
+    }
     killSessionSync(targetPid, "SIGKILL", tag, spared);
     const after = pidIdentityNow(targetPid);
-    if (after && (!targetStartTime || after.startTime === targetStartTime)) {
+    if (after && after.startTime === targetStartTime) {
       try {
         process.kill(targetPid, "SIGKILL");
       } catch {}
@@ -1521,10 +1521,13 @@ export async function killTargetSession(
   const spared = resolveSpareInput(spareInput);
   const now = pidIdentityNow(targetPid);
   if (now) {
-    if (targetStartTime && now.startTime !== targetStartTime) return;
+    if (!targetStartTime || now.startTime !== targetStartTime) {
+      if (tag) await killSession(undefined, "SIGKILL", tag, undefined, spared);
+      return;
+    }
     await killSession(targetPid, "SIGKILL", tag, undefined, spared);
     const after = pidIdentityNow(targetPid);
-    if (after && (!targetStartTime || after.startTime === targetStartTime)) {
+    if (after && after.startTime === targetStartTime) {
       try {
         process.kill(targetPid, "SIGKILL");
       } catch {}
