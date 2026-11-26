@@ -147,16 +147,18 @@ function bodiesOf(found: Command, inline: string[]): Body[] {
 
 function expandedBody({ text, programs, parameters }: Body, cwd: string | undefined, io: IntentIO): string | undefined {
   if (parameters) return undefined;
-  let expanded = text;
+  let expanded = "";
+  let rest = text;
   for (const program of programs) {
     const output = catOutput(program, cwd, io);
     const forms = [`$(${program})`, `\`${program}\``];
-    const spelled = forms.find((form) => expanded.includes(form));
-    const ambiguous = forms.reduce((count, form) => count + expanded.split(form).length - 1, 0) > programs.filter((other) => other === program).length;
-    if (output === undefined || spelled === undefined || ambiguous) return undefined;
-    expanded = expanded.replace(spelled, () => output.replace(/\n+$/, ""));
+    const ambiguous = forms.reduce((count, form) => count + text.split(form).length - 1, 0) > programs.filter((other) => other === program).length;
+    const [at, form] = forms.map((spelled) => [rest.indexOf(spelled), spelled] as const).filter(([index]) => index >= 0).sort(([a], [b]) => a - b)[0] ?? [-1, ""];
+    if (output === undefined || at < 0 || ambiguous) return undefined;
+    expanded += rest.slice(0, at) + output.replace(/\n+$/, "");
+    rest = rest.slice(at + form.length);
   }
-  return expanded;
+  return expanded + rest;
 }
 
 function catOutput(program: string, cwd: string | undefined, io: IntentIO): string | undefined {
@@ -270,8 +272,9 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const inline = [...fields, ...fields.map((field) => field.replace(/^[^=]*=/, ""))];
   const fieldFiles = values(gh, "-F", "--field").flatMap((field) => field.match(/^[^=]*=@(.+)$/s)?.[1] ?? []);
   let endpoint = endpointOf(gh).replace(/[?#].*$/s, "").replace(/\/$/, "");
-  const readQuery = endpoint === "graphql" && fields.some((field) => /^query=\s*(?:query\b|\{)/.test(field));
-  const bodies = endpoint === "graphql" && !readQuery ? inline : fields.flatMap((field) => field.match(/^(?:body|query)=(.*)$/s)?.[1] ?? []);
+  const queries = fields.flatMap((field) => field.match(/^query=(.*)$/s)?.[1] ?? []);
+  const readQuery = queries.length > 0 && queries.every((query) => !query.startsWith("@") && !/mutation/i.test(query));
+  const bodies = endpoint === "graphql" && !readQuery ? inline : fields.flatMap((field) => field.match(/^(?:body|query)=(.*)$/s)?.[1] ?? (/^[^=]*[$`]/.test(field) ? [field] : []));
   const sent = sentTexts(found, cwd, io, inline, [...values(gh, "--input"), ...fieldFiles], bodies);
   if (endpoint === "graphql") return sent.piped || sent.unread || sent.texts.some((text) => mentionsEnqueue.test(text) || graphqlMerge.test(text)) || mentionsEnqueue.test(raw) ? { targets: [], refusal: graphqlReason } : { targets: [] };
   if (/\{owner\}|\{repo\}|:owner|:repo/.test(endpoint)) {
@@ -370,10 +373,8 @@ export function mergeIntent(call: ToolCall, command: string, exempt: string[], i
         continue;
       }
       const one = commandIntent(found, command, cwdIn(found.scope), unwritten);
-      for (const target of [...found.outputs, ...found.writes]) {
-        if (/[$`]/.test(target)) writtenUnknown = true;
-        written.add(resolve(cwdIn(found.scope) ?? ".", home(target)));
-      }
+      if (found.builtRedirect) writtenUnknown = true;
+      for (const target of [...found.outputs, ...found.writes]) written.add(resolve(cwdIn(found.scope) ?? ".", home(target)));
       intent = { targets: [...intent.targets, ...one.targets], refusal: intent.refusal ?? one.refusal };
     }
   } else if (/github/i.test(tool) || t3Tool.test(tool)) intent = mcpIntent(tool, call.tool_input ?? {});
@@ -468,7 +469,10 @@ const heldReason = (held: string[], person: string) => `Hedge blocked this merge
 
 const unreadReason = (repositories: string[]) => `Hedge blocked this merge: the decision ledger could not be read, so the merge gate cannot tell whether an agent accepted a proof gap in ${repositories.join(", ")} itself, and such a gap holds a merge until the person's word. Try again when the hub answers.`;
 
-export const unreadBody = (intent: MergeIntent) => [...intent.targets, ...intent.exempt ?? []].some((target) => target.via.endsWith(unreadVia));
+export const unreadBody = (intent: MergeIntent) => {
+  const targets = [...intent.targets, ...intent.exempt ?? []];
+  return !intent.refusal && targets.length > 0 && targets.every((target) => target.via.endsWith(unreadVia));
+};
 
 /** Why the call may not go out, or undefined when every open layer of every target passed the gate at its head and none holds a gap an agent accepted without the person's merge word. */
 export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: string): Promise<string | undefined> {

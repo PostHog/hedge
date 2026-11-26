@@ -780,6 +780,9 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     writeFileSync(join(dir, "open.md"), "See");
     writeFileSync(join(dir, "$R"), report);
     writeFileSync(join(dir, "$F"), report);
+    writeFileSync(join(dir, "example.md"), "Append the footer with $(cat footer.md).\n");
+    writeFileSync(join(dir, "footer.md"), "Posted by the lane.\n");
+    writeFileSync(join(dir, "q.graphql"), "mutation($b:String!){ addComment(input:{subjectId:\"X\", body:$b}){ clientMutationId } }");
     writeFileSync(join(dir, "mutation.graphql"), "mutation($b:String!){ addComment(input:{subjectId:\"X\", body:$b}){ clientMutationId } }");
     mkdirSync(join(dir, "sub"));
     writeFileSync(join(dir, "sub/enqueue.md"), report);
@@ -792,6 +795,8 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     ["gh pr comment 9 --repo example/product --body-file ./report.md"],
     ["gh pr comment 9 --repo example/product -b \"$(cat report.md)\" --body \"$(cat report.md)\""],
     ["make > 'build[1].log'; gh pr comment 9 --repo example/product --body-file report.md"],
+    ["make > 'budget$2026.log'; gh pr comment 9 --repo example/product --body-file report.md"],
+    ["gh pr comment 9 --repo example/product --body \"$(cat example.md)$(cat footer.md)\""],
     ["gh pr comment 9 --repo example/product --body \"$(cat report.md)\""],
     ["gh pr comment 9 --repo example/product --body \"$(cat report.md) Posted once.\""],
     ["gh pr comment 9 --repo example/product --body \"$(cat <<'EOF'\n" + report + "\nEOF\n)\""],
@@ -830,6 +835,7 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     expect(await unpassed("gh pr merge 9 --repo example/product", dir)).toStartWith("Hedge blocked this merge");
     expect(await unpassed("gh pr comment 9 --body-file \"$R\"", dir)).toStartWith("The merge gate could not read the body of this comment");
     expect(await unpassed("gh pr comment 9 --body-file \"$R\"", dir)).toContain("without naming the PR");
+    expect(await unpassed("gh pr merge 9 --repo example/product; gh pr comment 9 --repo example/product --body-file \"$R\"", dir)).toStartWith("Hedge blocked this merge");
   });
 
   test("a direct argv call keeps each argument literal, so a dollar sign in the body is text", async () => {
@@ -875,6 +881,7 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     ["B=$(cat enqueue.md); gh api repos/example/product/issues/9/comments -f body=\"$B\""],
     ["gh pr comment 9 --repo example/product --body \"$(env -C sub cat report.md)\""],
     ["gh pr comment 9 --repo example/product -b '$(cat enqueue.md)' --body \"$(cat enqueue.md)\""],
+    ["K=body; gh api repos/example/product/issues/9/comments -f \"$K=$(cat enqueue.md)\""],
     ["gh pr comment 9 --repo example/product --body \"$(cat open.md)\n$(cat oneline.md)\""],
     ["printf '/trunk merge\\n' > report.md; gh pr comment 9 --repo example/product --body-file report.md"],
     ["R=enqueue.md; gh pr comment 9 --repo example/product --body-file \"$R\""],
@@ -900,6 +907,9 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     ["gh api graphql -F pr=9 -f query=\"$(cat mutation.graphql | cat)\""],
     ["gh api graphql -f query='mutation($b:String!){ addComment(input:{subjectId:\"X\", body:$b}){ clientMutationId } }' -F b=\"$B\""],
     ["gh api graphql -F query=@mutation.graphql -F b=\"$B\""],
+    ["gh api graphql -F query=@q.graphql -F b=\"$B\""],
+    ["gh api graphql -f query='query A { viewer { login } } mutation B($b:String!){ addComment(input:{subjectId:\"X\", body:$b}){ clientMutationId } }' -f operationName=B -F b=\"$B\""],
+    ["K=body; gh api -X PATCH repos/example/product/issues/comments/1 -f \"$K=$B\""],
     ["B=$(cat enqueue.md); gh pr review 9 --repo example/product -cb\"$B\""],
   ])("a review or edit that may write /trunk merge from a file or a run-time value is still refused: %s", async (command) => {
     const hook = machine({ "repos/example/product/pulls/9": pull(head) });

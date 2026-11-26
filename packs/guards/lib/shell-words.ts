@@ -14,6 +14,7 @@ export type Command = {
   outputs: string[];
   writes: string[];
   redirects: string[];
+  builtRedirect?: true;
   bare: string[];
   rawArgs: string[];
   rawPrefix: string[];
@@ -371,6 +372,7 @@ function withoutRedirects(words: Word[]) {
   const outputs: string[] = [];
   const fileWrites: string[] = [];
   const redirects: string[] = [];
+  let built = false;
   for (let index = 0; index < words.length; index++) {
     const match = words[index].raw.match(redirect);
     if (!match) {
@@ -380,12 +382,14 @@ function withoutRedirects(words: Word[]) {
     const [operator, descriptor = "", direction] = match;
     const attached = words[index].text.slice(operator.length);
     redirects.push(attached ? words[index].raw : `${words[index].raw}${words[index + 1]?.raw ?? ""}`);
-    const target = attached || words[++index]?.text || "";
+    const word = attached ? words[index] : words[++index];
+    built ||= word !== undefined && (word.parameters || word.substitutions.length > 0);
+    const target = attached || word?.text || "";
     const writes = direction !== "<" && direction !== "<&" && direction !== ">&" && (descriptor === "" || descriptor === "1" || descriptor === "&");
     if (writes) outputs.push(target);
     if (/^(?:>>|>\||<>|>)$/.test(direction) || (direction === ">&" && !/^(?:\d+-?|-)$/.test(target))) fileWrites.push(target);
   }
-  return { kept, outputs, writes: fileWrites, redirects };
+  return { kept, outputs, writes: fileWrites, redirects, built };
 }
 
 function wrapperOption(texts: string[], index: number, valued: string[]): { width: number; name: string; value?: string } {
@@ -444,7 +448,7 @@ export function parse(program: string, context: Context = { env: new Map(), inLo
       if (group && after) Object.assign(group, { after, afterAt });
       return;
     }
-    const { kept, outputs, writes, redirects } = withoutRedirects(words);
+    const { kept, outputs, writes, redirects, built } = withoutRedirects(words);
     const texts = kept.map((word) => word.text);
     const commandEnv = new Map(env);
     const assigned = new Map<string, string>();
@@ -487,7 +491,7 @@ export function parse(program: string, context: Context = { env: new Map(), inLo
     const rawArgs = kept.slice(index + 1).map((word) => word.raw);
     const rawPrefix = kept.slice(0, index).map((word) => word.raw);
     const prefix = kept.slice(0, index).map((word) => basename(word.text));
-    pipeline.push({ name, args, env: commandEnv, substitutions, leadingSubstitutions, argSubstitutions, argParameters, stdin, outputs, writes, redirects, bare, rawArgs, rawPrefix, prefix, keywords: stripped, processSubstitutions: words.flatMap((word) => word.processes), inLoop, tested, ...(after && { after, afterAt }), scope, chdir });
+    pipeline.push({ name, args, env: commandEnv, substitutions, leadingSubstitutions, argSubstitutions, argParameters, stdin, outputs, writes, redirects, bare, rawArgs, rawPrefix, prefix, keywords: stripped, processSubstitutions: words.flatMap((word) => word.processes), inLoop, tested, ...(after && { after, afterAt }), ...(built && { builtRedirect: true as const }), scope, chdir });
     words = [];
     stdin = undefined;
   };
