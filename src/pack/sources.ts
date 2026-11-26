@@ -1253,6 +1253,26 @@ async function stagedCommitOids(dir: string, stageDir: string): Promise<Set<stri
   return commits;
 }
 
+function quoteGitAlternatePath(path: string): string {
+  const sepChar = process.platform === "win32" ? ";" : ":";
+  if (!path.includes(sepChar) && !path.startsWith("\"") && !/[\0-\x1f\x7f\\"]/.test(path)) return path;
+  let out = "\"";
+  for (const byte of Buffer.from(path, "utf8")) {
+    if (byte === 0x5c) out += "\\\\";
+    else if (byte === 0x22) out += "\\\"";
+    else if (byte === 0x07) out += "\\a";
+    else if (byte === 0x08) out += "\\b";
+    else if (byte === 0x0c) out += "\\f";
+    else if (byte === 0x0a) out += "\\n";
+    else if (byte === 0x0d) out += "\\r";
+    else if (byte === 0x09) out += "\\t";
+    else if (byte === 0x0b) out += "\\v";
+    else if (byte < 0x20 || byte >= 0x7f) out += `\\${byte.toString(8).padStart(3, "0")}`;
+    else out += String.fromCharCode(byte);
+  }
+  return `${out}"`;
+}
+
 async function moveFileAtomic(src: string, dst: string): Promise<void> {
   try {
     await rename(src, dst);
@@ -1759,13 +1779,18 @@ const isOtherQualifiedRef = (ref: unknown) => {
   const stripped = stripSourceRefspec(ref);
   return stripped.startsWith("refs/") && !stripped.startsWith("refs/heads/");
 };
+const isNonBranchNamespace = (ref: unknown) => {
+  if (typeof ref !== "string") return false;
+  const stripped = stripSourceRefspec(ref);
+  return /^refs\/(?:tags|remotes|notes|replace|bisect)\//.test(stripped) || stripped === "refs/stash";
+};
 const hasRefspecDecor = (ref: unknown) => typeof ref === "string" && (ref.startsWith("+") || ref.endsWith(":"));
 
 const sameBranchRef = (a: unknown, b: unknown, hashLen?: number): boolean => {
   const nameA = branchName(a);
   const nameB = branchName(b);
   if (!nameA || nameA !== nameB) return false;
-  if (isOtherQualifiedRef(a) !== isOtherQualifiedRef(b)) return false;
+  if (isNonBranchNamespace(a) !== isNonBranchNamespace(b)) return false;
   const fullHash = hashLen !== undefined ? isCommitPin(nameA, hashLen) : gitHash.test(nameA);
   if (!fullHash) return true;
   const headA = hasExplicitHead(a);
@@ -1942,15 +1967,17 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     const message = error instanceof Error ? error.message : String(error);
     return { state: "failed", say: `could not stage refresh for ${ref.name}: ${message}` };
   }
-  const stageEnv = { GIT_OBJECT_DIRECTORY: stageDir, GIT_ALTERNATE_OBJECT_DIRECTORIES: targetObjectsDir };
+  const stageEnv = { GIT_OBJECT_DIRECTORY: stageDir, GIT_ALTERNATE_OBJECT_DIRECTORIES: quoteGitAlternatePath(targetObjectsDir) };
   let movedObjects: string[] = [];
-  const restoreRefreshState = async () => {
+  const restoreRefreshState = async (removeObjects = true) => {
     await restoreFetchHead(dir, savedFetchHead);
     await restoreGitFileAt(gitDir, "shallow", savedShallow);
-    await restoreGitFileAt(gitDir, join("logs", "HEAD"), savedHeadLog);
-    if (movedObjects.length) {
-      await removeMigratedObjects(movedObjects);
-      movedObjects = [];
+    if (removeObjects) {
+      await restoreGitFileAt(gitDir, join("logs", "HEAD"), savedHeadLog);
+      if (movedObjects.length) {
+        await removeMigratedObjects(movedObjects);
+        movedObjects = [];
+      }
     }
   };
   try {
@@ -1983,33 +2010,35 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
       return { state: "failed", say: `could not store fetched objects for ${ref.name}: ${message}` };
     }
     const before = await currentCheckout(dir);
+    const rollbackCheckout = async (): Promise<boolean> => {
+      if (before) return restoreCheckout(dir, before);
+      const ok = (await git(dir, "checkout", "-q", "--detach", `${from}^{commit}`)).ok;
+      if (ok) clearLoadedModules(dir);
+      return ok;
+    };
     const moved = await git(dir, "checkout", "-q", "--detach", `${tip}^{commit}`);
     if (!moved.ok) {
-      if (before) await restoreCheckout(dir, before);
-      else if ((await git(dir, "checkout", "-q", "--detach", `${from}^{commit}`)).ok) clearLoadedModules(dir);
-      await restoreRefreshState();
+      const restored = await rollbackCheckout();
+      await restoreRefreshState(restored);
       return { state: "failed", say: `could not check out ${tip.slice(0, 12)} of ${ref.name}: ${moved.stderr}` };
     }
     const loaded = await load(dir, loadLimitMs);
     if ("error" in loaded) {
-      if (before) await restoreCheckout(dir, before);
-      else if ((await git(dir, "checkout", "-q", "--detach", `${from}^{commit}`)).ok) clearLoadedModules(dir);
-      await restoreRefreshState();
+      const restored = await rollbackCheckout();
+      await restoreRefreshState(restored);
       return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} does not load: ${loaded.error}` };
     }
     const postLoadHead = (await git(dir, "rev-parse", "--verify", "--quiet", "HEAD")).stdout;
     if (!postLoadHead || postLoadHead.toLowerCase() !== tip.toLowerCase()) {
-      if (before) await restoreCheckout(dir, before);
-      else if ((await git(dir, "checkout", "-q", "--detach", `${from}^{commit}`)).ok) clearLoadedModules(dir);
-      await restoreRefreshState();
+      const restored = await rollbackCheckout();
+      await restoreRefreshState(restored);
       return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} changed checkout HEAD while loading` };
     }
     const { localAliases: refreshAliases, clearAliases: clearRefreshAliases } = localAliasPlan(afterRefreshIdentity.localInfo, effectiveDigest);
     const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest }, verifiedHistoryFrom, refreshAliases, clearRefreshAliases, stagedCommits);
     if (saveError) {
-      if (before) await restoreCheckout(dir, before);
-      else if ((await git(dir, "checkout", "-q", "--detach", `${from}^{commit}`)).ok) clearLoadedModules(dir);
-      await restoreRefreshState();
+      const restored = await rollbackCheckout();
+      await restoreRefreshState(restored);
       return { state: "failed", say: `could not record ${branch} of ${ref.repo} at ${tip.slice(0, 12)}: ${saveError}` };
     }
     return { state: "moved", commit: tip, source: { ref, dir, packs: loaded.packs } };

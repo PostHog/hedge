@@ -1161,11 +1161,15 @@ describe("fetchSource local path resolution and object formats", () => {
     await spawnGit(customBranchRepo, "checkout", "-q", "-b", "refs/custom/release");
     const cb1 = await commitPack(customBranchRepo, "team", "Custom branch v1.");
     const cbCache = temp.make("cache-refs-custom-");
-    expect("error" in (await fetchSource({ name: "team", repo: customBranchRepo, ref: "refs/custom/release" }, cbCache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo: customBranchRepo, ref: "refs/heads/refs/custom/release" }, cbCache))).toBe(false);
     expect(await followsBranch({ name: "team", repo: customBranchRepo, ref: "refs/custom/release" }, cbCache)).toBe(true);
     const cb2 = await commitPack(customBranchRepo, "team", "Custom branch v2.");
     const cbMoved = await advanceSource({ name: "team", repo: customBranchRepo, ref: "refs/custom/release" }, cbCache, cb1);
     expect(cbMoved).toMatchObject({ state: "moved", commit: cb2 });
+    const cb3 = await commitPack(customBranchRepo, "team", "Custom branch v3.");
+    expect(await followsBranch({ name: "team", repo: customBranchRepo, ref: "refs/custom/release" }, cbCache)).toBe(true);
+    const cbMoved2 = await advanceSource({ name: "team", repo: customBranchRepo, ref: "refs/custom/release" }, cbCache, cb2);
+    expect(cbMoved2).toMatchObject({ state: "moved", commit: cb3 });
 
     const symObjRepo = join(root, "symlink-objects");
     await initRepo(symObjRepo);
@@ -1178,5 +1182,32 @@ describe("fetchSource local path resolution and object formats", () => {
     const so2 = await commitPack(symObjRepo, "team", "Symlink objects v2.");
     const soMoved = await advanceSource({ name: "team", repo: symObjRepo, ref: "main" }, symObjCache, so1);
     expect(soMoved).toMatchObject({ state: "moved", commit: so2 });
+
+    const colonRepo = join(root, "colon-repo");
+    await initRepo(colonRepo);
+    const col1 = await commitPack(colonRepo, "team", "Colon v1.");
+    const colonCache = join(root, "cache:with:colon");
+    mkdirSync(colonCache, { recursive: true });
+    expect("error" in (await fetchSource({ name: "team", repo: colonRepo, ref: "main" }, colonCache))).toBe(false);
+    const col2 = await commitPack(colonRepo, "team", "Colon v2.");
+    const colMoved = await advanceSource({ name: "team", repo: colonRepo, ref: "main" }, colonCache, col1);
+    expect(colMoved).toMatchObject({ state: "moved", commit: col2 });
+
+    const dirtyRollbackRepo = join(root, "dirty-rollback");
+    await initRepo(dirtyRollbackRepo);
+    const dr1 = await commitPack(dirtyRollbackRepo, "team", "Dirty rollback v1.");
+    const drCache = temp.make("cache-dirty-rollback-");
+    expect("error" in (await fetchSource({ name: "team", repo: dirtyRollbackRepo, ref: "main" }, drCache))).toBe(false);
+    const drHooksDir = join(drCache, "team", ".git", "hooks");
+    mkdirSync(drHooksDir, { recursive: true });
+    const drHook = join(drHooksDir, "post-checkout");
+    writeFileSync(drHook, "#!/bin/sh\necho dirty >> packs/team/pack.json\n");
+    chmodSync(drHook, 0o755);
+    mkdirSync(join(dirtyRollbackRepo, "packs", "team"), { recursive: true });
+    writeFileSync(join(dirtyRollbackRepo, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Dirty rollback broken." }));
+    await spawnGit(dirtyRollbackRepo, "commit", "-qam", "broken v2");
+    const drFailed = await advanceSource({ name: "team", repo: dirtyRollbackRepo, ref: "main" }, drCache, dr1);
+    expect(drFailed.state).toBe("failed");
+    await spawnGit(join(drCache, "team"), "fsck", "--full");
   });
 });
