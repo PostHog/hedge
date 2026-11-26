@@ -1,7 +1,7 @@
 import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { fold, gateOverride, live, mergeCardChoice, mergeCardCondition, namesHead, namesId, overrideChoice, hubLedger, prRef, type DecisionState, type Env, type LedgerEvent } from "../../pull-requests/lib/decision-ledger.ts";
+import { fold, gateOverride, sameThread, live, mergeCardChoice, mergeCardCondition, namesHead, namesId, overrideChoice, hubLedger, prRef, type DecisionState, type Env, type LedgerEvent } from "../../pull-requests/lib/decision-ledger.ts";
 import { isTextList, lastGateResult, latestGateResult, type GateResult } from "../../pull-requests/lib/proof.ts";
 import { decidesAll } from "../../pull-requests/lib/proof-autonomy.ts";
 import { normalized } from "../../pull-requests/lib/proof-answers.ts";
@@ -381,8 +381,7 @@ const usersMergeAt = (decision: DecisionState, layer: Layer) => live(decision) &
 const overrideAt = (decision: DecisionState, layer: Layer) => usersMergeAt(decision, layer) && decision.scope.kinds?.includes(gateOverride) === true && decision.scope.condition?.startsWith(`${layer.head}:`) === true;
 const chosen = (answer: string) => normalized(answer.replace(/^\d{4}-\d{2}-\d{2}\s+/, ""));
 const choseMerge = (decision: DecisionState, head: string) => namesHead(decision.question, head) && [mergeCardChoice, `${mergeCardChoice} (Recommended)`].map(normalized).includes(chosen(decision.answer));
-const threadKey = (thread: string) => thread.slice(thread.lastIndexOf(":") + 1);
-const askedIn = (decision: DecisionState, thread: string | undefined) => thread === undefined || threadKey(decision.where.thread) === threadKey(thread);
+const askedIn = (decision: DecisionState, thread: string | undefined) => thread === undefined || sameThread(decision.where.thread, thread);
 const mergeCardAt = (decision: DecisionState, layer: Layer) => usersMergeAt(decision, layer) && decision.scope.condition === mergeCardCondition(layer.head) && choseMerge(decision, layer.head);
 const mergeWordAt = (decision: DecisionState, layer: Layer, thread: string | undefined) => overrideAt(decision, layer) || (mergeCardAt(decision, layer) && askedIn(decision, thread));
 
@@ -404,14 +403,14 @@ const kindsOf = (decisions: DecisionState[], id: string) => decisions.find((deci
 const heldName = (decisions: DecisionState[], id: string) => kindsOf(decisions, id).length ? `${id} for ${kindsOf(decisions, id).join("/")}` : id;
 const cardNames = (decisions: DecisionState[], id: string, question: string) => namesId(question, heldName(decisions, id));
 
-const heldLayer = (results: GateResult[], decisions: DecisionState[], layer: Layer, thread: string | undefined) => {
-  if (decisions.some((decision) => overrideAt(decision, layer))) return [];
-  const gaps = agentGapsAt(results, decisions, layer).filter((id) => !decisions.some((decision) => mergeWordAt(decision, layer, thread) && cardNames(decisions, id, decision.question)));
-  return gaps.length ? [`${layer.repository}#${layer.pr} at ${layer.head.slice(0, 12)} (🤖 ${gaps.map((id) => heldName(decisions, id)).join(", ")})`] : [];
-};
+const heldGaps = (results: GateResult[], decisions: DecisionState[], layer: Layer, thread: string | undefined) => decisions.some((decision) => overrideAt(decision, layer)) ? []
+  : agentGapsAt(results, decisions, layer).filter((id) => !decisions.some((decision) => mergeWordAt(decision, layer, thread) && cardNames(decisions, id, decision.question)));
 
-const wordsElsewhere = (decisions: DecisionState[], layer: Layer, thread: string | undefined) => decisions.filter((decision) => mergeCardAt(decision, layer) && !askedIn(decision, thread))
-  .map((decision) => `Merge answer ${decision.id} for ${layer.repository}#${layer.pr} at ${layer.head.slice(0, 12)} was given in thread ${decision.where.thread}, and a merge word counts only in the thread that asked: merge from there.`);
+const heldLayer = (decisions: DecisionState[], layer: Layer, gaps: string[]) => gaps.length ? [`${layer.repository}#${layer.pr} at ${layer.head.slice(0, 12)} (🤖 ${gaps.map((id) => heldName(decisions, id)).join(", ")})`] : [];
+
+const wordsElsewhere = (decisions: DecisionState[], layer: Layer, gaps: string[], thread: string | undefined) => decisions
+  .filter((decision) => mergeCardAt(decision, layer) && !askedIn(decision, thread) && gaps.every((id) => cardNames(decisions, id, decision.question)))
+  .map((decision) => `Merge answer ${decision.id} for ${layer.repository}#${layer.pr} at ${layer.head.slice(0, 12)} lifts this hold, but it was given in thread ${decision.where.thread}, and a merge word counts only in the thread that asked: merge from that thread instead of asking again here.`);
 
 const gateCommand = ({ repository, pr, head }: Layer) => `hedge proof gate --repo ${repository} --pr ${pr} --commit ${head}`;
 const overrideHint = (person: string) => `For an incident fix that cannot wait for the gate, ask ${person} with the question tool, naming the PR and its full head sha, with the options "${overrideChoice}" and "Keep the gate closed", and record the answer `
@@ -432,9 +431,9 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
   const held: string[] = [];
   const elsewhere: string[] = [];
   const hold = (results: GateResult[], layer: Layer) => {
-    const heldHere = heldLayer(results, decisions, layer, io.thread);
-    held.push(...heldHere);
-    if (heldHere.length) elsewhere.push(...wordsElsewhere(decisions, layer, io.thread));
+    const gaps = heldGaps(results, decisions, layer, io.thread);
+    held.push(...heldLayer(decisions, layer, gaps));
+    if (gaps.length) elsewhere.push(...wordsElsewhere(decisions, layer, gaps, io.thread));
   };
   const readLedger = async () => {
     if (events !== undefined || hubError !== undefined) return;

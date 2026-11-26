@@ -5,7 +5,7 @@ import { readPullRequest, runIn } from "./pr-ci.ts";
 import { gapKind, refuseInstructionQuote, usedAnswer } from "./proof.ts";
 import { decidesAll } from "./proof-autonomy.ts";
 import {
-  agentRefusal, answerUse, askClasses, gateOverride, mergeCardChoice, mergeCardCondition, namesHead, overrideChoice, brakeDays, brakeOf, covers, decisionLine, fold, hubLedger, HubUnreachable, isUsers, liftCounted, live, messageKey, namesKind, namesPr, panelRefusal, prRef, refText, thisMachine, tierOf,
+  agentRefusal, answerUse, sameThread, askClasses, gateOverride, mergeCardChoice, mergeCardCondition, namesHead, overrideChoice, brakeDays, brakeOf, covers, decisionLine, fold, hubLedger, HubUnreachable, isUsers, liftCounted, live, messageKey, namesKind, namesPr, panelRefusal, prRef, refText, thisMachine, tierOf,
   type AnswerUse, type AskClass, type Decision, type DecisionState, type Env, type Ledger, type LedgerEvent, type Lift, type PrRef, type Reversal, type Ssh, type UsersMark,
 } from "./decision-ledger.ts";
 
@@ -172,9 +172,12 @@ function fitsMergeCard(scope: Scope): ((heard: HeardAnswer) => void) | undefined
   };
 }
 
-const enqueueHere = (head: string, [{ repository, pr }]: PrRef[]) => `This is the user's merge word for ${repository}#${pr} at ${head.slice(0, 12)}, given in this thread: `
-  + `merge or enqueue it from this thread in this turn, once \`hedge proof gate --repo ${repository} --pr ${pr} --commit ${head}\` passes. `
-  + "It never passes to another thread, so never hand it on or ask the user to repeat it elsewhere. A new head voids it.";
+const enqueueFrom = (head: string, [{ repository, pr }]: PrRef[], asked: string, here: string | undefined) => {
+  const where = here && sameThread(asked, here) ? "this thread" : `thread ${asked}`;
+  return `This is the user's merge word for ${repository}#${pr} at ${head.slice(0, 12)}, given in ${where}: merge or enqueue it from ${where} in the same turn, `
+    + `once the merge gate lets that head through, which outside the repositories that skip the gate takes a \`hedge proof gate --repo ${repository} --pr ${pr} --commit ${head}\` pass. `
+    + "It never passes to another thread, so never hand it on or ask the user to repeat it elsewhere. A new head voids it.";
+};
 
 function checkMergeCard(scope: Scope, mark: string) {
   if (!mergeCardHead(scope)) {
@@ -353,7 +356,7 @@ async function record(parsed: Parsed, context: DecisionContext, ledger: Ledger) 
   await appendDecision(ledger, decision);
   context.print(decisionLine(decision));
   const head = mergeCardHead(scope);
-  if (head) context.print(enqueueHere(head, scope.prs));
+  if (head) context.print(enqueueFrom(head, scope.prs, decision.where.thread, context.env.T3CODE_THREAD_ID));
   return 0;
 }
 
