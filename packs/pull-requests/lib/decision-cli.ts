@@ -5,7 +5,7 @@ import { readPullRequest, runIn } from "./pr-ci.ts";
 import { gapKind, refuseInstructionQuote, usedAnswer } from "./proof.ts";
 import { decidesAll } from "./proof-autonomy.ts";
 import {
-  agentRefusal, answerUse, askClasses, gateOverride, mergeCardChoice, mergeCardCondition, namesHead, overrideChoice, brakeDays, brakeOf, covers, decisionLine, fold, hubLedger, HubUnreachable, isUsers, liftCounted, live, messageKey, namesKind, namesPr, panelRefusal, prRef, refText, thisMachine, tierOf,
+  agentRefusal, answerUse, sameThread, askClasses, gateOverride, mergeCardChoice, mergeCardCondition, namesHead, overrideChoice, brakeDays, brakeOf, covers, decisionLine, fold, hubLedger, HubUnreachable, isUsers, liftCounted, live, messageKey, namesKind, namesPr, panelRefusal, prRef, refText, thisMachine, tierOf,
   type AnswerUse, type AskClass, type Decision, type DecisionState, type Env, type Ledger, type LedgerEvent, type Lift, type PrRef, type Reversal, type Ssh, type UsersMark,
 } from "./decision-ledger.ts";
 
@@ -42,7 +42,8 @@ lets the merge gate pass that one PR at that head without a hedge proof gate pas
 records it. With --class merge and --condition '<full head sha>: merge card', the user's 👤 choice of "${mergeCardChoice}"
 on a merge card whose question names the PR and that head lifts the hold on each gap an agent accepted whose
 decision the question names as the hook's refusal does, its id with every proof kind it accepts, such as
-d-1a2b3c4d for live-run/prod-shape; any other choice is refused. Each option other than --pr and --kind is taken once.
+d-1a2b3c4d for live-run/prod-shape; any other choice is refused. It lifts the hold only in the T3 thread that asked it, so
+record it there, and merge or enqueue from there in the same turn. Each option other than --pr and --kind is taken once.
 record with 🤖 records the agent's own decision with the option it rejected. Hedge reads each PR's Tier line in its
 merge-risk callout at HEAD: it refuses an ungraded PR, and on a critical PR anything but process (review and status
 asks, judge and post-deploy-watch gaps). On ask it never takes a panel gap: ${panelRefusal}. With pull-requests.autonomy
@@ -170,6 +171,13 @@ function fitsMergeCard(scope: Scope): ((heard: HeardAnswer) => void) | undefined
     if (![mergeCardChoice, `${mergeCardChoice} (Recommended)`].map(normalized).includes(normalized(heard.words))) throw new Error(`The user chose "${heard.words}", not "${mergeCardChoice}". The merge stays held`);
   };
 }
+
+const enqueueFrom = (head: string, [{ repository, pr }]: PrRef[], asked: string, here: string | undefined) => {
+  const where = here && sameThread(asked, here) ? "this thread" : `thread ${asked}`;
+  return `This is the user's merge word for ${repository}#${pr} at ${head.slice(0, 12)}, given in ${where}: merge or enqueue it from ${where} in the same turn, `
+    + `once the merge gate lets that head through, which outside the repositories that skip the gate takes a \`hedge proof gate --repo ${repository} --pr ${pr} --commit ${head}\` pass. `
+    + "It never passes to another thread, so never hand it on or ask the user to repeat it elsewhere. A new head voids it.";
+};
 
 function checkMergeCard(scope: Scope, mark: string) {
   if (!mergeCardHead(scope)) {
@@ -347,6 +355,8 @@ async function record(parsed: Parsed, context: DecisionContext, ledger: Ledger) 
   } else throw new Error("--mark takes 👤 (the user's own answer), 👍 (they accepted the recommended default) or 🤖 (the agent's own decision)");
   await appendDecision(ledger, decision);
   context.print(decisionLine(decision));
+  const head = mergeCardHead(scope);
+  if (head) context.print(enqueueFrom(head, scope.prs, decision.where.thread, context.env.T3CODE_THREAD_ID));
   return 0;
 }
 

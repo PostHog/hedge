@@ -121,6 +121,9 @@ export const thisMachine = (env: Env) => env.CODER_WORKSPACE_NAME || hostname();
 
 export type DecisionState = Decision & { voided?: { reason: string; at: string }; reversed?: { at: string; mark: Mark; answer: string; rejected?: string } };
 
+const threadKey = (thread: string) => thread.slice(thread.lastIndexOf(":") + 1);
+export const sameThread = (a: string, b: string) => threadKey(a) === threadKey(b);
+
 export const messageKey = ({ thread, message }: Decision["where"]) => message && `${thread}/${message}`;
 
 export const brakeDays = 28;

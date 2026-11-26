@@ -118,6 +118,32 @@ test("a gate pass with a gap the agent accepted holds the merge, own tooling inc
   } finally { rmSync(other, { recursive: true, force: true }); }
 });
 
+test("a Merge answer is the merge word of the thread that asked: it tells that thread to enqueue now, and lifts the hold there and nowhere else", async () => {
+  const { pr, head, id } = await agentAcceptedGap();
+  expect((await pr.hedge("gate")).code).toBe(0);
+  const github = { pull: async () => ({ head, base: "main", defaultBranch: "main", open: true }), pullFor: async () => undefined };
+  const enqueueFrom = async (thread: string) => (await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr comment 42 --repo example/product --body '/trunk merge'" }, cwd: "/" },
+    { home: pr.home, env: { HEDGE_SETTINGS: pr.env.HEDGE_SETTINGS, T3CODE_THREAD_ID: thread }, github }))?.hookSpecificOutput.permissionDecisionReason;
+  const recordMerge = async (question: string, ...thread: string[]) => {
+    pr.choose("Merge", question);
+    const recorded = await pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${head}: merge card`, ...thread);
+    return recorded.output.split("\n").at(-1);
+  };
+  const nextStep = (where: string) => `This is the user's merge word for example/product#42 at ${head.slice(0, 12)}, given in ${where}: merge or enqueue it from ${where} in the same turn, `
+    + `once the merge gate lets that head through, which outside the repositories that skip the gate takes a \`hedge proof gate --repo example/product --pr 42 --commit ${head}\` pass. `
+    + "It never passes to another thread, so never hand it on or ask the user to repeat it elsewhere. A new head voids it.";
+  const partial = await recordMerge(`Merge example/product#42 at ${head}?`);
+  expect(partial).toBe(nextStep("this thread"));
+  pr.env.T3CODE_THREAD_ID = "mcp:conductor-thread";
+  const word = await recordMerge(`Merge example/product#42 at ${head}? An agent accepted ${id} for prod-shape.`, "--thread", "mcp:thread-1");
+  expect(word).toBe(nextStep("thread mcp:thread-1"));
+  expect(await enqueueFrom("mcp:thread-1")).toBeUndefined();
+  expect(await enqueueFrom("thread-1")).toBeUndefined();
+  const relayed = await enqueueFrom("mcp:conductor-thread");
+  expect(relayed).toContain(`an agent accepted proof gaps of example/product#42 at ${head.slice(0, 12)} (🤖 ${id} for prod-shape) itself`);
+  expect(relayed).toContain("The answer lifts only the decisions its question named that way, only in the T3 thread that asked it");
+});
+
 test("a merge word lifts an agent's gap decision only when its card named every proof kind that decision accepts", async () => {
   const pr: Checkout = await checkout();
   pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.autonomy": "end" });

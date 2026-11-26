@@ -32,7 +32,9 @@ proves PRs with the Quality gates pack: add `--workflows merge-gate=on`.
 Repositories that merge without the gate, such as their own tooling, go in
 `--set guards.merge-gate-exempt=<owner/name or owner/*, ...>`. In every
 repository, these included, a head with a proof gap that an agent accepted
-waits for the person's merge word for that head.
+waits for the person's merge word for that head. That word is their "Merge"
+answer on a merge card, and it counts only in the T3 thread that asked it, so
+that thread merges or enqueues the PR itself.
 
 When the person adds Claude allow rules that let agents request reviewers or
 post `/trunk merge` without the auto-mode review, list the same rules, one per

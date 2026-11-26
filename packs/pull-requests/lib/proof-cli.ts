@@ -447,7 +447,8 @@ review budget, each gap with who accepted it and why, after "held:" each 🤖 de
 ready and from ready to now; --json carries it as mergeCard. A pass records the gaps that 🤖 decisions accepted, here
 and in the ledger, and the merge-gate hook then holds that head until the user chooses "Merge" on a merge card that
 names the PR, its full head sha, and each held decision as the hook names it, such as d-1a2b3c4d for live-run/prod-shape, recorded with
-hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full head sha>: merge card'. Own tooling
+hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full head sha>: merge card'. The answer lifts the hold only in
+the T3 thread that asked it, so that thread merges or enqueues the PR. Own tooling
 and repositories that skip the gate are held too. --wait
 <minutes>, at most 120, waits up to that long for running CI to finish, reading CI every 30 seconds, and stops early
 when a read of GitHub fails, with a "ci: --wait stopped early" line that names the error. Then it runs the gate
