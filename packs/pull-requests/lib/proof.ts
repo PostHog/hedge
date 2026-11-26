@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { access, link, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
-import { normalized, unlinked, type HeardAnswer } from "./proof-answers.ts";
+import { leadsWith, normalized, type HeardAnswer } from "./proof-answers.ts";
 import { agentRefusal, agentsAcceptance, covers, fold, keptOwed, panelRefusal, usersAcceptance, type Decision, type DecisionState, type Ledger, type Mark, type PrRef, type Tier } from "./decision-ledger.ts";
 import type { Family, Usage } from "./proof-models.ts";
 import { quietReason, type DeltaKind, type QuietStep } from "./proof-delta.ts";
@@ -500,7 +500,7 @@ export function askGap(identity: ProofIdentity, kind: string, reason: string, au
 
 export function requireChoice(answer: HeardAnswer, lead: string, [accept, decline]: [string, string], refused: string) {
   if (answer.source !== "question") throw new Error(`"${answer.words}" is a message the user typed. Only their answer to your question tool counts: ask "${lead} …" with the options "${accept}" and "${decline}"`);
-  if (!normalized(unlinked(answer.answered)).startsWith(normalized(lead))) throw new Error(`"${answer.words}" answers another question ("${answer.answered}"). Ask the question that hedge proof printed, which starts "${lead}"`);
+  if (!leadsWith(answer.answered, lead)) throw new Error(`"${answer.words}" answers another question ("${answer.answered}"). Ask the question that hedge proof printed, which starts "${lead}"`);
   if (![accept, `${accept} (Recommended)`].map(normalized).includes(normalized(answer.words))) throw new Error(`The user chose "${answer.words}", not "${accept}". ${refused}`);
 }
 

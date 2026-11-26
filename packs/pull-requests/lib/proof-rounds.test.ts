@@ -209,6 +209,8 @@ const linkShapes: [string, string][] = [
   ["balanced parentheses in the URL", `[example/product#42](${pull42}?q=(a))`],
   ["an apostrophe in the URL", `[example/product#42](${pull42}?who=it's)`],
   ["an angle-bracket destination with a parenthesis", `[example/product#42](<${pull42}?q=(draft>)`],
+  ["an angle-bracket destination with an escaped bracket", `[example/product#42](<${pull42}?q=\\>(draft>)`],
+  ["a title in parentheses with a quote", `[example/product#42](${pull42} (A "draft))`],
 ];
 
 test.each(linkShapes)("an answer to a round question that links the PR as %s starts the round", async (_, link) => {
@@ -217,6 +219,36 @@ test.each(linkShapes)("an answer to a round question that links the PR as %s sta
   pr.choose("Run one more round", `Run one more review round? ${link}: why.`);
   expect((await pr.hedge("review-start", "--scope", "full", "--override", `2026-10-25 "Run one more round"`, "--thread", "thread-1")).code).toBe(0);
   expect(await roundDecision(pr, "1")).toMatch(/^d-[0-9a-f]{8}$/);
+});
+
+test("an answer to a round question that links another PR, or more than the PR, never starts this PR's round", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "new\n");
+  for (const link of [`[example/product#421](${pull42}1)`, `[example/product#42 and #43](${pull42})`, `[example/other#42](${pull42})`]) {
+    pr.choose("Run one more round", `Run one more review round? ${link}: why.`);
+    await expect(pr.hedge("review-start", "--scope", "full", "--override", `2026-10-25 "Run one more round"`, "--thread", "thread-1")).rejects.toThrow("answers another question");
+  }
+  await noRound(pr, "1");
+});
+
+test("a decision that covers two PRs starts a round only on the PR its question leads with", async () => {
+  const pr = await checkout();
+  const { override } = await overrideRound(pr);
+  pr.choose("Run one more round", `${linkedQuestion} It also covers example/product#43.`);
+  const message = `request-${(await pr.reader.words!("thread-1")).length}:0`;
+  const both = /\[(d-[0-9a-f]{8})\]/.exec((await pr.decide("record", "--mark", "👤", "--class", "review", "--pr", "example/product#42", "--pr", "example/product#43", "--message", message)).output)![1]!;
+  await expect(pr.hedge("review-start", "--scope", "full", "--repo", "example/product", "--pr", "43", "--override", both)).rejects.toThrow("answers another question");
+  expect((await override(both)).code).toBe(0);
+});
+
+test("an unreadable reservation of another PR keeps the refusal of a recorded answer", async () => {
+  const pr = await checkout();
+  const { override, recordAnswer } = await overrideRound(pr);
+  const recorded = await recordAnswer();
+  const broken = join(pr.home, ".local/state/hedge/proof/example/other/7/reviews/1");
+  mkdirSync(broken, { recursive: true });
+  writeFileSync(join(broken, "round.json"), "{");
+  await expect(override(`2026-10-25 "Run one more round"`)).rejects.toThrow(`already recorded as decision ${recorded}. One answer records one decision`);
 });
 
 test("the user's decision id replaces an agent decision that a round holds unrecorded", async () => {

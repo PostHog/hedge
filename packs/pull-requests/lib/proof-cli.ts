@@ -1143,7 +1143,7 @@ async function decisionOf(options: Map<string, string>, head: ProofIdentity, con
   const decision = words !== undefined
     ? await hearUser({ ...ask, mark: "👤", words, thread: options.get("--thread"), fits }, context, ledger).catch(async (error: unknown) => {
       const recorded = error instanceof AnswerTaken && /already recorded as decision (d-[0-9a-f]{8})/.exec(error.message)?.[1];
-      if (recorded && !await roundOfDecision(context.home, recorded)) error.message += `. When ${recorded} is the user's 👤 answer for ${refText(head)}, pass --override ${recorded}`;
+      if (recorded && await roundOfDecision(context.home, recorded).then((round) => !round, () => false)) error.message += `. When ${recorded} is the user's 👤 answer for ${refText(head)}, pass --override ${recorded}`;
       throw error;
     })
     : await decideAlone({ ...ask, question: `Run another review round of ${refText(head)} at ${short(head.commit)}?`, answer: `Run it: ${reason}`, rejected: "Ask the user", reason: reason!, thread: options.get("--thread") }, context, ledger);
