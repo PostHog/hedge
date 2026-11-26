@@ -586,7 +586,7 @@ function dupCloexec(fd: number): number | undefined {
   return copy;
 }
 
-function redirectAllStdioToNull(): void {
+export function redirectAllStdioToNull(): void {
   const lib = getPosixLib();
   if (!lib) return;
   let devNullIn: number | undefined;
@@ -1447,6 +1447,7 @@ export function signalTargets(
   sessionId?: number,
   tag?: string,
   spared?: SparedSet,
+  sessionGuard?: () => boolean,
 ): void {
   for (const pgrp of targets.groups) {
     if (pgrp === sessionId) continue;
@@ -1458,10 +1459,13 @@ export function signalTargets(
     if (!pidStillLive(pid, targets.pidIdentities?.get(pid))) continue;
     signalOnePid(pid, signal);
   }
-  if (sessionId !== undefined) signalOneGroup(sessionId, signal);
+  if (sessionId !== undefined) {
+    if (sessionGuard && !sessionGuard()) return;
+    signalOneGroup(sessionId, signal);
+  }
 }
 
-function signalDeadTargets(
+export function signalDeadTargets(
   targets: ProcTargets,
   deadSessionId?: number,
   guard?: () => boolean,
@@ -1500,7 +1504,20 @@ export function killTargetSessionSync(
       if (tag) killSessionSync(undefined, "SIGKILL", tag, spared);
       return;
     }
-    killSessionSync(targetPid, "SIGKILL", tag, spared);
+    const found = discoverTargetsSync(targetPid, tag, undefined, spared);
+    const stillSame = pidIdentityNow(targetPid);
+    if (!stillSame || stillSame.startTime !== targetStartTime) {
+      if (tag) killSessionSync(undefined, "SIGKILL", tag, spared);
+      return;
+    }
+    signalTargets(
+      found ?? { pids: [], groups: [], orphanPids: [] },
+      "SIGKILL",
+      targetPid,
+      tag,
+      spared,
+      () => pidIdentityNow(targetPid)?.startTime === targetStartTime,
+    );
     const after = pidIdentityNow(targetPid);
     if (after && after.startTime === targetStartTime) {
       try {
@@ -1525,7 +1542,20 @@ export async function killTargetSession(
       if (tag) await killSession(undefined, "SIGKILL", tag, undefined, spared);
       return;
     }
-    await killSession(targetPid, "SIGKILL", tag, undefined, spared);
+    const found = await discoverTargets(targetPid, tag, spared);
+    const stillSame = pidIdentityNow(targetPid);
+    if (!stillSame || stillSame.startTime !== targetStartTime) {
+      if (tag) await killSession(undefined, "SIGKILL", tag, undefined, spared);
+      return;
+    }
+    signalTargets(
+      found ?? { pids: [], groups: [], orphanPids: [] },
+      "SIGKILL",
+      targetPid,
+      tag,
+      spared,
+      () => pidIdentityNow(targetPid)?.startTime === targetStartTime,
+    );
     const after = pidIdentityNow(targetPid);
     if (after && after.startTime === targetStartTime) {
       try {

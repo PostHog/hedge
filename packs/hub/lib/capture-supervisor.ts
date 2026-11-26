@@ -1,5 +1,6 @@
 import { closeSync, writeSync } from "node:fs";
-import { discoverTargets, discoverTargetsLinux, discoverTargetsSync, drainControlFd, emptySpared, enableChildSubreaper, graceMs, interruptGraceMs, killDeadSession, mergeSpared, ownTag, type PidIdentity, pidIdentityNow, probeGraceEnvVar, type ProcTargets, readFdChunk, redirectStdioOutputsToNull, reportSpared, setCloexec, shieldGroupSignals, signalTargets, spareEnvVar, startSpareServer, type StopSignal, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
+import { bunScript } from "../../../src/runner/bun.ts";
+import { createPipe, discoverTargets, discoverTargetsLinux, discoverTargetsSync, drainControlFd, emptySpared, enableChildSubreaper, graceMs, interruptGraceMs, killDeadSession, killDeadSessionSync, killTargetSessionSync, mergeSpared, ownTag, type PidIdentity, pidIdentityNow, probeGraceEnvVar, probeResultReported, type ProcTargets, readFdChunk, redirectAllStdioToNull, redirectStdioOutputsToNull, reportSpared, setCloexec, shieldGroupSignals, signalDeadTargets, signalTargets, spareEnvVar, startSpareServer, type StopSignal, tagEnvVar } from "../../../src/reconciler/probe-supervisor.ts";
 
 type StartConfig = {
   argv: string[];
@@ -14,10 +15,171 @@ type StartConfig = {
 enableChildSubreaper();
 shieldGroupSignals();
 
+const closeQuiet = (fd: number) => {
+  try {
+    closeSync(fd);
+  } catch {}
+};
+
+const parseFd = (raw: string | undefined, min: number) => {
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= min ? n : undefined;
+};
+
+const parsedLockCount = parseFd(Bun.argv[2], 0);
+const ipcFd = parseFd(Bun.argv[3], 3);
+const configFd = Bun.argv[4] && Bun.argv[4] !== "-" ? parseFd(Bun.argv[4], 3) : undefined;
+if (parsedLockCount === undefined || ipcFd === undefined) {
+  process.exit(127);
+}
+
+const runTag = ownTag(process.env[tagEnvVar]);
+
+if (process.platform === "linux" && Bun.argv[5] !== "inner") {
+  const holderAlive = createPipe();
+  const innerDone = createPipe();
+  const innerMeta = createPipe();
+  if (holderAlive && innerDone && innerMeta) {
+    for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) process.on(sig, () => {});
+    setCloexec(holderAlive.writeFd, true);
+    setCloexec(innerDone.readFd, true);
+    setCloexec(innerMeta.readFd, true);
+    const lockFds = Array.from({ length: parsedLockCount }, (_, index) => index + 3);
+    const extraStdio: number[] = [...lockFds, ipcFd, ...(configFd !== undefined ? [configFd] : [])];
+    const holderAliveIdx = 3 + extraStdio.length;
+    extraStdio.push(holderAlive.readFd);
+    const innerDoneIdx = 3 + extraStdio.length;
+    extraStdio.push(innerDone.writeFd);
+    const innerMetaIdx = 3 + extraStdio.length;
+    extraStdio.push(innerMeta.writeFd);
+    for (const fd of extraStdio) setCloexec(fd, false);
+    let inner: ReturnType<typeof Bun.spawn> | undefined;
+    try {
+      inner = Bun.spawn(
+        bunScript(
+          import.meta.filename,
+          String(parsedLockCount),
+          String(ipcFd),
+          configFd !== undefined ? String(configFd) : "-",
+          "inner",
+          String(holderAliveIdx),
+          String(innerDoneIdx),
+          String(innerMetaIdx),
+        ),
+        { stdio: [0, 1, 2, ...extraStdio], env: process.env, detached: true },
+      );
+    } catch {
+      closeQuiet(holderAlive.readFd);
+      closeQuiet(holderAlive.writeFd);
+      closeQuiet(innerDone.readFd);
+      closeQuiet(innerDone.writeFd);
+      closeQuiet(innerMeta.readFd);
+      closeQuiet(innerMeta.writeFd);
+    }
+    if (inner) {
+      for (const fd of [...lockFds, ipcFd, ...(configFd !== undefined ? [configFd] : []), holderAlive.readFd, innerDone.writeFd, innerMeta.writeFd]) {
+        closeQuiet(fd);
+      }
+      redirectAllStdioToNull();
+      const holderSpared = emptySpared();
+      let holderTargetPid: number | undefined;
+      let holderTargetStartTime: string | undefined;
+      const metaPump = (async () => {
+        const reader = Bun.file(innerMeta.readFd).stream().getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        const handleLine = (line: string) => {
+          if (!line) return;
+          try {
+            const msg = JSON.parse(line) as {
+              spare?: { pids?: unknown; sids?: unknown };
+              targetPid?: unknown;
+              targetStartTime?: unknown;
+            };
+            if (msg.spare) {
+              const pids = Array.isArray(msg.spare.pids) ? msg.spare.pids.filter((v): v is number => typeof v === "number") : [];
+              const sids = Array.isArray(msg.spare.sids) ? msg.spare.sids.filter((v): v is number => typeof v === "number") : [];
+              mergeSpared(holderSpared, pids, sids);
+            }
+            if (typeof msg.targetPid === "number" && msg.targetPid > 0) {
+              holderTargetPid = msg.targetPid;
+              if (typeof msg.targetStartTime === "string" && msg.targetStartTime) holderTargetStartTime = msg.targetStartTime;
+            }
+          } catch {}
+        };
+        try {
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (!value) continue;
+            buf += decoder.decode(value, { stream: true });
+            for (let nl = buf.indexOf("\n"); nl !== -1; nl = buf.indexOf("\n")) {
+              handleLine(buf.slice(0, nl).trim());
+              buf = buf.slice(nl + 1);
+            }
+          }
+          if (buf.trim()) handleLine(buf.trim());
+        } catch {
+        } finally {
+          await reader.cancel().catch(() => {});
+        }
+      })();
+      const code = await inner.exited;
+      await metaPump;
+      const reported = probeResultReported(innerDone.readFd) === "reported";
+      closeQuiet(innerDone.readFd);
+      closeQuiet(innerMeta.readFd);
+      closeQuiet(holderAlive.writeFd);
+      if (reported) {
+        process.exit(inner.signalCode ? 137 : code);
+      }
+      killDeadSessionSync(inner.pid, runTag, true, holderSpared);
+      if (holderTargetPid !== undefined) {
+        killTargetSessionSync(holderTargetPid, holderTargetStartTime, runTag, holderSpared);
+      }
+      const adopted = discoverTargetsLinux(process.pid, runTag, undefined, holderSpared);
+      signalDeadTargets(adopted, process.pid, undefined, runTag, holderSpared);
+      process.exit(inner.signalCode ? 137 : code);
+    }
+  } else {
+    if (holderAlive) {
+      closeQuiet(holderAlive.readFd);
+      closeQuiet(holderAlive.writeFd);
+    }
+    if (innerDone) {
+      closeQuiet(innerDone.readFd);
+      closeQuiet(innerDone.writeFd);
+    }
+    if (innerMeta) {
+      closeQuiet(innerMeta.readFd);
+      closeQuiet(innerMeta.writeFd);
+    }
+  }
+}
+
+const holderAliveFd = Bun.argv[5] === "inner" ? parseFd(Bun.argv[6], 3) : undefined;
+const innerDoneFd = Bun.argv[5] === "inner" ? parseFd(Bun.argv[7], 3) : undefined;
+const innerMetaFd = Bun.argv[5] === "inner" ? parseFd(Bun.argv[8], 3) : undefined;
+if (holderAliveFd !== undefined) setCloexec(holderAliveFd, true);
+if (innerDoneFd !== undefined) setCloexec(innerDoneFd, true);
+if (innerMetaFd !== undefined) setCloexec(innerMetaFd, true);
+
+let innerDoneMarked = false;
+const markInnerDone = () => {
+  if (innerDoneMarked) return;
+  innerDoneMarked = true;
+  if (innerDoneFd !== undefined) {
+    try {
+      writeSync(innerDoneFd, "1\n");
+    } catch {}
+    closeQuiet(innerDoneFd);
+  }
+  if (innerMetaFd !== undefined) closeQuiet(innerMetaFd);
+};
+
 const inlineConfigRaw = process.env.HEDGE_CAPTURE_CONFIG;
 delete process.env.HEDGE_CAPTURE_CONFIG;
 
-const runTag = ownTag(process.env[tagEnvVar]);
 const inProbe = (process.env[tagEnvVar] ?? "").split(",").some((part) => part.trim().startsWith("probe-"));
 const inheritedSpare = process.env[spareEnvVar] || undefined;
 const stopSignalsSet = new Set<StopSignal>(["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"]);
@@ -32,7 +194,7 @@ let targetCode: number | undefined;
 let confirmedDone = false;
 let exitingDone = false;
 let killing = false;
-let lockCount = 0;
+let lockCount = parsedLockCount;
 let gracefulSignal: StopSignal | undefined;
 let interruptTimer: ReturnType<typeof setTimeout> | undefined;
 let graceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -47,12 +209,6 @@ const clearGraceTimers = () => {
     clearTimeout(graceTimer);
     graceTimer = undefined;
   }
-};
-
-const closeQuiet = (fd: number) => {
-  try {
-    closeSync(fd);
-  } catch {}
 };
 
 const writeResult = (
@@ -76,22 +232,10 @@ const writeResult = (
   } catch {}
 };
 
-const parseFd = (raw: string | undefined, min: number) => {
-  const n = Number(raw);
-  return Number.isInteger(n) && n >= min ? n : undefined;
-};
-
-const parsedLockCount = parseFd(Bun.argv[2], 0);
-const ipcFd = parseFd(Bun.argv[3], 3);
-const configFd = Bun.argv[4] && Bun.argv[4] !== "-" ? parseFd(Bun.argv[4], 3) : undefined;
-if (parsedLockCount === undefined || ipcFd === undefined) {
-  process.exit(127);
-}
-lockCount = parsedLockCount;
-
 const spareServer = startSpareServer(async (pids, sids) => {
   mergeSpared(localSpared, pids, sids);
   writeResult(ipcFd, { spare: { pids, sids } });
+  if (innerMetaFd !== undefined && !innerDoneMarked) writeResult(innerMetaFd, { spare: { pids, sids } });
   if (inheritedSpare) {
     const fwd = await reportSpared(inheritedSpare, pids, sids);
     return fwd.ok;
@@ -197,11 +341,13 @@ const exitDone = async () => {
       const saved = await reportSpared(inheritedSpare, found.pids, found.sids);
       if (!saved.ok) {
         writeResult(ipcFd, { spareError: saved.error });
+        markInnerDone();
         process.exit(1);
       }
     }
     writeResult(ipcFd, { saved: true });
   }
+  markInnerDone();
   process.exit(targetCode ?? 0);
 };
 
@@ -216,6 +362,7 @@ const killAll = () => {
         target.kill("SIGKILL");
       } catch {}
     }
+    markInnerDone();
     process.exit(137);
   };
   const done = signalBoth("SIGKILL");
@@ -312,6 +459,7 @@ const watchControl = (fd: number, initialBuf = "") => {
             if (!killing && !alive) {
               clearGraceTimers();
               spareServer?.close();
+              markInnerDone();
               process.exit(targetCode ?? 0);
             }
           });
@@ -320,6 +468,7 @@ const watchControl = (fd: number, initialBuf = "") => {
       }
       if (lockCount > 0 && !targetReaped && !inProbe) {
         spareServer?.close();
+        markInnerDone();
         process.exit(0);
       }
       killAll();
@@ -327,8 +476,31 @@ const watchControl = (fd: number, initialBuf = "") => {
   })();
 };
 
+if (holderAliveFd !== undefined) {
+  const drainedHolder = drainControlFd(holderAliveFd);
+  if (drainedHolder.closed) {
+    killAll();
+  } else {
+    void (async () => {
+      const reader = Bun.file(holderAliveFd).stream().getReader();
+      try {
+        for (;;) {
+          const { done } = await reader.read();
+          if (done) break;
+        }
+      } catch {
+      } finally {
+        await reader.cancel().catch(() => {});
+      }
+      if (!confirmedDone && !exitingDone && !killing) killAll();
+    })();
+  }
+}
+
 if (lockCount > 0 && !inProbe && inheritedSpare) {
-  await reportSpared(inheritedSpare, [process.pid], [process.pid]);
+  const sparePids = holderAliveFd !== undefined ? [process.pid, process.ppid] : [process.pid];
+  const spareSids = holderAliveFd !== undefined ? [process.pid, process.ppid] : [process.pid];
+  await reportSpared(inheritedSpare, sparePids, spareSids);
 }
 
 setCloexec(ipcFd, true);
@@ -340,6 +512,7 @@ if (drained.closed || drained.lines.includes("kill") || drained.lines.some((line
   for (const fd of [...lockFds, ...(configFd !== undefined ? [configFd] : [])]) closeQuiet(fd);
   redirectStdioOutputsToNull();
   spareServer?.close();
+  markInnerDone();
   process.exit(137);
 }
 if (drained.lines.includes("done")) {
@@ -347,6 +520,7 @@ if (drained.lines.includes("done")) {
   for (const fd of [...lockFds, ...(configFd !== undefined ? [configFd] : [])]) closeQuiet(fd);
   redirectStdioOutputsToNull();
   spareServer?.close();
+  markInnerDone();
   process.exit(0);
 }
 watchControl(ipcFd, drained.rest);
@@ -368,17 +542,15 @@ if (!parsed || killing || gracefulSignal) {
   redirectStdioOutputsToNull();
   killAll();
 } else {
-  const { argv, env, envEntries, injectedTag, injectedSpare, callerTag, callerSpare } = parsed;
-  let baseEnv: Record<string, string> | undefined;
+  const { argv, env, envEntries, injectedTag, injectedSpare } = parsed;
+  let cleanBaseEnv: Record<string, string> | undefined;
   if (Array.isArray(envEntries)) {
-    baseEnv = Object.create(null) as Record<string, string>;
-    for (const [k, v] of envEntries) baseEnv[k] = v;
-    if (callerTag !== undefined) baseEnv[tagEnvVar] = callerTag;
-    if (callerSpare !== undefined) baseEnv[spareEnvVar] = callerSpare;
+    cleanBaseEnv = Object.create(null) as Record<string, string>;
+    for (const [k, v] of envEntries) cleanBaseEnv[k] = v;
   } else if (env && typeof env === "object") {
-    baseEnv = Object.create(null) as Record<string, string>;
+    cleanBaseEnv = Object.create(null) as Record<string, string>;
     for (const [k, v] of Object.entries(env)) {
-      if (typeof v === "string") baseEnv[k] = v;
+      if (typeof v === "string" && k !== tagEnvVar && k !== spareEnvVar) cleanBaseEnv[k] = v;
     }
   }
   const effectiveInheritedSpare = injectedSpare ?? inheritedSpare;
@@ -386,14 +558,20 @@ if (!parsed || killing || gracefulSignal) {
     spareServer?.endpoint && effectiveInheritedSpare
       ? `${spareServer.endpoint},${effectiveInheritedSpare}`
       : (spareServer?.endpoint ?? effectiveInheritedSpare);
-  let targetEnv: Record<string, string> | undefined = baseEnv;
-  if (injectedTag || childSpareEndpoint) {
-    targetEnv = Object.create(null) as Record<string, string>;
-    if (baseEnv) {
-      for (const [k, v] of Object.entries(baseEnv)) targetEnv[k] = v;
+  const cloneEnv = (base: Record<string, string> | undefined) => {
+    const out: Record<string, string> = Object.create(null);
+    if (base) {
+      for (const [k, v] of Object.entries(base)) out[k] = v;
     } else {
-      for (const [k, v] of Object.entries(process.env)) if (v !== undefined) targetEnv[k] = v;
+      for (const [k, v] of Object.entries(process.env)) {
+        if (v !== undefined && k !== tagEnvVar && k !== spareEnvVar) out[k] = v;
+      }
     }
+    return out;
+  };
+  let targetEnv: Record<string, string> | undefined = cleanBaseEnv;
+  if (injectedTag || childSpareEndpoint) {
+    targetEnv = cloneEnv(cleanBaseEnv);
     if (injectedTag) targetEnv[tagEnvVar] = injectedTag;
     if (childSpareEndpoint) targetEnv[spareEnvVar] = childSpareEndpoint;
   }
@@ -402,8 +580,22 @@ if (!parsed || killing || gracefulSignal) {
     try {
       target = Bun.spawn(argv, { ...(targetEnv ? { env: targetEnv } : {}), stdio, detached: true });
     } catch (spawnError) {
-      if ((spawnError as NodeJS.ErrnoException)?.code === "E2BIG" && targetEnv !== baseEnv) {
-        target = Bun.spawn(argv, { ...(baseEnv ? { env: baseEnv } : {}), stdio, detached: true });
+      if ((spawnError as NodeJS.ErrnoException)?.code === "E2BIG" && targetEnv !== cleanBaseEnv) {
+        if (injectedTag && childSpareEndpoint) {
+          const spareOnlyEnv = cloneEnv(cleanBaseEnv);
+          spareOnlyEnv[spareEnvVar] = childSpareEndpoint;
+          try {
+            target = Bun.spawn(argv, { env: spareOnlyEnv, stdio, detached: true });
+          } catch (spareError) {
+            if ((spareError as NodeJS.ErrnoException)?.code === "E2BIG") {
+              target = Bun.spawn(argv, { ...(cleanBaseEnv ? { env: cleanBaseEnv } : {}), stdio, detached: true });
+            } else {
+              throw spareError;
+            }
+          }
+        } else {
+          target = Bun.spawn(argv, { ...(cleanBaseEnv ? { env: cleanBaseEnv } : {}), stdio, detached: true });
+        }
       } else {
         throw spawnError;
       }
@@ -411,7 +603,9 @@ if (!parsed || killing || gracefulSignal) {
     targetDetached = true;
     targetPid = target.pid;
     const targetIdentity = pidIdentityNow(targetPid);
-    writeResult(ipcFd, { targetPid, ...(targetIdentity ? { targetStartTime: targetIdentity.startTime } : {}) });
+    const targetInfo = { targetPid, ...(targetIdentity ? { targetStartTime: targetIdentity.startTime } : {}) };
+    writeResult(ipcFd, targetInfo);
+    if (innerMetaFd !== undefined && !innerDoneMarked) writeResult(innerMetaFd, targetInfo);
   } catch (error) {
     for (const fd of lockFds) closeQuiet(fd);
     redirectStdioOutputsToNull();
@@ -420,6 +614,7 @@ if (!parsed || killing || gracefulSignal) {
     targetCode = 127;
     const err = error as NodeJS.ErrnoException;
     writeResult(ipcFd, { error: err?.message ?? String(error), ...(err?.code ? { code: err.code } : {}) });
+    markInnerDone();
     process.exit(127);
   }
   if (target) {
@@ -434,6 +629,7 @@ if (!parsed || killing || gracefulSignal) {
       if (!killing && !alive) {
         clearGraceTimers();
         spareServer?.close();
+        markInnerDone();
         process.exit(code);
       }
     } else {
