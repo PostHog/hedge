@@ -154,13 +154,23 @@ host=""
 cmd=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -o|-p|-i|-l) shift 2 ;;
-    -*) shift ;;
+    -o|-p|-i|-l|-F|-S|-c|-m|-b|-E|-I|-J|-L|-O|-Q|-R|-W|-w|-B|-D) shift 2 ;;
+    -o*|-p*|-i*|-l*|-F*|-S*) shift ;;
+    -4|-6|-A|-a|-C|-f|-G|-g|-K|-k|-M|-N|-n|-q|-s|-T|-t|-V|-v|-X|-x|-Y|-y) shift ;;
+    --)
+      shift
+      break
+      ;;
+    -*) echo "unknown option: $1" >&2; exit 255 ;;
     *)
       if [ -z "$host" ]; then host="$1"; else cmd="$1"; fi
       shift
       ;;
   esac
+done
+while [ "$#" -gt 0 ]; do
+  if [ -z "$host" ]; then host="$1"; else cmd="$1"; fi
+  shift
 done
 case "$host" in
   alice@example.invalid) dest=${JSON.stringify(sshA)} ;;

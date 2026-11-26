@@ -435,6 +435,36 @@ describe("hedge triage", () => {
     const issue = sent.find((call) => call.command[1] === "issue")!;
     expect(issue.input).not.toContain("secret-team");
   });
+
+  test("scrubs private unpinned source advisories recorded in the setup transcript", async () => {
+    const home = temp.make("home-transcript-advisory-");
+    const logs = join(home, ".local/state/hedge/logs");
+    mkdirSync(logs, { recursive: true });
+    writeFileSync(
+      join(logs, "setup.log"),
+      [
+        "=== hedge setup at 2026-11-26T00:00:00.000Z",
+        "Note: The pack source confidential-project is not pinned to a commit SHA. Pin its ref in hedge.json, so each apply loads the same packs, even offline.",
+      ].join("\n") + "\n",
+    );
+    const sent: Sent[] = [];
+    const io = scripted([]);
+    const code = await main(["triage", "--send", "--note", "setup log check"], {
+      home,
+      engineRoot,
+      platform: "darwin",
+      env: {},
+      print: io.terminal.print,
+      terminal: io.terminal,
+      capture: capture(sent),
+      hostname: () => "box.local",
+      run: async () => 0,
+    });
+    expect(code).toBe(0);
+    const issue = sent.find((call) => call.command[1] === "issue")!;
+    expect(issue.input).not.toContain("confidential-project");
+    expect(issue.input).toContain("Note: The pack source <private source> is not pinned to a commit SHA.");
+  });
 });
 
 describe("hedge setup and triage", () => {

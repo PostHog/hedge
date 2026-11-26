@@ -92,6 +92,8 @@ function decodeRepoBytes(bytes: Uint8Array): string {
 }
 
 const slashByte = 0x2f;
+const slashBuf = Buffer.from("/");
+const zeroByteBuf = Buffer.from([0]);
 const dotBuf = Buffer.from(".");
 const dotDotBuf = Buffer.from("..");
 const dotGitBuf = Buffer.from(".git");
@@ -176,14 +178,14 @@ function isDirectoryBytes(pathBuf: Buffer): boolean {
   }
 }
 
-function isBareGitDirBytes(dirBuf: Buffer): boolean {
+function resolvedCommonDirBytes(dirBuf: Buffer): Buffer | undefined {
   try {
-    if (!statSync(dirBuf).isDirectory()) return false;
+    if (!statSync(dirBuf).isDirectory()) return undefined;
     const headPath = Buffer.concat([dirBuf, slashHeadBuf]);
     const headInfo = statSync(headPath);
-    if (!headInfo.isFile()) return false;
+    if (!headInfo.isFile()) return undefined;
     const head = readFileSync(headPath, "utf8").trim();
-    if (!head.startsWith("ref:") && !gitHash.test(head)) return false;
+    if (!head.startsWith("ref:") && !gitHash.test(head)) return undefined;
     let commonDir = dirBuf;
     const commonPath = Buffer.concat([dirBuf, slashCommondirBuf]);
     try {
@@ -195,33 +197,61 @@ function isBareGitDirBytes(dirBuf: Buffer): boolean {
         if (end > 0) commonDir = resolvePosixPathBytes(dirBuf, raw.subarray(0, end));
       }
     } catch {}
-    if (!isDirectoryBytes(Buffer.concat([commonDir, slashObjectsBuf]))) return false;
-    return isDirectoryBytes(Buffer.concat([commonDir, slashRefsBuf])) || isDirectoryBytes(Buffer.concat([commonDir, slashReftableBuf]));
+    if (!isDirectoryBytes(Buffer.concat([commonDir, slashObjectsBuf]))) return undefined;
+    if (!isDirectoryBytes(Buffer.concat([commonDir, slashRefsBuf])) && !isDirectoryBytes(Buffer.concat([commonDir, slashReftableBuf]))) return undefined;
+    return commonDir;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
-function isGitDirBytes(pathBuf: Buffer): boolean {
-  if (isBareGitDirBytes(pathBuf)) return true;
+function isBareGitDirBytes(dirBuf: Buffer): boolean {
+  return resolvedCommonDirBytes(dirBuf) !== undefined;
+}
+
+function resolveGitIdentityBytes(pathBuf: Buffer): { identity: Buffer; isStandardChild: boolean } | undefined {
+  const bareCommon = resolvedCommonDirBytes(pathBuf);
+  if (bareCommon) {
+    const identity = bareCommon.equals(pathBuf) ? pathBuf : Buffer.concat([pathBuf, zeroByteBuf, bareCommon]);
+    return { identity, isStandardChild: false };
+  }
   const dotGit = Buffer.concat([pathBuf, slashDotGitBuf]);
   try {
-    const info = statSync(dotGit);
-    if (info.isDirectory()) return isBareGitDirBytes(dotGit);
+    const linkInfo = lstatSync(dotGit);
+    const resolvedDotGit = linkInfo.isSymbolicLink() ? resolvePosixPathBytes(pathBuf, dotGitBuf) : dotGit;
+    const info = statSync(resolvedDotGit);
+    if (info.isDirectory()) {
+      const commonDir = resolvedCommonDirBytes(resolvedDotGit);
+      if (!commonDir) return undefined;
+      const isStandardChild = !linkInfo.isSymbolicLink() && resolvedDotGit.equals(dotGit) && commonDir.equals(resolvedDotGit);
+      const identity = isStandardChild
+        ? pathBuf
+        : commonDir.equals(resolvedDotGit)
+          ? resolvedDotGit
+          : Buffer.concat([resolvedDotGit, zeroByteBuf, commonDir]);
+      return { identity, isStandardChild };
+    }
     if (info.isFile()) {
-      const raw = readFileSync(dotGit);
-      if (raw.length < gitdirPrefixBuf.length || !raw.subarray(0, gitdirPrefixBuf.length).equals(gitdirPrefixBuf)) return false;
+      const raw = readFileSync(resolvedDotGit);
+      if (raw.length < gitdirPrefixBuf.length || !raw.subarray(0, gitdirPrefixBuf.length).equals(gitdirPrefixBuf)) return undefined;
       let start = gitdirPrefixBuf.length;
       let end = raw.indexOf(0x0a, start);
       if (end === -1) end = raw.length;
       while (start < end && (raw[start] === 0x20 || raw[start] === 0x09)) start++;
       while (end > start && (raw[end - 1] === 0x0d || raw[end - 1] === 0x20 || raw[end - 1] === 0x09)) end--;
-      if (end <= start) return false;
+      if (end <= start) return undefined;
       const target = resolvePosixPathBytes(pathBuf, raw.subarray(start, end));
-      return isBareGitDirBytes(target);
+      const commonDir = resolvedCommonDirBytes(target);
+      if (!commonDir) return undefined;
+      const identity = commonDir.equals(target) ? target : Buffer.concat([target, zeroByteBuf, commonDir]);
+      return { identity, isStandardChild: false };
     }
   } catch {}
-  return false;
+  return undefined;
+}
+
+function isGitDirBytes(pathBuf: Buffer): boolean {
+  return resolveGitIdentityBytes(pathBuf) !== undefined;
 }
 
 function endsWithDotGit(pathBuf: Buffer): boolean {
@@ -332,12 +362,27 @@ function canonicalLocalRepoInfo(dir: string, effective: string, goodDigest?: str
   const { base, rawPath, asFileUrl } = parsed;
   const resolved = resolvePosixPathBytes(base, rawPath);
   const primary = encodeCanonicalLocal(resolved, asFileUrl);
-  if (isGitDirBytes(resolved)) return { resolved: primary, primary, usedImplicitDotGit: false, isLocal: true };
+  const primaryGit = resolveGitIdentityBytes(resolved);
+  if (primaryGit) {
+    return {
+      resolved: primaryGit.isStandardChild ? primary : encodeCanonicalLocal(primaryGit.identity, asFileUrl),
+      primary,
+      usedImplicitDotGit: false,
+      isLocal: true,
+    };
+  }
   const trimmedRaw = stripTrailingSlashBytes(rawPath);
   if (endsWithDotGit(trimmedRaw)) return { resolved: primary, primary, usedImplicitDotGit: false, isLocal: true };
   const dotGitResolved = resolvePosixPathBytes(base, Buffer.concat([trimmedRaw, dotGitBuf]));
-  const dotGitEncoded = encodeCanonicalLocal(dotGitResolved, asFileUrl);
-  if (isGitDirBytes(dotGitResolved)) return { resolved: dotGitEncoded, primary, usedImplicitDotGit: true, isLocal: true };
+  const dotGitInfo = resolveGitIdentityBytes(dotGitResolved);
+  if (dotGitInfo) {
+    return {
+      resolved: dotGitInfo.isStandardChild ? encodeCanonicalLocal(dotGitResolved, asFileUrl) : encodeCanonicalLocal(dotGitInfo.identity, asFileUrl),
+      primary,
+      usedImplicitDotGit: true,
+      isLocal: true,
+    };
+  }
   return { resolved: primary, primary, usedImplicitDotGit: false, isLocal: true };
 }
 
@@ -378,7 +423,7 @@ async function rawResolvedRepoUrl(dir: string, repo: string) {
 
 async function resolveCanonicalRepoAt(gitDir: string, dir: string, rawEffective: string): Promise<string> {
   const info = canonicalLocalRepoInfo(dir, rawEffective);
-  if (info.usedImplicitDotGit || !info.isLocal) return info.resolved;
+  if (info.usedImplicitDotGit || !info.isLocal || info.resolved !== info.primary) return info.resolved;
   const fallback = implicitDotGitFallback(dir, rawEffective);
   if (fallback && fallback !== info.resolved && (await hasImplicitDotGitRefAt(dir, gitDir, repoDigest(info.primary), repoDigest(fallback)))) {
     return fallback;
@@ -622,7 +667,10 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
       }
       const rawAfter = await rawResolvedRepoUrl(dir, repo);
       const localInfo = canonicalLocalRepoInfo(dir, rawAfter);
-      const usedImplicit = localInfo.isLocal && (localInfo.usedImplicitDotGit || localInfo.primary !== effectiveRepo);
+      const dotGitFallbackAfter = implicitDotGitFallback(dir, rawAfter);
+      const usedImplicit =
+        localInfo.isLocal &&
+        (localInfo.usedImplicitDotGit || (dotGitFallbackAfter !== undefined && dotGitFallbackAfter === effectiveRepo));
       const implicitAlias =
         usedImplicit && localInfo.primary !== effectiveRepo
           ? { primaryHash: repoDigest(localInfo.primary), dotGitHash: effectiveDigest }
@@ -952,16 +1000,18 @@ async function buildHistoryAnchor(dir: string, commits: string[]): Promise<strin
   return prev;
 }
 
-async function recordPinRef(dir: string, repoHash: string, oid: string, created?: string[]): Promise<string | undefined> {
+type RefUndo = { ref: string; oldOid?: string };
+
+async function recordPinRef(dir: string, repoHash: string, oid: string, undo?: RefUndo[]): Promise<string | undefined> {
   if ((await exactPinTarget(dir, repoHash, oid)) !== undefined) return undefined;
   const ref = pinRef(repoHash, oid);
   const updated = await git(dir, "update-ref", ref, oid.toLowerCase());
   if (!updated.ok) return updated.stderr || "could not record pinned commit";
-  created?.push(ref);
+  undo?.push({ ref });
   return undefined;
 }
 
-async function recordHistoryRef(dir: string, repoHash: string, commit: string, from: string, created?: string[]): Promise<string | undefined> {
+async function recordHistoryRef(dir: string, repoHash: string, commit: string, from: string, undo?: RefUndo[]): Promise<string | undefined> {
   const normalized = commit.toLowerCase();
   const listed = await git(dir, "rev-list", normalized, `^${from.toLowerCase()}`);
   if (!listed.ok) return listed.stderr || "could not list verified commit history";
@@ -985,7 +1035,7 @@ async function recordHistoryRef(dir: string, repoHash: string, commit: string, f
     const cmds = toCreate.map((item) => `update ${item.ref} ${item.oid}\n`).join("");
     const batch = await gitWithStdin(dir, cmds, ["update-ref", "--stdin"]);
     if (!batch.ok) return batch.stderr || "could not record verified commit history";
-    if (created) for (const item of toCreate) created.push(item.ref);
+    if (undo) for (const item of toCreate) undo.push({ ref: item.ref });
     return undefined;
   }
   const anchorRef = historyAnchorRef(repoHash, commit, from);
@@ -995,17 +1045,20 @@ async function recordHistoryRef(dir: string, repoHash: string, commit: string, f
   if (!anchorOid) return "could not record verified commit history";
   const savedAnchor = await git(dir, "update-ref", anchorRef, anchorOid);
   if (!savedAnchor.ok) return savedAnchor.stderr || "could not record verified commit history";
-  created?.push(anchorRef);
+  undo?.push({ ref: anchorRef });
   return undefined;
 }
 
-async function rollbackRefs(dir: string, refs: string[]): Promise<void> {
-  if (!refs.length) return;
-  const cmds = refs.map((ref) => `delete ${ref}\n`).join("");
+async function rollbackRefs(dir: string, undo: RefUndo[]): Promise<void> {
+  if (!undo.length) return;
+  const cmds = undo
+    .map((entry) => (entry.oldOid ? `update ${entry.ref} ${entry.oldOid}\n` : `delete ${entry.ref}\n`))
+    .join("");
   const batch = await gitWithStdin(dir, cmds, ["update-ref", "--stdin"]).catch(() => ({ ok: false }));
   if (batch.ok) return;
-  for (const ref of refs) {
-    await git(dir, "update-ref", "-d", ref).catch(() => {});
+  for (const entry of undo) {
+    if (entry.oldOid) await git(dir, "update-ref", entry.ref, entry.oldOid).catch(() => {});
+    else await git(dir, "update-ref", "-d", entry.ref).catch(() => {});
   }
 }
 
@@ -1030,42 +1083,43 @@ async function saveGood(
     before.resolved === undefined &&
     before.resolvedDigest === good.resolvedDigest;
   const currentCommit = verifiedGoodCommit(good);
-  const createdRefs: string[] = [];
+  const refUndo: RefUndo[] = [];
   if (currentCommit) {
-    const recorded = await recordPinRef(dir, currentCommit.repoHash, currentCommit.commit, createdRefs);
+    const recorded = await recordPinRef(dir, currentCommit.repoHash, currentCommit.commit, refUndo);
     if (recorded && !unchanged) {
-      await rollbackRefs(dir, createdRefs);
+      await rollbackRefs(dir, refUndo);
       return recorded;
     }
     if (implicitAlias) {
       const aliasRef = implicitDotGitRef(implicitAlias.primaryHash, implicitAlias.dotGitHash);
       const existingAlias = await git(dir, "rev-parse", "--verify", "--quiet", aliasRef);
-      if (!existingAlias.ok || existingAlias.stdout.toLowerCase() !== currentCommit.commit) {
+      const prevAliasOid = existingAlias.ok && gitHash.test(existingAlias.stdout) ? existingAlias.stdout.toLowerCase() : undefined;
+      if (prevAliasOid !== currentCommit.commit) {
         const updatedAlias = await git(dir, "update-ref", aliasRef, currentCommit.commit);
         if (!updatedAlias.ok && !unchanged) {
-          await rollbackRefs(dir, createdRefs);
+          await rollbackRefs(dir, refUndo);
           return updatedAlias.stderr || "could not record implicit repository alias";
         }
-        if (updatedAlias.ok) createdRefs.push(aliasRef);
+        if (updatedAlias.ok) refUndo.push({ ref: aliasRef, ...(prevAliasOid ? { oldOid: prevAliasOid } : {}) });
       }
     }
     if (historyFrom && gitHash.test(historyFrom)) {
-      const recordedFrom = await recordPinRef(dir, currentCommit.repoHash, historyFrom, createdRefs);
+      const recordedFrom = await recordPinRef(dir, currentCommit.repoHash, historyFrom, refUndo);
       if (recordedFrom && !unchanged) {
-        await rollbackRefs(dir, createdRefs);
+        await rollbackRefs(dir, refUndo);
         return recordedFrom;
       }
-      const recordedHistory = await recordHistoryRef(dir, currentCommit.repoHash, currentCommit.commit, historyFrom, createdRefs);
+      const recordedHistory = await recordHistoryRef(dir, currentCommit.repoHash, currentCommit.commit, historyFrom, refUndo);
       if (recordedHistory && !unchanged) {
-        await rollbackRefs(dir, createdRefs);
+        await rollbackRefs(dir, refUndo);
         return recordedHistory;
       }
     }
     const strippedGoodRef = stripSourceRefspec(good.ref);
     if (good.peeled === true && isCommitPin(strippedGoodRef, currentCommit.commit.length) && (await git(dir, "cat-file", "-e", strippedGoodRef)).ok) {
-      const recordedTag = await recordPinRef(dir, currentCommit.repoHash, strippedGoodRef, createdRefs);
+      const recordedTag = await recordPinRef(dir, currentCommit.repoHash, strippedGoodRef, refUndo);
       if (recordedTag && !unchanged) {
-        await rollbackRefs(dir, createdRefs);
+        await rollbackRefs(dir, refUndo);
         return recordedTag;
       }
     }
@@ -1075,7 +1129,7 @@ async function saveGood(
     if (clearImplicitForPrimary) {
       const staleAliases = await git(dir, "for-each-ref", "--format=%(refname)", `refs/hedge/implicit-dotgit/${clearImplicitForPrimary}/`);
       if (staleAliases.ok && staleAliases.stdout) {
-        const refsToClear = staleAliases.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+        const refsToClear = staleAliases.stdout.split("\n").map((s) => s.trim()).filter(Boolean).map((ref) => ({ ref }));
         if (refsToClear.length) await rollbackRefs(dir, refsToClear);
       }
     }
@@ -1084,13 +1138,13 @@ async function saveGood(
   try {
     await writeAtomic(goodPath(dir), JSON.stringify(good) + "\n");
   } catch (error) {
-    await rollbackRefs(dir, createdRefs);
+    await rollbackRefs(dir, refUndo);
     return error instanceof Error ? error.message : String(error);
   }
   if (clearImplicitForPrimary) {
     const staleAliases = await git(dir, "for-each-ref", "--format=%(refname)", `refs/hedge/implicit-dotgit/${clearImplicitForPrimary}/`);
     if (staleAliases.ok && staleAliases.stdout) {
-      const refsToClear = staleAliases.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+      const refsToClear = staleAliases.stdout.split("\n").map((s) => s.trim()).filter(Boolean).map((ref) => ({ ref }));
       if (refsToClear.length) await rollbackRefs(dir, refsToClear);
     }
   }
@@ -1230,69 +1284,173 @@ async function checkoutFromEmptyTree(dir: string, commit: string, branch?: strin
   return { ok: true, stderr: "" };
 }
 
-async function listTrackedFiles(dir: string): Promise<string[]> {
+function splitNullBytes(bytes: Uint8Array): Buffer[] {
+  const out: Buffer[] = [];
+  let start = 0;
+  for (let i = 0; i <= bytes.length; i++) {
+    if (i === bytes.length || bytes[i] === 0) {
+      if (i > start) out.push(Buffer.from(bytes.subarray(start, i)));
+      start = i + 1;
+    }
+  }
+  return out;
+}
+
+const pathByteKey = (buf: Buffer) => buf.toString("hex");
+const joinPosixFile = (rootBuf: Buffer, relBuf: Buffer) => Buffer.concat([rootBuf, slashBuf, relBuf]);
+
+function decodeTrackedPathWin(buf: Buffer): string | undefined {
+  try {
+    return fatalUtf8.decode(buf);
+  } catch {
+    return undefined;
+  }
+}
+
+async function listTrackedFiles(dir: string): Promise<Buffer[] | undefined> {
   if (!existsSync(join(dir, ".git"))) return [];
   const listed = await git(dir, "ls-files", "-z");
-  if (!listed.ok || !listed.rawStdout) return [];
-  return listed.rawStdout.split("\0").filter(Boolean);
+  if (!listed.ok) return undefined;
+  return listed.rawBytes.length ? splitNullBytes(listed.rawBytes) : [];
 }
 
-async function listTreeFiles(dir: string, gitDir: string, commit: string): Promise<string[] | undefined> {
+async function listTreeFiles(dir: string, gitDir: string, commit: string): Promise<Buffer[] | undefined> {
   const listed = await gitAt(dir, gitDir, "ls-tree", "-r", "--name-only", "-z", commit);
   if (!listed.ok) return undefined;
-  return listed.rawStdout ? listed.rawStdout.split("\0").filter(Boolean) : [];
+  return listed.rawBytes.length ? splitNullBytes(listed.rawBytes) : [];
 }
 
-async function hasUntrackedUnder(root: string, relDir: string, oldTracked: Set<string>): Promise<boolean> {
-  const entries = await readdir(join(root, relDir), { withFileTypes: true }).catch(() => []);
+async function hasUntrackedUnderBytes(rootBuf: Buffer, relDir: Buffer, oldTracked: Set<string>): Promise<boolean> {
+  const entries = await readdir(joinPosixFile(rootBuf, relDir), { encoding: "buffer" }).catch(() => [] as Buffer[]);
   for (const entry of entries) {
-    const childRel = `${relDir}/${entry.name}`;
-    if (entry.isDirectory()) {
-      if (await hasUntrackedUnder(root, childRel, oldTracked)) return true;
-    } else if (!oldTracked.has(childRel)) {
+    const childRel = Buffer.concat([relDir, slashBuf, entry]);
+    let isDir = false;
+    try {
+      isDir = lstatSync(joinPosixFile(rootBuf, childRel)).isDirectory();
+    } catch {}
+    if (isDir) {
+      if (await hasUntrackedUnderBytes(rootBuf, childRel, oldTracked)) return true;
+    } else if (!oldTracked.has(pathByteKey(childRel))) {
       return true;
     }
   }
   return false;
 }
 
-async function checkUntrackedCollisions(dir: string, oldTracked: Set<string>, newFiles: string[]): Promise<string | undefined> {
-  for (const rel of newFiles) {
-    const parts = rel.split("/");
-    for (let i = 0; i < parts.length - 1; i++) {
-      const prefix = parts.slice(0, i + 1).join("/");
+async function hasUntrackedUnderWin(root: string, relDir: string, oldTracked: Set<string>): Promise<boolean> {
+  const entries = await readdir(join(root, relDir), { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const childRel = `${relDir}/${entry.name}`;
+    if (entry.isDirectory()) {
+      if (await hasUntrackedUnderWin(root, childRel, oldTracked)) return true;
+    } else if (!oldTracked.has(pathByteKey(Buffer.from(childRel, "utf8")))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function checkUntrackedCollisions(dir: string, oldTracked: Set<string>, newFiles: Buffer[]): Promise<string | undefined> {
+  if (process.platform === "win32") {
+    for (const relBuf of newFiles) {
+      const rel = decodeTrackedPathWin(relBuf);
+      if (rel === undefined) return "cannot switch cache object format with non-UTF-8 tracked paths";
+      const parts = rel.split("/");
+      for (let i = 0; i < parts.length - 1; i++) {
+        const prefix = parts.slice(0, i + 1).join("/");
+        try {
+          const info = lstatSync(join(dir, prefix));
+          if (!info.isDirectory() && !oldTracked.has(pathByteKey(Buffer.from(prefix, "utf8")))) return `untracked file ${prefix} would be overwritten`;
+        } catch {}
+      }
       try {
-        const info = lstatSync(join(dir, prefix));
-        if (!info.isDirectory() && !oldTracked.has(prefix)) return `untracked file ${prefix} would be overwritten`;
+        const info = lstatSync(join(dir, rel));
+        if (info.isDirectory()) {
+          if (await hasUntrackedUnderWin(dir, rel, oldTracked)) return `untracked files under ${rel} would be overwritten`;
+        } else if (!oldTracked.has(pathByteKey(relBuf))) {
+          return `untracked file ${rel} would be overwritten`;
+        }
+      } catch {}
+    }
+    return undefined;
+  }
+  const rootBuf = Buffer.from(resolve(dir), "utf8");
+  for (const relBuf of newFiles) {
+    for (let i = 0; i < relBuf.length; i++) {
+      if (relBuf[i] !== slashByte) continue;
+      const prefix = relBuf.subarray(0, i);
+      try {
+        const info = lstatSync(joinPosixFile(rootBuf, prefix));
+        if (!info.isDirectory() && !oldTracked.has(pathByteKey(prefix))) {
+          return `untracked file ${decodeRepoBytes(prefix)} would be overwritten`;
+        }
       } catch {}
     }
     try {
-      const info = lstatSync(join(dir, rel));
+      const info = lstatSync(joinPosixFile(rootBuf, relBuf));
       if (info.isDirectory()) {
-        if (await hasUntrackedUnder(dir, rel, oldTracked)) return `untracked files under ${rel} would be overwritten`;
-      } else if (!oldTracked.has(rel)) {
-        return `untracked file ${rel} would be overwritten`;
+        if (await hasUntrackedUnderBytes(rootBuf, relBuf, oldTracked)) {
+          return `untracked files under ${decodeRepoBytes(relBuf)} would be overwritten`;
+        }
+      } else if (!oldTracked.has(pathByteKey(relBuf))) {
+        return `untracked file ${decodeRepoBytes(relBuf)} would be overwritten`;
       }
     } catch {}
   }
   return undefined;
 }
 
-async function removeTrackedFiles(dir: string, files: string[]): Promise<void> {
-  const dirs = new Set<string>();
-  const root = resolve(dir);
-  for (const rel of files) {
-    const full = join(dir, rel);
-    await rm(full, { force: true }).catch(() => {});
-    let parent = dirname(full);
-    while (resolve(parent) !== root && resolve(parent).startsWith(root + sep)) {
-      dirs.add(parent);
-      parent = dirname(parent);
+async function removeTrackedFiles(dir: string, files: Buffer[]): Promise<void> {
+  if (process.platform === "win32") {
+    const dirs = new Set<string>();
+    const root = resolve(dir);
+    for (const relBuf of files) {
+      const rel = decodeTrackedPathWin(relBuf);
+      if (rel === undefined) continue;
+      const full = join(dir, rel);
+      await rm(full, { force: true }).catch(() => {});
+      let parent = dirname(full);
+      while (resolve(parent) !== root && resolve(parent).startsWith(root + sep)) {
+        dirs.add(parent);
+        parent = dirname(parent);
+      }
+    }
+    for (const folder of [...dirs].sort((a, b) => b.length - a.length)) {
+      await rmdir(folder).catch(() => {});
+    }
+    return;
+  }
+  const rootBuf = Buffer.from(resolve(dir), "utf8");
+  const parentDirs = new Map<string, Buffer>();
+  for (const relBuf of files) {
+    await rm(joinPosixFile(rootBuf, relBuf), { force: true }).catch(() => {});
+    let slash = relBuf.lastIndexOf(slashByte);
+    while (slash > 0) {
+      const parent = relBuf.subarray(0, slash);
+      const key = pathByteKey(parent);
+      if (!parentDirs.has(key)) parentDirs.set(key, Buffer.from(parent));
+      slash = parent.lastIndexOf(slashByte);
     }
   }
-  for (const folder of [...dirs].sort((a, b) => b.length - a.length)) {
-    await rmdir(folder).catch(() => {});
+  for (const folder of [...parentDirs.values()].sort((a, b) => b.length - a.length)) {
+    await rmdir(joinPosixFile(rootBuf, folder)).catch(() => {});
   }
+}
+
+async function forceRestoreCheckout(dir: string, before: CheckoutState): Promise<boolean> {
+  let ok = false;
+  if (before.branch) {
+    const tip = await git(dir, "rev-parse", "--verify", "--quiet", `refs/heads/${before.branch}`);
+    if (tip.ok && tip.stdout.toLowerCase() === before.commit.toLowerCase()) {
+      ok = (await git(dir, "checkout", "-q", "-f", before.branch)).ok;
+    }
+  }
+  if (!ok) ok = (await git(dir, "checkout", "-q", "-f", "--detach", `${before.commit}^{commit}`)).ok;
+  if (!ok) return false;
+  const head = await git(dir, "rev-parse", "--verify", "--quiet", "HEAD");
+  if (!head.ok || head.stdout.toLowerCase() !== before.commit.toLowerCase()) return false;
+  clearLoadedModules(dir);
+  return true;
 }
 
 async function activateSwappedGit(
@@ -1305,9 +1463,14 @@ async function activateSwappedGit(
   onRollbackTarget?: () => Promise<void>,
 ): Promise<{ commit?: string; rollback?: () => Promise<void>; commitSwap?: () => Promise<void>; error?: string }> {
   const oldTracked = await listTrackedFiles(dir);
+  if (!oldTracked) return { error: "could not inspect current checkout files" };
+  if (process.platform === "win32" && oldTracked.some((buf) => decodeTrackedPathWin(buf) === undefined)) {
+    return { error: "cannot switch cache object format with non-UTF-8 tracked paths" };
+  }
   const newFiles = await listTreeFiles(dir, targetGit, targetCommit);
   if (!newFiles) return { error: "could not inspect fetched commit tree" };
-  const collision = await checkUntrackedCollisions(dir, new Set(oldTracked), newFiles);
+  const oldTrackedKeys = new Set(oldTracked.map(pathByteKey));
+  const collision = await checkUntrackedCollisions(dir, oldTrackedKeys, newFiles);
   if (collision) return { error: collision };
   const liveGit = join(dir, ".git");
   const stashOldGit = altGitDirPath(dir, oldFormat);
@@ -1318,10 +1481,13 @@ async function activateSwappedGit(
   }
   let movedOld = false;
   let movedNew = false;
+  let removedOldTracked = false;
+  let startedNewCheckout = false;
   const rollback = async () => {
     if (movedNew) {
-      const newTracked = await listTrackedFiles(dir);
-      await removeTrackedFiles(dir, newTracked);
+      if (startedNewCheckout) {
+        await removeTrackedFiles(dir, newFiles);
+      }
       if (removeTargetOnRollback) {
         await rm(liveGit, { recursive: true, force: true }).catch(() => {});
       } else {
@@ -1331,9 +1497,9 @@ async function activateSwappedGit(
     }
     if (movedOld) await rename(stashOldGit, liveGit).catch(() => {});
     if (prevStashBackup) await rename(prevStashBackup, stashOldGit).catch(() => {});
-    if (before) {
+    if (before && removedOldTracked) {
       const restored = await checkoutFromEmptyTree(dir, before.commit, before.branch);
-      if (!restored.ok) await restoreCheckout(dir, before);
+      if (!restored.ok) await forceRestoreCheckout(dir, before);
     }
     clearLoadedModules(dir);
   };
@@ -1343,6 +1509,8 @@ async function activateSwappedGit(
     await rename(targetGit, liveGit);
     movedNew = true;
     await removeTrackedFiles(dir, oldTracked);
+    removedOldTracked = true;
+    startedNewCheckout = true;
     const moved = await checkoutFromEmptyTree(dir, targetCommit);
     if (!moved.ok) {
       await rollback();
@@ -1658,11 +1826,12 @@ const branchName = (ref: unknown) => {
 const hasExplicitHead = (ref: unknown) => typeof ref === "string" && stripSourceRefspec(ref).startsWith("refs/heads/");
 const hasRefspecDecor = (ref: unknown) => typeof ref === "string" && (ref.startsWith("+") || ref.endsWith(":"));
 
-const sameBranchRef = (a: unknown, b: unknown): boolean => {
+const sameBranchRef = (a: unknown, b: unknown, hashLen?: number): boolean => {
   const nameA = branchName(a);
   const nameB = branchName(b);
   if (!nameA || nameA !== nameB) return false;
-  if (!gitHash.test(nameA)) return true;
+  const fullHash = hashLen !== undefined ? isCommitPin(nameA, hashLen) : gitHash.test(nameA);
+  if (!fullHash) return true;
   const headA = hasExplicitHead(a);
   const headB = hasExplicitHead(b);
   if (headA === headB) return true;
@@ -1694,15 +1863,16 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
   const branch = branchName(ref.ref);
   const repo = repoUrl(ref.repo);
   if (!good || !branch || typeof good.commit !== "string" || !gitHash.test(good.commit)) return false;
+  const hashLen = good.commit.length;
   let isBranch: boolean;
   let matchedExplicitHead = false;
-  if (sameBranchRef(good.asked, ref.ref)) {
+  if (sameBranchRef(good.asked, ref.ref, hashLen)) {
     matchedExplicitHead = hasExplicitHead(good.asked);
     if (good.askedBranch === true) isBranch = true;
     else if (good.askedBranch === false) return false;
-    else if (sameBranchRef(good.ref, ref.ref) && typeof good.branch === "boolean") isBranch = good.branch;
+    else if (sameBranchRef(good.ref, ref.ref, hashLen) && typeof good.branch === "boolean") isBranch = good.branch;
     else isBranch = (await fetchHeadIsBranch(dir, ref.ref)) === true;
-  } else if (sameBranchRef(good.ref, ref.ref)) {
+  } else if (sameBranchRef(good.ref, ref.ref, hashLen)) {
     matchedExplicitHead = hasExplicitHead(good.ref);
     if (good.branch === true) isBranch = true;
     else if (good.branch === false) return false;
@@ -1711,7 +1881,7 @@ export async function followsBranch(ref: SourceRef, cacheRoot: string) {
     return false;
   }
   if (!isBranch) return false;
-  if (gitHash.test(branch) && matchedExplicitHead && !hasExplicitHead(ref.ref) && existsSync(join(dir, ".git"))) {
+  if (isCommitPin(branch, hashLen) && matchedExplicitHead && !hasExplicitHead(ref.ref) && existsSync(join(dir, ".git"))) {
     const obj = await git(dir, "cat-file", "-t", branch);
     if (obj.ok && obj.stdout === "commit") return false;
   }
@@ -1844,7 +2014,10 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
   }
   const rawAfterRefresh = await rawResolvedRepoUrl(dir, repo);
   const refreshLocalInfo = canonicalLocalRepoInfo(dir, rawAfterRefresh);
-  const refreshUsedImplicit = refreshLocalInfo.isLocal && (refreshLocalInfo.usedImplicitDotGit || refreshLocalInfo.primary !== effectiveRepo);
+  const refreshDotGitFallback = implicitDotGitFallback(dir, rawAfterRefresh);
+  const refreshUsedImplicit =
+    refreshLocalInfo.isLocal &&
+    (refreshLocalInfo.usedImplicitDotGit || (refreshDotGitFallback !== undefined && refreshDotGitFallback === effectiveRepo));
   const refreshAlias =
     refreshUsedImplicit && refreshLocalInfo.primary !== effectiveRepo
       ? { primaryHash: repoDigest(refreshLocalInfo.primary), dotGitHash: effectiveDigest }

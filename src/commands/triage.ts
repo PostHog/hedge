@@ -82,7 +82,7 @@ export async function triageReport(context: TriageContext, note?: string): Promi
   const head = ["## What happened", "", described, "", "## Setup", "", facts, "", "## hedge doctor", "", fence(checked), "", ""].join("\n");
   const ending = "\n\nMade by `hedge triage`.";
   const transcript = transcriptTail(context.home, transcriptLines);
-  const lines = transcript.lines.length ? clean(transcript.lines.join("\n")).split("\n") : [];
+  const lines = transcript.lines.length ? clean(transcript.lines.map(scrubUnpinnedAdvisory).join("\n")).split("\n") : [];
   const room = bodyLimit - head.length - ending.length - 200;
   let kept = lines.length;
   let size = lines.reduce((sum, line) => sum + line.length + 1, 0);
@@ -156,7 +156,7 @@ const publicSourceNames = new Set(defaultSources.map((source) => source.name));
 
 function scrubUnpinnedAdvisory(line: string): string {
   return line.replace(
-    /^(Note: The pack source )([a-z0-9][a-z0-9-]*)( is not pinned to a commit SHA\. Pin its ref in hedge\.json, so each apply loads the same packs, even offline\.)$/,
+    /^(\s*Note: The pack source )([a-z0-9][a-z0-9-]*)( is not pinned to a commit SHA\. Pin its ref in hedge\.json, so each apply loads the same packs, even offline\.)$/,
     (match, prefix, name, suffix) => (publicSourceNames.has(name) ? match : `${prefix}<private source>${suffix}`),
   );
 }
