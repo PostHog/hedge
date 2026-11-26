@@ -2,7 +2,7 @@ import { closeSync, existsSync, openSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { decisionsLock, roundOfDecision, answerNumbers, askGap, savedFindings, summaryGaps, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity, type Once } from "./proof.ts";
+import { decisionLock, roundOfDecision, answerNumbers, askGap, savedFindings, summaryGaps, authorOf, ciRunningCode, readDecisions, finishReview, startGateRun, ledgerRoot, listStanding, panelCommit, proofDirectory, readJson, readOwed, recordGap, recordGapCommand, recordStanding, requireChoice, requireNone, devPr, requireProofs, requireReservation, respondToReview, reuseProof, reviewDirectory, reviewOfCommit, reviewRecords, roundId, roundQuestion, runOption, saveProof, startReview, stopOption, storeCapturedFindings, unfinishedReview, writeJson, markRecorded, readReservation, recordReceipt, roundDirectories, unrecordedElsewhere, recordFailure, dropFinalRead, droppedFinalReads, type Arbiter, type Reservation, type CapturedBy, type ProofIdentity, type Once } from "./proof.ts";
 import { AnswerTaken, adoptUsers, appendOnce, decideAlone, decisionId, hearUser, ledgerHolds, ledgerOf, refuseUsedDecision } from "./decision-cli.ts";
 import { HubUnreachable, keptOwed, refText, usersAcceptance, thisMachine, type Decision, type Ssh } from "./decision-ledger.ts";
 import { autonomyOf, decidesAll, gradeOf, type Autonomy, type Grade } from "./proof-autonomy.ts";
@@ -816,6 +816,8 @@ async function unrecordedRound(options: Map<string, string>, head: ProofIdentity
 
 function requireSameRequest({ reservation, directory }: { reservation: Reservation; directory: string }, options: Map<string, string>, run: Run) {
   if (!reservation.decision || reservation.recorded) return;
+  const id = options.get("--override");
+  if (id !== undefined && decisionId.test(id) && id !== reservation.decision.id) throw new Error(`Review round ${basename(directory)} at this HEAD is reserved with decision ${reservation.decision.id}, not ${id}, and that decision is not recorded yet. Run its command again with --override ${reservation.decision.id} to record it, or remove ${directory} to drop it`);
   const reserved = reservedOptions(reservation);
   if (reserved !== requestedOptions(options, reservation, run)) throw new Error(`Review round ${basename(directory)} at this HEAD is reserved with ${reserved}, and its decision is not recorded yet. Run its command again with ${reserved} to record it, or remove ${directory} to drop it`);
 }
@@ -1148,7 +1150,7 @@ async function decisionOf(options: Map<string, string>, head: ProofIdentity, con
 }
 
 const adoptOnce = (id: string, context: CommandContext): Once => async (step) => {
-  const directory = decisionsLock(context.home);
+  const directory = decisionLock(context.home, id);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   return withRoundLock(directory, await context.lock(), async () => {
     await refuseUsedDecision(context.home, id);

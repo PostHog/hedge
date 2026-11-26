@@ -465,18 +465,16 @@ function claimedOn(text: string) {
 
 const usedOn = (where: string) => `This answer is already used on ${where}. One answer counts once. Ask the user again`;
 
-export const decisionsLock = (home: string) => join(ledgerRoot(home), ".decisions");
+export const decisionLock = (home: string, id: string) => join(ledgerRoot(home), ".decisions", id);
 
 export async function roundOfDecision(home: string, id: string) {
   const root = ledgerRoot(home);
   for (const owner of await entries(root)) for (const name of await entries(join(root, owner))) for (const pr of await entries(join(root, owner, name))) {
     const reviews = join(root, owner, name, pr, "reviews");
+    const holds = async (directory: string) => (await readReservation(directory))?.decision?.id === id;
+    for (const review of await reviewNames(reviews)) if (await holds(join(reviews, review))) return `${reviewLabel(review)} of ${owner}/${name}#${pr}`;
     const dropped = droppedDirectory(reviews);
-    const rounds = [
-      ...(await reviewNames(reviews)).map((review) => ({ review, directory: join(reviews, review) })),
-      ...(await entries(dropped)).filter((entry) => droppedEntry.test(entry)).map((entry) => ({ review: droppedName(entry), directory: join(dropped, entry) })),
-    ];
-    for (const { review, directory } of rounds) if ((await readReservation(directory))?.decision?.id === id) return `${reviewLabel(review)} of ${owner}/${name}#${pr}`;
+    for (const entry of (await entries(dropped)).filter((name) => droppedEntry.test(name))) if (await holds(join(dropped, entry))) return `${reviewLabel(droppedName(entry))} of ${owner}/${name}#${pr}`;
   }
   return undefined;
 }

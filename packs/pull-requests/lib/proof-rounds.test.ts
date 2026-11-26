@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { dirname, join } from "node:path";
 import { startT3Stub } from "../../base/lib/t3/testing.ts";
 import { parseVerdict } from "./proof.ts";
+import { unlinked } from "./proof-answers.ts";
 import { cleanFixtures, settings, lookup, checkout, fakeModel, reviewHead, reviewHeadFixed, finishRound, recordingModel, stalledOnQuota, blanks, ledgerDecisions, graded, hubAt, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
@@ -199,8 +200,20 @@ test("a panel start that fails after it reserved the round leaves the decision f
   expect(await roundDecision(pr, "4")).toBe(recorded);
 });
 
-test("a round whose decision is voided before the round is recorded is dropped", async () => {
-  const pr = await checkout();
+const linkShapes: [string, string][] = [
+  ["a plain link", "[o/r#42](https://github.com/o/r/pull/42)"],
+  ["a quoted title with parentheses", '[o/r#42](https://github.com/o/r/pull/42 "PR (draft)")'],
+  ["a single-quoted title and a space before the close", "[o/r#42](https://github.com/o/r/pull/42 'PR' )"],
+  ["a title in parentheses", "[o/r#42](https://github.com/o/r/pull/42 (PR))"],
+  ["balanced parentheses in the URL", "[o/r#42](https://github.com/o/r/pull/42?q=(a))"],
+  ["an apostrophe in the URL", "[o/r#42](https://github.com/o/r/pull/42?who=it's)"],
+];
+
+test.each(linkShapes)("a round question that links the PR as %s reads as its text", (_, link) => {
+  expect(unlinked(`Run one more review round? ${link}: why.`)).toBe("Run one more review round? o/r#42: why.");
+});
+
+async function reservedWhileHubDown(pr: Checkout) {
   const { override, recordAnswer } = await overrideRound(pr);
   const hub = hubAt(pr);
   const recorded = await recordAnswer();
@@ -209,6 +222,20 @@ test("a round whose decision is voided before the round is recorded is dropped",
   await expect(override(recorded)).rejects.toThrow("Not recorded");
   pr.reader.words = words;
   hub.state.hub = "up";
+  return { override, recorded };
+}
+
+test("a retry of a round reserved with one decision id refuses another id", async () => {
+  const pr = await checkout();
+  const { override, recorded } = await reservedWhileHubDown(pr);
+  await expect(override("d-00000000")).rejects.toThrow(`Review round 4 at this HEAD is reserved with decision ${recorded}, not d-00000000`);
+  expect((await override(recorded)).code).toBe(0);
+  expect(await roundDecision(pr, "4")).toBe(recorded);
+});
+
+test("a round whose decision is voided before the round is recorded is dropped", async () => {
+  const pr = await checkout();
+  const { override, recorded } = await reservedWhileHubDown(pr);
   await pr.decide("void", recorded, "--reason", "the merge moved");
   await expect(override(recorded)).rejects.toThrow(`Decision ${recorded} was voided before its round was recorded, so the round is dropped`);
   await noRound(pr, "4");
