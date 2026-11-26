@@ -193,6 +193,7 @@ function scrubUnreachableSources(line: string, nextToken: () => string, saved: M
 }
 
 const publicBranchNames = new Set(["main", "master", "HEAD"]);
+const recordErrorBoundary = /: (?:could not |fatal:|error:|E[A-Z]+:)/;
 
 function scrubRecordFallback(line: string, clean: (text: string) => string, nextToken: () => string, saved: Map<string, string>): string {
   const maskRef = (ref: string) => {
@@ -223,13 +224,20 @@ function scrubRecordFallback(line: string, clean: (text: string) => string, next
     if (fromIdx > 0) {
       const ref = body.slice(0, fromIdx);
       const afterFrom = body.slice(fromIdx + " from ".length);
-      const colonIdx = afterFrom.indexOf(": ");
-      if (colonIdx > 0) {
-        const repo = afterFrom.slice(0, colonIdx);
-        const tail = afterFrom.slice(colonIdx);
-        return `${prefix}${maskRef(ref)} from ${maskRepo(repo)}${tail}${usingSuffix}`;
+      const cleanedAfterFrom = clean(afterFrom);
+      const firstColon = cleanedAfterFrom.indexOf(": ");
+      const leadRepo = firstColon > 0 ? cleanedAfterFrom.slice(0, firstColon) : cleanedAfterFrom;
+      let maskedAfterFrom: string;
+      if (publicRepoSpecs.has(leadRepo) || /^<[^>]+>$/.test(leadRepo)) {
+        maskedAfterFrom = cleanedAfterFrom;
+      } else {
+        const boundary = cleanedAfterFrom.match(recordErrorBoundary)?.index;
+        const splitIdx = boundary !== undefined && boundary > 0 ? boundary : cleanedAfterFrom.lastIndexOf(": ");
+        maskedAfterFrom = splitIdx > 0 ? `<private repo>${cleanedAfterFrom.slice(splitIdx)}` : "<private repo>";
       }
-      return `${prefix}${maskRef(ref)} from ${maskRepo(afterFrom)}${usingSuffix}`;
+      const tailToken = nextToken();
+      saved.set(tailToken, maskedAfterFrom);
+      return `${prefix}${maskRef(ref)} from ${tailToken}${usingSuffix}`;
     }
   }
   const refreshMatch = line.match(/^(\s*could not record )([\s\S]+?)( at [0-9a-f]{12}:[\s\S]*)$/i);

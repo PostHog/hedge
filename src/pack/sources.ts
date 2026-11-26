@@ -1692,9 +1692,13 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
   const effectiveDigest = identity.digest;
   const strippedRef = stripSourceRefspec(ref.ref);
   const otherQualified = isOtherQualifiedRef(ref.ref);
+  const explicitHead = strippedRef === head;
+  const tagRef = `refs/tags/${branch}`;
   const listed = otherQualified
     ? await git(dir, "ls-remote", repo, head, strippedRef)
-    : await git(dir, "ls-remote", repo, head);
+    : explicitHead
+      ? await git(dir, "ls-remote", repo, head)
+      : await git(dir, "ls-remote", repo, head, tagRef);
   if (!listed.ok) return { state: "failed", say: `could not reach ${ref.repo}: ${listed.stderr}` };
   const legacyRepoMismatch =
     cachedGood !== undefined &&
@@ -1720,6 +1724,9 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
   const listedEntries = listed.stdout.split("\n").map((line) => line.split("\t"));
   if (otherQualified && listedEntries.some(([, name]) => name === strippedRef)) {
     return { state: "failed", say: `${ref.ref} in ${ref.repo} is not a branch` };
+  }
+  if (!explicitHead && !otherQualified && listedEntries.some(([, name]) => name === tagRef)) {
+    return { state: "failed", say: `${ref.ref} in ${ref.repo} resolves to a tag, not a branch` };
   }
   if (otherQualified && cachedGood && hasGoodCommit(cachedGood) && !sameBranchRef(cachedGood.ref, ref.ref, cachedGood.commit.length) && !askedBranchActive) {
     return { state: "failed", say: `${ref.ref} in ${ref.repo} does not match cached branch ${cachedGood.ref}` };
@@ -1850,9 +1857,9 @@ function formatAlternatesPath(path: string): string {
 
 async function syncRemoteTrackingRefs(dir: string, repo: string, headRef: string, tip: string, stageDir: string, targetObjectsDir: string): Promise<void> {
   if (!repo || repo.startsWith("-") || /[\0\r\n=]/.test(repo)) return;
-  const configured = await git(dir, "config", "--get-all", `remote.${repo}.fetch`);
-  if (!configured.ok || !configured.stdout) return;
-  const specs = configured.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+  const configured = await git(dir, "config", "-z", "--get-all", `remote.${repo}.fetch`);
+  if (!configured.ok || !configured.rawStdout) return;
+  const specs = configured.rawStdout.split("\0").slice(0, -1).filter((s) => s.length > 0);
   if (!specs.length) return;
   const syncDir = join(stageDir, "sync-remote");
   try {
@@ -1871,12 +1878,12 @@ async function syncRemoteTrackingRefs(dir: string, repo: string, headRef: string
       "-c", `remote.${syncRemote}.url=${syncDir}`,
       ...specs.flatMap((spec) => ["-c", `remote.${syncRemote}.fetch=${spec}`]),
     ];
-    const res = await git(dir, ...cfgArgs, "fetch", "-q", "--no-tags", "--no-prune", "--no-write-fetch-head", syncRemote);
+    const res = await git(dir, ...cfgArgs, "fetch", "-q", "--no-tags", "--no-prune", "--no-write-fetch-head", syncRemote, headRef);
     if (res.ok) return;
     const unsupportedNoWrite = (res.code === 129 || /unknown option.*no-write-fetch-head/i.test(res.fullStderr)) && /no-write-fetch-head/i.test(res.fullStderr);
     if (!unsupportedNoWrite) return;
     const savedFetchHead = await snapshotFetchHead(dir);
-    await git(dir, ...cfgArgs, "fetch", "-q", "--no-tags", "--no-prune", syncRemote);
+    await git(dir, ...cfgArgs, "fetch", "-q", "--no-tags", "--no-prune", syncRemote, headRef);
     await restoreFetchHead(dir, savedFetchHead);
   } catch {}
 }

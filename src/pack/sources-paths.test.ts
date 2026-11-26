@@ -872,4 +872,46 @@ describe("fetchSource local path resolution", () => {
     writeFileSync(join(repoA, ".git"), `gitdir: ${join(root, "missing-repo", ".git")}\n`);
     expect("error" in (await fetchSource({ name: "team", repo: repoA, ref: shaA }, cache))).toBe(true);
   });
+
+  test("fails closed on non-traversable .git/objects and rejects reftable-only .git without refs alongside a .git sibling", async () => {
+    if (process.platform === "win32" || process.getuid?.() === 0) return;
+    const root = temp.make("git-objects-perm-reftable-");
+    const primary = join(root, "packs");
+    const sibling = join(root, "packs.git");
+    const other = join(root, "other");
+    await initRepo(primary);
+    await commitPack(primary, "team", "Primary.");
+    await initRepo(sibling);
+    const sibSha = await commitPack(sibling, "team", "Sibling.");
+    await initRepo(other);
+    const otherSha = await commitPack(other, "team", "Other.");
+
+    const permCache = temp.make("cache-objects-perm-");
+    const objectsDir = join(primary, ".git", "objects");
+    chmodSync(objectsDir, 0o600);
+    try {
+      expect("error" in (await fetchSource({ name: "team", repo: primary, ref: sibSha }, permCache))).toBe(true);
+    } finally {
+      chmodSync(objectsDir, 0o755);
+    }
+    expect("error" in (await fetchSource({ name: "team", repo: other, ref: otherSha }, permCache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo: primary, ref: sibSha }, permCache))).toBe(true);
+
+    const rtRoot = temp.make("git-reftable-only-");
+    const fakePrimary = join(rtRoot, "packs");
+    const rtSibling = join(rtRoot, "packs.git");
+    mkdirSync(join(fakePrimary, ".git", "objects"), { recursive: true });
+    mkdirSync(join(fakePrimary, ".git", "reftable"), { recursive: true });
+    writeFileSync(join(fakePrimary, ".git", "HEAD"), "ref: refs/heads/main\n");
+    await initRepo(rtSibling);
+    const rtSibSha = await commitPack(rtSibling, "team", "Reftable sibling.");
+    const rtCache = temp.make("cache-reftable-only-");
+    const loadedSib = await fetchSource({ name: "team", repo: fakePrimary, ref: rtSibSha }, rtCache);
+    if ("error" in loadedSib) throw new Error(loadedSib.error);
+    expect(loadedSib.packs[0]?.manifest.summary).toBe("Reftable sibling.");
+    rmSync(fakePrimary, { recursive: true, force: true });
+    await initRepo(fakePrimary);
+    await commitPack(fakePrimary, "team", "Real replacement.");
+    expect("error" in (await fetchSource({ name: "team", repo: fakePrimary, ref: rtSibSha }, rtCache))).toBe(true);
+  });
 });

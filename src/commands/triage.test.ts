@@ -795,6 +795,66 @@ describe("hedge triage", () => {
     expect(issue.input).toContain("could not record <ref> of <private repo> at 0123456789ab: could not record pinned commit");
     expect(issue.input).toContain("could not record <ref> of Silthus/agent-skills at 0123456789ab: could not record pinned commit");
   });
+
+  test("preserves complete redaction when a configured or unlisted local repo path in could-not-record contains ': '", async () => {
+    const home = temp.make("home-record-colon-path-");
+    const profileDir = join(home, "profile");
+    const configuredRepo = "/mnt/confidential: project/private-packs";
+    mkdirSync(profileDir, { recursive: true });
+    writeFileSync(
+      join(profileDir, "hedge.json"),
+      JSON.stringify({
+        schema: 1,
+        engine: { repo: "PostHog/hedge", ref: "v1", channel: "release" },
+        sources: [{ name: "team", repo: configuredRepo, ref: "main" }],
+        packs: ["ops"],
+        plan: "both",
+        settings: {},
+        workflows: {},
+      }),
+    );
+    mkdirSync(join(home, ".config/hedge"), { recursive: true });
+    writeFileSync(join(home, ".config/hedge/machine.json"), JSON.stringify({ schema: 1, role: "linux", name: "box", profileDir }));
+    const logs = join(home, ".local/state/hedge/logs");
+    mkdirSync(logs, { recursive: true });
+    writeFileSync(
+      join(logs, "setup.log"),
+      [
+        `Note: The ops pack uses its last fetched files: could not record secret/branch from ${configuredRepo}: could not record pinned commit; using secret/old instead`,
+        "Note: The ops pack is not applied: could not record secret/branch from /mnt/unlisted: secret/other-packs: could not record pinned commit",
+      ].join("\n") + "\n",
+    );
+    const sent: Sent[] = [];
+    const io = scripted([]);
+    const ghOnly = capture(sent);
+    const runRealGit: CommandRunner = async (command, options = {}) => {
+      if (command[0] === "git") {
+        const proc = Bun.spawn(command, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+        const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+        return { code, stdout, stderr };
+      }
+      return ghOnly(command, options);
+    };
+    const code = await main(["triage", "--send", "--note", "colon path check"], {
+      home,
+      engineRoot,
+      platform: "linux",
+      env: {},
+      print: io.terminal.print,
+      terminal: io.terminal,
+      capture: runRealGit,
+      hostname: () => "box.local",
+      run: async () => 0,
+    });
+    expect(code).toBe(0);
+    const issue = sent.find((call) => call.command[1] === "issue")!;
+    expect(issue.input).not.toContain("confidential");
+    expect(issue.input).not.toContain("project/private-packs");
+    expect(issue.input).not.toContain("unlisted");
+    expect(issue.input).not.toContain("secret/other-packs");
+    expect(issue.input).toContain("could not record <ref> from <team source>: could not record pinned commit; using <ref> instead");
+    expect(issue.input).toContain("could not record <ref> from <private repo>: could not record pinned commit");
+  });
 });
 
 describe("hedge setup and triage", () => {

@@ -1,4 +1,4 @@
-import { closeSync, existsSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { bunScript } from "../runner/bun.ts";
@@ -23,7 +23,6 @@ const slashDotGitBuf = Buffer.from("/.git");
 const slashHeadBuf = Buffer.from("/HEAD");
 const slashObjectsBuf = Buffer.from("/objects");
 const slashRefsBuf = Buffer.from("/refs");
-const slashReftableBuf = Buffer.from("/reftable");
 const slashCommondirBuf = Buffer.from("/commondir");
 const gitdirPrefixBuf = Buffer.from("gitdir: ");
 const bundleV2Buf = Buffer.from("# v2 git bundle\n");
@@ -167,6 +166,17 @@ function resolvePosixPathBytes(base: Buffer, rawPath: Buffer, followLast = true,
 function isDirectoryBytes(pathBuf: Buffer, access?: AccessState): boolean {
   try {
     return statSync(pathBuf).isDirectory();
+  } catch (error) {
+    recordAccessError(error, access);
+    return false;
+  }
+}
+
+function isTraversableDirectoryBytes(pathBuf: Buffer, access?: AccessState): boolean {
+  try {
+    if (!statSync(pathBuf).isDirectory()) return false;
+    accessSync(pathBuf, constants.X_OK);
+    return true;
   } catch (error) {
     recordAccessError(error, access);
     return false;
@@ -341,8 +351,8 @@ function resolvedCommonDirBytes(dirBuf: Buffer, access?: AccessState): Buffer | 
         commonDir = resolvedCommon;
       }
     }
-    if (!isDirectoryBytes(Buffer.concat([commonDir, slashObjectsBuf]), access)) return undefined;
-    if (!isDirectoryBytes(Buffer.concat([commonDir, slashRefsBuf]), access) && !isDirectoryBytes(Buffer.concat([commonDir, slashReftableBuf]), access)) return undefined;
+    if (!isTraversableDirectoryBytes(Buffer.concat([commonDir, slashObjectsBuf]), access)) return undefined;
+    if (!isTraversableDirectoryBytes(Buffer.concat([commonDir, slashRefsBuf]), access)) return undefined;
     return commonDir;
   } catch (error) {
     recordAccessError(error, access);

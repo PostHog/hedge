@@ -844,6 +844,38 @@ describe("fetchSource staged refresh and rollback", () => {
     const movedWt = await advanceSource({ name: "team", repo: "origin", ref: "main" }, wtCache, m2);
     expect(movedWt).toMatchObject({ state: "moved", commit: m3 });
     expect(await spawnGit(wtDir, "rev-parse", "refs/heads/main")).toBe(m2);
+
+    const multiCache = temp.make("cache-multi-refspec-");
+    const multiDir = join(multiCache, "team");
+    const nbspDest = "refs/remotes/origin/main\u00a0";
+    await spawnGit(root, "clone", "-q", "-b", "main", upstream, multiDir);
+    await spawnGit(multiDir, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main");
+    await spawnGit(multiDir, "config", "--add", "remote.origin.fetch", "+refs/heads/release:refs/remotes/origin/release");
+    await spawnGit(multiDir, "config", "--add", "remote.origin.fetch", `+refs/heads/main:${nbspDest}`);
+    expect("error" in (await fetchSource({ name: "team", repo: "origin", ref: "main" }, multiCache))).toBe(false);
+    const m4 = await commitPack(upstream, "team", "Main v4.");
+    const movedMulti = await advanceSource({ name: "team", repo: "origin", ref: "main" }, multiCache, m3);
+    expect(movedMulti).toMatchObject({ state: "moved", commit: m4 });
+    expect(await spawnGit(multiDir, "rev-parse", "refs/remotes/origin/main")).toBe(m4);
+    expect(await spawnGit(multiDir, "rev-parse", nbspDest)).toBe(m4);
+  });
+
+  test("refuses to advance an unqualified or +prefixed ref on refresh when a same-named tag also exists", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-branch-tag-collision-");
+    const repo = join(root, "repo");
+    await initRepo(repo);
+    const c1 = await commitPack(repo, "team", "Collision v1.");
+    await spawnGit(repo, "tag", "main", c1);
+    const cache = temp.make("cache-branch-tag-collision-");
+    expect("error" in (await fetchSource({ name: "team", repo, ref: "refs/heads/main" }, cache))).toBe(false);
+    const c2 = await commitPack(repo, "team", "Collision v2.");
+    const blockedPlus = await advanceSource({ name: "team", repo, ref: "+main" }, cache, c1);
+    expect(blockedPlus.state).toBe("failed");
+    const blockedPlain = await advanceSource({ name: "team", repo, ref: "main" }, cache, c1);
+    expect(blockedPlain.state).toBe("failed");
+    const movedExplicit = await advanceSource({ name: "team", repo, ref: "refs/heads/main" }, cache, c1);
+    expect(movedExplicit).toMatchObject({ state: "moved", commit: c2 });
   });
 
   test("records intermediate commits in verified pin history when a retry reuses objects retained after a write-only FETCH_HEAD rollback", async () => {
