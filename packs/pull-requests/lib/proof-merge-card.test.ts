@@ -127,23 +127,20 @@ test("a Merge answer is the merge word of the thread that asked: it tells that t
   const recordMerge = async (question: string, ...thread: string[]) => {
     pr.choose("Merge", question);
     const recorded = await pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${head}: merge card`, ...thread);
-    return { id: /\[(d-[0-9a-f]+)\]/.exec(recorded.output)?.[1], next: recorded.output.split("\n").at(-1) };
+    return recorded.output.split("\n").at(-1);
   };
   const nextStep = (where: string) => `This is the user's merge word for example/product#42 at ${head.slice(0, 12)}, given in ${where}: merge or enqueue it from ${where} in the same turn, `
     + `once the merge gate lets that head through, which outside the repositories that skip the gate takes a \`hedge proof gate --repo example/product --pr 42 --commit ${head}\` pass. `
     + "It never passes to another thread, so never hand it on or ask the user to repeat it elsewhere. A new head voids it.";
   const partial = await recordMerge(`Merge example/product#42 at ${head}?`);
-  expect(partial.next).toBe(nextStep("this thread"));
-  expect(await enqueueFrom("mcp:conductor-thread")).not.toContain(`Merge answer ${partial.id}`);
+  expect(partial).toBe(nextStep("this thread"));
+  expect(await enqueueFrom("mcp:conductor-thread")).not.toContain("was given in thread mcp:thread-1");
   pr.env.T3CODE_THREAD_ID = "mcp:conductor-thread";
   const word = await recordMerge(`Merge example/product#42 at ${head}? An agent accepted ${id} for prod-shape.`, "--thread", "mcp:thread-1");
-  expect(word.next).toBe(nextStep("thread mcp:thread-1"));
+  expect(word).toBe(nextStep("thread mcp:thread-1"));
   expect(await enqueueFrom("mcp:thread-1")).toBeUndefined();
   expect(await enqueueFrom("thread-1")).toBeUndefined();
-  const relayed = await enqueueFrom("mcp:conductor-thread");
-  expect(relayed).toContain(`an agent accepted proof gaps of example/product#42 at ${head.slice(0, 12)} (🤖 ${id} for prod-shape) itself`);
-  expect(relayed).toContain(`Merge answer ${word.id} for example/product#42 at ${head.slice(0, 12)} lifts this hold, but it was given in thread mcp:thread-1, and a merge word counts only in the thread that asked: merge from that thread instead of asking again here.`);
-  expect(relayed).not.toContain(`Merge answer ${partial.id}`);
+  expect(await enqueueFrom("mcp:conductor-thread")).toBe(`Hedge blocked this merge: the user's Merge answer that lifts the hold of example/product#42 at ${head.slice(0, 12)} was given in thread mcp:thread-1. A merge word counts only in the thread that asked it, so merge from that thread, and do not ask again here.`);
 });
 
 test("a merge word lifts an agent's gap decision only when its card named every proof kind that decision accepts", async () => {
