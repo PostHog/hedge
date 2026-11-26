@@ -1223,24 +1223,31 @@ async function fetchExactAt(
   shallow: boolean,
   extraEnv?: Record<string, string>,
   noRefmap = false,
+  noWriteFetchHead = false,
 ): Promise<{ ok: boolean; oid?: string; stderr: string; fullStderr?: string }> {
   const configArgs = noRefmap ? ["-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "fetch.writeCommitGraph=false"] : [];
   const refmapArgs = noRefmap ? ["--refmap=", "--no-prune"] : [];
-  const args = [...configArgs, "fetch", "--porcelain", ...(shallow ? ["--depth", "1"] : []), "--no-tags", ...refmapArgs, repo, ref];
-  const fetched = await gitAtEnv(dir, gitDir, extraEnv, ...args);
-  if (fetched.ok) {
-    const oid = parsePorcelainFetchHead(fetched.stdout);
-    if (oid) return { ok: true, oid, stderr: "" };
-  }
-  const unsupportedPorcelain = !fetched.ok && (fetched.code === 129 || /unknown option.*porcelain/i.test(fetched.fullStderr)) && /porcelain/i.test(fetched.fullStderr);
-  if (!fetched.ok && !unsupportedPorcelain) {
-    return { ok: false, stderr: fetched.stderr, fullStderr: fetched.fullStderr };
+  if (!noWriteFetchHead) {
+    const args = [...configArgs, "fetch", "--porcelain", ...(shallow ? ["--depth", "1"] : []), "--no-tags", ...refmapArgs, repo, ref];
+    const fetched = await gitAtEnv(dir, gitDir, extraEnv, ...args);
+    if (fetched.ok) {
+      const oid = parsePorcelainFetchHead(fetched.stdout);
+      if (oid) return { ok: true, oid, stderr: "" };
+    }
+    const unsupportedPorcelain = !fetched.ok && (fetched.code === 129 || /unknown option.*porcelain/i.test(fetched.fullStderr)) && /porcelain/i.test(fetched.fullStderr);
+    if (!fetched.ok && !unsupportedPorcelain) {
+      return { ok: false, stderr: fetched.stderr, fullStderr: fetched.fullStderr };
+    }
   }
   const src = stripSourceRefspec(ref) || "HEAD";
   const tmpRef = `refs/hedge/tmp/${crypto.randomUUID()}`;
   try {
-    const fallbackArgs = [...configArgs, "fetch", "-q", ...(shallow ? ["--depth", "1"] : []), "--no-tags", ...refmapArgs, repo, `+${src}:${tmpRef}`];
-    const fallback = await gitAtEnv(dir, gitDir, extraEnv, ...fallbackArgs);
+    const noWriteArgs = noWriteFetchHead ? ["--no-write-fetch-head"] : [];
+    const fallbackArgs = [...configArgs, "fetch", "-q", ...(shallow ? ["--depth", "1"] : []), "--no-tags", ...refmapArgs, ...noWriteArgs, repo, `+${src}:${tmpRef}`];
+    let fallback = await gitAtEnv(dir, gitDir, extraEnv, ...fallbackArgs);
+    if (noWriteFetchHead && !fallback.ok && (fallback.code === 129 || /unknown option.*write-fetch-head/i.test(fallback.fullStderr))) {
+      fallback = await gitAtEnv(dir, gitDir, extraEnv, ...configArgs, "fetch", "-q", ...(shallow ? ["--depth", "1"] : []), "--no-tags", ...refmapArgs, repo, `+${src}:${tmpRef}`);
+    }
     if (!fallback.ok) return { ok: false, stderr: fallback.stderr, fullStderr: fallback.fullStderr };
     const resolved = await gitAtEnv(dir, gitDir, extraEnv, "rev-parse", "--verify", "--quiet", tmpRef);
     return resolved.ok && gitHash.test(resolved.stdout) ? { ok: true, oid: resolved.stdout.toLowerCase(), stderr: "" } : { ok: false, stderr: resolved.stderr || "could not resolve fetched commit", fullStderr: resolved.fullStderr };
@@ -1249,8 +1256,8 @@ async function fetchExactAt(
   }
 }
 
-async function fetchExact(dir: string, repo: string, ref: string, shallow: boolean, extraEnv?: Record<string, string>, noRefmap = false) {
-  return fetchExactAt(dir, join(dir, ".git"), repo, ref, shallow, extraEnv, noRefmap);
+async function fetchExact(dir: string, repo: string, ref: string, shallow: boolean, extraEnv?: Record<string, string>, noRefmap = false, noWriteFetchHead = false) {
+  return fetchExactAt(dir, join(dir, ".git"), repo, ref, shallow, extraEnv, noRefmap, noWriteFetchHead);
 }
 
 type PreexistingEntry =
@@ -1642,18 +1649,18 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
   const stageEnv = { GIT_OBJECT_DIRECTORY: stageDir, GIT_ALTERNATE_OBJECT_DIRECTORIES: quoteGitAlternatePath(targetObjectsDir) };
   let movedObjects: string[] = [];
   const restoreRefreshState = async (removeObjects = true) => {
-    await restoreFetchHead(dir, savedFetchHead);
-    await restoreGitFileAt(gitDir, "shallow", savedShallow);
+    const fetchHeadRestored = await restoreFetchHead(dir, savedFetchHead);
+    const shallowRestored = await restoreGitFileAt(gitDir, "shallow", savedShallow);
     if (removeObjects) {
       const headLogRestored = await restoreGitFileAt(gitDir, join("logs", "HEAD"), savedHeadLog);
-      if (headLogRestored && movedObjects.length) {
+      if (fetchHeadRestored && shallowRestored && headLogRestored && movedObjects.length) {
         await removeMigratedObjects(movedObjects);
         movedObjects = [];
       }
     }
   };
   try {
-    const fetched = await fetchExact(dir, repo, head, false, stageEnv, true);
+    const fetched = await fetchExact(dir, repo, head, false, stageEnv, true, savedFetchHead.kind === "unreadable");
     if (!fetched.ok || !fetched.oid) {
       await restoreRefreshState();
       return { state: "failed", say: `could not fetch ${branch} from ${ref.repo}: ${fetched.stderr}` };

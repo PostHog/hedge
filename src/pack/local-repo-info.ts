@@ -76,6 +76,17 @@ function lexicalPosixPathBytes(base: Buffer, rawPath: Buffer): Buffer | undefine
   return joinPosixBytes(stack);
 }
 
+function isMissingPathError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+type AccessState = { inaccessible: boolean };
+
+function recordAccessError(error: unknown, access?: AccessState): void {
+  if (access && !isMissingPathError(error)) access.inaccessible = true;
+}
+
 function resolvePosixPathBytes(base: Buffer, rawPath: Buffer, followLast = true): Buffer | undefined {
   const queue = splitPosixBytes(rawPath);
   const trailingSlash = rawPath.length > 1 && rawPath[rawPath.length - 1] === slashByte;
@@ -95,7 +106,9 @@ function resolvePosixPathBytes(base: Buffer, rawPath: Buffer, followLast = true)
       if (stack.length > 0) {
         try {
           if (!statSync(joinPosixBytes(stack)).isDirectory()) return undefined;
-        } catch {}
+        } catch (error) {
+          if (!isMissingPathError(error)) return undefined;
+        }
       }
       continue;
     }
@@ -122,7 +135,9 @@ function resolvePosixPathBytes(base: Buffer, rawPath: Buffer, followLast = true)
           index = 0;
           continue;
         }
-      } catch {}
+      } catch (error) {
+        if (!isMissingPathError(error)) return undefined;
+      }
     }
     stack.push(seg);
   }
@@ -130,15 +145,18 @@ function resolvePosixPathBytes(base: Buffer, rawPath: Buffer, followLast = true)
   if (requireDir) {
     try {
       if (!statSync(out).isDirectory()) return undefined;
-    } catch {}
+    } catch (error) {
+      if (!isMissingPathError(error)) return undefined;
+    }
   }
   return out;
 }
 
-function isDirectoryBytes(pathBuf: Buffer): boolean {
+function isDirectoryBytes(pathBuf: Buffer, access?: AccessState): boolean {
   try {
     return statSync(pathBuf).isDirectory();
-  } catch {
+  } catch (error) {
+    recordAccessError(error, access);
     return false;
   }
 }
@@ -148,7 +166,7 @@ function dirnamePosixBytes(buf: Buffer): Buffer {
   return last <= 0 ? slashBuf : buf.subarray(0, last);
 }
 
-function parseGitDirFileBytes(fileBuf: Buffer, baseDir: Buffer): Buffer | undefined {
+function parseGitDirFileBytes(fileBuf: Buffer, baseDir: Buffer, access?: AccessState): Buffer | undefined {
   let fd: number | undefined;
   try {
     const info = statSync(fileBuf);
@@ -170,7 +188,8 @@ function parseGitDirFileBytes(fileBuf: Buffer, baseDir: Buffer): Buffer | undefi
     while (end > start && (slice[end - 1] === 0x0a || slice[end - 1] === 0x0d)) end--;
     if (end <= start) return undefined;
     return resolvePosixPathBytes(baseDir, slice.subarray(start, end));
-  } catch {
+  } catch (error) {
+    recordAccessError(error, access);
     return undefined;
   } finally {
     if (fd !== undefined) {
@@ -181,7 +200,7 @@ function parseGitDirFileBytes(fileBuf: Buffer, baseDir: Buffer): Buffer | undefi
   }
 }
 
-function isGitBundleFileBytes(fileBuf: Buffer): boolean {
+function isGitBundleFileBytes(fileBuf: Buffer, access?: AccessState): boolean {
   let fd: number | undefined;
   try {
     const info = statSync(fileBuf);
@@ -190,7 +209,8 @@ function isGitBundleFileBytes(fileBuf: Buffer): boolean {
     const header = Buffer.allocUnsafe(bundleV2Buf.length);
     if (readSync(fd, header, 0, header.length, 0) !== header.length) return false;
     return header.equals(bundleV2Buf) || header.equals(bundleV3Buf);
-  } catch {
+  } catch (error) {
+    recordAccessError(error, access);
     return false;
   } finally {
     if (fd !== undefined) {
@@ -201,7 +221,7 @@ function isGitBundleFileBytes(fileBuf: Buffer): boolean {
   }
 }
 
-function readBoundedPrefixBytes(fileBuf: Buffer, maxBytes: number, rejectOversized = false): Buffer | undefined {
+function readBoundedPrefixBytes(fileBuf: Buffer, maxBytes: number, rejectOversized = false, access?: AccessState): Buffer | undefined {
   let fd: number | undefined;
   try {
     const info = statSync(fileBuf);
@@ -218,7 +238,8 @@ function readBoundedPrefixBytes(fileBuf: Buffer, maxBytes: number, rejectOversiz
       filled += n;
     }
     return raw.subarray(0, filled);
-  } catch {
+  } catch (error) {
+    recordAccessError(error, access);
     return undefined;
   } finally {
     if (fd !== undefined) {
@@ -232,7 +253,7 @@ function readBoundedPrefixBytes(fileBuf: Buffer, maxBytes: number, rejectOversiz
 function isValidHeadBytes(raw: Buffer): boolean {
   const text = raw.toString("latin1");
   if (text.startsWith("ref:")) return /^ref:[ \t\r\n\v\f]*refs\//.test(text);
-  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})(?:[\r\n]|$)/i.test(text);
+  return /^[0-9a-f]{40}/i.test(text);
 }
 
 function nestedCommonKeyBytes(gitDirBuf: Buffer): Buffer | undefined {
@@ -257,32 +278,35 @@ function withNestedCommonBytes(prefix: Buffer, target: Buffer): Buffer {
   return nested ? Buffer.concat([prefix, target, zeroByteBuf, Buffer.from("common:"), nested]) : Buffer.concat([prefix, target]);
 }
 
-function isValidHeadFileBytes(headPath: Buffer): boolean {
+function isValidHeadFileBytes(headPath: Buffer, access?: AccessState): boolean {
   try {
     const info = lstatSync(headPath);
     if (info.isSymbolicLink()) {
       const target = readlinkSync(headPath, "buffer").toString("latin1");
       if (target.startsWith("refs/")) return true;
     }
-  } catch {
+  } catch (error) {
+    recordAccessError(error, access);
     return false;
   }
-  const headBytes = readBoundedPrefixBytes(headPath, 256);
+  const headBytes = readBoundedPrefixBytes(headPath, 256, false, access);
   return headBytes !== undefined && isValidHeadBytes(headBytes);
 }
 
-function resolvedCommonDirBytes(dirBuf: Buffer): Buffer | undefined {
+function resolvedCommonDirBytes(dirBuf: Buffer, access?: AccessState): Buffer | undefined {
   try {
     if (!statSync(dirBuf).isDirectory()) return undefined;
-    if (!isValidHeadFileBytes(Buffer.concat([dirBuf, slashHeadBuf]))) return undefined;
+    if (!isValidHeadFileBytes(Buffer.concat([dirBuf, slashHeadBuf]), access)) return undefined;
     let commonDir = dirBuf;
     const commonPath = Buffer.concat([dirBuf, slashCommondirBuf]);
     let hasCommonFile = false;
     try {
       hasCommonFile = statSync(commonPath).isFile();
-    } catch {}
+    } catch (error) {
+      recordAccessError(error, access);
+    }
     if (hasCommonFile) {
-      const rawCommon = readBoundedPrefixBytes(commonPath, 8192, true);
+      const rawCommon = readBoundedPrefixBytes(commonPath, 8192, true, access);
       if (!rawCommon) return undefined;
       let end = rawCommon.length;
       while (end > 0 && (rawCommon[end - 1] === 0x0a || rawCommon[end - 1] === 0x0d)) end--;
@@ -292,10 +316,11 @@ function resolvedCommonDirBytes(dirBuf: Buffer): Buffer | undefined {
         commonDir = resolvedCommon;
       }
     }
-    if (!isDirectoryBytes(Buffer.concat([commonDir, slashObjectsBuf]))) return undefined;
-    if (!isDirectoryBytes(Buffer.concat([commonDir, slashRefsBuf])) && !isDirectoryBytes(Buffer.concat([commonDir, slashReftableBuf]))) return undefined;
+    if (!isDirectoryBytes(Buffer.concat([commonDir, slashObjectsBuf]), access)) return undefined;
+    if (!isDirectoryBytes(Buffer.concat([commonDir, slashRefsBuf]), access) && !isDirectoryBytes(Buffer.concat([commonDir, slashReftableBuf]), access)) return undefined;
     return commonDir;
-  } catch {
+  } catch (error) {
+    recordAccessError(error, access);
     return undefined;
   }
 }
@@ -357,7 +382,7 @@ function implicitDotGitPointerKeyBytes(baseKeyBuf: Buffer, dotGitLexical: Buffer
   return undefined;
 }
 
-function resolveGitIdentityBytes(pathBuf: Buffer, lexicalDir: Buffer, allowBundle: boolean): { identity: Buffer; isStandardChild: boolean } | undefined {
+function resolveGitIdentityBytes(pathBuf: Buffer, lexicalDir: Buffer, allowBundle: boolean, access?: AccessState): { identity: Buffer; isStandardChild: boolean } | undefined {
   const dotGit = Buffer.concat([pathBuf, slashDotGitBuf]);
   try {
     const linkInfo = lstatSync(dotGit);
@@ -365,7 +390,7 @@ function resolveGitIdentityBytes(pathBuf: Buffer, lexicalDir: Buffer, allowBundl
     if (resolvedDotGit) {
       const info = statSync(resolvedDotGit);
       if (info.isDirectory()) {
-        const commonDir = resolvedCommonDirBytes(resolvedDotGit);
+        const commonDir = resolvedCommonDirBytes(resolvedDotGit, access);
         if (commonDir) {
           const isStandardChild = !linkInfo.isSymbolicLink() && resolvedDotGit.equals(dotGit) && commonDir.equals(resolvedDotGit);
           const identity = isStandardChild
@@ -376,9 +401,9 @@ function resolveGitIdentityBytes(pathBuf: Buffer, lexicalDir: Buffer, allowBundl
           return { identity, isStandardChild };
         }
       } else if (info.isFile()) {
-        const target = parseGitDirFileBytes(resolvedDotGit, pathBuf);
+        const target = parseGitDirFileBytes(resolvedDotGit, pathBuf, access);
         if (target) {
-          const commonDir = resolvedCommonDirBytes(target);
+          const commonDir = resolvedCommonDirBytes(target, access);
           if (commonDir) {
             const identity = commonDir.equals(target) ? target : Buffer.concat([target, zeroByteBuf, commonDir]);
             return { identity, isStandardChild: false };
@@ -386,19 +411,21 @@ function resolveGitIdentityBytes(pathBuf: Buffer, lexicalDir: Buffer, allowBundl
         }
       }
     }
-  } catch {}
-  const directTarget = parseGitDirFileBytes(pathBuf, lexicalDir);
+  } catch (error) {
+    recordAccessError(error, access);
+  }
+  const directTarget = parseGitDirFileBytes(pathBuf, lexicalDir, access);
   if (directTarget) {
-    const commonDir = resolvedCommonDirBytes(directTarget);
+    const commonDir = resolvedCommonDirBytes(directTarget, access);
     if (commonDir) {
       const identity = commonDir.equals(directTarget) ? directTarget : Buffer.concat([directTarget, zeroByteBuf, commonDir]);
       return { identity, isStandardChild: false };
     }
   }
-  if (allowBundle && isGitBundleFileBytes(pathBuf)) {
+  if (allowBundle && isGitBundleFileBytes(pathBuf, access)) {
     return { identity: Buffer.concat([pathBuf, zeroByteBuf, Buffer.from("bundle")]), isStandardChild: false };
   }
-  const bareCommon = resolvedCommonDirBytes(pathBuf);
+  const bareCommon = resolvedCommonDirBytes(pathBuf, access);
   if (bareCommon) {
     const identity = bareCommon.equals(pathBuf)
       ? Buffer.concat([pathBuf, zeroByteBuf, Buffer.from("bare")])
@@ -600,7 +627,8 @@ export function canonicalLocalRepoInfo(dir: string, effective: string): LocalRep
         : encodeCanonicalLocal(Buffer.concat([lexicalPrimary, zeroByteBuf, resolved]), asFileUrl)
       : invalidPrimary;
   const pointerKey = resolved && lexicalPrimary ? explicitPointerKeyBytes(resolved, lexicalPrimary, asFileUrl) : undefined;
-  const primaryGit = resolved && lexicalPrimary ? resolveGitIdentityBytes(resolved, dirnamePosixBytes(lexicalPrimary), !hasTrailingSlash) : undefined;
+  const primaryAccess: AccessState = { inaccessible: false };
+  const primaryGit = resolved && lexicalPrimary ? resolveGitIdentityBytes(resolved, dirnamePosixBytes(lexicalPrimary), !hasTrailingSlash, primaryAccess) : undefined;
   if (primaryGit) {
     return {
       resolved: primaryGit.isStandardChild ? primary : encodeCanonicalLocal(primaryGit.identity, asFileUrl),
@@ -613,6 +641,19 @@ export function canonicalLocalRepoInfo(dir: string, effective: string): LocalRep
       isLocal: true,
     };
   }
+  if (resolved === undefined || primaryAccess.inaccessible) {
+    return {
+      resolved: primary,
+      primary,
+      lexicalKey,
+      ...(configuredKey && configuredKey !== primary && configuredKey !== lexicalKey ? { configuredKey } : {}),
+      aliasKey,
+      ...(pointerKey ? { pointerKey } : {}),
+      hasLiveRepo: false,
+      isLocal: true,
+      skipPinCache: true,
+    };
+  }
   const trimmedRaw = stripTrailingSlashBytes(rawPath);
   const dotGitRaw = Buffer.concat([trimmedRaw, dotGitBuf]);
   const dotGitResolved = resolvePosixPathBytes(base, dotGitRaw);
@@ -620,7 +661,8 @@ export function canonicalLocalRepoInfo(dir: string, effective: string): LocalRep
   const dotGitPointerKey = dotGitLexical
     ? implicitDotGitPointerKeyBytes(lexicalPrimary ?? dotGitLexical, dotGitLexical, dotGitResolved, asFileUrl)
     : undefined;
-  const dotGitInfo = dotGitResolved && dotGitLexical ? resolveGitIdentityBytes(dotGitResolved, dirnamePosixBytes(dotGitLexical), false) : undefined;
+  const dotGitAccess: AccessState = { inaccessible: false };
+  const dotGitInfo = dotGitResolved && dotGitLexical ? resolveGitIdentityBytes(dotGitResolved, dirnamePosixBytes(dotGitLexical), false, dotGitAccess) : undefined;
   if (dotGitResolved && dotGitInfo) {
     return {
       resolved: dotGitInfo.isStandardChild ? encodeCanonicalLocal(dotGitResolved, asFileUrl) : encodeCanonicalLocal(dotGitInfo.identity, asFileUrl),
@@ -643,7 +685,7 @@ export function canonicalLocalRepoInfo(dir: string, effective: string): LocalRep
     ...(effectivePointerKey ? { pointerKey: effectivePointerKey } : {}),
     hasLiveRepo: false,
     isLocal: true,
-    ...(resolved === undefined ? { skipPinCache: true } : {}),
+    ...(dotGitResolved === undefined || dotGitAccess.inaccessible ? { skipPinCache: true } : {}),
   };
 }
 
@@ -658,6 +700,7 @@ export async function probeLocalRepoInfo(
   effective: string,
   timeoutMs = localProbeTimeoutMs,
   script = localRepoInfoScript,
+  deadline?: Promise<void>,
 ): Promise<LocalRepoInfo> {
   if (!isLocalRepoSpec(effective)) {
     return { resolved: effective, primary: effective, lexicalKey: effective, aliasKey: effective, hasLiveRepo: false, isLocal: false };
@@ -689,10 +732,12 @@ export async function probeLocalRepoInfo(
   })();
   const finished = Promise.all([proc.exited, readOut]).then(([code]) => ({ timedOut: false as const, code }));
   void finished.catch(() => {});
-  const timeoutPromise = new Promise<{ timedOut: true }>((resolveTimeout) => {
-    timer = setTimeout(() => resolveTimeout({ timedOut: true }), timeoutMs);
-    if (typeof timer === "object" && timer && "unref" in timer && typeof timer.unref === "function") timer.unref();
-  });
+  const timeoutPromise = deadline
+    ? deadline.then(() => ({ timedOut: true as const }))
+    : new Promise<{ timedOut: true }>((resolveTimeout) => {
+        timer = setTimeout(() => resolveTimeout({ timedOut: true }), timeoutMs);
+        if (typeof timer === "object" && timer && "unref" in timer && typeof timer.unref === "function") timer.unref();
+      });
   const outcome = await Promise.race([finished, timeoutPromise]);
   if (timer !== undefined) clearTimeout(timer);
   if (outcome.timedOut) {

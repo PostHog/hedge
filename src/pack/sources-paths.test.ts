@@ -1486,21 +1486,24 @@ await new Promise(() => {});
     const goneProc = Bun.spawn(["cat", goneFifo], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
     const readyText = new Response(readyProc.stdout).text();
     const fifoClosed = new Response(goneProc.stdout).text();
-    let readyBeforeFetchDone = false;
-    let fetchSettled = false;
-    const readyWatcher = readyText.then((text) => {
-      if (text.trim() === "started" && !fetchSettled) readyBeforeFetchDone = true;
+    let fireTimeout!: () => void;
+    const deadline = new Promise<void>((resolve) => {
+      fireTimeout = resolve;
     });
+    let fetchSettled = false;
     try {
-      const loaded = await fetchSource({ name: "team", repo, ref: sha }, cache, undefined, undefined, (dir, effective) =>
-        probeLocalRepoInfo(dir, effective, 120, hungScript),
-      );
-      fetchSettled = true;
-      await readyWatcher;
+      const fetchPromise = fetchSource({ name: "team", repo, ref: sha }, cache, undefined, undefined, (dir, effective) =>
+        probeLocalRepoInfo(dir, effective, 0, hungScript, deadline),
+      ).finally(() => {
+        fetchSettled = true;
+      });
+      expect((await readyText).trim()).toBe("started");
+      expect(fetchSettled).toBe(false);
+      fireTimeout();
+      const loaded = await fetchPromise;
       if ("error" in loaded) throw new Error(loaded.error);
       expect(loaded.packs[0]?.manifest.summary).toBe("Cached NFS pin.");
       expect(loaded.stale).toContain("timed out inspecting local repository");
-      expect(readyBeforeFetchDone).toBe(true);
       expect(await fifoClosed).toBe("");
     } finally {
       try {
@@ -1520,12 +1523,116 @@ await new Promise(() => {});
     await commitPack(mirrorRepoB, "team", "Other NFS repo.");
     rmSync(mirrorLink);
     symlinkSync(mirrorRepoB, mirrorLink);
+    const mirrorReadyFifo = join(root, "mirror-ready");
+    const mirrorGoneFifo = join(root, "mirror-gone");
+    expect(Bun.spawnSync(["mkfifo", mirrorReadyFifo, mirrorGoneFifo]).exitCode).toBe(0);
     const mirrorHungScript = join(root, "hung-mirror-probe.ts");
-    writeFileSync(mirrorHungScript, "await new Promise(() => {});\n");
-    const stalledMirror = await fetchSource({ name: "team", repo: mirrorLink, ref: sha }, mirrorCache, undefined, undefined, (dir, effective) =>
-      probeLocalRepoInfo(dir, effective, 80, mirrorHungScript),
+    writeFileSync(
+      mirrorHungScript,
+      `import { openSync, writeFileSync } from "node:fs";
+const fd = openSync(${JSON.stringify(mirrorGoneFifo)}, "w");
+void fd;
+writeFileSync(${JSON.stringify(mirrorReadyFifo)}, "started\\n");
+await new Promise(() => {});
+`,
     );
-    expect("error" in stalledMirror).toBe(true);
+    const mirrorReadyProc = Bun.spawn(["cat", mirrorReadyFifo], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    const mirrorGoneProc = Bun.spawn(["cat", mirrorGoneFifo], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    const mirrorReadyText = new Response(mirrorReadyProc.stdout).text();
+    const mirrorClosed = new Response(mirrorGoneProc.stdout).text();
+    let fireMirrorTimeout!: () => void;
+    const mirrorDeadline = new Promise<void>((resolve) => {
+      fireMirrorTimeout = resolve;
+    });
+    try {
+      const stalledMirrorPromise = fetchSource({ name: "team", repo: mirrorLink, ref: sha }, mirrorCache, undefined, undefined, (dir, effective) =>
+        probeLocalRepoInfo(dir, effective, 0, mirrorHungScript, mirrorDeadline),
+      );
+      expect((await mirrorReadyText).trim()).toBe("started");
+      fireMirrorTimeout();
+      const stalledMirror = await stalledMirrorPromise;
+      expect("error" in stalledMirror).toBe(true);
+      expect(await mirrorClosed).toBe("");
+    } finally {
+      try {
+        mirrorReadyProc.kill("SIGKILL");
+      } catch {}
+      try {
+        mirrorGoneProc.kill("SIGKILL");
+      } catch {}
+    }
+  });
+
+  test("recognizes a detached HEAD with trailing whitespace instead of selecting a .git sibling", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("git-detached-space-head-");
+    const plain = join(root, "packs");
+    const sibling = join(root, "packs.git");
+    await initRepo(plain);
+    const plainSha = await commitPack(plain, "team", "Detached space HEAD.");
+    writeFileSync(join(plain, ".git", "HEAD"), `${plainSha} \n`);
+    await initRepo(sibling);
+    await commitPack(sibling, "team", "Sibling dotgit.");
+    const cache = temp.make("cache-detached-space-head-");
+    const loaded = await fetchSource({ name: "team", repo: plain, ref: plainSha }, cache);
+    if ("error" in loaded) throw new Error(loaded.error);
+    expect(loaded.packs[0]?.manifest.summary).toBe("Detached space HEAD.");
+    rmSync(sibling, { recursive: true, force: true });
+    expect("error" in (await fetchSource({ name: "team", repo: sibling, ref: plainSha }, cache))).toBe(true);
+  });
+
+  test("fails closed instead of reusing a symlink alias when a parent directory becomes inaccessible", async () => {
+    if (process.platform === "win32" || process.getuid?.() === 0) return;
+    const root = temp.make("git-eacces-parent-");
+    const repoA = join(root, "repo-a");
+    const repoB = join(root, "repo-b");
+    await initRepo(repoA);
+    await initRepo(repoB);
+    const shaA = await commitPack(repoA, "team", "Accessible A.");
+    await commitPack(repoB, "team", "Accessible B.");
+    const gate = join(root, "gate");
+    mkdirSync(gate, { recursive: true });
+    const link = join(gate, "mirror");
+    symlinkSync(repoA, link);
+    const cache = temp.make("cache-eacces-parent-");
+    const initial = await fetchSource({ name: "team", repo: link, ref: shaA }, cache);
+    if ("error" in initial) throw new Error(initial.error);
+    rmSync(link);
+    symlinkSync(repoB, link);
+    chmodSync(gate, 0o000);
+    try {
+      const blocked = await fetchSource({ name: "team", repo: link, ref: shaA }, cache);
+      expect("error" in blocked).toBe(true);
+    } finally {
+      chmodSync(gate, 0o755);
+    }
+  });
+
+  test("keeps FETCH_HEAD valid and fsck-clean when FETCH_HEAD is write-only during refresh rollback", async () => {
+    if (process.platform === "win32" || process.getuid?.() === 0) return;
+    const root = temp.make("git-wo-fetchhead-");
+    const repo = join(root, "repo");
+    await initRepo(repo);
+    const c1 = await commitPack(repo, "team", "WO FETCH_HEAD v1.");
+    const cache = temp.make("cache-wo-fetchhead-");
+    expect("error" in (await fetchSource({ name: "team", repo, ref: "main" }, cache))).toBe(false);
+    const fetchHeadPath = join(cache, "team", ".git", "FETCH_HEAD");
+    const beforeContent = readFileSync(fetchHeadPath, "utf8");
+    chmodSync(fetchHeadPath, 0o200);
+    mkdirSync(join(repo, "packs", "team"), { recursive: true });
+    writeFileSync(join(repo, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Broken v2." }));
+    await spawnGit(repo, "commit", "-qam", "broken v2");
+    try {
+      const failed = await advanceSource({ name: "team", repo, ref: "main" }, cache, c1);
+      expect(failed.state).toBe("failed");
+    } finally {
+      chmodSync(fetchHeadPath, 0o644);
+    }
+    expect(readFileSync(fetchHeadPath, "utf8")).toBe(beforeContent);
+    const oid = readFileSync(fetchHeadPath, "utf8").split("\t")[0]?.trim();
+    expect(oid).toBe(c1);
+    await spawnGit(join(cache, "team"), "cat-file", "-e", oid!);
+    await spawnGit(join(cache, "team"), "fsck", "--full");
   });
 
   test("applies a relative source path on first fetch before the cache directory exists", async () => {
