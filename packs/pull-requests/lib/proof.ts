@@ -483,14 +483,9 @@ export function askGap(identity: ProofIdentity, kind: string, reason: string, au
   return `Ask the user with your question tool. Question: "${gapQuestion(identity, kind, reason)}" Options: "${acceptGapOption}", "${keepGapOption}". When they choose "${acceptGapOption}", run ${recordGapCommand(identity, kind)}`;
 }
 
-const linksLeadPr = (question: string, lead: string) => {
-  const pr = /(\S+#\d+):$/.exec(lead)?.[1];
-  return pr !== undefined && normalized(question).includes(normalized(`[${pr}](`));
-};
-
 export function requireChoice(answer: HeardAnswer, lead: string, [accept, decline]: [string, string], refused: string) {
   if (answer.source !== "question") throw new Error(`"${answer.words}" is a message the user typed. Only their answer to your question tool counts: ask "${lead} …" with the options "${accept}" and "${decline}"`);
-  if (!normalized(answer.answered).startsWith(normalized(lead))) throw new Error(`"${answer.words}" answers another question ("${answer.answered}"). Ask the question that hedge proof printed, which starts "${lead}"${linksLeadPr(answer.answered, lead) ? ", with the PR as plain owner/repo#n, not a Markdown link" : ""}`);
+  if (!normalized(answer.answered).startsWith(normalized(lead))) throw new Error(`"${answer.words}" answers another question ("${answer.answered}"). Ask the question that hedge proof printed, which starts "${lead}"${answer.answered.includes("](") ? ", with the PR as plain owner/repo#n, not a Markdown link" : ""}`);
   if (![accept, `${accept} (Recommended)`].map(normalized).includes(normalized(answer.words))) throw new Error(`The user chose "${answer.words}", not "${accept}". ${refused}`);
 }
 
