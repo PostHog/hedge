@@ -1482,7 +1482,7 @@ esac
     expect(loadedPin.packs[0]?.manifest.summary).toBe("Pinned commit C1.");
   });
 
-  test("switches an existing source cache cleanly between SHA-1 and SHA-256 repositories and keeps the old cache intact on failure", async () => {
+  test("supports fresh SHA-256 caches offline and leaves an existing SHA-1 cache untouched when pointed at a SHA-256 repository", async () => {
     const sha1Repo = temp.make("switch-sha1-repo-");
     await initRepo(sha1Repo);
     const sha1Commit = await commitPack(sha1Repo, "team", "SHA-1 pack.");
@@ -1494,112 +1494,31 @@ esac
     const sha256Commit = await commitPack(sha256Repo, "team", "SHA-256 pack.");
     expect(sha256Commit.length).toBe(64);
 
-    const brokenSha256Repo = temp.make("switch-broken-sha256-repo-");
-    await spawnGit(brokenSha256Repo, "init", "-q", "-b", "main", "--object-format=sha256");
-    await spawnGit(brokenSha256Repo, "config", "user.email", "test@example.com");
-    await spawnGit(brokenSha256Repo, "config", "user.name", "Test");
-    mkdirSync(join(brokenSha256Repo, "packs/team"), { recursive: true });
-    writeFileSync(join(brokenSha256Repo, "packs/team/pack.json"), "{ broken json");
-    await spawnGit(brokenSha256Repo, "add", ".");
-    await spawnGit(brokenSha256Repo, "commit", "-qm", "broken");
-    const brokenSha256Commit = await spawnGit(brokenSha256Repo, "rev-parse", "HEAD");
+    const sha256Cache = temp.make("cache-fresh-sha256-");
+    const fresh256 = await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, sha256Cache);
+    if ("error" in fresh256) throw new Error(fresh256.error);
+    expect([fresh256.packs[0]?.manifest.summary, fresh256.stale]).toEqual(["SHA-256 pack.", undefined]);
+    expect(await unpinnedSources([{ name: "team", repo: sha256Repo, ref: sha256Commit }], sha256Repo, sha256Cache)).toEqual([]);
 
-    const cache = temp.make("cache-format-switch-");
-    const first = await fetchSource({ name: "team", repo: sha1Repo, ref: sha1Commit }, cache);
+    const sha1Cache = temp.make("cache-sha1-intact-");
+    const first = await fetchSource({ name: "team", repo: sha1Repo, ref: sha1Commit }, sha1Cache);
     if ("error" in first) throw new Error(first.error);
-    expect(first.packs[0]?.manifest.summary).toBe("SHA-1 pack.");
+    const localNotes = join(sha1Cache, "team", "local-notes.txt");
+    writeFileSync(localNotes, "keep my notes\n");
 
-    const failedSwitch = await fetchSource({ name: "team", repo: brokenSha256Repo, ref: brokenSha256Commit }, cache);
-    expect("error" in failedSwitch).toBe(true);
+    const mismatch = await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, sha1Cache);
+    expect("error" in mismatch).toBe(true);
+    expect(readFileSync(localNotes, "utf8")).toBe("keep my notes\n");
 
-    const stillSha1 = await fetchSource({ name: "team", repo: sha1Repo, ref: sha1Commit }, cache);
+    rmSync(sha1Repo, { recursive: true, force: true });
+    const stillSha1 = await fetchSource({ name: "team", repo: sha1Repo, ref: sha1Commit }, sha1Cache);
     if ("error" in stillSha1) throw new Error(stillSha1.error);
     expect([stillSha1.packs[0]?.manifest.summary, stillSha1.stale]).toEqual(["SHA-1 pack.", undefined]);
 
-    const toSha256 = await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, cache);
-    if ("error" in toSha256) throw new Error(toSha256.error);
-    expect([toSha256.packs[0]?.manifest.summary, toSha256.stale]).toEqual(["SHA-256 pack.", undefined]);
-
-    const localNotes = join(cache, "team", "local-notes.txt");
-    writeFileSync(localNotes, "keep my notes\n");
-
-    const pathFailRepo = temp.make("switch-path-fail-sha1-");
-    await initRepo(pathFailRepo);
-    writePack(pathFailRepo, "Path-dependent SHA-1.");
-    writeFileSync(
-      join(pathFailRepo, "packs/team/pack.ts"),
-      `if (import.meta.dir.endsWith("/team/packs/team")) throw new Error("failed at final path");\nexport default {};\n`,
-    );
-    await spawnGit(pathFailRepo, "add", ".");
-    await spawnGit(pathFailRepo, "commit", "-qm", "path-fail");
-    const pathFailCommit = await spawnGit(pathFailRepo, "rev-parse", "HEAD");
-    const failedPathSwitch = await fetchSource({ name: "team", repo: pathFailRepo, ref: pathFailCommit }, cache);
-    expect("error" in failedPathSwitch).toBe(true);
-    expect(readFileSync(localNotes, "utf8")).toBe("keep my notes\n");
-    const stillSha256 = await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, cache);
-    if ("error" in stillSha256) throw new Error(stillSha256.error);
-    expect([stillSha256.packs[0]?.manifest.summary, stillSha256.stale]).toEqual(["SHA-256 pack.", undefined]);
-
-    const sha1NotesRepo = temp.make("switch-sha1-notes-");
-    await initRepo(sha1NotesRepo);
-    writePack(sha1NotesRepo, "SHA-1 with notes.");
-    writeFileSync(join(sha1NotesRepo, "notes.txt"), "tracked v1\n");
-    await spawnGit(sha1NotesRepo, "add", ".");
-    await spawnGit(sha1NotesRepo, "commit", "-qm", "with-notes");
-    const sha1WithNotes = await spawnGit(sha1NotesRepo, "rev-parse", "HEAD");
-    rmSync(join(sha1NotesRepo, "notes.txt"));
-    writePack(sha1NotesRepo, "SHA-1 without notes.");
-    await spawnGit(sha1NotesRepo, "add", "-A");
-    await spawnGit(sha1NotesRepo, "commit", "-qm", "without-notes");
-    const sha1WithoutNotes = await spawnGit(sha1NotesRepo, "rev-parse", "HEAD");
-
-    const notesCache = temp.make("cache-format-untracked-");
-    const n1 = await fetchSource({ name: "team", repo: sha1NotesRepo, ref: sha1WithNotes }, notesCache);
-    if ("error" in n1) throw new Error(n1.error);
-    const n2 = await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, notesCache);
-    if ("error" in n2) throw new Error(n2.error);
-    const untrackedNotes = join(notesCache, "team", "notes.txt");
-    writeFileSync(untrackedNotes, "local untracked notes\n");
-    const n3 = await fetchSource({ name: "team", repo: sha1NotesRepo, ref: sha1WithoutNotes }, notesCache);
-    if ("error" in n3) throw new Error(n3.error);
-    expect([n3.packs[0]?.manifest.summary, n3.stale]).toEqual(["SHA-1 without notes.", undefined]);
-    expect(readFileSync(untrackedNotes, "utf8")).toBe("local untracked notes\n");
-
-    const cfgCache = temp.make("cache-format-config-");
-    const cInit = await fetchSource({ name: "team", repo: sha1Repo, ref: sha1Commit }, cfgCache);
-    if ("error" in cInit) throw new Error(cInit.error);
-    const cfgDir = join(cfgCache, "team");
-    await spawnGit(cfgDir, "config", "http.extraHeader", "Authorization: Bearer secret-test-header");
-    await spawnGit(cfgDir, "config", `url.${sha1Repo}.insteadOf`, "https://alias.invalid/repo");
-    chmodSync(join(cfgDir, ".git", "config"), 0o600);
-    const cTo256 = await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, cfgCache);
-    if ("error" in cTo256) throw new Error(cTo256.error);
-    expect(statSync(join(cfgDir, ".git", "config")).mode & 0o777).toBe(0o600);
-    expect(await spawnGit(cfgDir, "config", "--get", "http.extraHeader")).toBe("Authorization: Bearer secret-test-header");
-    await spawnGit(cfgDir, "config", "--unset", `url.${sha1Repo}.insteadOf`);
-    const cBackToSha1 = await fetchSource({ name: "team", repo: "https://alias.invalid/repo", ref: sha1Commit }, cfgCache);
-    expect("error" in cBackToSha1).toBe(true);
-
-    const originCache = temp.make("cache-format-origin-");
-    const originDir = join(originCache, "team");
-    mkdirSync(originDir, { recursive: true });
-    await spawnGit(originDir, "init", "-q");
-    await spawnGit(originDir, "remote", "add", "origin", sha1Repo);
-    const o1 = await fetchSource({ name: "team", repo: "origin", ref: sha1Commit }, originCache);
-    if ("error" in o1) throw new Error(o1.error);
-    await spawnGit(originDir, "remote", "set-url", "origin", sha256Repo);
-    const o2 = await fetchSource({ name: "team", repo: "origin", ref: sha256Commit }, originCache);
-    if ("error" in o2) throw new Error(o2.error);
-    await spawnGit(originDir, "remote", "set-url", "origin", sha1Repo);
-    const o3 = await fetchSource({ name: "team", repo: "origin", ref: sha1Commit }, originCache);
-    if ("error" in o3) throw new Error(o3.error);
-    expect(await spawnGit(originDir, "remote", "get-url", "origin")).toBe(sha1Repo);
-
-    rmSync(sha1Repo, { recursive: true, force: true });
-    const offlineBackToSha1 = await fetchSource({ name: "team", repo: sha1Repo, ref: sha1Commit }, cache);
-    if ("error" in offlineBackToSha1) throw new Error(offlineBackToSha1.error);
-    expect([offlineBackToSha1.packs[0]?.manifest.summary, offlineBackToSha1.stale]).toEqual(["SHA-1 pack.", undefined]);
-    expect(readFileSync(localNotes, "utf8")).toBe("keep my notes\n");
+    rmSync(sha256Repo, { recursive: true, force: true });
+    const offline256 = await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, sha256Cache);
+    if ("error" in offline256) throw new Error(offline256.error);
+    expect([offline256.packs[0]?.manifest.summary, offline256.stale]).toEqual(["SHA-256 pack.", undefined]);
   });
 
   test("rejects a non-directory refs file in Git dir detection and recovers an offline implicit .git pin only when previously resolved via implicit .git", async () => {
@@ -1654,149 +1573,28 @@ esac
     expect("error" in crossSpoof).toBe(true);
   });
 
-  test("preserves untracked files when an object-format switch hits a stale index.lock", async () => {
+  test("does not collapse parent traversal through a missing or non-directory path component to a sibling repository", async () => {
     if (process.platform === "win32") return;
-    const sha1Repo = temp.make("fmt-lock-sha1-");
-    await initRepo(sha1Repo);
-    writePack(sha1Repo, "SHA-1 v1.");
-    writeFileSync(join(sha1Repo, "notes.txt"), "old tracked notes\n");
-    await spawnGit(sha1Repo, "add", ".");
-    await spawnGit(sha1Repo, "commit", "-qm", "v1");
-    const sha1V1 = await spawnGit(sha1Repo, "rev-parse", "HEAD");
-    rmSync(join(sha1Repo, "notes.txt"));
-    writePack(sha1Repo, "SHA-1 v2.");
-    await spawnGit(sha1Repo, "add", "-A");
-    await spawnGit(sha1Repo, "commit", "-qm", "v2");
-    const sha1V2 = await spawnGit(sha1Repo, "rev-parse", "HEAD");
-
-    const sha256Repo = temp.make("fmt-lock-sha256-");
-    await spawnGit(sha256Repo, "init", "-q", "--object-format=sha256", "-b", "main");
-    await spawnGit(sha256Repo, "config", "user.email", "test@example.com");
-    await spawnGit(sha256Repo, "config", "user.name", "Test");
-    writePack(sha256Repo, "SHA-256 clean.");
-    writeFileSync(join(sha256Repo, "a-clean.txt"), "clean file\n");
-    await spawnGit(sha256Repo, "add", ".");
-    await spawnGit(sha256Repo, "commit", "-qm", "v1");
-    const sha256Commit = await spawnGit(sha256Repo, "rev-parse", "HEAD");
-
-    const lockCache = temp.make("cache-fmt-indexlock-");
-    expect("error" in (await fetchSource({ name: "team", repo: sha1Repo, ref: sha1V1 }, lockCache))).toBe(false);
-    expect("error" in (await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, lockCache))).toBe(false);
-    const untrackedNotes = join(lockCache, "team", "notes.txt");
-    writeFileSync(untrackedNotes, "my untracked notes\n");
-    writeFileSync(join(lockCache, ".team.git-sha1", "index.lock"), "locked\n");
-    const lockFail = await fetchSource({ name: "team", repo: sha1Repo, ref: sha1V2 }, lockCache);
-    expect("error" in lockFail).toBe(true);
-    expect(readFileSync(untrackedNotes, "utf8")).toBe("my untracked notes\n");
-    expect(readFileSync(join(lockCache, "team", "a-clean.txt"), "utf8")).toBe("clean file\n");
-    rmSync(join(lockCache, ".team.git-sha1", "index.lock"), { force: true });
-  });
-
-  test("restores the prior checkout after a partial smudge-filter failure during an object-format switch", async () => {
-    if (process.platform === "win32") return;
-    const sha1Repo = temp.make("fmt-smudge-sha1-");
-    await initRepo(sha1Repo);
-    const sha1Commit = await commitPack(sha1Repo, "team", "SHA-1 smudge baseline.");
-
-    const sha256Repo = temp.make("fmt-smudge-sha256-");
-    await spawnGit(sha256Repo, "init", "-q", "--object-format=sha256", "-b", "main");
-    await spawnGit(sha256Repo, "config", "user.email", "test@example.com");
-    await spawnGit(sha256Repo, "config", "user.name", "Test");
-    writePack(sha256Repo, "SHA-256 filtered.");
-    writeFileSync(join(sha256Repo, "a-clean.txt"), "clean file\n");
-    writeFileSync(join(sha256Repo, "z-filtered.bad"), "trigger filter\n");
-    writeFileSync(join(sha256Repo, ".gitattributes"), "*.bad filter=failfilter\n");
-    await spawnGit(sha256Repo, "add", ".");
-    await spawnGit(sha256Repo, "commit", "-qm", "v1");
-    const sha256Commit = await spawnGit(sha256Repo, "rev-parse", "HEAD");
-
-    const filterCache = temp.make("cache-fmt-smudge-");
-    expect("error" in (await fetchSource({ name: "team", repo: sha1Repo, ref: sha1Commit }, filterCache))).toBe(false);
-    const filterDir = join(filterCache, "team");
-    await spawnGit(filterDir, "config", "filter.failfilter.smudge", "false");
-    await spawnGit(filterDir, "config", "filter.failfilter.required", "true");
-    const smudgeFail = await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, filterCache);
-    expect("error" in smudgeFail).toBe(true);
-    expect(existsSync(join(filterDir, "a-clean.txt"))).toBe(false);
-    expect(readFileSync(join(filterDir, "packs", "team", "pack.json"), "utf8")).toContain("SHA-1 smudge baseline.");
-  });
-
-  test("preserves untracked U+FFFD filenames while removing raw non-UTF-8 tracked files on format switch", async () => {
-    if (process.platform !== "linux") return;
-    const rawRepo = temp.make("fmt-rawbytes-sha1-");
-    await initRepo(rawRepo);
-    writePack(rawRepo, "Raw bytes pack.");
-    const rawName = Buffer.from([0x66, 0xff, 0x6f]);
-    writeFileSync(Buffer.concat([Buffer.from(rawRepo + "/"), rawName]), "tracked raw\n");
-    await spawnGit(rawRepo, "add", ".");
-    await spawnGit(rawRepo, "commit", "-qm", "raw");
-    const rawCommit = await spawnGit(rawRepo, "rev-parse", "HEAD");
-
-    const sha256Repo = temp.make("fmt-rawbytes-sha256-");
-    await spawnGit(sha256Repo, "init", "-q", "--object-format=sha256", "-b", "main");
-    await spawnGit(sha256Repo, "config", "user.email", "test@example.com");
-    await spawnGit(sha256Repo, "config", "user.name", "Test");
-    writePack(sha256Repo, "SHA-256 raw target.");
-    await spawnGit(sha256Repo, "add", ".");
-    await spawnGit(sha256Repo, "commit", "-qm", "v1");
-    const sha256Commit = await spawnGit(sha256Repo, "rev-parse", "HEAD");
-
-    const rawCache = temp.make("cache-fmt-rawbytes-");
-    expect("error" in (await fetchSource({ name: "team", repo: rawRepo, ref: rawCommit }, rawCache))).toBe(false);
-    const rawDir = join(rawCache, "team");
-    const replacementUntracked = join(rawDir, "f\ufffdo");
-    writeFileSync(replacementUntracked, "keep untracked replacement\n");
-    const switched = await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, rawCache);
-    if ("error" in switched) throw new Error(switched.error);
-    expect(readFileSync(replacementUntracked, "utf8")).toBe("keep untracked replacement\n");
-    expect(existsSync(Buffer.concat([Buffer.from(rawDir + "/"), rawName]))).toBe(false);
-  });
-
-  test("fails and restores the prior checkout when an object-format switch cannot delete a read-only old tracked file", async () => {
-    if (process.platform === "win32" || process.getuid?.() === 0) return;
-    const sha1Repo = temp.make("fmt-ro-sha1-");
-    await initRepo(sha1Repo);
-    mkdirSync(join(sha1Repo, "packs/oldpack"), { recursive: true });
-    writeFileSync(join(sha1Repo, "packs/oldpack/pack.json"), JSON.stringify({ schema: 1, name: "oldpack", summary: "Old read-only pack." }));
-    await spawnGit(sha1Repo, "add", ".");
-    await spawnGit(sha1Repo, "commit", "-qm", "v1");
-    const sha1Commit = await spawnGit(sha1Repo, "rev-parse", "HEAD");
-    const sha256Repo = temp.make("fmt-ro-sha256-");
-    await spawnGit(sha256Repo, "init", "-q", "--object-format=sha256", "-b", "main");
-    await spawnGit(sha256Repo, "config", "user.email", "test@example.com");
-    await spawnGit(sha256Repo, "config", "user.name", "Test");
-    mkdirSync(join(sha256Repo, "packs/newpack"), { recursive: true });
-    writeFileSync(join(sha256Repo, "packs/newpack/pack.json"), JSON.stringify({ schema: 1, name: "newpack", summary: "New pack." }));
-    await spawnGit(sha256Repo, "add", ".");
-    await spawnGit(sha256Repo, "commit", "-qm", "v1");
-    const sha256Commit = await spawnGit(sha256Repo, "rev-parse", "HEAD");
-
-    const cache = temp.make("cache-fmt-ro-");
-    expect("error" in (await fetchSource({ name: "team", repo: sha1Repo, ref: sha1Commit }, cache))).toBe(false);
-    const oldPackDir = join(cache, "team", "packs", "oldpack");
-    chmodSync(oldPackDir, 0o500);
-    try {
-      const switched = await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, cache);
-      expect("error" in switched).toBe(true);
-    } finally {
-      chmodSync(oldPackDir, 0o700);
-    }
-    expect(existsSync(join(cache, "team", "packs", "newpack"))).toBe(false);
-    expect(readFileSync(join(oldPackDir, "pack.json"), "utf8")).toContain("Old read-only pack.");
-  });
-
-  test("recovers an offline verified pin after a format swap is interrupted between git-directory renames", async () => {
-    if (process.platform === "win32") return;
-    const repo = temp.make("fmt-interrupt-sha1-");
+    const root = temp.make("missing-parent-traversal-");
+    const repo = join(root, "repo");
+    const regularFile = join(root, "not-a-dir");
     await initRepo(repo);
-    const sha = await commitPack(repo, "team", "Interrupted swap baseline.");
-    const cache = temp.make("cache-fmt-interrupt-");
-    expect("error" in (await fetchSource({ name: "team", repo, ref: sha }, cache))).toBe(false);
-    rmSync(repo, { recursive: true, force: true });
-    Bun.spawnSync(["mv", join(cache, "team", ".git"), join(cache, ".team.git-sha1")]);
-    const recovered = await fetchSource({ name: "team", repo, ref: sha }, cache);
-    if ("error" in recovered) throw new Error(recovered.error);
-    expect([recovered.packs[0]?.manifest.summary, recovered.stale]).toEqual(["Interrupted swap baseline.", undefined]);
+    const sha = await commitPack(repo, "team", "Sibling repo.");
+    writeFileSync(regularFile, "plain file\n");
+
+    const cache = temp.make("cache-missing-parent-");
+    const first = await fetchSource({ name: "team", repo, ref: sha }, cache);
+    if ("error" in first) throw new Error(first.error);
+    expect(first.packs[0]?.manifest.summary).toBe("Sibling repo.");
+
+    const missingTraversal = await fetchSource({ name: "team", repo: `${root}/missing/../repo`, ref: sha }, cache);
+    expect("error" in missingTraversal).toBe(true);
+
+    const fileTraversal = await fetchSource({ name: "team", repo: `${root}/not-a-dir/../repo`, ref: sha }, cache);
+    expect("error" in fileTraversal).toBe(true);
+
+    const fileUrlTraversal = await fetchSource({ name: "team", repo: `file://${root}/missing/../repo`, ref: sha }, cache);
+    expect("error" in fileUrlTraversal).toBe(true);
   });
 
   test("matches Git local-transport identity for repointed .git symlinks, bare+child precedence, direct gitfiles, and trailing-space gitdir targets", async () => {
