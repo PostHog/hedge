@@ -154,17 +154,23 @@ async function firstLine(context: TriageContext, command: string[]) {
 
 const publicSourceNames = new Set(defaultSources.map((source) => source.name));
 
+const legacyAdvisorySuffix = ". Pin its ref in hedge.json to a commit SHA, so each apply loads the same packs, even offline.";
+
 function scrubUnpinnedAdvisory(line: string): string {
   const next = line.replace(
     /^(\s*Note: The pack source )([a-z0-9][a-z0-9-]*)( is not pinned to a commit SHA\. Pin its ref in hedge\.json, so each apply loads the same packs, even offline\.)$/,
     (match, prefix, name, suffix) => (publicSourceNames.has(name) ? match : `${prefix}<private source>${suffix}`),
   );
-  if (next !== line) return next;
-  return line.replace(
-    /^(\s*Note: The pack source )([a-z0-9][a-z0-9-]*)( follows )(.+?)( of )(.+?)(\. Pin its ref in hedge\.json to a commit SHA, so each apply loads the same packs, even offline\.)$/,
-    (match, prefix, name, follows, _ref, ofWord, _repo, suffix) =>
-      publicSourceNames.has(name) ? match : `${prefix}<private source>${follows}<ref>${ofWord}<private repo>${suffix}`,
-  );
+  if (next !== line || !line.endsWith(legacyAdvisorySuffix)) return next;
+  const head = line.slice(0, -legacyAdvisorySuffix.length);
+  const prefixMatch = head.match(/^(\s*Note: The pack source )([a-z0-9][a-z0-9-]*) follows /);
+  if (!prefixMatch) return line;
+  const [, prefix, name] = prefixMatch;
+  const rest = head.slice(prefixMatch[0].length);
+  const sep = rest.indexOf(" of ");
+  if (sep <= 0 || sep + 4 >= rest.length) return line;
+  const safeName = publicSourceNames.has(name!) ? name! : "<private source>";
+  return `${prefix}${safeName} follows <ref> of <private repo>${legacyAdvisorySuffix}`;
 }
 
 function knownNames(hostname: string, machine: MachineFile | undefined, profile: Profile | undefined, gitName: string | undefined, origin: string | undefined): KnownName[] {

@@ -909,4 +909,66 @@ describe("fetchSource local path resolution and object formats", () => {
     truncateSync(hugeHead, 64 * 1024 * 1024);
     expect("error" in (await fetchSource({ name: "team", repo: hugeHeadDir, ref: siblingSha }, headCache))).toBe(true);
   });
+
+  test("handles offline branch switch refresh, failed fresh SHA-256 recovery, nested commondir repointing, and implicit .git symlink retargeting", async () => {
+    if (process.platform === "win32") return;
+    const root = temp.make("refresh-sha256-alias-");
+    const repo = join(root, "branch-repo");
+    await initRepo(repo);
+    const v1 = await commitPack(repo, "team", "Branch v1.");
+    const branchCache = temp.make("cache-offline-branch-switch-");
+    expect("error" in (await fetchSource({ name: "team", repo, ref: "main" }, branchCache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo, ref: v1 }, branchCache))).toBe(false);
+    const movedAside = join(root, "branch-repo-offline");
+    const { renameSync } = await import("node:fs");
+    renameSync(repo, movedAside);
+    const offlineSwitch = await fetchSource({ name: "team", repo, ref: "main" }, branchCache);
+    if ("error" in offlineSwitch) throw new Error(offlineSwitch.error);
+    expect(offlineSwitch.stale).toContain("could not fetch main");
+    expect(await followsBranch({ name: "team", repo, ref: "main" }, branchCache)).toBe(true);
+    renameSync(movedAside, repo);
+    const v2 = await commitPack(repo, "team", "Branch v2.");
+    const advanced = await advanceSource({ name: "team", repo, ref: "main" }, branchCache, v1);
+    expect(advanced).toMatchObject({ state: "moved", commit: v2 });
+
+    const brokenSha256 = join(root, "broken-sha256");
+    mkdirSync(brokenSha256, { recursive: true });
+    await spawnGit(brokenSha256, "init", "-q", "--object-format=sha256", "-b", "main");
+    await spawnGit(brokenSha256, "config", "user.email", "test@example.com");
+    await spawnGit(brokenSha256, "config", "user.name", "Test");
+    mkdirSync(join(brokenSha256, "packs", "team"), { recursive: true });
+    writeFileSync(join(brokenSha256, "packs", "team", "pack.json"), JSON.stringify({ schema: 2, name: "team", summary: "Broken 256." }));
+    await spawnGit(brokenSha256, "add", ".");
+    await spawnGit(brokenSha256, "commit", "-q", "-m", "broken");
+    const recoveryCache = temp.make("cache-sha256-recover-");
+    expect("error" in (await fetchSource({ name: "team", repo: brokenSha256, ref: "main" }, recoveryCache))).toBe(true);
+    const recovered = await fetchSource({ name: "team", repo, ref: "main" }, recoveryCache);
+    if ("error" in recovered) throw new Error(recovered.error);
+    expect([recovered.packs[0]?.manifest.summary, recovered.stale]).toEqual(["Branch v2.", undefined]);
+
+    const mainRepo = join(root, "wt-main");
+    await initRepo(mainRepo);
+    const wtSha = await commitPack(mainRepo, "team", "WT main.");
+    const wtDir = join(root, "wt-dir");
+    await spawnGit(mainRepo, "worktree", "add", "-q", "-b", "wt-b", wtDir, "HEAD");
+    const wtCache = temp.make("cache-commondir-repoint-");
+    expect("error" in (await fetchSource({ name: "team", repo: wtDir, ref: wtSha }, wtCache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo, ref: v2 }, wtCache))).toBe(false);
+    const wtGitDir = readFileSync(join(wtDir, ".git"), "utf8").replace(/^gitdir: /, "").trim();
+    writeFileSync(join(wtGitDir, "commondir"), `${join(root, "missing-common")}\n`);
+    expect("error" in (await fetchSource({ name: "team", repo: wtDir, ref: wtSha }, wtCache))).toBe(true);
+
+    const impTargetA = join(root, "imp-a");
+    await initRepo(impTargetA);
+    const impShaA = await commitPack(impTargetA, "team", "Implicit symlink A.");
+    const impPath = join(root, "imp-packs");
+    const impDotGitLink = join(root, "imp-packs.git");
+    symlinkSync(impTargetA, impDotGitLink);
+    const impCache = temp.make("cache-imp-symlink-repoint-");
+    expect("error" in (await fetchSource({ name: "team", repo: impPath, ref: impShaA }, impCache))).toBe(false);
+    expect("error" in (await fetchSource({ name: "team", repo, ref: v2 }, impCache))).toBe(false);
+    rmSync(impDotGitLink);
+    symlinkSync(join(root, "missing-imp-b"), impDotGitLink);
+    expect("error" in (await fetchSource({ name: "team", repo: impPath, ref: impShaA }, impCache))).toBe(true);
+  });
 });
