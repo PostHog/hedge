@@ -1530,19 +1530,69 @@ esac
     if ("error" in stillSha256) throw new Error(stillSha256.error);
     expect([stillSha256.packs[0]?.manifest.summary, stillSha256.stale]).toEqual(["SHA-256 pack.", undefined]);
 
+    const sha1NotesRepo = temp.make("switch-sha1-notes-");
+    await initRepo(sha1NotesRepo);
+    writePack(sha1NotesRepo, "SHA-1 with notes.");
+    writeFileSync(join(sha1NotesRepo, "notes.txt"), "tracked v1\n");
+    await spawnGit(sha1NotesRepo, "add", ".");
+    await spawnGit(sha1NotesRepo, "commit", "-qm", "with-notes");
+    const sha1WithNotes = await spawnGit(sha1NotesRepo, "rev-parse", "HEAD");
+    rmSync(join(sha1NotesRepo, "notes.txt"));
+    writePack(sha1NotesRepo, "SHA-1 without notes.");
+    await spawnGit(sha1NotesRepo, "add", "-A");
+    await spawnGit(sha1NotesRepo, "commit", "-qm", "without-notes");
+    const sha1WithoutNotes = await spawnGit(sha1NotesRepo, "rev-parse", "HEAD");
+
+    const notesCache = temp.make("cache-format-untracked-");
+    const n1 = await fetchSource({ name: "team", repo: sha1NotesRepo, ref: sha1WithNotes }, notesCache);
+    if ("error" in n1) throw new Error(n1.error);
+    const n2 = await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, notesCache);
+    if ("error" in n2) throw new Error(n2.error);
+    const untrackedNotes = join(notesCache, "team", "notes.txt");
+    writeFileSync(untrackedNotes, "local untracked notes\n");
+    const n3 = await fetchSource({ name: "team", repo: sha1NotesRepo, ref: sha1WithoutNotes }, notesCache);
+    if ("error" in n3) throw new Error(n3.error);
+    expect([n3.packs[0]?.manifest.summary, n3.stale]).toEqual(["SHA-1 without notes.", undefined]);
+    expect(readFileSync(untrackedNotes, "utf8")).toBe("local untracked notes\n");
+
+    const cfgCache = temp.make("cache-format-config-");
+    const cInit = await fetchSource({ name: "team", repo: sha1Repo, ref: sha1Commit }, cfgCache);
+    if ("error" in cInit) throw new Error(cInit.error);
+    const cfgDir = join(cfgCache, "team");
+    await spawnGit(cfgDir, "config", "http.extraHeader", "Authorization: Bearer secret-test-header");
+    await spawnGit(cfgDir, "config", `url.${sha1Repo}.insteadOf`, "https://alias.invalid/repo");
+    chmodSync(join(cfgDir, ".git", "config"), 0o600);
+    const cTo256 = await fetchSource({ name: "team", repo: sha256Repo, ref: sha256Commit }, cfgCache);
+    if ("error" in cTo256) throw new Error(cTo256.error);
+    expect(statSync(join(cfgDir, ".git", "config")).mode & 0o777).toBe(0o600);
+    expect(await spawnGit(cfgDir, "config", "--get", "http.extraHeader")).toBe("Authorization: Bearer secret-test-header");
+    await spawnGit(cfgDir, "config", "--unset", `url.${sha1Repo}.insteadOf`);
+    const cBackToSha1 = await fetchSource({ name: "team", repo: "https://alias.invalid/repo", ref: sha1Commit }, cfgCache);
+    expect("error" in cBackToSha1).toBe(true);
+
+    const originCache = temp.make("cache-format-origin-");
+    const originDir = join(originCache, "team");
+    mkdirSync(originDir, { recursive: true });
+    await spawnGit(originDir, "init", "-q");
+    await spawnGit(originDir, "remote", "add", "origin", sha1Repo);
+    const o1 = await fetchSource({ name: "team", repo: "origin", ref: sha1Commit }, originCache);
+    if ("error" in o1) throw new Error(o1.error);
+    await spawnGit(originDir, "remote", "set-url", "origin", sha256Repo);
+    const o2 = await fetchSource({ name: "team", repo: "origin", ref: sha256Commit }, originCache);
+    if ("error" in o2) throw new Error(o2.error);
+    await spawnGit(originDir, "remote", "set-url", "origin", sha1Repo);
+    const o3 = await fetchSource({ name: "team", repo: "origin", ref: sha1Commit }, originCache);
+    if ("error" in o3) throw new Error(o3.error);
+    expect(await spawnGit(originDir, "remote", "get-url", "origin")).toBe(sha1Repo);
+
     rmSync(sha1Repo, { recursive: true, force: true });
     const offlineBackToSha1 = await fetchSource({ name: "team", repo: sha1Repo, ref: sha1Commit }, cache);
     if ("error" in offlineBackToSha1) throw new Error(offlineBackToSha1.error);
     expect([offlineBackToSha1.packs[0]?.manifest.summary, offlineBackToSha1.stale]).toEqual(["SHA-1 pack.", undefined]);
     expect(readFileSync(localNotes, "utf8")).toBe("keep my notes\n");
-
-    await spawnGit(join(cache, "team"), "remote", "add", "origin", sha256Repo);
-    const viaOrigin = await fetchSource({ name: "team", repo: "origin", ref: sha256Commit }, cache);
-    if ("error" in viaOrigin) throw new Error(viaOrigin.error);
-    expect([viaOrigin.packs[0]?.manifest.summary, viaOrigin.stale]).toEqual(["SHA-256 pack.", undefined]);
   });
 
-  test("rejects a non-directory refs file in Git dir detection and recovers an offline implicit .git pin after switching repos", async () => {
+  test("rejects a non-directory refs file in Git dir detection and recovers an offline implicit .git pin only when previously resolved via implicit .git", async () => {
     if (process.platform === "win32") return;
     const root = temp.make("refs-file-implicit-offline-");
     const fakeDir = join(root, "packs");
@@ -1575,6 +1625,23 @@ esac
     await commitPack(fakeDir, "team", "Real replacement.");
     const replacementCheck = await fetchSource({ name: "team", repo: fakeDir, ref: siblingSha }, cache);
     expect("error" in replacementCheck).toBe(true);
+
+    const pairRoot = temp.make("distinct-pair-offline-");
+    const pairMain = join(pairRoot, "packs");
+    const pairGit = join(pairRoot, "packs.git");
+    await initRepo(pairMain);
+    const pairMainSha = await commitPack(pairMain, "team", "Distinct main.");
+    await initRepo(pairGit);
+    const pairGitSha = await commitPack(pairGit, "team", "Distinct dotgit.");
+    const pairCache = temp.make("cache-distinct-pair-");
+    const p1 = await fetchSource({ name: "team", repo: pairMain, ref: pairMainSha }, pairCache);
+    if ("error" in p1) throw new Error(p1.error);
+    const p2 = await fetchSource({ name: "team", repo: pairGit, ref: pairGitSha }, pairCache);
+    if ("error" in p2) throw new Error(p2.error);
+    rmSync(pairMain, { recursive: true, force: true });
+    rmSync(pairGit, { recursive: true, force: true });
+    const crossSpoof = await fetchSource({ name: "team", repo: pairMain, ref: pairGitSha }, pairCache);
+    expect("error" in crossSpoof).toBe(true);
   });
 
 });

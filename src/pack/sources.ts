@@ -304,40 +304,45 @@ function parseLocalRepoBytes(dir: string, effective: string): { base: Buffer; ra
   return { base, rawPath: expanded, asFileUrl: false };
 }
 
-function canonicalLocalRepo(dir: string, effective: string, goodDigest?: string): string {
+function canonicalLocalRepoInfo(dir: string, effective: string, goodDigest?: string): { resolved: string; primary: string; usedImplicitDotGit: boolean; isLocal: boolean } {
   if (process.platform === "win32") {
-    if (effective.startsWith("\0raw:")) return effective;
+    if (effective.startsWith("\0raw:")) return { resolved: effective, primary: effective, usedImplicitDotGit: false, isLocal: false };
     if (/^file:\/\//i.test(effective)) {
       try {
         const abs = resolve(fileURLToPath(effective));
-        return pathToFileURL(existsSync(abs) ? realpathSync(abs) : abs).href;
+        const out = pathToFileURL(existsSync(abs) ? realpathSync(abs) : abs).href;
+        return { resolved: out, primary: out, usedImplicitDotGit: false, isLocal: true };
       } catch {
-        return effective;
+        return { resolved: effective, primary: effective, usedImplicitDotGit: false, isLocal: true };
       }
     }
-    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(effective) || (!/^[a-z]:[\\/]/i.test(effective) && /^[^/\\]+:/.test(effective))) return effective;
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(effective) || (!/^[a-z]:[\\/]/i.test(effective) && /^[^/\\]+:/.test(effective))) {
+      return { resolved: effective, primary: effective, usedImplicitDotGit: false, isLocal: false };
+    }
     const abs = resolve(dir, effective);
     try {
-      return realpathSync(abs);
+      const out = realpathSync(abs);
+      return { resolved: out, primary: out, usedImplicitDotGit: false, isLocal: true };
     } catch {
-      return abs;
+      return { resolved: abs, primary: abs, usedImplicitDotGit: false, isLocal: true };
     }
   }
   const parsed = parseLocalRepoBytes(dir, effective);
-  if (!parsed) return effective;
+  if (!parsed) return { resolved: effective, primary: effective, usedImplicitDotGit: false, isLocal: false };
   const { base, rawPath, asFileUrl } = parsed;
   const resolved = resolvePosixPathBytes(base, rawPath);
   const primary = encodeCanonicalLocal(resolved, asFileUrl);
-  if (isGitDirBytes(resolved)) return primary;
+  if (isGitDirBytes(resolved)) return { resolved: primary, primary, usedImplicitDotGit: false, isLocal: true };
   const trimmedRaw = stripTrailingSlashBytes(rawPath);
-  if (endsWithDotGit(trimmedRaw)) return primary;
+  if (endsWithDotGit(trimmedRaw)) return { resolved: primary, primary, usedImplicitDotGit: false, isLocal: true };
   const dotGitResolved = resolvePosixPathBytes(base, Buffer.concat([trimmedRaw, dotGitBuf]));
   const dotGitEncoded = encodeCanonicalLocal(dotGitResolved, asFileUrl);
-  if (isGitDirBytes(dotGitResolved)) return dotGitEncoded;
-  if (goodDigest !== undefined && repoDigest(primary) !== goodDigest && repoDigest(dotGitEncoded) === goodDigest) {
-    return dotGitEncoded;
-  }
-  return primary;
+  if (isGitDirBytes(dotGitResolved)) return { resolved: dotGitEncoded, primary, usedImplicitDotGit: true, isLocal: true };
+  return { resolved: primary, primary, usedImplicitDotGit: false, isLocal: true };
+}
+
+function canonicalLocalRepo(dir: string, effective: string): string {
+  return canonicalLocalRepoInfo(dir, effective).resolved;
 }
 
 function implicitDotGitFallback(dir: string, effective: string): string | undefined {
@@ -371,12 +376,22 @@ async function rawResolvedRepoUrl(dir: string, repo: string) {
   return rawResolvedRepoUrlAt(dir, join(dir, ".git"), repo);
 }
 
-async function resolvedRepoUrlAt(gitDir: string, dir: string, repo: string, goodDigest?: string) {
-  return canonicalLocalRepo(dir, await rawResolvedRepoUrlAt(dir, gitDir, repo), goodDigest);
+async function resolveCanonicalRepoAt(gitDir: string, dir: string, rawEffective: string): Promise<string> {
+  const info = canonicalLocalRepoInfo(dir, rawEffective);
+  if (info.usedImplicitDotGit || !info.isLocal) return info.resolved;
+  const fallback = implicitDotGitFallback(dir, rawEffective);
+  if (fallback && fallback !== info.resolved && (await hasImplicitDotGitRefAt(dir, gitDir, repoDigest(info.primary), repoDigest(fallback)))) {
+    return fallback;
+  }
+  return info.resolved;
 }
 
-async function resolvedRepoUrl(dir: string, repo: string, goodDigest?: string) {
-  return canonicalLocalRepo(dir, await rawResolvedRepoUrl(dir, repo), goodDigest);
+async function resolvedRepoUrlAt(gitDir: string, dir: string, repo: string, _goodDigest?: string) {
+  return resolveCanonicalRepoAt(gitDir, dir, await rawResolvedRepoUrlAt(dir, gitDir, repo));
+}
+
+async function resolvedRepoUrl(dir: string, repo: string, _goodDigest?: string) {
+  return resolvedRepoUrlAt(join(dir, ".git"), dir, repo);
 }
 
 const gitHash = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
@@ -517,7 +532,7 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
         !(await git(dir, "cat-file", "-e", rawStrippedRef)).ok &&
         (await fetchHeadEntry(dir, [rawGood.ref]))?.oid === rawStrippedRef.toLowerCase()));
   const rawEffectiveBefore = await rawResolvedRepoUrl(dir, repo);
-  const effectiveBefore = canonicalLocalRepo(dir, rawEffectiveBefore, rawGoodDigest);
+  const effectiveBefore = await resolveCanonicalRepoAt(join(dir, ".git"), dir, rawEffectiveBefore);
   const rawFhEntry =
     !legacyPeeled &&
     rawGood !== undefined &&
@@ -605,14 +620,28 @@ async function fetchLocked(ref: SourceRef, dir: string, loadLimitMs: number): Pr
         if (savedFetchHead) await restoreFetchHead(dir, savedFetchHead);
         return fallBack(ref, dir, repo, effectiveRepo, good, `${ref.ref} from ${ref.repo} changed checkout HEAD while loading`, loadLimitMs, before, preserveBefore, legacyOk && effectiveRepo === effectiveBefore, isBranch);
       }
-      const saveError = await saveGood(dir, {
-        repo,
-        ref: ref.ref,
-        commit,
-        ...(isBranch === undefined ? {} : { branch: isBranch }),
-        ...(peeled ? { peeled: true } : {}),
-        resolvedDigest: effectiveDigest,
-      });
+      const rawAfter = await rawResolvedRepoUrl(dir, repo);
+      const localInfo = canonicalLocalRepoInfo(dir, rawAfter);
+      const usedImplicit = localInfo.isLocal && (localInfo.usedImplicitDotGit || localInfo.primary !== effectiveRepo);
+      const implicitAlias =
+        usedImplicit && localInfo.primary !== effectiveRepo
+          ? { primaryHash: repoDigest(localInfo.primary), dotGitHash: effectiveDigest }
+          : undefined;
+      const clearImplicitForPrimary = localInfo.isLocal && !usedImplicit ? repoDigest(localInfo.primary) : undefined;
+      const saveError = await saveGood(
+        dir,
+        {
+          repo,
+          ref: ref.ref,
+          commit,
+          ...(isBranch === undefined ? {} : { branch: isBranch }),
+          ...(peeled ? { peeled: true } : {}),
+          resolvedDigest: effectiveDigest,
+        },
+        undefined,
+        implicitAlias,
+        clearImplicitForPrimary,
+      );
       if (!saveError) {
         await commitSwap?.();
         return { ref, dir, packs: loaded.packs };
@@ -786,7 +815,14 @@ const goodResolvedDigest = (record: { resolved?: string; resolvedDigest?: string
 
 const pinRef = (repoHash: string, commit: string) => `refs/hedge/pins/${repoHash}/${commit.toLowerCase()}`;
 const historyAnchorRef = (repoHash: string, commit: string, from: string) => `refs/hedge/history-anchor/${repoHash}/${commit.toLowerCase()}/${from.toLowerCase()}`;
+const implicitDotGitRef = (primaryHash: string, dotGitHash: string) => `refs/hedge/implicit-dotgit/${primaryHash}/${dotGitHash}`;
 const inlineHistoryPinLimit = 256;
+
+async function hasImplicitDotGitRefAt(dir: string, gitDir: string, primaryHash: string, dotGitHash: string): Promise<boolean> {
+  if (!existsSync(gitDir)) return false;
+  const check = await gitAt(dir, gitDir, "rev-parse", "--verify", "--quiet", implicitDotGitRef(primaryHash, dotGitHash));
+  return check.ok && gitHash.test(check.stdout);
+}
 
 async function writeAtomic(path: string, content: string | Uint8Array, mode = 0o600) {
   const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
@@ -973,7 +1009,13 @@ async function rollbackRefs(dir: string, refs: string[]): Promise<void> {
   }
 }
 
-async function saveGood(dir: string, good: Good, historyFrom?: string): Promise<string | undefined> {
+async function saveGood(
+  dir: string,
+  good: Good,
+  historyFrom?: string,
+  implicitAlias?: { primaryHash: string; dotGitHash: string },
+  clearImplicitForPrimary?: string,
+): Promise<string | undefined> {
   const before = await lastGood(dir);
   const unchanged =
     before !== undefined &&
@@ -994,6 +1036,18 @@ async function saveGood(dir: string, good: Good, historyFrom?: string): Promise<
     if (recorded && !unchanged) {
       await rollbackRefs(dir, createdRefs);
       return recorded;
+    }
+    if (implicitAlias) {
+      const aliasRef = implicitDotGitRef(implicitAlias.primaryHash, implicitAlias.dotGitHash);
+      const existingAlias = await git(dir, "rev-parse", "--verify", "--quiet", aliasRef);
+      if (!existingAlias.ok || existingAlias.stdout.toLowerCase() !== currentCommit.commit) {
+        const updatedAlias = await git(dir, "update-ref", aliasRef, currentCommit.commit);
+        if (!updatedAlias.ok && !unchanged) {
+          await rollbackRefs(dir, createdRefs);
+          return updatedAlias.stderr || "could not record implicit repository alias";
+        }
+        if (updatedAlias.ok) createdRefs.push(aliasRef);
+      }
     }
     if (historyFrom && gitHash.test(historyFrom)) {
       const recordedFrom = await recordPinRef(dir, currentCommit.repoHash, historyFrom, createdRefs);
@@ -1018,6 +1072,13 @@ async function saveGood(dir: string, good: Good, historyFrom?: string): Promise<
   }
   if (unchanged) {
     await chmod(goodPath(dir), 0o600).catch(() => {});
+    if (clearImplicitForPrimary) {
+      const staleAliases = await git(dir, "for-each-ref", "--format=%(refname)", `refs/hedge/implicit-dotgit/${clearImplicitForPrimary}/`);
+      if (staleAliases.ok && staleAliases.stdout) {
+        const refsToClear = staleAliases.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+        if (refsToClear.length) await rollbackRefs(dir, refsToClear);
+      }
+    }
     return undefined;
   }
   try {
@@ -1025,6 +1086,13 @@ async function saveGood(dir: string, good: Good, historyFrom?: string): Promise<
   } catch (error) {
     await rollbackRefs(dir, createdRefs);
     return error instanceof Error ? error.message : String(error);
+  }
+  if (clearImplicitForPrimary) {
+    const staleAliases = await git(dir, "for-each-ref", "--format=%(refname)", `refs/hedge/implicit-dotgit/${clearImplicitForPrimary}/`);
+    if (staleAliases.ok && staleAliases.stdout) {
+      const refsToClear = staleAliases.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+      if (refsToClear.length) await rollbackRefs(dir, refsToClear);
+    }
   }
   return undefined;
 }
@@ -1082,30 +1150,84 @@ export async function unpinnedSources(refs: SourceRef[], profileDir: string, cac
 
 const altGitDirPath = (dir: string, format: "sha1" | "sha256") => join(dirname(dir), `.${basename(dir)}.git-${format}`);
 
-async function copyRepoGitConfig(dir: string, fromGitDir: string, toGitDir: string): Promise<void> {
-  const fromConfig = join(fromGitDir, "config");
-  const toConfig = join(toGitDir, "config");
-  if (!existsSync(fromConfig) || !existsSync(toConfig)) return;
-  const read = await gitAt(dir, fromGitDir, "config", "--file", fromConfig, "--null", "--get-regexp", "^(remote\\.|url\\.)");
-  if (!read.ok || read.rawBytes.length === 0) return;
+async function gitConfigFile(...args: string[]) {
+  const proc = Bun.spawn(["git", "config", ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: gitEnv(), timeout: fetchTimeoutMs });
+  const [code, rawBytes, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).arrayBuffer(), new Response(proc.stderr).text()]);
+  const bytes = new Uint8Array(rawBytes);
+  const rawStdout = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes);
+  return { ok: code === 0, code, stdout: rawStdout.trim(), rawStdout, rawBytes: bytes, stderr: stderr.trim() };
+}
+
+function parseNullConfigEntries(raw: string): Map<string, string[]> {
   const entries = new Map<string, string[]>();
-  const raw = read.rawStdout;
   for (const record of raw.split("\0")) {
     if (!record) continue;
     const nl = record.indexOf("\n");
-    if (nl <= 0) continue;
-    const key = record.slice(0, nl);
-    const value = record.slice(nl + 1);
+    const key = nl === -1 ? record : record.slice(0, nl);
+    const value = nl === -1 ? "" : record.slice(nl + 1);
+    if (!key) continue;
     const list = entries.get(key) ?? [];
     list.push(value);
     entries.set(key, list);
   }
-  for (const [key, values] of entries) {
-    await gitAt(dir, toGitDir, "config", "--file", toConfig, "--unset-all", key).catch(() => {});
-    for (const value of values) {
-      await gitAt(dir, toGitDir, "config", "--file", toConfig, "--add", key, value);
+  return entries;
+}
+
+const isFormatConfigKey = (key: string) => key === "core.repositoryformatversion" || key.startsWith("extensions.");
+
+async function syncRepoGitConfig(fromGitDir: string, toGitDir: string): Promise<() => Promise<void>> {
+  const fromConfig = join(fromGitDir, "config");
+  const toConfig = join(toGitDir, "config");
+  if (!existsSync(fromConfig) || !existsSync(toConfig)) return async () => {};
+  const [fromBytes, toBytes, toInfo] = await Promise.all([
+    readFile(fromConfig),
+    readFile(toConfig),
+    stat(toConfig),
+  ]);
+  const savedMode = toInfo.mode & 0o777;
+  const restore = async () => {
+    await writeAtomic(toConfig, toBytes, savedMode).catch(() => {});
+  };
+  const targetList = await gitConfigFile("--file", toConfig, "--null", "--list");
+  const targetFormatEntries = new Map<string, string[]>();
+  if (targetList.ok) {
+    for (const [key, values] of parseNullConfigEntries(targetList.rawStdout)) {
+      if (isFormatConfigKey(key)) targetFormatEntries.set(key, values);
     }
   }
+  await writeAtomic(toConfig, fromBytes, 0o600);
+  const copiedList = await gitConfigFile("--file", toConfig, "--null", "--list");
+  const keysToClear = new Set<string>(["core.repositoryformatversion", "core.bare"]);
+  if (copiedList.ok) {
+    for (const key of parseNullConfigEntries(copiedList.rawStdout).keys()) {
+      if (isFormatConfigKey(key)) keysToClear.add(key);
+    }
+  }
+  for (const key of keysToClear) {
+    await gitConfigFile("--file", toConfig, "--unset-all", key).catch(() => {});
+  }
+  await gitConfigFile("--file", toConfig, "core.bare", "false");
+  for (const [key, values] of targetFormatEntries) {
+    for (const value of values) {
+      await gitConfigFile("--file", toConfig, "--add", key, value);
+    }
+  }
+  await chmod(toConfig, 0o600).catch(() => {});
+  return restore;
+}
+
+async function checkoutFromEmptyTree(dir: string, commit: string, branch?: string): Promise<{ ok: boolean; stderr: string }> {
+  const emptyTree = await gitWithStdin(dir, "", ["mktree"]);
+  if (!emptyTree.ok || !gitHash.test(emptyTree.stdout)) return { ok: false, stderr: emptyTree.stderr || "could not create empty tree" };
+  const cleared = await git(dir, "read-tree", "--empty");
+  if (!cleared.ok) return { ok: false, stderr: cleared.stderr };
+  const populated = await git(dir, "read-tree", "-m", "-u", emptyTree.stdout.toLowerCase(), `${commit}^{commit}`);
+  if (!populated.ok) return { ok: false, stderr: populated.stderr };
+  const refUpdated = branch
+    ? await git(dir, "symbolic-ref", "HEAD", `refs/heads/${branch}`)
+    : await git(dir, "update-ref", "--no-deref", "HEAD", commit);
+  if (!refUpdated.ok) return { ok: false, stderr: refUpdated.stderr };
+  return { ok: true, stderr: "" };
 }
 
 async function listTrackedFiles(dir: string): Promise<string[]> {
@@ -1180,6 +1302,7 @@ async function activateSwappedGit(
   targetCommit: string,
   before: CheckoutState | undefined,
   removeTargetOnRollback: boolean,
+  onRollbackTarget?: () => Promise<void>,
 ): Promise<{ commit?: string; rollback?: () => Promise<void>; commitSwap?: () => Promise<void>; error?: string }> {
   const oldTracked = await listTrackedFiles(dir);
   const newFiles = await listTreeFiles(dir, targetGit, targetCommit);
@@ -1199,13 +1322,19 @@ async function activateSwappedGit(
     if (movedNew) {
       const newTracked = await listTrackedFiles(dir);
       await removeTrackedFiles(dir, newTracked);
-      if (removeTargetOnRollback) await rm(liveGit, { recursive: true, force: true }).catch(() => {});
-      else await rename(liveGit, targetGit).catch(() => {});
+      if (removeTargetOnRollback) {
+        await rm(liveGit, { recursive: true, force: true }).catch(() => {});
+      } else {
+        await rename(liveGit, targetGit).catch(() => {});
+        await onRollbackTarget?.();
+      }
     }
     if (movedOld) await rename(stashOldGit, liveGit).catch(() => {});
     if (prevStashBackup) await rename(prevStashBackup, stashOldGit).catch(() => {});
-    await git(dir, "checkout", "-q", "-f", "--", ".").catch(() => {});
-    await restoreCheckout(dir, before);
+    if (before) {
+      const restored = await checkoutFromEmptyTree(dir, before.commit, before.branch);
+      if (!restored.ok) await restoreCheckout(dir, before);
+    }
     clearLoadedModules(dir);
   };
   try {
@@ -1214,7 +1343,7 @@ async function activateSwappedGit(
     await rename(targetGit, liveGit);
     movedNew = true;
     await removeTrackedFiles(dir, oldTracked);
-    const moved = await git(dir, "checkout", "-q", "-f", "--detach", `${targetCommit}^{commit}`);
+    const moved = await checkoutFromEmptyTree(dir, targetCommit);
     if (!moved.ok) {
       await rollback();
       return { error: moved.stderr || "could not check out fetched commit" };
@@ -1249,8 +1378,16 @@ async function checkedOutFromCache(
   if (!gitHash.test(oid)) return undefined;
   const hashLen = await repoHashLength(dir);
   const dotGitFallback = implicitDotGitFallback(dir, rawEffectiveRepo);
-  const candidates = dotGitFallback && dotGitFallback !== effectiveRepo ? [effectiveRepo, dotGitFallback] : [effectiveRepo];
+  const primaryHash = repoDigest(effectiveRepo);
   if (isCommitPin(oid, hashLen)) {
+    const candidates = [effectiveRepo];
+    if (
+      dotGitFallback &&
+      dotGitFallback !== effectiveRepo &&
+      (await hasImplicitDotGitRefAt(dir, join(dir, ".git"), primaryHash, repoDigest(dotGitFallback)))
+    ) {
+      candidates.push(dotGitFallback);
+    }
     const goodDigest = goodResolvedDigest(good);
     const goodCommit = verifiedGoodCommit(good);
     for (const candidate of candidates) {
@@ -1273,13 +1410,26 @@ async function checkedOutFromCache(
   if (!altFormat) return undefined;
   const altGit = altGitDirPath(dir, altFormat);
   if (!existsSync(altGit)) return undefined;
-  for (const candidate of candidates) {
+  const altCandidates = [effectiveRepo];
+  if (
+    dotGitFallback &&
+    dotGitFallback !== effectiveRepo &&
+    (await hasImplicitDotGitRefAt(dir, altGit, primaryHash, repoDigest(dotGitFallback)))
+  ) {
+    altCandidates.push(dotGitFallback);
+  }
+  for (const candidate of altCandidates) {
     const target = await pinTargetAt(dir, altGit, repoDigest(candidate), oid);
     if (!target) continue;
     const oldFormat = hashLen === 64 ? "sha256" : "sha1";
-    const swapped = await activateSwappedGit(dir, oldFormat, altGit, target, before, false);
-    if (swapped.error) return { effectiveRepo: candidate, error: swapped.error };
+    const restoreAltConfig = await syncRepoGitConfig(join(dir, ".git"), altGit);
+    const swapped = await activateSwappedGit(dir, oldFormat, altGit, target, before, false, restoreAltConfig);
+    if (swapped.error) {
+      await restoreAltConfig();
+      return { effectiveRepo: candidate, error: swapped.error };
+    }
     if (swapped.commit) return { commit: swapped.commit, effectiveRepo: candidate, rollback: swapped.rollback, commitSwap: swapped.commitSwap };
+    await restoreAltConfig();
   }
   return undefined;
 }
@@ -1387,6 +1537,7 @@ async function checkout(
       const reusedAlt = existsSync(existingAlt);
       const targetGit = reusedAlt ? existingAlt : join(dirname(dir), `.${basename(dir)}.git-tmp-${crypto.randomUUID()}`);
       const savedAltFetchHead = reusedAlt ? await snapshotFetchHeadAt(targetGit) : undefined;
+      let restoreAltConfig: (() => Promise<void>) | undefined;
       try {
         let ready = reusedAlt;
         if (!reusedAlt) {
@@ -1398,25 +1549,33 @@ async function checkout(
           }
         }
         if (ready) {
-          await copyRepoGitConfig(dir, join(dir, ".git"), targetGit);
+          restoreAltConfig = await syncRepoGitConfig(join(dir, ".git"), targetGit);
           const stagedEffective = await resolvedRepoUrlAt(targetGit, dir, repo, goodDigest);
           const stagedFetch = await fetchExactAt(dir, targetGit, repo, ref, true);
           if (stagedFetch.ok && stagedFetch.oid) {
             if ((await resolvedRepoUrlAt(targetGit, dir, repo, goodDigest)) !== stagedEffective) {
               if (savedAltFetchHead) await restoreFetchHeadAt(targetGit, savedAltFetchHead);
-              if (!reusedAlt) await rm(targetGit, { recursive: true, force: true }).catch(() => {});
+              if (reusedAlt) await restoreAltConfig?.();
+              else await rm(targetGit, { recursive: true, force: true }).catch(() => {});
               await restoreFetchHead(dir, savedFetchHead);
               return { effectiveRepo: stagedEffective, error: "git remote rewrite rule changed during fetch" };
             }
             const stagedPeeled = await gitAt(dir, targetGit, "rev-parse", "--verify", "--quiet", `${stagedFetch.oid}^{commit}`);
             if (stagedPeeled.ok && gitHash.test(stagedPeeled.stdout)) {
               const stagedCommit = stagedPeeled.stdout.toLowerCase();
-              const swapped = await activateSwappedGit(dir, oldFormat, targetGit, stagedCommit, before, !reusedAlt);
+              const onRollbackTarget = reusedAlt
+                ? async () => {
+                    if (savedAltFetchHead) await restoreFetchHeadAt(targetGit, savedAltFetchHead);
+                    await restoreAltConfig?.();
+                  }
+                : undefined;
+              const swapped = await activateSwappedGit(dir, oldFormat, targetGit, stagedCommit, before, !reusedAlt, onRollbackTarget);
               if (swapped.commit) {
                 return { effectiveRepo: stagedEffective, commit: swapped.commit, fetchedOid: stagedFetch.oid, rollback: swapped.rollback, commitSwap: swapped.commitSwap };
               }
               if (savedAltFetchHead) await restoreFetchHeadAt(targetGit, savedAltFetchHead);
-              if (!reusedAlt) await rm(targetGit, { recursive: true, force: true }).catch(() => {});
+              if (reusedAlt) await restoreAltConfig?.();
+              else await rm(targetGit, { recursive: true, force: true }).catch(() => {});
               await restoreFetchHead(dir, savedFetchHead);
               return { effectiveRepo: stagedEffective, error: swapped.error || "could not switch cache object format" };
             }
@@ -1426,7 +1585,8 @@ async function checkout(
         }
       } catch {}
       if (savedAltFetchHead) await restoreFetchHeadAt(targetGit, savedAltFetchHead);
-      if (!reusedAlt) await rm(targetGit, { recursive: true, force: true }).catch(() => {});
+      if (reusedAlt) await restoreAltConfig?.();
+      else await rm(targetGit, { recursive: true, force: true }).catch(() => {});
     }
   }
   if (!fetched.ok || !fetched.oid) {
@@ -1612,7 +1772,7 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
   const cachedGood = await lastGood(dir);
   const cachedDigest = goodResolvedDigest(cachedGood);
   const rawEffectiveRepo = await rawResolvedRepoUrl(dir, repo);
-  const effectiveRepo = canonicalLocalRepo(dir, rawEffectiveRepo, cachedDigest);
+  const effectiveRepo = await resolveCanonicalRepoAt(join(dir, ".git"), dir, rawEffectiveRepo);
   const effectiveDigest = repoDigest(effectiveRepo);
   const listed = await git(dir, "ls-remote", repo, head);
   if (!listed.ok) return { state: "failed", say: `could not reach ${ref.repo}: ${listed.stderr}` };
@@ -1682,7 +1842,15 @@ async function advanceLocked(ref: SourceRef, dir: string, from: string, loadLimi
     await restoreFetchHead(dir, savedFetchHead);
     return { state: "failed", say: `${branch} of ${ref.repo} at ${tip.slice(0, 12)} changed checkout HEAD while loading` };
   }
-  const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest }, verifiedHistoryFrom);
+  const rawAfterRefresh = await rawResolvedRepoUrl(dir, repo);
+  const refreshLocalInfo = canonicalLocalRepoInfo(dir, rawAfterRefresh);
+  const refreshUsedImplicit = refreshLocalInfo.isLocal && (refreshLocalInfo.usedImplicitDotGit || refreshLocalInfo.primary !== effectiveRepo);
+  const refreshAlias =
+    refreshUsedImplicit && refreshLocalInfo.primary !== effectiveRepo
+      ? { primaryHash: repoDigest(refreshLocalInfo.primary), dotGitHash: effectiveDigest }
+      : undefined;
+  const clearRefreshImplicit = refreshLocalInfo.isLocal && !refreshUsedImplicit ? repoDigest(refreshLocalInfo.primary) : undefined;
+  const saveError = await saveGood(dir, { repo, ref: ref.ref, commit: tip, branch: true, resolvedDigest: effectiveDigest }, verifiedHistoryFrom, refreshAlias, clearRefreshImplicit);
   if (saveError) {
     if (before) await restoreCheckout(dir, before);
     else if ((await git(dir, "checkout", "-q", "--detach", `${from}^{commit}`)).ok) clearLoadedModules(dir);
