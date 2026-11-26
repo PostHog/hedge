@@ -11,11 +11,16 @@
   heredoc. Before, it read like a refusal of a merge: an end-of-run report
   that names a pending merge looked like the cause, and the comment was not
   posted.
-- A body built with `$(cat <file>)` or `$(cat <<'EOF' … EOF)` is read from
-  that file or heredoc. Any other body built at run time, such as another
-  command's output, a shell variable, or an unquoted heredoc that expands
-  one, counts as unread. Before, such a body could post `/trunk merge` past
-  the gate when the command line did not spell it out.
+- A comment body built with `$(cat <file>)` or `$(cat <<'EOF' … EOF)` is
+  read from that file or heredoc, in place, as the shell expands it. Any
+  other comment body built at run time, such as another command's output, a
+  shell variable, or an unquoted heredoc that expands one, counts as unread.
+  A file that an earlier redirect on the same line writes counts as unread
+  too. Before, such a body could post `/trunk merge` past the gate when the
+  command line did not spell it out.
+- Only the words that carry a comment's body count. A shell variable in a
+  redirect, an environment prefix, the repo name, a GraphQL read, a label, or
+  a review body does not make the comment unread.
 
 ### A check that a person passes no longer turns into a ci gap
 

@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type Hook, printing, runHook } from "../../base/lib/hook.ts";
 import type { Env } from "../../pull-requests/lib/decision-ledger.ts";
-import { beforeDeadline, exemptList, mergeGateRisk, mergeIntent, realGateIO, realIntentIO, type GateIO, type IntentIO, type ToolCall } from "../lib/merge-gate.ts";
+import { beforeDeadline, exemptList, mergeGateRisk, mergeIntent, realGateIO, realIntentIO, unreadBody, unreadBodyNote, type GateIO, type IntentIO, type ToolCall } from "../lib/merge-gate.ts";
 
 export type Denial = { hookSpecificOutput: { hookEventName: "PreToolUse"; permissionDecision: "deny"; permissionDecisionReason: string } };
 export type Where = { home: string; env: Env; gate?: GateIO; github?: Pick<GateIO, "pull" | "pullFor">; intent?: IntentIO; deadline?: Promise<void> };
@@ -22,9 +22,11 @@ function gateSettings(home: string): GateSettings {
   return { person: typeof person === "string" && person.trim() ? person.trim() : fallbackPerson, exempt: exemptList(settings["guards.merge-gate-exempt"]), text };
 }
 
+const shellQuoted = (word: unknown) => `'${String(word).replaceAll("'", "'\\''")}'`;
+
 function shellCommand(input: Record<string, unknown> = {}) {
   const command = input.command ?? input.cmd;
-  if (Array.isArray(command)) return /(?:^|\/)(?:ba)?sh$/.test(String(command[0])) && /^-l?c$/.test(String(command[1])) ? String(command[2] ?? "") : command.join(" ");
+  if (Array.isArray(command)) return /(?:^|\/)(?:ba)?sh$/.test(String(command[0])) && /^-l?c$/.test(String(command[1])) ? String(command[2] ?? "") : command.map(shellQuoted).join(" ");
   return typeof command === "string" ? command : "";
 }
 
@@ -36,11 +38,12 @@ export async function mergeGate(call: ToolCall, where: Where): Promise<Denial | 
   catch (error) { problem = (error as Error).message; }
   const intent = mergeIntent(call, shellCommand(call.tool_input), settings?.exempt ?? [], where.intent ?? realIntentIO);
   if (!intent.refusal && !intent.targets.length && !intent.exempt?.length) return undefined;
-  if (!settings) return deny(`Hedge blocked this merge: the merge gate could not read its settings (${problem}), so it cannot tell which repositories skip the gate. Fix that file.`);
+  const explained = (reason: string) => deny(unreadBody(intent) ? `${unreadBodyNote} ${reason}` : reason);
+  if (!settings) return explained(`Hedge blocked this merge: the merge gate could not read its settings (${problem}), so it cannot tell which repositories skip the gate. Fix that file.`);
   const env = { ...where.env, HEDGE_SETTINGS: where.env.HEDGE_SETTINGS ?? settings.text };
   const io = where.gate ?? { ...realGateIO(where.home, env), ...where.github };
   const refusal = await beforeDeadline(() => mergeGateRisk(intent, io, settings.person), where.deadline);
-  return refusal ? deny(refusal) : undefined;
+  return refusal ? explained(refusal) : undefined;
 }
 
 async function answer(input: string, home: string): Promise<Denial | undefined> {

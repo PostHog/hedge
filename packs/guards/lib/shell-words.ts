@@ -9,8 +9,8 @@ export type Command = {
   substitutions: string[];
   leadingSubstitutions: string[];
   argSubstitutions: string[][];
+  argParameters: boolean[];
   stdin?: { body: string; substitutions: string[]; parameters?: true };
-  parameters?: true;
   outputs: string[];
   writes: string[];
   redirects: string[];
@@ -480,14 +480,14 @@ export function parse(program: string, context: Context = { env: new Map(), inLo
     if (declarations.has(name)) for (const pair of args.map((arg) => arg.match(assignment))) if (pair) assigned.set(pair[1], pair[2]);
     if (name === "" || declarations.has(name)) for (const [key, value] of assigned) env.set(key, value), commandEnv.set(key, value);
     const substitutions = [...words.flatMap((word) => word.substitutions), ...(stdin?.substitutions ?? [])];
-    const parameters = words.some((word) => word.parameters) || stdin?.parameters === true;
     const leadingSubstitutions = kept.slice(0, index + 1).flatMap((word) => word.substitutions);
     const argSubstitutions = kept.slice(index + 1).map((word) => word.substitutions);
+    const argParameters = kept.slice(index + 1).map((word) => word.parameters);
     const bare = kept.slice(index).map((word) => word.bare);
     const rawArgs = kept.slice(index + 1).map((word) => word.raw);
     const rawPrefix = kept.slice(0, index).map((word) => word.raw);
     const prefix = kept.slice(0, index).map((word) => basename(word.text));
-    pipeline.push({ name, args, env: commandEnv, substitutions, ...parameters && { parameters: true as const }, leadingSubstitutions, argSubstitutions, stdin, outputs, writes, redirects, bare, rawArgs, rawPrefix, prefix, keywords: stripped, processSubstitutions: words.flatMap((word) => word.processes), inLoop, tested, ...(after && { after, afterAt }), scope, chdir });
+    pipeline.push({ name, args, env: commandEnv, substitutions, leadingSubstitutions, argSubstitutions, argParameters, stdin, outputs, writes, redirects, bare, rawArgs, rawPrefix, prefix, keywords: stripped, processSubstitutions: words.flatMap((word) => word.processes), inLoop, tested, ...(after && { after, afterAt }), scope, chdir });
     words = [];
     stdin = undefined;
   };
