@@ -791,7 +791,7 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     expect(lane).toContain("give the body by its literal file path");
     expect(lane).toContain("an agent accepted proof gaps of example/product#9");
     const unpassed = machine({ "repos/example/product/pulls/9": pull(head) });
-    for (const command of ["gh pr comment 9 --repo example/product --body-file missing.md", "cat report.md | gh pr comment 9 --repo example/product -F -", "cat report.md | gh api repos/example/product/issues/9/comments -F body=@-", "gh api repos/example/product/issues/9/comments --input missing.json"]) {
+    for (const command of ["gh pr comment 9 --repo example/product --body-file missing.md", "cat report.md | gh pr comment 9 --repo example/product -F -", "cat report.md | gh api repos/example/product/issues/9/comments -F body=@-", "gh api repos/example/product/issues/9/comments --input missing.json", "cat report.md | gh api repos/example/product/issues/9/comments --input - -f body='/trunk merge'"]) {
       const reason = await unpassed(command, dir);
       expect(reason).toStartWith(opensWithNote);
       expect(reason).toContain("has not passed at the head of example/product#9");
@@ -807,11 +807,9 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     expect(await unpassed("gh pr comment 9 --repo example/product --body-file enqueue.md", dir)).toStartWith("Hedge blocked this merge");
     expect(await unpassed("gh pr merge 9 --repo example/product", dir)).toStartWith("Hedge blocked this merge");
     expect(await unpassed("gh pr merge 9 --repo example/product; gh pr comment 10 --repo example/product --body-file \"$R\"", dir)).toStartWith("Hedge blocked this merge");
-    expect(await unpassed("gh pr comment 9 --repo example/product --body-file \"$R\"; trunk merge 9", dir)).not.toStartWith(opensWithNote);
+    expect(await unpassed("gh pr comment 9 --repo example/product --body-file \"$R\"; trunk merge 9", dir)).toStartWith("Hedge blocked this command: an agent enters the Trunk merge queue only with");
     const unnamedWithMerge = await unpassed("gh pr comment 9 --body-file \"$R\"; gh pr merge 10 --repo example/product", dir);
     expect(unnamedWithMerge).toStartWith("Hedge blocked this command: it posts a comment without naming the PR");
-    writeFileSync(join(dir, "enqueue.json"), JSON.stringify({ body: "/trunk merge" }));
-    expect(await unpassed("printf x | gh api repos/example/product/issues/9/comments --input enqueue.json -F trace=@-", dir)).toStartWith("Hedge blocked this merge");
   });
 
   test("a refusal of an unread body says so first when the gate cannot read its settings", async () => {
