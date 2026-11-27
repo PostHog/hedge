@@ -403,6 +403,11 @@ async function sendCodexHome(home: string): Promise<boolean> {
 export type Agent = "claude" | "codex";
 
 const applyWaits = (name: string) => `hedge apply keeps ${name} on its own sign-in until the proxy serves it.`;
+const applyKeeps = (name: string) => `${name} has Hedge's whole proxy route, so the check passes and hedge apply keeps it on the proxy until it answers.`;
+const wholeRoute = {
+  claude: async (home: string) => readClaude(home).then(({ settings }) => settings.env?.ANTHROPIC_BASE_URL === proxyUrl && settings.apiKeyHelper === keyHelper).catch(() => false),
+  codex: async (home: string) => readableCodex(home).then((read) => read?.config.model_provider === codexProvider && read.untouched),
+};
 
 async function check(machine: ProxyMachine, agent: Agent): Promise<number> {
   const hub = readRole(machine.home) === "hub";
@@ -412,8 +417,9 @@ async function check(machine: ProxyMachine, agent: Agent): Promise<number> {
   const models = key ? await listModels(machine.fetch, key) : noKey;
   const reason = danger ?? (agent === "claude" ? unserved(models, "claude") : await codexUnserved(machine.home, models));
   const name = agent === "claude" ? "Claude Code" : "Codex";
-  machine.print(reason ? `${reason} ${applyWaits(name)}` : `${name} reaches your own-account proxy at ${proxyUrl}.`);
-  if (!reason) return 0;
+  const keeps = reason === silent && (await wholeRoute[agent](machine.home));
+  machine.print(reason ? `${reason} ${keeps ? applyKeeps(name) : applyWaits(name)}` : `${name} reaches your own-account proxy at ${proxyUrl}.`);
+  if (!reason || keeps) return 0;
   return reason === missingModel[agent] || (reason === noKey && !hub) ? waitsForPerson : 1;
 }
 
