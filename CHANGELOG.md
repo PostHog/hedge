@@ -19,6 +19,18 @@
 - When the user answered a card that names the PR as a Markdown link, the
   error says to name the PR as plain owner/repo#n.
 
+### A proxy that does not answer no longer takes Claude Code and Codex off it
+
+- While the hub's proxy does not answer, such as while the hub's tunnel to a
+  devbox reconnects, `hedge cli-proxy check` passes for an agent whose
+  settings hold Hedge's whole proxy route, and says so. `hedge apply` then
+  keeps that route as it is. Without the whole route the check fails as
+  before, so `hedge apply` adds no route while the proxy is silent. The check
+  still fails when the proxy refuses the key or serves no model.
+- Before, one silent answer during the hourly apply took the route out, so
+  open sessions kept the proxy address without its key and failed with
+  "Invalid API key".
+
 ### A check that a person passes no longer turns into a ci gap
 
 - A new setting, `pull-requests.personChecks`, lists the required checks that

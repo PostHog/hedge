@@ -419,7 +419,7 @@ describe("the Own-account balancing workflow", () => {
     expect(plan({ ...balancing, plan: "both" }, devbox).config.filter(onRoute)).toHaveLength(4);
   });
 
-  describe("apply while the proxy is down", () => {
+  describe("apply while the proxy does not answer or serves nothing", () => {
     const key = "c1".repeat(32);
     const routeOnly = (result: Plan): Plan => ({ ...result, config: result.config.filter((entry) => entry.pack === "hub"), checks: result.checks.filter((check) => check.pack === "hub"), steps: [], jobs: [], human: [] });
     const realCheck = (home: string, models: string[] | "down") => {
@@ -449,28 +449,39 @@ describe("the Own-account balancing workflow", () => {
     };
     const both = ["claude-sonnet-5-5", "gpt-6.1-sol"];
 
-    test("leaves Claude Code and Codex on their own sign-in, names both checks, and the next apply changes nothing", async () => {
+    test("keeps the whole routes an earlier apply wrote while the proxy does not answer, puts in none on a fresh machine, and the next apply changes nothing", async () => {
       const home = homeWith();
-      await applied(home, both, 1);
+      const routed = await applied(home, both, 1);
       const { reports, claude, codex } = await applied(home, "down");
-      expect(claude).toEqual({});
-      expect(codex).toEqual({});
-      expect(reports[0]!.findings.map((finding) => finding.id)).toEqual(["check:cli-proxy-client", "check:cli-proxy-codex"]);
+      expect(claude).toEqual(routed.claude);
+      expect(codex).toEqual(routed.codex);
+      expect(reports[0]!.findings).toEqual([]);
       expect(reports[1]!.actions).toEqual([]);
+      const fresh = await applied(homeWith(), "down", 1);
+      expect(fresh.claude).toEqual({});
+      expect(fresh.codex).toEqual({});
+      expect(fresh.reports[0]!.findings.map((finding) => finding.id)).toEqual(["check:cli-proxy-client", "check:cli-proxy-codex"]);
     });
 
-    test("takes off the Claude route that an earlier apply wrote even while a pack source cannot be fetched", async () => {
+    test("while the proxy does not answer, a route whose base URL you removed loses its key helper too, as on the base", async () => {
+      const home = homeWith();
+      const { claude } = await applied(home, both, 1);
+      writeFileSync(join(home, ".claude/settings.json"), JSON.stringify({ ...claude, env: {} }));
+      expect((await applied(home, "down", 1)).claude).toEqual({ env: {} });
+    });
+
+    test("takes off the Claude route that an earlier apply wrote once the proxy serves no model, even while a pack source cannot be fetched", async () => {
       const home = homeWith({ ".claude/settings.json": JSON.stringify({ model: "opus" }) });
       expect((await applied(home, both, 1)).claude.apiKeyHelper).toBe('cat "$HOME/.config/hedge/cli-proxy.key"');
-      const { claude, reports } = await applied(home, "down", 2, offline);
+      const { claude, reports } = await applied(home, [], 2, offline);
       expect(claude).toEqual({ model: "opus" });
       expect(reports[1]!.actions).toEqual([]);
     });
 
-    test("takes off the Codex route that an earlier apply wrote even while a pack source cannot be fetched", async () => {
+    test("takes off the Codex route that an earlier apply wrote once the proxy serves no model, even while a pack source cannot be fetched", async () => {
       const home = homeWith({ ".codex/config.toml": stringify({ model: "gpt-6.1-sol" }) });
       expect((await applied(home, both, 1)).codex.model_provider).toBe("hedge-proxy");
-      const { codex, reports } = await applied(home, "down", 2, offline);
+      const { codex, reports } = await applied(home, [], 2, offline);
       expect(codex).toEqual({ model: "gpt-6.1-sol" });
       expect(reports[1]!.actions).toEqual([]);
     });
