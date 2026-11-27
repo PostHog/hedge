@@ -1156,7 +1156,7 @@ describe("the merge gate checks a full grant against the user's card answer in T
   });
 
   test("a lineage T3 gives only in part counts the thread's own grant alone", async () => {
-    const partial = givenReader({ threads: async () => [shell("lane", "conductor")], words: async () => [] });
+    const partial = givenReader({ threads: async () => [shell("lane", "conductor"), shell("conductor", "gone")], words: async () => [] });
     expect(await modeAt({ "pull-requests.autonomy": "end" }, [row("auto", "m1", t1)], [], partial)).toBe("supervised");
     expect(await modeAt({ "pull-requests.autonomy": "end" }, [row("auto", "m1", t1, "conductor", "lane")], [], partial)).toBe("auto");
   });
