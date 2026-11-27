@@ -458,8 +458,8 @@ ready and from ready to now; --json carries it as mergeCard. A pass records the 
 and in the ledger, and the merge-gate hook then holds that head until the user chooses "Merge" on a merge card that
 names the PR, its full head sha, and each held decision as the hook names it, such as d-1a2b3c4d for live-run/prod-shape, recorded with
 hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full head sha>: merge card'. The answer lifts the hold only in
-the T3 thread that asked it, so that thread merges or enqueues the PR. A live standing order of the user's, recorded with
---kind standing-order in a T3 thread, lifts that hold for every PR merged from that thread. Own tooling
+the T3 thread that asked it, so that thread merges or enqueues the PR. A live standing order of the user's, their card answer recorded with
+--kind standing-order, lifts that hold for every PR merged from the T3 thread they answered in. Own tooling
 and repositories that skip the gate are held too. --wait
 <minutes>, at most 120, waits up to that long for running CI to finish, reading CI every 30 seconds, and stops early
 when a read of GitHub fails, with a "ci: --wait stopped early" line that names the error. Then it runs the gate

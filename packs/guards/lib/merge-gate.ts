@@ -467,13 +467,14 @@ const heldGaps = (results: GateResult[], decisions: DecisionState[], layer: Laye
 
 const isOrder = (decision: DecisionState) => decision.class === "merge" && decision.mark === "👤" && decision.scope.kinds?.includes(standingOrder) === true;
 const inThread = (decision: DecisionState, thread: string | undefined) => thread !== undefined && sameThread(decision.where.thread, thread);
-const orderCovers = (decision: DecisionState, thread: string | undefined, now: number) => isOrder(decision) && live(decision) && inThread(decision, thread) && now < standingOrderEnd(decision.scope.condition);
-const orderName = (order: DecisionState) => `${order.id} (${order.answer})`;
+const runs = (decision: DecisionState, now: number) => live(decision) && now < standingOrderEnd(decision.scope.condition);
+const orderCovers = (decision: DecisionState, thread: string | undefined, now: number) => isOrder(decision) && runs(decision, now) && inThread(decision, thread);
+const orderName = (order: DecisionState) => `${order.id} of ${order.at.slice(0, 10)}`;
 
 function uncoveredWhy(decisions: DecisionState[], thread: string | undefined, now: number) {
   const orders = decisions.filter(isOrder);
   const here = orders.filter((order) => inThread(order, thread));
-  const order = (here.length ? here : orders.filter(live)).at(-1);
+  const order = (here.length ? here : orders.filter((one) => runs(one, now))).at(-1);
   if (!order) return "";
   if (order.reversed) return ` The standing order ${orderName(order)} was withdrawn on ${order.reversed.at.slice(0, 10)}.`;
   if (order.voided) return ` The standing order ${orderName(order)} ended on ${order.voided.at.slice(0, 10)}: ${order.voided.reason}.`;
@@ -489,7 +490,7 @@ const gateCommand = ({ repository, pr, head }: Layer) => `hedge proof gate --rep
 const overrideHint = (person: string) => `For an incident fix that cannot wait for the gate, ask ${person} with the question tool, naming the PR and its full head sha, with the options "${overrideChoice}" and "Keep the gate closed", and record the answer `
   + `with \`hedge decision record --mark 👤 --class merge --kind ${gateOverride} --pr <owner/repo#n> --condition '<full head sha>: <incident and why>'\`.`;
 
-const heldReason = (held: string[], person: string) => `Hedge blocked this merge: an agent accepted proof gaps of ${held.join("; ")} itself, so it merges only on ${person}'s word for that head, or under a standing order they gave in this T3 thread, whatever else lets it merge: own tooling, a standing merge grant, or full send. `
+const heldReason = (held: string[], person: string) => `Hedge blocked this merge: an agent accepted proof gaps of ${held.join("; ")} itself, so it merges only on ${person}'s word for that head, or under a standing order they chose on a question card in this T3 thread, whatever else lets it merge: own tooling, a standing merge grant, or full send. `
   + `Show it on a merge card: ask ${person} with the question tool, naming the PR, its full head sha, and each held decision as this message names it, such as \`d-1a2b3c4d for live-run/prod-shape\`, with the options "${mergeCardChoice}" and "Keep it open". When they choose "${mergeCardChoice}", record the answer with \`hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full 40-character head sha>: merge card'\`, then merge again. The answer lifts only the decisions its question named that way, only in the T3 thread that asked it, and a push leaves it behind; a gate pass at the new head that saw no such gap lifts the hold.`;
 
 const unreadReason = (repositories: string[]) => `Hedge blocked this merge: the decision ledger could not be read, so the merge gate cannot tell whether an agent accepted a proof gap in ${repositories.join(", ")} itself, and such a gap holds a merge until the person's word. Try again when the hub answers.`;
@@ -502,8 +503,8 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
   let hubError: string | undefined;
   const missing: string[] = [];
   const held: string[] = [];
-  const now = io.now?.() ?? Date.now();
-  const order = () => decisions.find((decision) => orderCovers(decision, io.thread, now));
+  const now = () => io.now?.() ?? Date.now();
+  const order = () => decisions.find((decision) => orderCovers(decision, io.thread, now()));
   const hold = (results: GateResult[], layer: Layer) => { if (!order()) held.push(...heldLayer(decisions, layer, heldGaps(results, decisions, layer, io.thread))); };
   const readLedger = async () => {
     if (events !== undefined || hubError !== undefined) return;
@@ -533,7 +534,7 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
     return `Hedge blocked this merge: the merge gate could not check it (${(error as Error).message}). A merge needs a \`hedge proof gate\` pass at each PR's head on GitHub; try again when GitHub answers.`;
   }
   if (!missing.length && hubError !== undefined) return unreadReason([...new Set(intent.targets.map((target) => target.repository))]);
-  if (!missing.length) return held.length ? heldReason(held, person) + uncoveredWhy(decisions, io.thread, now) : undefined;
+  if (!missing.length) return held.length ? heldReason(held, person) + uncoveredWhy(decisions, io.thread, now()) : undefined;
   const hub = hubError ? ` The decision ledger could not be read (${hubError}), so only this machine's gate records counted.` : "";
   const covering = order();
   const ordered = covering ? ` ${person}'s standing order ${orderName(covering)} is their merge word for gaps an agent accepted, never for a missing gate pass.` : "";
