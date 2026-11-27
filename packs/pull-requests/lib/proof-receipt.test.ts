@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { acceptGap, answerFixed, checkout, cleanFixtures, fakeModel, graded, hubAt, productionMajor, reviewHead, reviewHeadFixed, verdict, type Checkout } from "./proof-testing.ts";
 
@@ -868,10 +868,13 @@ test("publish without an asset repository attaches the screenshot to the PR with
 test("publish refuses a proof store it cannot write before gh posts anything", async () => {
   const { pr, older } = await provedPr();
   const store = join(pr.pullRequest, older);
-  chmodSync(store, 0o500);
-  try { await expect(pr.hedge("publish", "--commit", older, "walk.png")).rejects.toThrow("EACCES"); }
-  finally { chmodSync(store, 0o700); }
+  for (const mode of [0o500, 0o600]) {
+    chmodSync(store, mode);
+    try { await expect(pr.hedge("publish", "--commit", older, "walk.png")).rejects.toThrow("EACCES"); }
+    finally { chmodSync(store, 0o700); }
+  }
   expect(pr.githubComments()).toEqual([]);
+  expect(readdirSync(store).filter((name) => name.includes(".pr-attachment."))).toEqual([]);
 });
 
 test("a comment gh posted whose links Hedge cannot read back is named, so it can be deleted before a retry", async () => {

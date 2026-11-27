@@ -1,4 +1,4 @@
-import { access, constants, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join } from "node:path";
 import { readComment, type Run } from "./pr-ci.ts";
@@ -101,7 +101,9 @@ export async function attachProofs(home: string, identity: ProofIdentity, source
   if (large) throw new Error(`${large.source} is larger than 10 MiB, which gh cannot attach. Make the screenshot smaller, or publish it with --asset-repo <owner/fork>`);
   if (missing.length) {
     await mkdir(directory, { recursive: true, mode: 0o700 });
-    await access(directory, constants.W_OK);
+    const probe = `${attachedRecord(directory, missing[0]!.name)}.${crypto.randomUUID()}`;
+    await writeFile(probe, "", { flag: "wx", mode: 0o600 });
+    await rm(probe);
     const staging = await mkdtemp(join(tmpdir(), "hedge-attach-"));
     try {
       const files: Staged[] = [];
