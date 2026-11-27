@@ -126,7 +126,7 @@ const builtAtRunTime = /[$`]/;
 const runTimeMark = "\u0000";
 const isRunTime = (value: string) => value.endsWith(runTimeMark);
 const anonymousRead = /^\s*(?:query\s*)?\{/;
-const ghPlaceholder = /\{(?:owner|repo|branch)\}/;
+const ghPlaceholder = /\{(?:owner|repo|branch)\}|:(?:owner|repo|branch)\b/;
 const unreadByTrunk = /^repos\/[\w.-]+\/[\w.-]+\/(?:pulls\/(?:\d+\/comments(?:\/\d+\/replies)?|comments\/\d+)|stacks)$/;
 const graphqlCall = /(?<!\w)(?:(?<=(?:^|\})[\s,]*)(mutation|query|subscription)[\s,]+)?([A-Za-z_]\w*)[\s,]*\(/g;
 const postingField = (name: string) => (/^(?:add|update|submit)/.test(name) && /Comment|Review/.test(name)) || /^update(?:PullRequest|Issue)$/.test(name);
@@ -166,14 +166,15 @@ function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline
   return { texts: [...texts, ...texts.flatMap(jsonStrings)], unread: read.includes(undefined) || runTime, missing: read.includes(undefined), built: runTime, piped };
 }
 
-function runTimeFields(fields: string[], graphql: boolean, bodyFromInput: boolean, readQuery: (path: string) => string | undefined) {
+function runTimeFields(fields: string[], typed: string[], graphql: boolean, bodyFromInput: boolean, readQuery: (path: string) => string | undefined) {
   const built = fields.filter(isRunTime);
   const key = (field: string) => field.replace(/=.*$/s, "");
   const named = (field: string, name: string) => builtAtRunTime.test(key(field)) || fieldName(key(field)).toLowerCase() === name;
   if (bodyFromInput) return false;
   if (!graphql) return built.some((field) => named(field, "body"));
   const queries = fields.filter((field) => key(field) === "query").map((field) => field.slice("query=".length)).map((query) => query.startsWith("@") ? readQuery(query.slice(1)) : query);
-  const quiet = queries.length > 0 && queries.every((query) => query !== undefined && !ghPlaceholder.test(query) && !postsText(query));
+  const filled = typed.some((field) => key(field) === "query" && ghPlaceholder.test(field));
+  const quiet = !filled && queries.length > 0 && queries.every((query) => query !== undefined && !postsText(query));
   const shownRead = (field: string) => key(field) === "query" && anonymousRead.test(field.slice("query=".length));
   return built.some((field) => named(field, "query") && !shownRead(field)) || (built.length > 0 && !quiet);
 }
@@ -281,7 +282,7 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const inline = [...fields, ...fields.map((field) => field.replace(/^[^=]*=/, ""))];
   const fieldFiles = values(gh, "-F", "--field").flatMap((field) => field.match(/^[^=]*=@(.+)$/s)?.[1] ?? []);
   let endpoint = endpointOf(gh).replace(/[?#].*$/s, "").replace(/\/$/, "");
-  const sent = sentTexts(found, cwd, io, inline, values(gh, "--input").length > 0 ? values(gh, "--input") : fieldFiles, values(marked, "--input").some(isRunTime) || runTimeFields(values(marked, "-f", "--raw-field", "-F", "--field"), endpoint === "graphql", values(gh, "--input").length > 0, (path) => stdinPath.test(path) ? found.stdin?.body : readAt(found, cwd, io, path)));
+  const sent = sentTexts(found, cwd, io, inline, values(gh, "--input").length > 0 ? values(gh, "--input") : fieldFiles, values(marked, "--input").some(isRunTime) || runTimeFields(values(marked, "-f", "--raw-field", "-F", "--field"), values(marked, "-F", "--field"), endpoint === "graphql", values(gh, "--input").length > 0, (path) => stdinPath.test(path) ? found.stdin?.body : readAt(found, cwd, io, path)));
   if (endpoint === "graphql") return sent.piped || sent.unread || sent.texts.some((text) => mentionsEnqueue.test(text) || graphqlMerge.test(text)) || mentionsEnqueue.test(raw) ? { targets: [], refusal: graphqlReason } : { targets: [] };
   if (/\{owner\}|\{repo\}|:owner|:repo/.test(endpoint)) {
     const [owner, repo] = (repositoryOf(gh, found, cwd, io) ?? "/").split("/");
