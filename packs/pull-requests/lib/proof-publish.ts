@@ -23,10 +23,13 @@ export async function publishedUrl(saved: string) {
   return undefined;
 }
 
-const attachedRecord = (directory: string, name: string) => join(directory, `${name}.pr-attachment${publishedSuffix}`);
+export const attachedSuffix = `.pr-attachment${publishedSuffix}`;
+const attachedRecord = (directory: string, name: string) => join(directory, `${name}${attachedSuffix}`);
 const attachLimit = 50;
+const attachBytes = 10 * 1024 * 1024;
 const firstLine = (text: string) => text.trim().split("\n")[0] ?? "";
 const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+type Shot = { source: string; name: string; bytes: Buffer };
 type Staged = { name: string; path: string };
 
 async function savedScreenshot(home: string, identity: ProofIdentity, source: string) {
@@ -36,10 +39,14 @@ async function savedScreenshot(home: string, identity: ProofIdentity, source: st
   return { saved, bytes };
 }
 
-async function staged(source: string, staging: string): Promise<Staged> {
+async function screenshot(source: string): Promise<Shot> {
   const bytes = await readFile(source);
   if (!isScreenshot(source, bytes)) throw new Error("Publish only screenshots with invented test data");
-  const name = proofName(source, bytes);
+  if (bytes.length > attachBytes) throw new Error(`${source} is larger than 10 MiB, which gh cannot attach. Make the screenshot smaller, or publish it with --asset-repo <owner/fork>`);
+  return { source, name: proofName(source, bytes), bytes };
+}
+
+async function staged({ name, bytes }: Shot, staging: string): Promise<Staged> {
   const path = join(staging, name);
   await writeFile(path, bytes, { mode: 0o600 });
   return { name, path };
@@ -53,7 +60,10 @@ function linksIn(body: string, names: string[]) {
 }
 
 async function readBack(identity: ProofIdentity, directory: string, comment: string, names: string[], gh: Run) {
-  const links = linksIn(readComment(comment, gh).body, names);
+  let body: string;
+  try { body = readComment(comment, gh).body; }
+  catch (error) { throw new Error(`gh posted ${comment}, but Hedge could not read its links back: ${firstLine((error as Error).message)}. Delete that comment before you run hedge proof publish again`); }
+  const links = linksIn(body, names);
   for (const [name, url] of links) await writeJson(attachedRecord(directory, name), { ...identity, comment, url });
   return links;
 }
@@ -74,22 +84,26 @@ async function attach(identity: ProofIdentity, directory: string, shots: Staged[
 
 export async function attachProofs(home: string, identity: ProofIdentity, sources: string[], gh: Run): Promise<string[]> {
   const directory = proofDirectory(home, identity);
-  const staging = await mkdtemp(join(tmpdir(), "hedge-attach-"));
-  try {
-    const shots: Staged[] = [];
-    for (const source of sources) shots.push(await staged(source, staging));
-    const links = new Map<string, string>();
-    for (const { name } of shots) {
-      const url = await publishedUrl(join(directory, name));
-      if (url !== undefined) links.set(name, url);
-    }
-    const missing = [...new Map(shots.filter(({ name }) => !links.has(name)).map((shot) => [shot.name, shot])).values()];
-    if (missing.length > attachLimit) throw new Error(`gh attaches at most ${attachLimit} files at once, and ${missing.length} of these screenshots have no link yet. Publish them in groups of ${attachLimit} or fewer`);
-    if (missing.length) for (const [name, url] of await attach(identity, directory, missing, gh)) links.set(name, url);
-    return shots.map(({ name }) => links.get(name)!);
-  } finally {
-    await rm(staging, { recursive: true, force: true });
+  const shots: Shot[] = [];
+  for (const source of sources) shots.push(await screenshot(source));
+  const links = new Map<string, string>();
+  for (const { name } of shots) {
+    const url = await publishedUrl(join(directory, name));
+    if (url !== undefined) links.set(name, url);
   }
+  const missing = [...new Map(shots.filter(({ name }) => !links.has(name)).map((shot) => [shot.name, shot])).values()];
+  if (missing.length > attachLimit) throw new Error(`gh attaches at most ${attachLimit} files at once, and ${missing.length} of these screenshots have no link yet. Publish them in groups of ${attachLimit} or fewer`);
+  if (missing.length) {
+    const staging = await mkdtemp(join(tmpdir(), "hedge-attach-"));
+    try {
+      const files: Staged[] = [];
+      for (const shot of missing) files.push(await staged(shot, staging));
+      for (const [name, url] of await attach(identity, directory, files, gh)) links.set(name, url);
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+    }
+  }
+  return shots.map(({ name }) => links.get(name)!);
 }
 
 export async function publishProof(home: string, identity: ProofIdentity, source: string, repository: string, github: GitHub, recheck = false): Promise<string> {
