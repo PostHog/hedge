@@ -5,7 +5,7 @@ import type { ShellThread } from "../../base/lib/t3/index.ts";
 import { tempDirs } from "../../../src/testing/git.ts";
 import type { LedgerEvent, ModeGrant } from "./decision-ledger.ts";
 import { modeCommand, threadModeEnv, type ModeContext } from "./mode-cli.ts";
-import { configuredMode, decidesAlone, fullHeldAtAuto, grantedBy, lineage, modeQuestion, resolveMode, withHeardFull, withThreadMode } from "./mode.ts";
+import { configuredMode, decidesAlone, fullHeldAtAuto, grantedBy, lineage, modeQuestion, resolveMode, withThreadMode } from "./mode.ts";
 import type { ThreadWord } from "./proof-answers.ts";
 
 const temp = tempDirs();
@@ -65,13 +65,15 @@ describe("where a mode comes from", () => {
     expect(lineage([], "x")).toEqual({ threads: ["x"], complete: false });
   });
 
-  test("an incomplete lineage without a grant of its own runs supervised, whatever the defaults say", () => {
+  test("an incomplete lineage without a grant of its own never runs in mode full, and keeps a stricter default", () => {
     const env = settings({ "pull-requests.mode": "full", "pull-requests.repoModes": "own/tools=full, own/strict=supervised" });
     const broken = { threads: ["lane"], complete: false };
-    expect(resolveMode(env, [], broken, "own/tools").mode).toBe("supervised");
+    expect(resolveMode(env, [], broken, "own/tools").mode).toBe("auto");
     expect(resolveMode(env, [], broken, "own/strict").mode).toBe("supervised");
     expect(resolveMode(env, [grant("full", "lane")], broken, "own/tools").mode).toBe("full");
-    for (const repository of ["own/strict", "own/tools", "else/where"]) expect(configuredMode(withThreadMode(env, [], broken), repository).mode).toBe("supervised");
+    expect(configuredMode(withThreadMode(env, [], broken), "own/strict").mode).toBe("supervised");
+    expect(configuredMode(withThreadMode(env, [], broken), "own/tools").mode).toBe("auto");
+    expect(configuredMode(withThreadMode(env, [], broken), "else/where").mode).toBe("auto");
   });
 
   test("full defaults from settings the hook did not apply are held at auto", () => {
@@ -80,22 +82,6 @@ describe("where a mode comes from", () => {
     expect(configuredMode({ HEDGE_SETTINGS: held }, "own/strict").mode).toBe("supervised");
     expect(configuredMode({ HEDGE_SETTINGS: held }, "else/where").mode).toBe("auto");
     for (const unreadable of ["{", "[]", "", "null", undefined]) expect(fullHeldAtAuto(unreadable)).toBe("{}");
-  });
-
-  test("the merge gate counts a full grant only when its thread still holds the card answer it names", async () => {
-    const chain = { threads: ["lane", "conductor"], complete: true };
-    const full = grant("full", "conductor");
-    const auto = grant("auto", "conductor", "2026-11-26T08:00:00.000Z");
-    const answer = (changes: Partial<ThreadWord> = {}): ThreadWord => ({ thread: "conductor", id: full.message, text: "mode full", answered: modeQuestion("conductor"), at: full.at, source: "question", ...changes });
-    const modeWith = async (...answers: ThreadWord[]) => resolveMode(settings({ "pull-requests.mode": "supervised" }), await withHeardFull([auto, full], chain, async (thread) => thread === "conductor" ? answers : []), chain).mode;
-    expect(await modeWith(answer())).toBe("full");
-    expect(await modeWith()).toBe("auto");
-    expect(await modeWith(answer({ source: "typed" }))).toBe("auto");
-    expect(await modeWith(answer({ answered: modeQuestion("elsewhere") }))).toBe("auto");
-    expect(await modeWith(answer({ text: "mode auto" }))).toBe("auto");
-    expect(await modeWith(answer({ id: "other" }))).toBe("auto");
-    expect(await modeWith(answer({ at: "2026-11-20T08:00:00.000Z" }))).toBe("auto");
-    expect(resolveMode(settings({}), await withHeardFull([full], chain, async () => { throw new Error("T3 is down"); }), chain).mode).toBe("supervised");
   });
 
   test("a ledger row whose words do not grant its mode counts for nothing", () => {

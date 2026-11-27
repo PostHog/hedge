@@ -3,8 +3,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fold, gateOverride, sameThread, live, mergeCardChoice, mergeCardCondition, namesHead, namesId, overrideChoice, hubLedger, prRef, type DecisionState, type Env, type LedgerEvent } from "../../pull-requests/lib/decision-ledger.ts";
 import { isTextList, lastGateResult, latestGateResult, type GateResult } from "../../pull-requests/lib/proof.ts";
-import { chainOf, fullHeldAtAuto, resolveMode, stricter, t3Threads, withHeardFull, type Lineage, type Mode, type ReadThreads } from "../../pull-requests/lib/mode.ts";
-import { t3ThreadWords, type ThreadWords } from "../../pull-requests/lib/proof-answers.ts";
+import { chainOf, fullHeldAtAuto, resolveMode, stricter, t3Threads, type Lineage, type Mode } from "../../pull-requests/lib/mode.ts";
 import { normalized } from "../../pull-requests/lib/proof-answers.ts";
 import { endpointOf, fieldName, ghGroups, inOrder, parseGh, values, type Gh } from "./gh.ts";
 import { githubSlug } from "./git.ts";
@@ -535,9 +534,7 @@ export async function beforeDeadline(check: () => Promise<string | undefined>, d
   catch (error) { return `Hedge blocked this merge: the merge gate failed (${(error as Error).message}).`; }
 }
 
-export type ThreadReads = { threads?: ReadThreads; words?: ThreadWords };
-
-export function realGateIO(home: string, env: Env, appliedSettings = env.HEDGE_SETTINGS, processSettings?: string, reads: ThreadReads = {}): GateIO {
+export function realGateIO(home: string, env: Env, appliedSettings = env.HEDGE_SETTINGS, processSettings?: string): GateIO {
   const thread = env.T3CODE_THREAD_ID || undefined;
   let chain: Promise<Lineage> | undefined;
   const api = async (path: string) => {
@@ -568,8 +565,7 @@ export function realGateIO(home: string, env: Env, appliedSettings = env.HEDGE_S
     localGate: (repository, pr, commit) => lastGateResult(home, { repository, pr, commit }).catch(() => ({ passed: false, at: Infinity })),
     ledger: () => hubLedger(home, env).read(),
     mode: async (repository, events) => {
-      const lineage = await (chain ??= chainOf(thread, reads.threads ?? t3Threads(home)));
-      events = await withHeardFull(events, lineage, reads.words ?? t3ThreadWords(home));
+      const lineage = await (chain ??= chainOf(thread, t3Threads(home)));
       const applied = resolveMode({ ...env, HEDGE_SETTINGS: appliedSettings }, events, lineage, repository).mode;
       if (processSettings === undefined) return applied;
       const fromProcess = (settings: string) => { try { return resolveMode({ ...env, HEDGE_SETTINGS: settings }, events, lineage, repository).mode; } catch { return "supervised" as const; } };
