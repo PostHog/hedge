@@ -20,7 +20,7 @@ const head = "a".repeat(40);
 const lower = "b".repeat(40);
 const older = "c".repeat(40);
 const exempt = exemptList("own/*, example/notes");
-const files: Record<string, string> = { "body.md": "/trunk merge\n", "note.md": "Merged after review.\n", "payload.json": '{"body":"/trunk merge"}', "query.json": '{"query":"mutation { mergePullRequest(input: {}) { clientMutationId } }"}', "merge.graphql": "mutation { mergePullRequest(input: {}) { clientMutationId } }", "comment.graphql": "mutation($b: String!) { addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }", "deep.json": `{"body":"/trunk merge","junk":${"[".repeat(200_000)}${"]".repeat(200_000)}}` };
+const files: Record<string, string> = { "body.md": "/trunk merge\n", "note.md": "Merged after review.\n", "payload.json": '{"body":"/trunk merge"}', "query.json": '{"query":"mutation { mergePullRequest(input: {}) { clientMutationId } }"}', "merge.graphql": "mutation { mergePullRequest(input: {}) { clientMutationId } }", "read.graphql": "query($owner: String!) { repository(owner: $owner, name: \"product\") { id } }", "note.json": '{"body":"Ready for review."}', "comment.graphql": "mutation($b: String!) { addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }", "deep.json": `{"body":"/trunk merge","junk":${"[".repeat(200_000)}${"]".repeat(200_000)}}` };
 const workFiles = mkdtempSync(join(tmpdir(), "merge-gate-work-"));
 for (const [name, text] of Object.entries(files)) writeFileSync(join(workFiles, name), text);
 afterAll(() => rmSync(workFiles, { recursive: true, force: true }));
@@ -188,6 +188,7 @@ describe("which calls enqueue or merge", () => {
     ["gh api graphql -f query='mutation($b: String!) { addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
     ["gh api graphql -f 'query=query { viewer { login } }' -f \"$K=$V\"", graphqlReason],
     ["gh api graphql -F query=@comment.graphql -f b=\"$B\"", graphqlReason],
+    ["gh api graphql -f query=@missing.graphql -f b=\"$B\"", graphqlReason],
     ["gh api -X PATCH repos/example/product/issues/comments/1 -f \"$K=$V\"", unreadPayloadReason],
   ])("a review, edit or GraphQL call whose body or query is built at run time is refused: %s", (command, reason) => {
     expect(bash(command).refusal).toBe(reason);
@@ -206,6 +207,14 @@ describe("which calls enqueue or merge", () => {
     ["gh api graphql -f query='query($owner: String!) { repository(owner: $owner, name: \"product\") { id } }' -f owner=\"$OWNER\""],
     ["gh api -X POST repos/example/product/git/refs -f ref=refs/heads/next -f sha=\"$(git rev-parse HEAD)\""],
     ["gh api repos/example/product/issues/7/comments -F body=@note.md"],
+    ["gh pr edit 7 --repo example/product --title \"Notes for $USER\" --body '$USER'"],
+    ["gh pr comment 7 --repo example/product --body \"Currency symbol: $\""],
+    ["gh pr comment 7 --repo example/product --body Costs\\ 5$"],
+    ["gh pr comment 7 --repo example/product -F - <<EOF\nCurrency symbol: $\nEOF"],
+    ["gh pr comment 7 --repo example/product -F - <<< \"Currency symbol: $\""],
+    ["gh api graphql -F query=@read.graphql -f owner=\"$OWNER\""],
+    ["gh api graphql -f 'query=query($owner: String!) { repository(owner: $owner, name: \"mutation\") { id } }' -f owner=\"$OWNER\""],
+    ["gh api -X PATCH repos/example/product/pulls/7 --input note.json -f body=\"$NOTE\""],
   ])("a literal body, literal path or literal heredoc posts without a check: %s", (command) => {
     expect(bash(command)).toEqual({ targets: [] });
   });

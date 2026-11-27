@@ -123,24 +123,26 @@ const stdinPath = /^(?:-|\/dev\/stdin|\/dev\/fd\/\d+|\/proc\/(?:self|\d+)\/fd\/\
 const home = (path: string) => path === "~" ? homedir() : path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
 
 const builtAtRunTime = /[$`]/;
-const runTimeValue = (found: Command, value: string) => builtAtRunTime.test(value) && found.args.some((arg, index) => found.argExpands[index] && arg.endsWith(value));
+const runTimeMark = "\u0000";
+const isRunTime = (value: string) => value.endsWith(runTimeMark);
+const readAt = (found: Command, cwd: string | undefined, io: IntentIO, path: string) => io.readText(resolve(cwd ?? ".", found.chdir ?? ".", home(path)));
 
-function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline: string[], files: string[], built = inline.some((value) => runTimeValue(found, value))) {
+function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline: string[], files: string[], built: boolean) {
   const paths = files.map((path) => stdinPath.test(path) ? "-" : path);
   const piped = paths.includes("-") && !found.stdin;
-  const read = paths.map((path) => path === "-" ? found.stdin?.body ?? "" : io.readText(resolve(cwd ?? ".", found.chdir ?? ".", home(path))));
+  const read = paths.map((path) => path === "-" ? found.stdin?.body ?? "" : readAt(found, cwd, io, path));
   const texts = [...inline, ...read.filter((text) => text !== undefined), found.stdin?.body ?? ""];
   const builtStdin = paths.includes("-") && found.stdin?.expands === true;
   return { texts: [...texts, ...texts.flatMap(jsonStrings)], unread: read.includes(undefined) || built || builtStdin, piped };
 }
 
-function runTimeFields(found: Command, fields: string[], graphql: boolean) {
-  const built = fields.filter((field) => runTimeValue(found, field));
+function runTimeFields(fields: string[], graphql: boolean, bodyFromInput: boolean, readQuery: (path: string) => string | undefined) {
+  const built = fields.filter(isRunTime);
   const key = (field: string) => field.replace(/=.*$/s, "");
   const named = (field: string, name: string) => builtAtRunTime.test(key(field)) || fieldName(key(field)).toLowerCase() === name;
-  if (!graphql) return built.some((field) => named(field, "body"));
-  const queries = fields.filter((field) => key(field).toLowerCase() === "query").map((field) => field.slice("query=".length));
-  const readsOnly = queries.length > 0 && queries.every((query) => !query.startsWith("@") && !/mutation/i.test(query));
+  if (!graphql) return !bodyFromInput && built.some((field) => named(field, "body"));
+  const queries = fields.filter((field) => key(field).toLowerCase() === "query").map((field) => field.slice("query=".length)).map((query) => query.startsWith("@") ? readQuery(query.slice(1)) : query);
+  const readsOnly = queries.length > 0 && queries.every((query) => query !== undefined && !/\bmutation\s*[\w({]/i.test(query));
   return built.some((field) => named(field, "query")) || (built.length > 0 && !readsOnly);
 }
 
@@ -222,8 +224,10 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const args = expandAlias(written, io);
   if (!args) return { targets: [], refusal: shellAliasReason };
   const gh = parseGh(inOrder(args));
+  const marked = parseGh(inOrder(expandAlias(ghArguments({ ...found, args: found.args.map((arg, index) => found.argExpands[index] ? `${arg}${runTimeMark}` : arg) })!, io) ?? []));
+  const builtBody = () => values(marked, "-b", "--body").some(isRunTime);
   if ((gh.group === "pr" || gh.group === "issue") && gh.action === "comment") {
-    const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"));
+    const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"), builtBody());
     if (!sent.piped && !sendsEnqueue(sent, raw)) return { targets: [] };
     const named = namedPr(gh, found, cwd, io);
     const reads = readsEnqueue(sent, raw);
@@ -232,7 +236,7 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
     return { targets: [{ ...named, via: `gh ${gh.group} comment${reads ? "" : unreadVia}` }], ...unread };
   }
   if ((gh.group === "pr" && gh.action === "review") || ((gh.group === "pr" || gh.group === "issue") && gh.action === "edit")) {
-    const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"));
+    const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"), builtBody());
     return sendsEnqueue(sent, raw) ? elsewhere(sent, raw) : { targets: [] };
   }
   if (gh.group === "pr" && gh.action === "merge") {
@@ -245,7 +249,7 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const inline = [...fields, ...fields.map((field) => field.replace(/^[^=]*=/, ""))];
   const fieldFiles = values(gh, "-F", "--field").flatMap((field) => field.match(/^[^=]*=@(.+)$/s)?.[1] ?? []);
   let endpoint = endpointOf(gh).replace(/[?#].*$/s, "").replace(/\/$/, "");
-  const sent = sentTexts(found, cwd, io, inline, [...values(gh, "--input"), ...fieldFiles], runTimeFields(found, fields, endpoint === "graphql"));
+  const sent = sentTexts(found, cwd, io, inline, [...values(gh, "--input"), ...fieldFiles], runTimeFields(values(marked, "-f", "--raw-field", "-F", "--field"), endpoint === "graphql", values(gh, "--input").length > 0, (path) => readAt(found, cwd, io, path)));
   const enqueues = sendsEnqueue(sent, raw);
   if (endpoint === "graphql") return sent.piped || sent.unread || sent.texts.some((text) => mentionsEnqueue.test(text) || graphqlMerge.test(text)) || mentionsEnqueue.test(raw) ? { targets: [], refusal: graphqlReason } : { targets: [] };
   if (/\{owner\}|\{repo\}|:owner|:repo/.test(endpoint)) {

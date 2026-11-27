@@ -169,6 +169,7 @@ function braceEnd(text: string, start: number, inDoubleQuotes: boolean): number 
   throw unclosed("a ${");
 }
 
+const parameterStart = /[\w@*#?$!-]/;
 const programsInside = (inner: string) => doubleQuoted(inner, 0, false).substitutions;
 
 function expansion(text: string, index: number, inDoubleQuotes: boolean): { end: number; programs: string[] } | undefined {
@@ -206,7 +207,7 @@ function doubleQuoted(text: string, start: number, stopAtQuote: boolean) {
       continue;
     }
     const found = expansion(text, index, true);
-    if (found || char === "$") expands = true;
+    if (found || (char === "$" && parameterStart.test(text[index + 1] ?? ""))) expands = true;
     if (found) {
       substitutions.push(...found.programs);
       value += text.slice(index, found.end + 1);
@@ -359,7 +360,7 @@ function tokenize(text: string): Token[] {
       if ((char === "<" || char === ">") && word && !/^\d+$|[<>&]$/.test(word.raw)) endWord();
       const found = expansion(text, index, false);
       const end = found?.end ?? index;
-      append(text.slice(index, end + 1), text.slice(index, end + 1), found?.programs, found ? "_" : char, [], found !== undefined || char === "$");
+      append(text.slice(index, end + 1), text.slice(index, end + 1), found?.programs, found ? "_" : char, [], found !== undefined || (char === "$" && parameterStart.test(next ?? "")));
       index = end + 1;
     }
   }
