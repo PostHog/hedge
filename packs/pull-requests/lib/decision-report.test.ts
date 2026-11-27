@@ -100,7 +100,7 @@ test("the report shows a merged PR's post-deploy watch once the gate weighed it 
 test("the report shows the gate's outcome when the judge was unavailable and the user accepted that gap, and a later gate asks the judge again", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "greet new members\n");
-  pr.pullRequestState({ body: graded("non-critical") });
+  pr.pullRequestState({ body: "A greeting for new members." });
   await reviewHead(pr);
   await pr.hedge("require", "--none", "--reason", "Docs only");
   const judge = fakeModel(pr, "JUDGE", "");

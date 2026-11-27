@@ -25,11 +25,12 @@
   question. A judge run that fails only the shape question spends no judge
   budget and never goes to the arbiter, so a corrected description is
   always read. An accepted judge gap never waives a shape failure: edit
-  the body instead, even while the gap waits on its decision. When the
-  judge fails, its budget is spent, or its answer cannot be read, a judge
-  gap passes such a PR only once the judge passes the shape question on
-  that run. A gap for a judge that gave no answer still passes, so a judge
-  outage does not stop every merge. Rollout lines are not callout bullets.
+  the body instead, even while the gap waits on its decision. On an open
+  PR with a callout, a judge gap passes only once the judge passes the
+  shape question on that run, so a spent budget, an unreadable answer, a
+  judge outage, or a prompt the secret guard holds never skips it. A gate
+  that fails only on the shape question says to edit the body, not to
+  record a judge gap. Rollout lines are not callout bullets.
 - The judge's risk question accepts a changed row with an incident, or an
   uncovered row, that the Known issues section names, so the callout can
   stay within its 6 bullets.

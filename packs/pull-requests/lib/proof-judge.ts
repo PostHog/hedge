@@ -195,7 +195,7 @@ const shapeSection = (body: string, shown: boolean) => `
 Hedge counts ${roughWords(withoutReceipt(body))} words in the body outside fenced code and comments. The count is rough: it includes checklist template lines and link targets, so the written words can be fewer.${shown ? " The body is the one shown above for the risk question." : `\n\n${untrusted("PR body", withoutReceipt(body))}`}
 `;
 
-const fence = /^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[^\n]*$/gm;
+const fence = /^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[`~]*[ \t]*$/gm;
 const roughWords = (body: string) => body.replace(fence, " ").split(/<!--[\s\S]*?-->/).join(" ").split(/\s+/).filter((word) => /[\p{L}\p{N}]/u.test(word)).length;
 
 function parseVerdict(text: string, asked: QuestionName[]): Verdict | undefined {

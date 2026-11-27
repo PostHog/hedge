@@ -188,11 +188,10 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
     return { code: 3, lines, covered: "", judge: verdict(lines, judgeGapProof(head.commit, { ...gap, acceptance: undefined, line })), reason: `judge gap: ${line}` };
   }
   const shapeFailure = outcome.lines.find((line) => line.startsWith("judge shape: fail"));
-  const judgeAnswered = outcome.state === "fail" || outcome.lines.some((line) => line.startsWith("judge: unavailable (unparseable answer"));
-  const shapeUnchecked = known.shape !== undefined && judgeAnswered && !outcome.lines.some((line) => line.startsWith("judge shape: pass"));
+  const shapeUnchecked = known.shape !== undefined && !outcome.lines.some((line) => line.startsWith("judge shape: pass"));
   if (gap && (shapeFailure || (gap.acceptance && shapeUnchecked))) {
     const line = shapeFailure ? "judge gap: a judge gap never waives the shape question. Edit the PR body to fix it, then run the gate again"
-      : "judge gap: a judge gap passes the gate only once the judge passes the shape question on this body. Run the gate again; when the judge budget is spent, only the user can raise pull-requests.reviewCeiling, so the judge runs again";
+      : "judge gap: a judge gap passes the gate only once the judge passes the shape question on this body. Run the gate again once the judge answers; when the judge budget is spent, only the user can raise pull-requests.reviewCeiling, so the judge runs again";
     const lines = [...outcome.lines, line];
     return { code: 1, lines, covered: "", judge: verdict(lines), reason: shapeFailure ?? line };
   }
@@ -209,7 +208,8 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
     : checked.grade.oneWay && !decidesAll(env)
     ? "judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and ask the user; on ask an agent never decides on a one-way door"
     : `judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and decide it with hedge decision record --mark 🤖 --class proof-gap --kind judge --pr ${refText(head)} --question <q> --answer <a> --rejected <option> --reason <why>${decidesAll(env) ? "" : ", or ask the user"}`;
-  const lines = [...outcome.lines, hint];
+  const onlyShape = shapeFailure !== undefined && outcome.lines.filter((line) => /^judge [a-z]+: fail\b/.test(line)).length === 1;
+  const lines = [...outcome.lines, ...shapeFailure ? ["judge shape: edit the PR body to fix it, then run the gate again. A judge gap never waives the shape question"] : [], ...onlyShape ? [] : [hint]];
   return { code: 1, lines, covered: "", judge: verdict(lines), reason };
 }
 
