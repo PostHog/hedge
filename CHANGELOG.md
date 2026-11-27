@@ -25,7 +25,10 @@
   question. A judge run that fails only the shape question spends no judge
   budget and never goes to the arbiter, so a corrected description is
   always read. An accepted judge gap never waives a shape failure: edit
-  the body instead.
+  the body instead. When the judge fails or its budget is spent, a judge
+  gap passes such a PR only once the judge passes the shape question on
+  that run. A gap for an unavailable judge still passes, so a judge outage
+  does not stop every merge.
 - The judge's risk question accepts a changed row with an incident, or an
   uncovered row, that the Known issues section names, so the callout can
   stay within its 6 bullets.

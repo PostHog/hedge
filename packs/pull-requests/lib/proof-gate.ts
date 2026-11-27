@@ -188,10 +188,12 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
     return { code: 3, lines, covered: "", judge: verdict(lines, judgeGapProof(head.commit, { ...gap, acceptance: undefined, line })), reason: `judge gap: ${line}` };
   }
   const shapeFailure = outcome.lines.find((line) => line.startsWith("judge shape: fail"));
-  if (gap?.acceptance && shapeFailure) {
-    const line = "judge gap: a judge gap never waives the shape question. Edit the PR body to fix it, then run the gate again";
+  const shapeUnchecked = known.shape !== undefined && outcome.state === "fail" && !outcome.lines.some((line) => line.startsWith("judge shape: pass"));
+  if (gap?.acceptance && shapeUnchecked) {
+    const line = shapeFailure ? "judge gap: a judge gap never waives the shape question. Edit the PR body to fix it, then run the gate again"
+      : "judge gap: a judge gap passes the gate only once the judge passes the shape question on this body. Run the gate again; when the judge budget is spent, only the user can raise pull-requests.reviewCeiling, so the judge runs again";
     const lines = [...outcome.lines, line];
-    return { code: 1, lines, covered: "", judge: verdict(lines), reason: shapeFailure };
+    return { code: 1, lines, covered: "", judge: verdict(lines), reason: shapeFailure ?? line };
   }
   if (gap?.acceptance) {
     const lines = [...outcome.lines, `judge gap: ${gap.acceptance.line}: ${gap.reason}`];
