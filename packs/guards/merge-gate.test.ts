@@ -667,6 +667,10 @@ describe("a standing order of the person's", () => {
     expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "[example/maps#8](https://github.com/example/maps/issues/7)"); })])).toContain("an agent accepted proof gaps");
     expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "[example/maps#7](https://github.com/example/maps/issues/8)"); })])).toContain("an agent accepted proof gaps");
     expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.answer = '2026-11-27 "2026-11-27 Merge on your own"'; })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "[example/ma_ps#7](https://github.com/example/maps/issues/7)"); })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "[example/maps#7](https://github.com/example/ma_ps/issues/7)"); })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "example/ma_ps#7"); })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "[Example/Maps#7](https://github.com/example/maps/issues/7)"); })])).toBeUndefined();
     expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace(": may", `:${" ".repeat(600)} may`); })])).toContain("an agent accepted proof gaps");
   });
 
@@ -679,6 +683,18 @@ describe("a standing order of the person's", () => {
     const command = "gh pr merge 9 --repo example/product && gh pr merge 7 --repo example/product";
     const refusal = await mergeGate({ tool_name: "Bash", tool_input: { command }, cwd: "/" }, { home, env: { T3CODE_THREAD_ID: conductor }, github: voidMidCall, intent: io });
     expect(refusal?.hookSpecificOutput.permissionDecisionReason).toContain("ended on 2026-11-28: milestone reached.");
+  });
+
+  test("another live order of the same thread still covers the merge when the first ends while the call reads a later PR", async () => {
+    const home = homeIn({ "guards.person": "Robin" });
+    const ledger = join(home, ".local/state/hedge/decisions.jsonl");
+    const second = order();
+    if (second.type === "decide") Object.assign(second.decision, { id: "d-order-2", where: { ...second.decision.where, message: "m-order-2" } });
+    writeFileSync(ledger, [gap, pass, gatePass(7, head), gatePass(6, lower), order(), second].map((event) => JSON.stringify(event)).join("\n") + "\n");
+    const milestone = JSON.stringify({ type: "void", id: "d-order", reason: "milestone reached", at: "2026-11-28T09:00:00Z" });
+    const voidMidCall = { pull: async (_repository: string, pr: number) => { if (pr === 7) appendFileSync(ledger, `${milestone}\n`); return pulls[pr]; }, pullFor: async (_repository: string, branch: string) => branch === "layer-1" ? 6 : undefined };
+    const command = "gh pr merge 9 --repo example/product && gh pr merge 7 --repo example/product";
+    expect(await mergeGate({ tool_name: "Bash", tool_input: { command }, cwd: "/" }, { home, env: { T3CODE_THREAD_ID: conductor }, github: voidMidCall, intent: io })).toBeUndefined();
   });
 });
 

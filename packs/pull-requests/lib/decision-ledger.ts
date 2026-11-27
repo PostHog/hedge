@@ -37,10 +37,14 @@ export const standingOrderChoice = "Merge on your own";
 export const standingOrderQuestion = (map: string, until: string | undefined) =>
   `Standing order (${standingOrder}) for ${map} until ${until ?? "its milestone"}: may this T3 thread merge every PR it merges on your word, gaps an agent accepted included?`;
 const issueLink = /\[([^\]]*)\]\(https:\/\/github\.com\/([^/\s()]+)\/([^/\s()]+)\/issues\/(\d+)\)/g;
-const linkText = (text: string) => text.replace(issueLink, (link, label: string, owner: string, repo: string, number: string) => normalized(label) === normalized(`${owner}/${repo}#${number}`) ? label : link);
+const sameIssue = (one: string, other: string) => one.trim().toLowerCase() === other.toLowerCase();
+const linkText = (text: string) => text.replace(issueLink, (link, label: string, owner: string, repo: string, number: string) => sameIssue(label, `${owner}/${repo}#${number}`) ? label.trim() : link);
+const namesMap = (question: string, map: string) => question.toLowerCase().includes(` for ${map.toLowerCase()} until `);
 export const standingOrderQuestionCap = 600;
-export const asksStandingOrder = (question: string, map: string, until: string | undefined) =>
-  question.length <= standingOrderQuestionCap && normalized(linkText(question)) === normalized(standingOrderQuestion(map, until));
+export const asksStandingOrder = (question: string, map: string, until: string | undefined) => {
+  const plain = linkText(question);
+  return question.length <= standingOrderQuestionCap && namesMap(plain, map) && normalized(plain) === normalized(standingOrderQuestion(map, until));
+};
 export const picksStandingOrder = (choice: string) => [standingOrderChoice, `${standingOrderChoice} (Recommended)`].map(normalized).includes(normalized(choice));
 const choseStandingOrder = (answer: string) => picksStandingOrder(/^\d{4}-\d{2}-\d{2} "(.*)"$/s.exec(answer)?.[1] ?? "");
 export const isStandingOrderEntry = (decision: DecisionState) => decision.class === "merge" && decision.scope.kinds?.includes(standingOrder) === true

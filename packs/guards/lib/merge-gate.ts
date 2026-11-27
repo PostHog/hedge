@@ -480,7 +480,7 @@ function uncoveredWhy(decisions: DecisionState[], thread: string | undefined, no
   if (order.voided) return ` The standing order ${orderName(order)} ended on ${order.voided.at.slice(0, 10)}: ${order.voided.reason}.`;
   if (!here.length) return ` The standing order ${orderName(order)} covers only merges from T3 thread ${order.where.thread}, and this merge runs ${thread === undefined ? "outside a T3 thread" : `in thread ${thread}`}.`;
   return Number.isNaN(standingOrderEnd(order.scope.condition)) ? ` The standing order ${orderName(order)} names no end date Hedge can read (${order.scope.condition}).`
-    : ` The standing order ${orderName(order)} ran ${order.scope.condition} and has ended.`;
+    : ` The standing order ${orderName(order)} ran ${order.scope.condition ?? "until its milestone"} and has ended.`;
 }
 
 const heldLayer = (decisions: DecisionState[], layer: Layer, gaps: string[]) => gaps.length ? [`${layer.repository}#${layer.pr} at ${layer.head.slice(0, 12)} (🤖 ${gaps.map((id) => heldName(decisions, id)).join(", ")})`] : [];
@@ -537,7 +537,7 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
   const standing = held.length ? order() : undefined;
   if (!missing.length && standing) {
     try { decisions = fold(await io.ledger()); } catch { return unreadReason([...new Set([...intent.targets, ...intent.exempt ?? []].map((target) => target.repository))]); }
-    if (order()?.id === standing.id) return undefined;
+    if (order()) return undefined;
   }
   if (!missing.length) return held.length ? heldReason(held, person) + uncoveredWhy(decisions, io.thread, now()) : undefined;
   const hub = hubError ? ` The decision ledger could not be read (${hubError}), so only this machine's gate records counted.` : "";
