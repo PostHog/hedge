@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Decision, LedgerEvent } from "../pull-requests/lib/decision-ledger.ts";
 import { tempDirs } from "../../src/testing/git.ts";
@@ -20,9 +20,12 @@ const head = "a".repeat(40);
 const lower = "b".repeat(40);
 const older = "c".repeat(40);
 const exempt = exemptList("own/*, example/notes");
-const files: Record<string, string> = { "/work/body.md": "/trunk merge\n", "/work/note.md": "Merged after review.\n", "/work/payload.json": '{"body":"/trunk merge"}', "/work/query.json": '{"query":"mutation { mergePullRequest(input: {}) { clientMutationId } }"}', "/work/deep.json": `{"body":"/trunk merge","junk":${"[".repeat(200_000)}${"]".repeat(200_000)}}` };
+const files: Record<string, string> = { "body.md": "/trunk merge\n", "note.md": "Merged after review.\n", "payload.json": '{"body":"/trunk merge"}', "query.json": '{"query":"mutation { mergePullRequest(input: {}) { clientMutationId } }"}', "deep.json": `{"body":"/trunk merge","junk":${"[".repeat(200_000)}${"]".repeat(200_000)}}` };
+const workFiles = mkdtempSync(join(tmpdir(), "merge-gate-work-"));
+for (const [name, text] of Object.entries(files)) writeFileSync(join(workFiles, name), text);
+afterAll(() => rmSync(workFiles, { recursive: true, force: true }));
 const io: IntentIO = {
-  readText: (path) => files[path],
+  readText: (path) => path.startsWith("/work/") ? readPayload(join(workFiles, path.slice("/work/".length))) : undefined,
   checkoutRepo: (cwd) => cwd.startsWith("/work") ? "example/product" : cwd.startsWith("/tooling") ? "own/tooling" : undefined,
   aliases: () => ({ m: "pr merge", say: "pr comment", x: "!gh pr merge 7", c: "pr comment $1", ready: "pr comment --body '/trunk merge'", "pr land": "pr merge" }),
 };
