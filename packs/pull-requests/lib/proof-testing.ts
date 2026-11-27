@@ -46,9 +46,10 @@ for (let index = 0; index < args.length; index++) {
   if (args[index] !== "--attach") continue;
   const value = args[++index], cut = value.lastIndexOf("#");
   const [file, alt] = cut < 0 ? [value, path.basename(value)] : [value.slice(0, cut), value.slice(cut + 1)];
-  if (path.basename(file) === dropped) { failed = true; process.stderr.write("upload failed for " + file + "\\n"); continue; }
+  if (path.basename(file) === dropped) { failed = true; process.stderr.write("upload failed for " + file + "\\n"); break; }
   assets.push("![" + alt + "](https://github.com/user-attachments/assets/" + crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex").slice(0, 32) + ")");
 }
+if (!assets.length) process.exit(1);
 const id = 9001 + fs.readdirSync(github).filter((name) => name.startsWith("comment-")).length;
 fs.writeFileSync(path.join(github, "comment-" + id), JSON.stringify({ user: { login: "the-user" }, body: [body, ...assets].join("\\n\\n"), created_at: "2026-10-25T12:00:00Z", issue_url: "https://api.github.com/repos/example/product/issues/42" }));
 console.log("https://github.com/example/product/pull/42#issuecomment-" + id);

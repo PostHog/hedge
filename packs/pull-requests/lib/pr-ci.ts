@@ -51,14 +51,14 @@ export function commentUrl(url: string): CommentUrl {
   return { repository, pr: Number(pr), id };
 }
 
-export function readComment(url: string, run: Run): CommentUrl {
+export function readComment(url: string, run: Run): CommentUrl & { body: string } {
   const named = commentUrl(url);
-  type Raw = { issue_url?: string };
+  type Raw = { issue_url?: string; body?: string };
   const raw = restJson<Raw>(`repos/${named.repository}/issues/comments/${named.id}`, run);
   const [, repository = "", pr = ""] = /\/repos\/([^/]+\/[^/]+)\/issues\/(\d+)$/.exec(raw.issue_url ?? "") ?? [];
   const on = repository ? `${repository}#${pr}` : "no PR GitHub names";
   if (on.toLowerCase() !== `${named.repository}#${named.pr}`.toLowerCase()) throw new Error(`The comment ${url} is on ${on}, not on ${named.repository}#${named.pr}`);
-  return named;
+  return { ...named, body: raw.body ?? "" };
 }
 
 function readRequired(repository: string, branch: string, run: Run): RequiredCheck[] {

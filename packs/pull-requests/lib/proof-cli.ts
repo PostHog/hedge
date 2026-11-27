@@ -167,8 +167,8 @@ screenshots, so save them with hedge proof save.`,
     usage: "publish [--asset-repo <owner/name> [--recheck]] <file>...",
     summary: `Give screenshots a link that the full receipt shows, and print each link. Without --asset-repo, hedge
 attaches them to the PR with gh, which needs gh 2.100.0 or newer and write access to the PR's repository: it posts one
-PR comment that holds up to 50 of them, reads the comment back, and records the link of each. The PR body stays as
-it is. A screenshot that has a link is not attached again, so after a partial failure run the same command again.
+PR comment that holds them, at most 50 at once, reads the comment back, and records the link of each. The PR body stays as
+it is. A screenshot that has a link from either route is not attached again, so after a partial failure run the same command again.
 GitHub keeps an attached file for good, so publish only screenshots with invented test data. When gh cannot attach,
 as for a PR from a fork into a repository you cannot write, --asset-repo names a public repository of your own
 GitHub account; hedge has no default. It refuses a private repository and one your account does not own, and it

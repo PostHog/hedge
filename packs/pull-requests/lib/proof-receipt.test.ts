@@ -872,18 +872,21 @@ test("a screenshot gh cannot attach gets no link, and publish names the asset re
   await expect(pr.hedge("publish", "--commit", older, "walk.png")).rejects.toThrow("gh could not attach the screenshots to example/product#42: attaching files requires write access to the repository. When gh cannot attach to this PR, publish to a public repository of your own with --asset-repo <owner/fork>");
 
   pr.githubFault("attach-error", undefined);
-  const dropped = `${new Bun.CryptoHasher("sha256").update(png("second")).digest("hex")}.png`;
-  pr.githubFault("attach-drop", dropped);
-  await expect(pr.hedge("publish", "--commit", older, "walk.png", "second.png")).rejects.toThrow(`gh did not attach ${dropped}: upload failed for`);
+  file("third.png", png("third"));
+  const hashed = (seed: string) => `${new Bun.CryptoHasher("sha256").update(png(seed)).digest("hex")}.png`;
+  pr.githubFault("attach-drop", hashed("second"));
+  await expect(pr.hedge("publish", "--commit", older, "walk.png", "second.png", "third.png")).rejects.toThrow(`gh did not attach ${hashed("second")}, ${hashed("third")}: upload failed for`);
   pr.githubFault("attach-drop", undefined);
-  const again = await pr.hedge("publish", "--commit", older, "walk.png", "second.png");
+  const again = await pr.hedge("publish", "--commit", older, "walk.png", "second.png", "third.png");
 
-  expect(again.output.split("\n")).toEqual([expect.stringMatching(asset), expect.stringMatching(asset)]);
-  expect(attachments(pr).at(-1)!.split("--attach ").slice(1)).toEqual([expect.stringContaining(`${dropped}#${dropped}`)]);
+  expect(again.output.split("\n")).toEqual([expect.stringMatching(asset), expect.stringMatching(asset), expect.stringMatching(asset)]);
+  expect(attachments(pr).at(-1)!.split("--attach ").slice(1)).toEqual([expect.stringContaining(`${hashed("second")}#`), expect.stringContaining(`${hashed("third")}#`)]);
 });
 
-test("publish refuses a log before gh attaches anything", async () => {
+test("publish refuses a log, and more screenshots than gh attaches at once, before gh attaches anything", async () => {
   const { pr, file } = await provedPr();
   await expect(pr.hedge("publish", file("run.txt.png", "Authorization: Bearer invented-token"))).rejects.toThrow("Publish only screenshots with invented test data");
+  const many = Array.from({ length: 51 }, (_, index) => file(`step-${index}.png`, png(`step ${index}`)));
+  await expect(pr.hedge("publish", ...many)).rejects.toThrow("gh attaches at most 50 files at once, and 51 of these screenshots have no link yet");
   expect(attachments(pr)).toEqual([]);
 });
