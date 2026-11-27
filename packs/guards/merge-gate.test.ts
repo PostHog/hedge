@@ -20,7 +20,7 @@ const head = "a".repeat(40);
 const lower = "b".repeat(40);
 const older = "c".repeat(40);
 const exempt = exemptList("own/*, example/notes");
-const files: Record<string, string> = { "body.md": "/trunk merge\n", "note.md": "Merged after review.\n", "payload.json": '{"body":"/trunk merge"}', "query.json": '{"query":"mutation { mergePullRequest(input: {}) { clientMutationId } }"}', "merge.graphql": "mutation { mergePullRequest(input: {}) { clientMutationId } }", "read.graphql": "query($owner: String!) { repository(owner: $owner, name: \"product\") { id } }", "note.json": '{"body":"Ready for review."}', "comment.graphql": "mutation($b: String!) { addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }", "deep.json": `{"body":"/trunk merge","junk":${"[".repeat(200_000)}${"]".repeat(200_000)}}` };
+const files: Record<string, string> = { "body.md": "/trunk merge\n", "note.md": "Merged after review.\n", "payload.json": '{"body":"/trunk merge"}', "query.json": '{"query":"mutation { mergePullRequest(input: {}) { clientMutationId } }"}', "merge.graphql": "mutation { mergePullRequest(input: {}) { clientMutationId } }", "read.graphql": "query($owner: String!) { repository(owner: $owner, name: \"product\") { id } }", "note.json": '{"body":"Ready for review."}', "read.json": '{"query":"query { viewer { login } }"}', "comment.graphql": "mutation($b: String!) { addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }", "deep.json": `{"body":"/trunk merge","junk":${"[".repeat(200_000)}${"]".repeat(200_000)}}` };
 const workFiles = mkdtempSync(join(tmpdir(), "merge-gate-work-"));
 for (const [name, text] of Object.entries(files)) writeFileSync(join(workFiles, name), text);
 afterAll(() => rmSync(workFiles, { recursive: true, force: true }));
@@ -215,6 +215,9 @@ describe("which calls enqueue or merge", () => {
     ["gh api graphql -F query=@read.graphql -f owner=\"$OWNER\""],
     ["gh api graphql -f 'query=query($owner: String!) { repository(owner: $owner, name: \"mutation\") { id } }' -f owner=\"$OWNER\""],
     ["gh api -X PATCH repos/example/product/pulls/7 --input note.json -f body=\"$NOTE\""],
+    ["gh api graphql -f 'query=query($q: String!) { search(query: $q, type: REPOSITORY, first: 1) { repositoryCount } } # mutation (x)' -f q=\"$Q\""],
+    ["gh api graphql -f 'query=query { search(query: \"mutation testing\", type: REPOSITORY, first: $n) { repositoryCount } }' -F n=\"$N\""],
+    ["gh api graphql --input read.json -f owner=\"$OWNER\""],
   ])("a literal body, literal path or literal heredoc posts without a check: %s", (command) => {
     expect(bash(command)).toEqual({ targets: [] });
   });

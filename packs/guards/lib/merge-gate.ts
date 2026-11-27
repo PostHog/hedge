@@ -125,6 +125,7 @@ const home = (path: string) => path === "~" ? homedir() : path.startsWith("~/") 
 const builtAtRunTime = /[$`]/;
 const runTimeMark = "\u0000";
 const isRunTime = (value: string) => value.endsWith(runTimeMark);
+const graphqlText = /"""[\s\S]*?"""|"(?:\\.|[^"\\\n])*"|#[^\n]*/g;
 const readAt = (found: Command, cwd: string | undefined, io: IntentIO, path: string) => io.readText(resolve(cwd ?? ".", found.chdir ?? ".", home(path)));
 
 function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline: string[], files: string[], built: boolean) {
@@ -140,9 +141,10 @@ function runTimeFields(fields: string[], graphql: boolean, bodyFromInput: boolea
   const built = fields.filter(isRunTime);
   const key = (field: string) => field.replace(/=.*$/s, "");
   const named = (field: string, name: string) => builtAtRunTime.test(key(field)) || fieldName(key(field)).toLowerCase() === name;
-  if (!graphql) return !bodyFromInput && built.some((field) => named(field, "body"));
+  if (bodyFromInput) return false;
+  if (!graphql) return built.some((field) => named(field, "body"));
   const queries = fields.filter((field) => key(field).toLowerCase() === "query").map((field) => field.slice("query=".length)).map((query) => query.startsWith("@") ? readQuery(query.slice(1)) : query);
-  const readsOnly = queries.length > 0 && queries.every((query) => query !== undefined && !/\bmutation\s*[\w({]/i.test(query));
+  const readsOnly = queries.length > 0 && queries.every((query) => query !== undefined && !/\bmutation\s*[\w({]/i.test(query.replace(graphqlText, "")));
   return built.some((field) => named(field, "query")) || (built.length > 0 && !readsOnly);
 }
 
