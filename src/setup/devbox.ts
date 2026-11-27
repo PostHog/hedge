@@ -215,7 +215,7 @@ async function coderOnBox(host: string, box: Machine, context: DevboxContext) {
   if (![0, otherSignIn, savedElsewhere].includes(state.code)) throw new Error(`Hedge could not read the Coder sign-in on ${host}: ${state.output.trim()}`);
   if (state.code !== otherSignIn && sameCoderUser(session, await coderSession(box))) return configSsh(host, box);
   if (state.code !== 0) return await leaveSignIn(host, box, session.address, state.stdout.split("\n").filter(Boolean), context), `  · Coder on ${host} is signed in another way, so Hedge leaves that sign-in alone and lists the sign-in to ${session.address} at the end.`;
-  await signInBox(host, box, context, session.address);
+  await signInBox(host, box, context, session);
 }
 
 async function configSsh(host: string, box: Machine) {
@@ -234,12 +234,14 @@ const savedElsewhere = 88;
 
 const signInState = (address: string) => `d=${coderConfig} a=${quote(address)} o=; for f in "$d/url" "$d/session"; do if [ -L "$f" ] || { [ -e "$f" ] && [ ! -f "$f" ]; }; then printf '%s\\n' "$f"; o=1; fi; done; [ -z "$CODER_URL" ] || { echo CODER_URL; o=1; }; [ -z "$CODER_SESSION_TOKEN" ] || { echo CODER_SESSION_TOKEN; o=1; }; [ -z "$o" ] || exit ${otherSignIn}; { [ ! -e "$d/url" ] && [ ! -e "$d/session" ]; } || [ "$(cat "$d/url" 2>/dev/null)" = "$a" ] || exit ${savedElsewhere};`;
 
-async function signInBox(host: string, box: Machine, context: DevboxContext, address: string) {
+async function signInBox(host: string, box: Machine, context: DevboxContext, session: CoderSession) {
+  const { address } = session;
   const here = context.machine;
   if (!(await reachesOverHttps(box, address))) throw new Error(`${host} does not reach Coder at ${address} over HTTPS, so Hedge makes no Coder token for it and sends none. Sign ${host} in to Coder yourself: install the Coder CLI there from your Coder deployment, run coder login there with an HTTPS address it reaches, and paste a token from ${address}/cli-auth. Then run hedge devbox add ${host} again.`);
   const placed = await stableCoder(box, address);
   if (placed.code === cliInTheWay) throw new Error(stableCoderMissing(host, placed));
   if (placed.code !== 0) throw new Error(`Hedge could not install the Coder CLI on ${host} from ${address}: ${placed.output.trim()}`);
+  if (sameCoderUser(session, await coderSession(box))) return configSsh(host, box);
   const name = `hedge-${Date.now().toString(36)}`;
   const token = await here.exec(["coder", "tokens", "create", "--name", name]);
   if (token.code !== 0 || !token.output.trim()) throw new Error(`Coder made no token for ${host}: ${token.output.trim()}`);
@@ -253,37 +255,38 @@ async function signInBox(host: string, box: Machine, context: DevboxContext, add
 }
 
 const cliInTheWay = 89;
-const noCliOnPath = 90;
 const stableCoderPath = "~/.local/bin/coder";
 
 const stableCoderScript = (address?: string) => {
-  const kept = `b="$HOME/.local/bin"; if [ -e "$b/coder" ] || [ -L "$b/coder" ]; then [ -f "$b/coder" ] && [ -x "$b/coder" ] && exit 0; exit ${cliInTheWay}; fi`;
-  const copied = `mkdir -p "$b" && p=$(mktemp "$b/.coder.XXXXXX") || exit 1; c=$(command -v coder) && cp "$c" "$p" && chmod +x "$p" && "$p" version >/dev/null 2>&1 && mv -f "$p" "$b/coder" && exit 0`;
+  const kept = `b="$HOME/.local/bin"; kept() { if [ -e "$b/coder" ] || [ -L "$b/coder" ]; then [ -f "$b/coder" ] && [ -x "$b/coder" ] && [ -s "$b/coder" ] && "$b/coder" version >/dev/null 2>&1 && exit 0; exit ${cliInTheWay}; fi; }; kept`;
+  const published = `{ ln "$p" "$b/coder" 2>/dev/null; rm -f "$p"; kept; echo "Hedge could not write ${stableCoderPath}" >&2; exit 1; }`;
+  const copied = `mkdir -p "$b" && p=$(mktemp "$b/.coder.XXXXXX") || exit 1; c=$(command -v coder) && cp "$c" "$p" && [ -s "$p" ] && chmod +x "$p" && "$p" version >/dev/null 2>&1 && ${published}`;
   const downloaded = address === undefined
-    ? `rm -f "$p"; [ -n "$c" ] || exit ${noCliOnPath}; exit 1`
-    : `a=; case $(uname -m) in x86_64) a=amd64;; aarch64|arm64) a=arm64;; esac; [ -n "$a" ] && c=$(curl -q --proto =https --max-redirs 0 -fsS --max-time 300 -w '%{http_code}' -o "$p" ${quote(`${address}/bin/coder-linux-`)}"$a") && [ "$c" = 200 ] && [ -s "$p" ] && chmod +x "$p" && "$p" version >/dev/null && mv -f "$p" "$b/coder"; s=$?; rm -f "$p"; [ $s = 0 ] || echo "the download answered HTTP $c and gave no Coder CLI" >&2; exit $s`;
+    ? `rm -f "$p"; echo "no Coder CLI on its PATH copied and ran" >&2; exit 1`
+    : `c= a=; case $(uname -m) in x86_64) a=amd64;; aarch64|arm64) a=arm64;; esac; [ -n "$a" ] && c=$(curl -q --proto =https --max-redirs 0 -fsS --max-time 300 -w '%{http_code}' -o "$p" ${quote(`${address}/bin/coder-linux-`)}"$a") && [ "$c" = 200 ] && [ -s "$p" ] && chmod +x "$p" && "$p" version >/dev/null && ${published}; rm -f "$p"; if [ -n "$a" ]; then echo "the download answered HTTP $c and gave no Coder CLI" >&2; else echo "Coder has no CLI for $(uname -m)" >&2; fi; exit 1`;
   return `${kept}; ${copied}; ${downloaded}`;
 };
 
 const stableCoder = (box: Machine, address?: string) => box.exec(["sh", "-c", stableCoderScript(address)]);
 
+const inTheWay = (host: string) => `${stableCoderPath} on ${host} is not a Coder CLI that runs, so Hedge does not replace it. Move it aside, then run hedge devbox add ${host} again.`;
+
 function stableCoderMissing(host: string, placed: ExecResult) {
-  const install = `Install the Coder CLI at ${stableCoderPath} on ${host} from your Coder deployment, then run hedge devbox add ${host} again.`;
-  if (placed.code === cliInTheWay) return `${stableCoderPath} on ${host} is not a file that runs, so Hedge does not replace it with the Coder CLI. Move it aside, then run hedge devbox add ${host} again.`;
-  if (placed.code === noCliOnPath) return `${host} has no Coder CLI on its PATH, so Hedge cannot put one at ${stableCoderPath}, where T3 Code and cron jobs find it. ${install}`;
-  const why = placed.output.trim();
-  return `Hedge could not copy the Coder CLI on the PATH of ${host} to ${stableCoderPath}, where T3 Code and cron jobs find it${why ? `: ${why}` : ", because it does not run"}. ${install}`;
+  if (placed.code === cliInTheWay) return inTheWay(host);
+  return `Hedge could not put the Coder CLI on the PATH of ${host} at ${stableCoderPath}, where T3 Code and cron jobs find it: ${placed.output.trim()}. Install the Coder CLI at ${stableCoderPath} on ${host} from your Coder deployment, then run hedge devbox add ${host} again.`;
 }
 
 async function leaveSignIn(host: string, box: Machine, address: string, found: string[], context: DevboxContext) {
   const https = address.startsWith("https://");
-  const fetched = https && (await stableCoder(box, address)).code === 0;
+  const placed = https ? (await stableCoder(box, address)).code : undefined;
   const variables = found.filter((line) => ["CODER_URL", "CODER_SESSION_TOKEN"].includes(line));
   const paths = found.filter((line) => !variables.includes(line));
   const first = [paths.length ? `move ${paths.join(" and ")} aside` : "", variables.length ? `remove ${variables.join(" and ")} from the environment on ${host}` : ""].filter(Boolean);
   const sign = first.length ? ` First ${first.join(" and ")}, then sign` : " Sign";
   const left = `Coder on ${host} is signed in another way, so Hedge left that sign-in alone.`;
-  const step: LeftStep = fetched
+  const step: LeftStep = placed === cliInTheWay
+    ? { say: `${left} ${inTheWay(host)}` }
+    : placed === 0
     ? { say: `${left}${sign} it in to ${address}, so it reaches the hub and the other nodes by their coder. names.`, command: `coder login ${quote(address)} && coder config-ssh --yes` }
     : https
       ? { say: `${left} Hedge could not fetch the Coder CLI from the hub's Coder address, ${address}, so install it on ${host} from your Coder deployment.${sign} it in to Coder over HTTPS, at ${address} or another address it reaches, and run coder config-ssh --yes.` }
