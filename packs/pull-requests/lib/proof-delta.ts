@@ -19,13 +19,14 @@ const quietChange = ({ status, oldMode, newMode, path }: FileChange) => isTestFi
 export type CommitReader = {
   parents(commit: string): string[] | undefined;
   changes(from: string, to: string): FileChange[] | undefined;
-  filesNaming(commit: string, word: string, pathspecs: string[]): string[] | undefined;
+  filesNaming(commit: string, word: string): string[] | undefined;
   message(commit: string): string | undefined;
   inBase(commit: string): boolean;
   isAncestor(ancestor: string, commit: string): boolean;
 };
 
-const importers = (path: string) => path.endsWith(".py") ? [":(top)*.py", ":(top)*.pyi", ":(top)*.pyx"] : [":(top)", ":(top,exclude)*.md"];
+const pythonImporter = (file: string) => /\.py[ix]?$/.test(file) || !file.split("/").at(-1)!.includes(".");
+const canImport = (test: string, file: string) => test.endsWith(".py") ? pythonImporter(file) : !file.endsWith(".md");
 const importName = (path: string) => /_test\.go$/.test(path) ? undefined : path.endsWith(".snap") ? path.split("/").at(-1)! : path.split("/").at(-1)!.replace(/\.[cm]?[jt]sx?$|\.py$/, "");
 
 function importedByCode(reader: CommitReader, commit: string, path: string) {
@@ -35,9 +36,9 @@ function importedByCode(reader: CommitReader, commit: string, path: string) {
     const file = queue.shift()!;
     const name = importName(file);
     if (name === undefined) continue;
-    const naming = reader.filesNaming(commit, name, importers(file));
+    const naming = reader.filesNaming(commit, name);
     if (naming === undefined) return true;
-    for (const importer of naming) {
+    for (const importer of naming.filter((candidate) => canImport(file, candidate))) {
       if (!isTestFile(importer)) return true;
       if (!seen.has(importer)) { seen.add(importer); queue.push(importer); }
     }
@@ -98,8 +99,8 @@ export function gitCommitReader(run: Run, baseRefs: () => string[]): CommitReade
       const raw = output(["git", "diff", "--raw", "--no-renames", "--no-relative", "--no-abbrev", "--ignore-submodules=none", "--no-ext-diff", "--no-color", "-z", from, to]);
       return raw === undefined ? undefined : parseRawDiff(raw);
     },
-    filesNaming: (commit, word, pathspecs) => {
-      const result = run(["git", "grep", "--no-color", "-z", "-l", "-F", "-w", "-e", word, commit, "--", ...pathspecs]);
+    filesNaming: (commit, word) => {
+      const result = run(["git", "grep", "--no-color", "-z", "-l", "-F", "-w", "-e", word, commit, "--", ":(top)"]);
       if (result.code === 1 && !result.stdout) return [];
       if (result.code !== 0) return undefined;
       return result.stdout.split("\0").filter(Boolean).map((hit) => hit.slice(commit.length + 1));

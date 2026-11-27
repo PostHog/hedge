@@ -95,14 +95,15 @@ test("commits that change only test files carry the final read, and a final read
   expect((await pr.hedge("review-start", "--scope", "final", "--base", reviewed, "--standing", "The test pins a rule the code must keep.")).code).toBe(0);
 });
 
-test("a test carries when code names it only inside a longer word, in another language, or in docs, and not when code imports it", async () => {
-  const gateAfterTyping = async (code: string) => {
+test("a test carries when code names it only inside a longer word, in another language, or in docs, and not when code or a script imports it", async () => {
+  const gateAfterTyping = async (code: string, path = "app.py") => {
     const pr = await checkout();
     mkdirSync(join(pr.repository, "api/test"), { recursive: true });
     await pr.commit("api/test/test_hog_function.py", "def test_create() -> None:\n    assert True\n");
     await pr.commit("ingest.rs", "fn test_hog_function() {}\n");
     await pr.commit("README.md", "Run `test_hog_function` before a release.\n");
-    await pr.commit("app.py", code);
+    mkdirSync(join(pr.repository, "bin"), { recursive: true });
+    await pr.commit(path, code);
     const reviewed = await reviewHead(pr);
     await pr.hedge("require", "--none", "--reason", "fixture");
     await pr.commit("api/test/test_hog_function.py", "def test_create() -> None:\n    assert 1 == 1\n");
@@ -111,6 +112,7 @@ test("a test carries when code names it only inside a longer word, in another la
 
   expect(await gateAfterTyping("latest_hog_function_error = None\n")).toContain("review: final read carried from <reviewed>: test-only delta");
   expect(await gateAfterTyping("from api.test.test_hog_function import test_create\n")).toContain("review: HEAD not reviewed, last review covered <reviewed>");
+  expect(await gateAfterTyping("#!/usr/bin/env python3\nfrom api.test.test_hog_function import test_create\n", "bin/worker")).toContain("review: HEAD not reviewed, last review covered <reviewed>");
 });
 
 test("a comment, a test folder, a code change beside a test, a test that code imports, a strange name, a mode change, a symlink, or a hidden submodule needs a new review", async () => {
