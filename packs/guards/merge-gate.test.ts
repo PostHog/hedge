@@ -586,7 +586,7 @@ describe("a standing order of the person's", () => {
   };
   const order = (condition?: string, thread = conductor): LedgerEvent => ({
     type: "decide", decision: {
-      id: "d-order", at: "2026-11-27T07:00:00Z", class: "merge", mark: "👤", question: `Standing order (standing-order) for example/maps#7 until its milestone: merge each map PR from this thread on your own? You wrote: "${words}"`, answer: '2026-11-27 "Merge on your own"',
+      id: "d-order", at: "2026-11-27T07:00:00Z", class: "merge", mark: "👤", question: `Standing order (standing-order) for example/maps#7 until ${/^until (\S+)$/.exec(condition ?? "")?.[1] ?? "its milestone"}: may this T3 thread merge every PR it merges on your word, gaps an agent accepted included?`, answer: '2026-11-27 "Merge on your own"',
       scope: { prs: ["example/maps#7"], kinds: ["standing-order"], ...condition ? { condition } : {} }, where: { thread, message: "m-order", machine: "hub" },
     },
   });
@@ -657,15 +657,12 @@ describe("a standing order of the person's", () => {
     expect(await mergeFrom(conductor, stacked, { now: () => time, github: lateGithub, command: both })).toContain("an agent accepted proof gaps of example/product#9");
   });
 
-  test("an order voided while the call reads a later PR holds the merge", async () => {
-    const home = homeIn({ "guards.person": "Robin" });
-    const ledger = join(home, ".local/state/hedge/decisions.jsonl");
-    writeFileSync(ledger, [gap, pass, gatePass(7, head), gatePass(6, lower), order()].map((event) => JSON.stringify(event)).join("\n") + "\n");
-    const milestone = JSON.stringify({ type: "void", id: "d-order", reason: "milestone reached", at: "2026-11-28T09:00:00Z" });
-    const voidMidCall = { pull: async (_repository: string, pr: number) => { if (pr === 7) appendFileSync(ledger, `${milestone}\n`); return pulls[pr]; }, pullFor: async (_repository: string, branch: string) => branch === "layer-1" ? 6 : undefined };
-    const command = "gh pr merge 9 --repo example/product && gh pr merge 7 --repo example/product";
-    const refusal = await mergeGate({ tool_name: "Bash", tool_input: { command }, cwd: "/" }, { home, env: { T3CODE_THREAD_ID: conductor }, github: voidMidCall, intent: io });
-    expect(refusal?.hookSpecificOutput.permissionDecisionReason).toContain("ended on 2026-11-28: milestone reached.");
+  test("a ledger entry counts as an order only with the person's choice on the exact standing-order question", async () => {
+    const reworded = (change: (decision: Decision) => void) => { const one = order(); if (one.type === "decide") change(one.decision); return one; };
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.answer = '2026-11-27 "Keep asking me"'; })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = `${decision.question} Only the docs PR.`; })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.scope.prs = ["example/maps#7", "example/maps#8"]; })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.answer = '2026-11-27 "Merge on your own (Recommended)"'; })])).toBeUndefined();
   });
 });
 

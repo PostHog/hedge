@@ -33,6 +33,8 @@ export const mergeCardChoice = "Merge";
 export const mergeCardCondition = (head: string) => `${head}: merge card`;
 export const standingOrder = "standing-order";
 export const standingOrderChoice = "Merge on your own";
+export const standingOrderQuestion = (map: string, until: string | undefined) =>
+  `Standing order (${standingOrder}) for ${map} until ${until ?? "its milestone"}: may this T3 thread merge every PR it merges on your word, gaps an agent accepted included?`;
 export const standingOrderDate = (condition: string | undefined) => /^until (\d{4}-\d{2}-\d{2})$/.exec(condition ?? "")?.[1];
 const calendarDay = (date: string) => {
   const start = Date.parse(`${date}T00:00:00Z`);

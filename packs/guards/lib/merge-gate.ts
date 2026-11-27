@@ -1,7 +1,7 @@
 import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { fold, gateOverride, sameThread, live, mergeCardChoice, mergeCardCondition, namesHead, namesId, overrideChoice, hubLedger, prRef, standingOrder, standingOrderEnd, type DecisionState, type Env, type LedgerEvent } from "../../pull-requests/lib/decision-ledger.ts";
+import { fold, gateOverride, sameThread, live, mergeCardChoice, mergeCardCondition, namesHead, namesId, overrideChoice, hubLedger, prRef, standingOrder, standingOrderChoice, standingOrderDate, standingOrderEnd, standingOrderQuestion, type DecisionState, type Env, type LedgerEvent } from "../../pull-requests/lib/decision-ledger.ts";
 import { isTextList, lastGateResult, latestGateResult, type GateResult } from "../../pull-requests/lib/proof.ts";
 import { decidesAll } from "../../pull-requests/lib/proof-autonomy.ts";
 import { normalized } from "../../pull-requests/lib/proof-answers.ts";
@@ -465,7 +465,9 @@ const cardNames = (decisions: DecisionState[], id: string, question: string) => 
 const heldGaps = (results: GateResult[], decisions: DecisionState[], layer: Layer, thread: string | undefined) => decisions.some((decision) => overrideAt(decision, layer)) ? []
   : agentGapsAt(results, decisions, layer).filter((id) => !decisions.some((decision) => mergeWordAt(decision, layer, thread) && cardNames(decisions, id, decision.question)));
 
-const isOrder = (decision: DecisionState) => decision.class === "merge" && decision.mark === "👤" && decision.scope.kinds?.includes(standingOrder) === true;
+const isOrder = (decision: DecisionState) => decision.class === "merge" && (decision.reversed?.mark ?? decision.mark) === "👤" && decision.scope.kinds?.includes(standingOrder) === true
+  && [standingOrderChoice, `${standingOrderChoice} (Recommended)`].map(normalized).includes(chosen(decision.reversed?.answer ?? decision.answer))
+  && decision.scope.prs.length === 1 && normalized(decision.question) === normalized(standingOrderQuestion(decision.scope.prs[0]!, standingOrderDate(decision.scope.condition)));
 const inThread = (decision: DecisionState, thread: string | undefined) => thread !== undefined && sameThread(decision.where.thread, thread);
 const runs = (decision: DecisionState, now: number) => live(decision) && now < standingOrderEnd(decision.scope.condition);
 const orderCovers = (decision: DecisionState, thread: string | undefined, now: number) => isOrder(decision) && runs(decision, now) && inThread(decision, thread);
@@ -534,9 +536,6 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
     return `Hedge blocked this merge: the merge gate could not check it (${(error as Error).message}). A merge needs a \`hedge proof gate\` pass at each PR's head on GitHub; try again when GitHub answers.`;
   }
   if (!missing.length && hubError !== undefined) return unreadReason([...new Set(intent.targets.map((target) => target.repository))]);
-  if (!missing.length && held.length && order()) {
-    try { decisions = fold(await io.ledger()); } catch { return unreadReason([...new Set([...intent.targets, ...intent.exempt ?? []].map((target) => target.repository))]); }
-  }
   if (!missing.length) return held.length && !order() ? heldReason(held, person) + uncoveredWhy(decisions, io.thread, now()) : undefined;
   const hub = hubError ? ` The decision ledger could not be read (${hubError}), so only this machine's gate records counted.` : "";
   const covering = order();

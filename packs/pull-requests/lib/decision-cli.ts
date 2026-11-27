@@ -5,7 +5,7 @@ import { readPullRequest, runIn } from "./pr-ci.ts";
 import { gapKind, refuseInstructionQuote, usedAnswer } from "./proof.ts";
 import { decidesAll } from "./proof-autonomy.ts";
 import {
-  agentRefusal, answerUse, sameThread, askClasses, gateOverride, mergeCardChoice, mergeCardCondition, namesHead, overrideChoice, brakeDays, brakeOf, covers, decisionLine, fold, hubLedger, HubUnreachable, isUsers, liftCounted, live, messageKey, namesKind, namesPr, panelRefusal, prRef, refText, standingOrder, standingOrderChoice, standingOrderDate, standingOrderEnd, thisMachine, tierOf,
+  agentRefusal, answerUse, sameThread, askClasses, gateOverride, mergeCardChoice, mergeCardCondition, namesHead, overrideChoice, brakeDays, brakeOf, covers, decisionLine, fold, hubLedger, HubUnreachable, isUsers, liftCounted, live, messageKey, namesKind, namesPr, panelRefusal, prRef, refText, standingOrder, standingOrderChoice, standingOrderDate, standingOrderEnd, standingOrderQuestion, thisMachine, tierOf,
   type AnswerUse, type AskClass, type Decision, type DecisionState, type Env, type Ledger, type LedgerEvent, type Lift, type PrRef, type Reversal, type Ssh, type UsersMark,
 } from "./decision-ledger.ts";
 
@@ -44,10 +44,10 @@ on a merge card whose question names the PR and that head lifts the hold on each
 decision the question names as the hook's refusal does, its id with every proof kind it accepts, such as
 d-1a2b3c4d for live-run/prod-shape; any other choice is refused. It lifts the hold only in the T3 thread that asked it, so
 record it there, and merge or enqueue from there in the same turn. With --class merge --kind standing-order and the map's issue as the one --pr,
-the user's 👤 choice of "${standingOrderChoice}" on a question that starts "Standing order (${standingOrder}) for
-<map owner/repo#n> until <YYYY-MM-DD>:", or "until its milestone:" when they named no date, is their standing order: their merge word for every PR merged or enqueued from that T3 thread, a head with gaps an agent accepted
+the user's 👤 choice of "${standingOrderChoice}" on the question "${standingOrderQuestion("<map owner/repo#n>", "<YYYY-MM-DD>")}",
+with "its milestone" in place of the date when they named none, is their standing order: their merge word for every PR merged or enqueued from that T3 thread, a head with gaps an agent accepted
 included. A typed message is not one: when they type such an order, ask them on a card. With a date, --condition
-'until <YYYY-MM-DD>' passes it, the question names no other date, and the order lapses after that day in UTC. It never stands in for a hedge proof gate pass. End it with void when
+'until <YYYY-MM-DD>' passes it, and the order lapses after that day in UTC. It never stands in for a hedge proof gate pass. End it with void when
 the map reaches its milestone, and with reverse when they withdraw it.
 Each option other than --pr and --kind is taken once.
 record with 🤖 records the agent's own decision with the option it rejected. Hedge reads each PR's Tier line in its
@@ -213,22 +213,14 @@ function checkStandingOrder(scope: Scope, mark: string, words: string | undefine
   if (end <= now.getTime()) throw new Error(`The standing order would end ${scope.condition}, which has passed`);
 }
 
-const datesIn = (text: string): string[] => text.match(/\b\d{4}-\d{2}-\d{2}\b/g) ?? [];
-
 function fitsStandingOrder(scope: Scope): ((heard: HeardAnswer) => void) | undefined {
   if (!isStandingOrder(scope)) return undefined;
-  const until = standingOrderDate(scope.condition);
-  const opening = standingOrderQuestion(scope.prs[0]!, until);
+  const question = standingOrderQuestion(refText(scope.prs[0]!), standingOrderDate(scope.condition));
   return (heard) => {
     if (![standingOrderChoice, `${standingOrderChoice} (Recommended)`].map(normalized).includes(normalized(heard.words))) throw new Error(`The user chose "${heard.words}", not "${standingOrderChoice}". No standing order is recorded`);
-    if (!normalized(heard.answered).startsWith(normalized(opening))) throw new Error(`The question the user answered does not start with "${opening}", which names the order and its end. Ask them again with that opening. The question: ${heard.answered}`);
-    const dates = [...new Set(datesIn(heard.answered))];
-    if (until && (dates.length !== 1 || dates[0] !== until)) throw new Error(`The question the user answered must name the end date ${until} and no other date. Ask them again. The question: ${heard.answered}`);
-    if (!until && dates.length) throw new Error(`The question the user answered names ${dates.join(", ")}: pass the end date with --condition 'until <YYYY-MM-DD>'. The question: ${heard.answered}`);
+    if (normalized(heard.answered) !== normalized(question)) throw new Error(`A standing order's question is exactly "${question}", and the user answered another. Ask them again with that question; put their words and any link in the option's description. The question: ${heard.answered}`);
   };
 }
-
-const standingOrderQuestion = (map: PrRef, until: string | undefined) => `Standing order (${standingOrder}) for ${refText(map)} until ${until ?? "its milestone"}:`;
 
 const standingOrderNote = (decision: Decision) => `This standing order is the user's merge word for every PR merged or enqueued from T3 thread ${decision.where.thread}, a head with gaps an agent accepted included, `
   + `while it lives${decision.scope.condition ? ` and ${decision.scope.condition} (UTC)` : ""}. The merge gate still needs a hedge proof gate pass at each head. `
