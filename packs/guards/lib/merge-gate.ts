@@ -534,6 +534,9 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
     return `Hedge blocked this merge: the merge gate could not check it (${(error as Error).message}). A merge needs a \`hedge proof gate\` pass at each PR's head on GitHub; try again when GitHub answers.`;
   }
   if (!missing.length && hubError !== undefined) return unreadReason([...new Set(intent.targets.map((target) => target.repository))]);
+  if (!missing.length && held.length && order()) {
+    try { decisions = fold(await io.ledger()); } catch { return unreadReason([...new Set([...intent.targets, ...intent.exempt ?? []].map((target) => target.repository))]); }
+  }
   if (!missing.length) return held.length && !order() ? heldReason(held, person) + uncoveredWhy(decisions, io.thread, now()) : undefined;
   const hub = hubError ? ` The decision ledger could not be read (${hubError}), so only this machine's gate records counted.` : "";
   const covering = order();
