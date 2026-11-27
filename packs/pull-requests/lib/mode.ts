@@ -110,7 +110,7 @@ const sameGrant = (a: ModeGrant, b: ModeGrant) => a.message === b.message && sam
 
 export async function heardGrant(grant: ModeGrant, words: ThreadWords): Promise<boolean> {
   const answers = await words(grant.thread).catch(() => []);
-  return answers.some((answer) => answer.id === grant.message && answer.source === "question"
+  return answers.some((answer) => answer.id === grant.message && answer.source === "question" && answer.at.slice(0, 10) === grant.at.slice(0, 10)
     && sameThread(askedFor(answer.answered) ?? "", grant.for) && grantedBy(answer.text) === grant.mode);
 }
 
