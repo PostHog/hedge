@@ -421,7 +421,7 @@ const refuseKeptOwed = (decision: DecisionState) => {
 const quoteWithDate = () => new Error(`Quote the user's words with the date they wrote them, such as '2026-10-24 "Reverse that."'`);
 const quotedDate = (words: string) => /\b\d{4}-\d{2}-\d{2}\b/.exec(words)![0];
 
-export async function heardInThread(thread: string, words: string, message: string | undefined, context: DecisionContext) {
+export async function heardInThread(thread: string, words: string, message: string | undefined, context: DecisionContext, meant: (word: ThreadWord) => boolean = () => false) {
   if (!isDatedQuote(words)) throw quoteWithDate();
   await refuseInstructionQuote(context.home, words);
   const text = quotes(words).join(" ");
@@ -436,8 +436,10 @@ export async function heardInThread(thread: string, words: string, message: stri
   if (!said.length) throw new Error(`"${quotes(words).join('" … "')}" is not in a message of the user's in thread ${thread}. Quote their whole message`);
   const onDate = said.filter((word) => word.at.slice(0, 10) === date);
   if (!onDate.length) throw new Error(`The user did not write "${text}" on ${date} in thread ${thread}. Quote the date they wrote it`);
-  if (onDate.length > 1) throw new Error(`${onDate.length} messages of the user's in thread ${thread} on ${date} say "${text}". Pass --message with the id of the one they meant: ${onDate.map((word) => word.id).join(", ")}`);
-  return onDate[0]!;
+  const narrowed = onDate.filter(meant);
+  const candidates = narrowed.length ? narrowed : onDate;
+  if (candidates.length > 1) throw new Error(`${candidates.length} messages of the user's in thread ${thread} on ${date} say "${text}". Pass --message with the id of the one they meant: ${candidates.map((word) => word.id).join(", ")}`);
+  return candidates[0]!;
 }
 
 async function repairVoid(decision: DecisionState, at: string, events: LedgerEvent[], context: DecisionContext, ledger: Ledger) {
