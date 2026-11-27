@@ -3,7 +3,9 @@ import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Decision, LedgerEvent } from "../pull-requests/lib/decision-ledger.ts";
-import type { Mode } from "../pull-requests/lib/mode.ts";
+import { givenReader, modeQuestion, type Mode, type T3Reader } from "../pull-requests/lib/mode.ts";
+import type { ModeGrant } from "../pull-requests/lib/decision-ledger.ts";
+import type { ThreadWord } from "../pull-requests/lib/proof-answers.ts";
 import { tempDirs } from "../../src/testing/git.ts";
 import { devbox, engineSource, resolveEngine, skillSources } from "../../src/testing/packs.ts";
 import { gateRunDirectory, startGateRun, writeJson } from "../pull-requests/lib/proof.ts";
@@ -1118,4 +1120,67 @@ test("the hook reads the mode from the applied settings, never from a mode its o
   expect(await realGateIO(home, {}, JSON.stringify({ "pull-requests.autonomy": "end" }), "{").mode!("own/tools", [])).toBe("supervised");
   const full = { "pull-requests.mode": "full", "pull-requests.autonomy": "end" };
   expect(await realGateIO(home, {}, JSON.stringify(full, null, 2), JSON.stringify(full)).mode!("own/tools", [])).toBe("full");
+});
+
+describe("the merge gate checks a full grant against the user's card answer in T3", () => {
+  const shell = (id: string, parent?: string) => ({ id, title: id, projectId: "p", status: "idle", ...parent ? { lineage: { parentThreadId: parent } } : {} });
+  const threads = [shell("conductor"), shell("lane", "conductor"), shell("elsewhere")];
+  const row = (mode: Mode, message: string, at: string, thread = "conductor", target = "conductor"): ModeGrant => ({ type: "mode", mode, for: target, words: `2026-11-27 "mode ${mode}"`, thread, message, machine: "box", at });
+  const answer = (choice: Mode, id: string, at: string, thread = "conductor", target = "conductor"): ThreadWord => ({ thread, id, text: `mode ${choice}`, answered: modeQuestion(target), at, source: "question" });
+  const t1 = "2026-11-27T08:00:00.000Z";
+  const t2 = "2026-11-27T09:00:00.000Z";
+  const t3 = "2026-11-27T10:00:00.000Z";
+  const modeAt = (applied: Record<string, unknown>, events: LedgerEvent[], answers: ThreadWord[], reader?: T3Reader, at = "lane") =>
+    realGateIO(temp.make("gate-heard-"), { T3CODE_THREAD_ID: at }, JSON.stringify(applied), undefined,
+      reader ?? givenReader({ threads: async () => threads, words: async (thread) => answers.filter((word) => word.thread === thread) })).mode!("own/tools", events);
+
+  test("a heard full grant counts, inherited by the lane", async () => {
+    expect(await modeAt({ "pull-requests.autonomy": "ask" }, [row("full", "m1", t1)], [answer("full", "m1", t1)])).toBe("full");
+  });
+
+  test("an unheard full row is dropped alone: a supervised row for the same card still holds", async () => {
+    const events = [row("supervised", "m1", t1), row("full", "m1", t2)];
+    const heard = [answer("supervised", "m1", t1)];
+    expect(await modeAt({ "pull-requests.mode": "full" }, events, heard)).toBe("supervised");
+    expect(await modeAt({ "pull-requests.autonomy": "end" }, events, heard)).toBe("supervised");
+  });
+
+  test("a full row counts only at the time of its answer, so a later answer of supervised wins", async () => {
+    const events = [row("full", "m1", t3), row("supervised", "m2", t2)];
+    expect(await modeAt({ "pull-requests.mode": "full" }, events, [answer("full", "m1", t1), answer("supervised", "m2", t2)])).toBe("supervised");
+  });
+
+  test("a card asked outside the lane's lineage grants it nothing", async () => {
+    const events = [row("full", "m1", t1, "elsewhere", "lane")];
+    expect(await modeAt({ "pull-requests.autonomy": "end" }, events, [answer("full", "m1", t1, "elsewhere", "lane")])).toBe("auto");
+  });
+
+  test("a lineage T3 gives only in part counts the thread's own grant alone", async () => {
+    const partial = givenReader({ threads: async () => [shell("lane", "conductor")], words: async () => [] });
+    expect(await modeAt({ "pull-requests.autonomy": "end" }, [row("auto", "m1", t1)], [], partial)).toBe("supervised");
+    expect(await modeAt({ "pull-requests.autonomy": "end" }, [row("auto", "m1", t1, "conductor", "lane")], [], partial)).toBe("auto");
+  });
+
+  test("when T3 fails, no full row counts and the thread runs supervised", async () => {
+    const down: T3Reader = async () => { throw new Error("T3 is down"); };
+    expect(await modeAt({ "pull-requests.mode": "full" }, [row("full", "m1", t1)], [], down)).toBe("supervised");
+  });
+
+  test("one hook call reads T3 once, for every repository it asks about", async () => {
+    let sessions = 0;
+    let reads = 0;
+    const counting: T3Reader = (run) => { sessions++; return run({ threads: async () => threads, words: async () => { reads++; return [answer("full", "m1", t1)]; } }); };
+    const io = realGateIO(temp.make("gate-once-"), { T3CODE_THREAD_ID: "lane" }, JSON.stringify({ "pull-requests.autonomy": "end" }), undefined, counting);
+    const events = [row("full", "m1", t1)];
+    expect([await io.mode!("own/tools", events), await io.mode!("own/other", events)]).toEqual(["full", "full"]);
+    expect({ sessions, reads }).toEqual({ sessions: 1, reads: 1 });
+  });
+
+  test("a T3 read that hangs is cut off by the merge deadline", async () => {
+    let release = () => {};
+    const deadline = new Promise<void>((resolve) => { release = resolve; });
+    const hanging: T3Reader = () => { release(); return new Promise(() => {}); };
+    const io = realGateIO(temp.make("gate-hang-"), { T3CODE_THREAD_ID: "lane" }, JSON.stringify({ "pull-requests.autonomy": "end" }), undefined, hanging);
+    expect(await beforeDeadline(async () => `mode ${await io.mode!("own/tools", [])}`, deadline)).toContain("could not read GitHub and the decision ledger in time");
+  });
 });

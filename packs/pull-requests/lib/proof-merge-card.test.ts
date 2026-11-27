@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mergeGate } from "../../guards/hooks/merge-gate.ts";
+import { givenReader } from "./mode.ts";
 import { checkout, cleanFixtures, graded, reviewHead, settings, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
@@ -136,7 +137,7 @@ test("a Merge answer is the merge word of the thread that asked: it tells that t
   const github = { pull: async () => ({ head, base: "main", defaultBranch: "main", open: true }), pullFor: async () => undefined };
   const topLevel = ["mcp:thread-1", "mcp:conductor-thread"].map((id) => ({ id, title: id, projectId: "p", status: "idle" }));
   const enqueueFrom = async (thread: string) => (await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr comment 42 --repo example/product --body '/trunk merge'" }, cwd: "/" },
-    { home: pr.home, env: { HEDGE_SETTINGS: pr.env.HEDGE_SETTINGS, T3CODE_THREAD_ID: thread }, github, reads: { threads: async () => topLevel } }))?.hookSpecificOutput.permissionDecisionReason;
+    { home: pr.home, env: { HEDGE_SETTINGS: pr.env.HEDGE_SETTINGS, T3CODE_THREAD_ID: thread }, github, reader: givenReader({ threads: async () => topLevel, words: async () => [] }) }))?.hookSpecificOutput.permissionDecisionReason;
   const recordMerge = async (question: string, ...thread: string[]) => {
     pr.choose("Merge", question);
     const recorded = await pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${head}: merge card`, ...thread);

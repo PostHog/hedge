@@ -17,7 +17,7 @@ the agent decides everything, merges, and reports once at the end.
 show prints the thread's mode and where it comes from: the thread's own grant, a grant it inherits from the thread
 that started it, the default of --repo in pull-requests.repoModes, or the profile default in pull-requests.mode.
 --thread defaults to this thread, and --repo to the GitHub repository of this checkout's origin. When the thread's
-lineage cannot be read in full and no grant is found, a default of full is held at auto.
+lineage cannot be read in full, only the thread's own grant counts; without one, the thread runs supervised.
 
 set records the user's answer. Only the user switches a mode, and only on your question tool: ask
 "Which mode should thread <id> run in?" with the options "mode supervised", "mode auto", and "mode full", where <id>
