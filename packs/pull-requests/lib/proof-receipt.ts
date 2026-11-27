@@ -166,7 +166,7 @@ export function renderSection(input: ReceiptInput) {
     if (!captioned.has(`${commit}/${name}`)) warnings.push(`warning: screenshot ${name} at ${short(commit)} has no caption. Run hedge proof save --commit ${commit} --kind ui-walk --caption '<what it shows>' <the screenshot>`);
   }
   for (const shot of input.display.screenshots.filter((candidate) => !candidate.url)) {
-    warnings.push(`warning: screenshot ${shot.name} at ${short(shot.commit)} has no published URL. Run hedge proof publish --commit ${shot.commit} --asset-repo <owner/fork> <the screenshot>`);
+    warnings.push(`warning: screenshot ${shot.name} at ${short(shot.commit)} has no published URL. Run hedge proof publish --commit ${shot.commit} <the screenshot> to attach it to the PR with gh, or add --asset-repo <owner/fork> when gh cannot attach`);
   }
   const section = [
     ...input.card ? [input.card, ""] : [],

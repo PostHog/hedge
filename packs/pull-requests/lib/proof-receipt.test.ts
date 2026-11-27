@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { acceptGap, answerFixed, checkout, cleanFixtures, fakeModel, graded, hubAt, productionMajor, reviewHead, reviewHeadFixed, verdict, type Checkout } from "./proof-testing.ts";
 
@@ -841,4 +841,84 @@ test("a receipt that Hedge wrote before the rename is replaced by the next one, 
   expect(body.match(/<!-- hedge-proof-receipt /g)).toHaveLength(1);
   expect(block(body)).toContain(`head=${head}`);
   expect(body.replace(block(body), "")).toBe(template.replace("- [x] I ticked this box\n\n", "- [x] I ticked this box\n\n\n\n"));
+});
+
+const links = (body: string) => [...body.matchAll(/!\[[^\]]*\]\((https:\/\/[^)]+)\)/g)].map((match) => match[1]);
+const commentLinks = (pr: Checkout) => pr.githubComments().map(links);
+
+test("publish without an asset repository attaches the screenshot to the PR with gh, and the receipt links it and keeps the gate", async () => {
+  const { pr, older } = await provedPr();
+  expect((await pr.hedge("gate")).code).toBe(0);
+  const warned = await pr.hedge("receipt");
+  expect(warned.output).toContain(`has no published URL. Run hedge proof publish --commit ${older} <the screenshot> to attach it to the PR with gh`);
+  const body = pr.githubBody();
+
+  const published = await pr.hedge("publish", "--commit", older, "walk.png");
+
+  expect(commentLinks(pr)).toEqual([[published.output]]);
+  expect(pr.githubBody()).toBe(body);
+  const written = await pr.hedge("receipt");
+  expect(written.output).not.toContain("warning: screenshot");
+  expect(block(pr.githubBody())).not.toContain("no gate at HEAD yet");
+  expect(readFileSync(join(pr.pullRequest, "display", "receipt.md"), "utf8")).toContain(`[The sender settings page after the save](${published.output})`);
+  expect((await pr.hedge("publish", "--commit", older, "walk.png")).output).toBe(published.output);
+  expect(commentLinks(pr)).toEqual([[published.output]]);
+});
+
+test("publish refuses a proof store it cannot write before gh posts anything", async () => {
+  const { pr, older } = await provedPr();
+  const store = join(pr.pullRequest, older);
+  for (const mode of [0o500, 0o600]) {
+    chmodSync(store, mode);
+    try { await expect(pr.hedge("publish", "--commit", older, "walk.png")).rejects.toThrow("EACCES"); }
+    finally { chmodSync(store, 0o700); }
+  }
+  expect(pr.githubComments()).toEqual([]);
+  expect(readdirSync(store).filter((name) => name.includes(".pr-attachment."))).toEqual([]);
+});
+
+test("a comment gh posted whose links Hedge cannot read back is named, so it can be deleted before a retry", async () => {
+  const { pr, older } = await provedPr();
+  pr.githubFault("comment-read-error", "gh: Server Error (HTTP 502)\n");
+  await expect(pr.hedge("publish", "--commit", older, "walk.png")).rejects.toThrow("gh posted https://github.com/example/product/pull/42#issuecomment-9001, but Hedge could not record its links");
+  pr.githubFault("comment-read-error", undefined);
+  expect((await pr.hedge("receipt")).output).toContain("has no published URL");
+});
+
+test("a screenshot gh cannot attach gets no link, and publish says what to fix", async () => {
+  const { pr, older } = await provedPr();
+  pr.githubFault("attach-error", "attaching files requires write access to the repository\n");
+  await expect(pr.hedge("publish", "--commit", older, "walk.png")).rejects.toThrow("gh could not attach the screenshots to example/product#42: attaching files requires write access to the repository. When gh cannot attach to this PR, publish to a public repository of your own with --asset-repo <owner/fork>");
+  pr.githubFault("attach-error", "unsupported authentication type\n");
+  await expect(pr.hedge("publish", "--commit", older, "walk.png")).rejects.toThrow("unsupported authentication type. When gh cannot attach to this PR, publish to a public repository of your own with --asset-repo <owner/fork>");
+  pr.githubFault("attach-error", "unknown flag: --attach\n");
+  await expect(pr.hedge("publish", "--commit", older, "walk.png")).rejects.toThrow("gh could not attach the screenshots to example/product#42: unknown flag: --attach. Attaching needs gh 2.100.0 or newer, signed in to GitHub (gh auth status)");
+  expect(pr.githubComments()).toEqual([]);
+});
+
+test("publish after a partial upload attaches only what has no link", async () => {
+  const { pr, older, file } = await provedPr();
+  file("second.png", png("second"));
+  file("third.png", png("third"));
+  pr.githubFault("attach-drop", "2");
+  await expect(pr.hedge("publish", "--commit", older, "walk.png", "second.png", "third.png")).rejects.toThrow("Run hedge proof publish again with the same screenshots");
+  pr.githubFault("attach-drop", undefined);
+
+  const again = await pr.hedge("publish", "--commit", older, "walk.png", "second.png", "third.png");
+
+  const [first, rest] = commentLinks(pr);
+  expect(commentLinks(pr)).toHaveLength(2);
+  expect(again.output.split("\n")).toEqual([...first!, ...rest!]);
+  expect(first).toHaveLength(1);
+  expect(rest).toHaveLength(2);
+});
+
+test("publish refuses a log, and more screenshots than gh attaches at once, before gh posts anything", async () => {
+  const { pr, file } = await provedPr();
+  await expect(pr.hedge("publish", file("run.txt.png", "Authorization: Bearer invented-token"))).rejects.toThrow("Publish only screenshots with invented test data");
+  await expect(pr.hedge("publish", "walk.png", file("large.png", Buffer.concat([png("large"), Buffer.alloc(10 * 1024 * 1024)])))).rejects.toThrow("large.png is larger than 10 MiB, which gh cannot attach");
+  await expect(pr.hedge("publish", file(".png", png("hidden")))).rejects.toThrow(".png needs a simple file extension, such as .png");
+  const many = Array.from({ length: 51 }, (_, index) => file(`step-${index}.png`, png(`step ${index}`)));
+  await expect(pr.hedge("publish", ...many)).rejects.toThrow("gh attaches at most 50 files at once, and 51 of these screenshots have no link yet");
+  expect(pr.githubComments()).toEqual([]);
 });

@@ -30,6 +30,7 @@ case "$*" in
   *PullRequestReviewThread*) reply="comments-$id-\${after:-first}" ;;
   "api graphql"*) reply="threads\${after:+-$after}" ;;
   "pr view"*) reply=pr ;;
+  "api --hostname github.com repos/"*"/pulls/"*) reply=pull ;;
   *) echo "unexpected gh call" >&2; exit 9 ;;
 esac
 [ -f "${replies}/$reply.json" ] || { echo "no $reply reply" >&2; exit 1; }
@@ -79,7 +80,8 @@ cat "${replies}/$reply.json"
     env.HEDGE_HANDLER_SUBCOMMANDS = JSON.stringify({ "pr-command": subcommands });
   };
   const packArgs = () => (existsSync(join(root, "pack-args.json")) ? JSON.parse(readFileSync(join(root, "pack-args.json"), "utf8")) : undefined);
-  return { home, env, reply, run, call, refusal, calls, reviewBot, botArgs, packCommands, packArgs };
+  const path = `${bin}:${process.env.PATH}`;
+  return { home, env, path, reply, run, call, refusal, calls, reviewBot, botArgs, packCommands, packArgs };
 }
 
 const user = (login: string) => ({ __typename: "User", login });
@@ -346,6 +348,46 @@ test("review hands its parsed arguments to the review-bot handler and exits with
   expect(result.code).toBe(1);
 });
 
+const riskCallout = (tier: string) => `## Problem\n\n<!-- merge-risk -->\n> [!CAUTION]\n> - **Switch-off:** none\n> - **Tier:** ${tier}\n<!-- /merge-risk -->\n`;
+
+test("review asks for Deep when the merge-risk Tier says critical, and says so", () => {
+  const box = sandbox();
+  box.reviewBot(0);
+  box.reply("pull", { body: riskCallout("critical (b: changes a public API)") });
+  const result = box.run("review", "--repo", "acme/widgets", "--pr", "12");
+  expect(box.calls()).toEqual(["api --hostname github.com repos/acme/widgets/pulls/12"]);
+  expect(box.botArgs()).toEqual(["review", "--repo", "acme/widgets", "--pr", "12", "--minutes", "15", "--deep"]);
+  expect(result.out).toBe("The merge-risk Tier is critical, so this asks for a Deep review.\nbot says hi");
+});
+
+test.each([
+  ["a non-critical Tier", riskCallout("non-critical")],
+  ["no merge-risk callout", "## Problem\n\n**Tier:** critical, outside any callout.\n"],
+  ["an empty body", null],
+])("review keeps Standard for %s", (_, body) => {
+  const box = sandbox();
+  box.reviewBot(0);
+  box.reply("pull", { body });
+  expect(box.run("review", "--repo", "acme/widgets", "--pr", "12").out).toBe("bot says hi");
+  expect(box.botArgs()).toEqual(["review", "--repo", "acme/widgets", "--pr", "12", "--minutes", "15"]);
+});
+
+test("review keeps Standard and says why when GitHub does not give the body", () => {
+  const box = sandbox();
+  box.reviewBot(0);
+  const result = box.run("review", "--repo", "acme/widgets", "--pr", "12");
+  expect(box.botArgs()).toEqual(["review", "--repo", "acme/widgets", "--pr", "12", "--minutes", "15"]);
+  expect(result.out).toBe("Could not read the merge-risk Tier, so this asks for a Standard review: gh api failed: no pull reply\nbot says hi");
+});
+
+test("an explicit --deep and a stamp read no PR body", () => {
+  const box = sandbox();
+  box.reviewBot(0);
+  box.run("review", "--repo", "acme/widgets", "--pr", "12", "--deep");
+  box.run("stamp", "--repo", "acme/widgets", "--pr", "12");
+  expect(box.calls()).toEqual([]);
+});
+
 test("stamp hands its parsed arguments to the review-bot handler", () => {
   const box = sandbox();
   box.reviewBot(0);
@@ -479,7 +521,8 @@ test("stopping review stops the review-bot handler before review exits", async (
   const stopped = join(box.home, "stopped");
   const handler = join(box.home, "slow-bot.ts");
   writeFileSync(handler, `process.on("SIGTERM", async () => { await Bun.write(${JSON.stringify(stopped)}, "stopped"); process.exit(5); });\nconsole.log("ready");\nsetInterval(() => {}, 1000);\n`);
-  const child = Bun.spawn([process.execPath, command, "review", "--repo", "acme/widgets", "--pr", "12"], { env: { ...process.env, HOME: box.home, HEDGE_SETTINGS: "{}", HEDGE_HANDLERS: JSON.stringify({ "review-bot": handler }) }, stdout: "pipe" });
+  box.reply("pull", { body: "" });
+  const child = Bun.spawn([process.execPath, command, "review", "--repo", "acme/widgets", "--pr", "12"], { env: { ...process.env, HOME: box.home, PATH: box.path, HEDGE_SETTINGS: "{}", HEDGE_HANDLERS: JSON.stringify({ "review-bot": handler }) }, stdout: "pipe" });
   try {
     const reader = child.stdout.getReader();
     let seen = "";
