@@ -10,7 +10,7 @@ import { githubSlug } from "./git.ts";
 import { commandsIn, shellTools, type Command, type Scope } from "./shell-words.ts";
 
 export type MergeTarget = { repository: string; pr: number; via: string };
-export type MergeIntent = { targets: MergeTarget[]; exempt?: MergeTarget[]; refusal?: string };
+export type MergeIntent = { targets: MergeTarget[]; exempt?: MergeTarget[]; refusal?: string; unreadOnly?: true };
 
 const enqueueLine = /(?:^|\n)[ \t]*\/trunk[ \t]+merge\b/i;
 const mentionsEnqueue = /\/trunk\s+merge\b/i;
@@ -214,8 +214,9 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
     if (!sent.piped && !sendsEnqueue(sent, raw)) return { targets: [] };
     const named = namedPr(gh, found, cwd, io);
     const reads = readsEnqueue(sent, raw);
-    if (!named) return { targets: [], refusal: reads ? unnamedReason("posts `/trunk merge`") : `${unreadBodyNote} ${unnamedReason("posts a comment")}` };
-    return { targets: [{ ...named, via: `gh ${gh.group} comment${reads ? "" : unreadVia}` }] };
+    const unread = reads ? {} : { unreadOnly: true as const };
+    if (!named) return { targets: [], refusal: unnamedReason(reads ? "posts `/trunk merge`" : "posts a comment"), ...unread };
+    return { targets: [{ ...named, via: `gh ${gh.group} comment${reads ? "" : unreadVia}` }], ...unread };
   }
   if (gh.group === "pr" && gh.action === "review") {
     const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"));
@@ -231,6 +232,7 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const inline = [...fields, ...fields.map((field) => field.replace(/^[^=]*=/, ""))];
   const fieldFiles = values(gh, "-F", "--field").flatMap((field) => field.match(/^[^=]*=@(.+)$/s)?.[1] ?? []);
   const sent = sentTexts(found, cwd, io, inline, [...values(gh, "--input"), ...fieldFiles]);
+  const body = values(gh, "--input").length ? sentTexts(found, cwd, io, [], values(gh, "--input")) : sent;
   const enqueues = sendsEnqueue(sent, raw);
   let endpoint = endpointOf(gh).replace(/[?#].*$/s, "").replace(/\/$/, "");
   if (endpoint === "graphql") return sent.piped || sent.unread || sent.texts.some((text) => mentionsEnqueue.test(text) || graphqlMerge.test(text)) || mentionsEnqueue.test(raw) ? { targets: [], refusal: graphqlReason } : { targets: [] };
@@ -241,11 +243,12 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const method = (values(gh, "-X", "--method").at(-1) ?? (fields.length || values(gh, "--input").length ? "POST" : "GET")).toUpperCase();
   if (method === "GET") return { targets: [] };
   const comment = endpoint.match(/^repos\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)\/comments$/);
-  if (comment && method === "POST" && sent.piped) return { targets: [{ repository: comment[1]!, pr: Number(comment[2]), via: `gh api issues/<n>/comments${unreadVia}` }] };
+  const posted = (reads: boolean): MergeIntent => ({ targets: [{ repository: comment![1]!, pr: Number(comment![2]), via: `gh api issues/<n>/comments${reads ? "" : unreadVia}` }], ...reads ? {} : { unreadOnly: true as const } });
+  if (comment && method === "POST" && sent.piped) return posted(readsEnqueue(body, raw));
   const merge = endpoint.match(/^repos\/([\w.-]+\/[\w.-]+)\/pulls\/(\d+)\/merge$/);
   if (merge) return { targets: [{ repository: merge[1]!, pr: Number(merge[2]), via: "gh api pulls/<n>/merge" }] };
   if (!enqueues) return { targets: [] };
-  if (comment && method === "POST") return { targets: [{ repository: comment[1]!, pr: Number(comment[2]), via: `gh api issues/<n>/comments${readsEnqueue(sent, raw) ? "" : unreadVia}` }] };
+  if (comment && method === "POST") return posted(readsEnqueue(body, raw));
   return elsewhere(sent, raw);
 }
 
@@ -314,6 +317,8 @@ export function mergeIntent(call: ToolCall, command: string, exempt: string[], i
     catch { return mentionsEnqueue.test(command) || graphqlMerge.test(command) || restMerge.test(command) ? { targets: [], refusal: rawReason } : intent; }
     const dirs = new Map<Scope, string[]>();
     const cwdIn = (scope: Scope | undefined): string | undefined => scope === undefined ? call.cwd : dirs.get(scope)?.at(-1) ?? cwdIn(scope.parent);
+    let parts = 0;
+    let unreadParts = 0;
     for (const found of commands) {
       const name = basename(found.name);
       if (name === "cd" || name === "pushd" || name === "popd") {
@@ -326,8 +331,10 @@ export function mergeIntent(call: ToolCall, command: string, exempt: string[], i
         continue;
       }
       const one = commandIntent(found, command, cwdIn(found.scope), io);
+      if (one.targets.length || one.refusal) { parts++; if (one.unreadOnly) unreadParts++; }
       intent = { targets: [...intent.targets, ...one.targets], refusal: intent.refusal ?? one.refusal };
     }
+    if (parts > 0 && parts === unreadParts) intent.unreadOnly = true;
   } else if (/github/i.test(tool) || t3Tool.test(tool)) intent = mcpIntent(tool, call.tool_input ?? {});
   const skipping = intent.targets.filter((target) => isExempt(target.repository, exempt));
   return { ...intent, targets: intent.targets.filter((target) => !skipping.includes(target)), ...skipping.length ? { exempt: skipping } : {} };
@@ -463,10 +470,7 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
     + `Run the gate on each head until it exits 0, then enqueue again. ${overrideHint(person)}`;
 }
 
-export const unreadBody = (intent: MergeIntent) => {
-  const targets = [...intent.targets, ...intent.exempt ?? []];
-  return !intent.refusal && targets.length > 0 && targets.every((target) => target.via.endsWith(unreadVia));
-};
+export const unreadBody = (intent: MergeIntent) => intent.unreadOnly === true;
 
 export const mergeGateDeadlineMs = 15_000;
 const after = (ms: number) => new Promise<void>((done) => { setTimeout(done, ms).unref(); });

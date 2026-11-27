@@ -78,7 +78,7 @@ describe("which calls enqueue or merge", () => {
     ["gh pr comment 7 --repo example/product --body \"`echo /trunk merge`\""],
     ["gh api repos/example/product/issues/7/comments -f body=\"$(echo /trunk merge)\""],
   ])("%s targets example/product#7", (command) => {
-    expect(bash(command)).toEqual({ targets: [target("example/product", 7)] });
+    expect(bash(command)).toMatchObject({ targets: [target("example/product", 7)] });
   });
 
   test.each([
@@ -225,7 +225,7 @@ describe("which calls enqueue or merge", () => {
     expect(mcp("mcp__t3-code__pull_request_review", { ...pr, verdict: "comment", body: "Looks good.", comments: [{ path: "a.ts", line: 1, body: "Nit.", note: deep(null) }] })).toEqual({ targets: [] });
     expect(mcp("mcp__github__add_issue_comment", { owner: "example", repo: "product", issue_number: 7, body: "/trunk merge", junk: deep(null) })).toEqual({ targets: [target("example/product", 7)] });
     expect(bash("gh api repos/example/product/issues/7/comments --input deep.json")).toEqual({ targets: [target("example/product", 7)] });
-    expect(bash("cat deep.json | gh api repos/example/product/issues/7/comments --input -")).toEqual({ targets: [target("example/product", 7)] });
+    expect(bash("cat deep.json | gh api repos/example/product/issues/7/comments --input -")).toMatchObject({ targets: [target("example/product", 7)] });
   });
 
   test("a T3 review or review-thread reply that posts /trunk merge is refused, and T3 reads, edits, issue comments and other comments enqueue nothing", () => {
@@ -808,11 +808,17 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     expect(await unpassed("gh pr merge 9 --repo example/product", dir)).toStartWith("Hedge blocked this merge");
     expect(await unpassed("gh pr merge 9 --repo example/product; gh pr comment 10 --repo example/product --body-file \"$R\"", dir)).toStartWith("Hedge blocked this merge");
     expect(await unpassed("gh pr comment 9 --repo example/product --body-file \"$R\"; trunk merge 9", dir)).not.toStartWith(opensWithNote);
+    expect(await unpassed("gh pr comment 9 --body-file \"$R\"; gh pr merge 10 --repo example/product", dir)).not.toStartWith(opensWithNote);
+    writeFileSync(join(dir, "enqueue.json"), JSON.stringify({ body: "/trunk merge" }));
+    expect(await unpassed("printf x | gh api repos/example/product/issues/9/comments --input enqueue.json -F trace=@-", dir)).toStartWith("Hedge blocked this merge");
+    expect(await unpassed("gh api repos/example/product/issues/9/comments --input \"$R\" -f body='/trunk merge'", dir)).toStartWith(opensWithNote);
   });
 
   test("a refusal of an unread body says so first when the gate cannot read its settings", async () => {
     const home = homeIn("{ not json");
-    const reason = (await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr comment 9 --repo example/product --body-file \"$R\"" }, cwd: "/" }, { home, env: {}, gate: gate(), intent: realIntentIO }))?.hookSpecificOutput.permissionDecisionReason;
+    const unnamed = (await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr comment 9 --body-file \"$R\"" }, cwd: "/" }, { home, env: {}, intent: realIntentIO }))?.hookSpecificOutput.permissionDecisionReason;
+    expect(unnamed).toStartWith(opensWithNote);
+    const reason = (await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr comment 9 --repo example/product --body-file \"$R\"" }, cwd: "/" }, { home, env: {}, intent: realIntentIO }))?.hookSpecificOutput.permissionDecisionReason;
     expect(reason).toStartWith(opensWithNote);
     expect(reason).toContain("could not read its settings");
   });
