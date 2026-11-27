@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, constants, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import { readComment, type Run } from "./pr-ci.ts";
 import { entries, isScreenshot, proofDirectory, proofName, saveProof, writeJson, type ProofIdentity } from "./proof.ts";
 
@@ -23,13 +23,14 @@ export async function publishedUrl(saved: string) {
   return undefined;
 }
 
-export const attachedSuffix = `.pr-attachment${publishedSuffix}`;
+const attachedSuffix = `.pr-attachment${publishedSuffix}`;
 const attachedRecord = (directory: string, name: string) => join(directory, `${name}${attachedSuffix}`);
+export const isAttachmentRecord = (path: string) => /^[0-9a-f]{64}\.[a-z0-9]{1,10}\.pr-attachment\.published\.json(\.[0-9a-f-]{36})?$/.test(basename(path));
 const attachLimit = 50;
 const attachBytes = 10 * 1024 * 1024;
 const firstLine = (text: string) => text.trim().split("\n")[0] ?? "";
 const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-type Shot = { source: string; name: string; bytes: Buffer };
+type Shot = { source: string; name: string; size: number };
 type Staged = { name: string; path: string };
 
 async function savedScreenshot(home: string, identity: ProofIdentity, source: string) {
@@ -42,11 +43,13 @@ async function savedScreenshot(home: string, identity: ProofIdentity, source: st
 async function screenshot(source: string): Promise<Shot> {
   const bytes = await readFile(source);
   if (!isScreenshot(source, bytes)) throw new Error("Publish only screenshots with invented test data");
-  if (bytes.length > attachBytes) throw new Error(`${source} is larger than 10 MiB, which gh cannot attach. Make the screenshot smaller, or publish it with --asset-repo <owner/fork>`);
-  return { source, name: proofName(source, bytes), bytes };
+  if (!/^\.[a-z0-9]{1,10}$/.test(extname(source).toLowerCase())) throw new Error(`${source} needs a simple file extension, such as .png`);
+  return { source, name: proofName(source, bytes), size: bytes.length };
 }
 
-async function staged({ name, bytes }: Shot, staging: string): Promise<Staged> {
+async function staged({ source, name }: Shot, staging: string): Promise<Staged> {
+  const bytes = await readFile(source);
+  if (proofName(source, bytes) !== name) throw new Error(`${source} changed while hedge proof publish ran. Run it again`);
   const path = join(staging, name);
   await writeFile(path, bytes, { mode: 0o600 });
   return { name, path };
@@ -60,12 +63,13 @@ function linksIn(body: string, names: string[]) {
 }
 
 async function readBack(identity: ProofIdentity, directory: string, comment: string, names: string[], gh: Run) {
-  let body: string;
-  try { body = readComment(comment, gh).body; }
-  catch (error) { throw new Error(`gh posted ${comment}, but Hedge could not read its links back: ${firstLine((error as Error).message)}. Delete that comment before you run hedge proof publish again`); }
-  const links = linksIn(body, names);
-  for (const [name, url] of links) await writeJson(attachedRecord(directory, name), { ...identity, comment, url });
-  return links;
+  try {
+    const links = linksIn(readComment(comment, gh).body, names);
+    for (const [name, url] of links) await writeJson(attachedRecord(directory, name), { ...identity, comment, url });
+    return links;
+  } catch (error) {
+    throw new Error(`gh posted ${comment}, but Hedge could not record its links: ${firstLine((error as Error).message)}. Delete that comment before you run hedge proof publish again`);
+  }
 }
 
 const refusal = (identity: ProofIdentity, stderr: string) => `gh could not attach the screenshots to ${identity.repository}#${identity.pr}: ${firstLine(stderr) || "gh named no comment"}. ${/write access|unsupported authentication/i.test(stderr)
@@ -93,7 +97,11 @@ export async function attachProofs(home: string, identity: ProofIdentity, source
   }
   const missing = [...new Map(shots.filter(({ name }) => !links.has(name)).map((shot) => [shot.name, shot])).values()];
   if (missing.length > attachLimit) throw new Error(`gh attaches at most ${attachLimit} files at once, and ${missing.length} of these screenshots have no link yet. Publish them in groups of ${attachLimit} or fewer`);
+  const large = missing.find(({ size }) => size > attachBytes);
+  if (large) throw new Error(`${large.source} is larger than 10 MiB, which gh cannot attach. Make the screenshot smaller, or publish it with --asset-repo <owner/fork>`);
   if (missing.length) {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await access(directory, constants.W_OK);
     const staging = await mkdtemp(join(tmpdir(), "hedge-attach-"));
     try {
       const files: Staged[] = [];

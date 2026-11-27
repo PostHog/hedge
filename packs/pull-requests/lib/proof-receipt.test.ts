@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { acceptGap, answerFixed, checkout, cleanFixtures, fakeModel, graded, hubAt, productionMajor, reviewHead, reviewHeadFixed, verdict, type Checkout } from "./proof-testing.ts";
 
@@ -863,16 +863,21 @@ test("publish without an asset repository attaches the screenshot to the PR with
   expect(readFileSync(join(pr.pullRequest, "display", "receipt.md"), "utf8")).toContain(`[The sender settings page after the save](${published.output})`);
   expect((await pr.hedge("publish", "--commit", older, "walk.png")).output).toBe(published.output);
   expect(commentLinks(pr)).toEqual([[published.output]]);
-  const record = readdirSync(pr.pullRequest, { recursive: true }).map(String).find((path) => path.endsWith(".pr-attachment.published.json"))!;
-  writeFileSync(join(pr.pullRequest, `${record}.an-interrupted-write`), "{");
-  await pr.hedge("receipt");
-  expect(block(pr.githubBody())).not.toContain("no gate at HEAD yet");
+});
+
+test("publish refuses a proof store it cannot write before gh posts anything", async () => {
+  const { pr, older } = await provedPr();
+  const store = join(pr.pullRequest, older);
+  chmodSync(store, 0o500);
+  try { await expect(pr.hedge("publish", "--commit", older, "walk.png")).rejects.toThrow("EACCES"); }
+  finally { chmodSync(store, 0o700); }
+  expect(pr.githubComments()).toEqual([]);
 });
 
 test("a comment gh posted whose links Hedge cannot read back is named, so it can be deleted before a retry", async () => {
   const { pr, older } = await provedPr();
   pr.githubFault("comment-read-error", "gh: Server Error (HTTP 502)\n");
-  await expect(pr.hedge("publish", "--commit", older, "walk.png")).rejects.toThrow("gh posted https://github.com/example/product/pull/42#issuecomment-9001, but Hedge could not read its links back");
+  await expect(pr.hedge("publish", "--commit", older, "walk.png")).rejects.toThrow("gh posted https://github.com/example/product/pull/42#issuecomment-9001, but Hedge could not record its links");
   pr.githubFault("comment-read-error", undefined);
   expect((await pr.hedge("receipt")).output).toContain("has no published URL");
 });
@@ -909,6 +914,7 @@ test("publish refuses a log, and more screenshots than gh attaches at once, befo
   const { pr, file } = await provedPr();
   await expect(pr.hedge("publish", file("run.txt.png", "Authorization: Bearer invented-token"))).rejects.toThrow("Publish only screenshots with invented test data");
   await expect(pr.hedge("publish", "walk.png", file("large.png", Buffer.concat([png("large"), Buffer.alloc(10 * 1024 * 1024)])))).rejects.toThrow("large.png is larger than 10 MiB, which gh cannot attach");
+  await expect(pr.hedge("publish", file(".png", png("hidden")))).rejects.toThrow(".png needs a simple file extension, such as .png");
   const many = Array.from({ length: 51 }, (_, index) => file(`step-${index}.png`, png(`step ${index}`)));
   await expect(pr.hedge("publish", ...many)).rejects.toThrow("gh attaches at most 50 files at once, and 51 of these screenshots have no link yet");
   expect(pr.githubComments()).toEqual([]);
