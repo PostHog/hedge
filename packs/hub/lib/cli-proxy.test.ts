@@ -497,11 +497,41 @@ test("the check cannot tell while the proxy does not answer, and changes no file
 });
 
 test("the check still fails, as on the base, when the proxy answers 200 and cuts the model list short", async () => {
-  const cut = async () => new Response(new ReadableStream({ start: (body) => (body.enqueue(new TextEncoder().encode('{"data":[')), body.error(new Error("connection reset"))) }), { status: 200, headers: { "Content-Type": "application/json" } });
-  const { machine, home, printed } = client({ fetch: cut });
-  connected(home);
-  expect(await cliProxy("check", machine)).toBe(1);
-  expect(printed).toEqual([`The proxy at ${proxyUrl} answers without a model list. hedge apply keeps Claude Code on its own sign-in until the proxy serves it.`]);
+  const headers = (request: Buffer) => request.toString().split("\r\n\r\n")[0]!.split("\r\n").slice(1).map((line) => line.split(": ")).map(([name, value]) => [name!.toLowerCase(), value]);
+  const keyed = (request: Buffer) => headers(request).some(([name, value]) => name === "authorization" && value === `Bearer ${clientKey}`);
+  const answer = (request: Buffer) => (keyed(request) ? 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{"data":[' : "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+  let received = "";
+  const server = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: {
+      data: (socket, chunk) => {
+        received += chunk.toString();
+        if (received.includes("\r\n\r\n")) socket.end(answer(Buffer.from(received)));
+      },
+    },
+  });
+  try {
+    const { machine, home, printed } = client({ fetch: (_url, init) => globalThis.fetch(`http://127.0.0.1:${server.port}/v1/models`, init) });
+    connected(home);
+    expect(await cliProxy("check", machine)).toBe(1);
+    expect(printed).toEqual([`The proxy at ${proxyUrl} answers without a model list. hedge apply keeps Claude Code on its own sign-in until the proxy serves it.`]);
+    expect(received.toLowerCase()).toContain(`authorization: bearer ${clientKey}`);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("a Claude token you add beside the route stays while the proxy is silent and the route holds, and leaves with the route once the proxy serves no model", async () => {
+  const proxy: Proxy = { models: ["claude-sonnet-5-5"] };
+  const { home, apply, connectAndApply } = connecting({}, proxy);
+  expect((await connectAndApply()).code).toBe(0);
+  const routed = readJson(settingsFile(home));
+  writeFileSync(settingsFile(home), JSON.stringify({ ...routed, env: { ...routed.env, ANTHROPIC_AUTH_TOKEN: "mine" } }));
+  proxy.down = true;
+  await apply();
+  expect(readJson(settingsFile(home))).toEqual({ ...routed, env: { ...routed.env, ANTHROPIC_AUTH_TOKEN: "mine" } });
+  proxy.down = false;
+  proxy.models = [];
+  await apply();
+  expect(readJson(settingsFile(home))).toEqual({});
 });
 
 test("hedge apply while the proxy does not answer keeps the routes an earlier apply put in, and puts in none", async () => {
