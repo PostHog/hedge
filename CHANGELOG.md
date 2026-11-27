@@ -15,24 +15,19 @@
 
 - The judge asks a new shape question about every PR description that
   holds a merge-risk callout, with or without the merge-risk skill. It
-  fails a description that breaks the shape of pr-description: no picture where GitHub renders it (a Mermaid
+  fails a description with no picture where GitHub renders it (a Mermaid
   diagram, an image, a video, an uploaded attachment, or a `No picture:`
   line with a reason), more than 800 written words, or a callout with more
-  than 6 top-level bullets, Switch-off and Tier included. Hedge gives the
-  judge a rough word count of the body outside the receipt, fenced code
-  and comments. The judge reads the body whole. A body without a
-  merge-risk callout, or a PR that GitHub reports merged, gets no shape
-  question. A judge run that fails only the shape question spends no judge
-  budget and never goes to the arbiter, so a corrected description is
-  always read. An accepted judge gap never waives a shape failure: edit
-  the body instead, even while the gap waits on its decision. On an open
-  PR with a callout, a judge gap passes only once the judge passes the
-  shape question on that run, so a spent budget, an unreadable answer, a
-  judge outage, or a prompt the secret guard holds never skips it. A gate
-  that fails only on the shape question says to edit the body, not to
-  record a judge gap, and a spent budget on such a PR says that only the
-  user can raise pull-requests.reviewCeiling. The arbiter reads no shape
-  reason. Rollout lines are not callout bullets.
+  than 6 top-level bullets, Switch-off and Tier included. Rollout lines are
+  not callout bullets. The judge reads the body whole. A body without a
+  callout, or a PR that GitHub reports merged, gets no shape question.
+- A judge run that fails only the shape question spends no judge budget
+  and never goes to the arbiter, so a corrected description is always
+  read. A gate that fails only on it says to edit the body. An accepted
+  judge gap waives the shape question as it waives the other questions.
+- The risk question leaves the body rules to the shape question.
+- A gate pass saved before this release is not reused, so each open PR
+  gets one gate run with the shape question.
 - The judge's risk question accepts a changed row with an incident, or an
   uncovered row, that the Known issues section names, so the callout can
   stay within its 6 bullets.

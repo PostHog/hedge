@@ -626,22 +626,20 @@ test("with the merge-risk skill installed, the judge grades the callout against 
   expect((await gateAfterResponse(pr, "Nothing to answer.\n")).output).toContain("judge: unavailable (unparseable answer");
 });
 
-test("the shape question holds pr-description's body rules, and hedge gives the judge a word count without the receipt, fenced code and comments", async () => {
+test("the shape question holds pr-description's body rules, and a gate that fails only on it says to edit the body", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "greet new members\n");
   await reviewHead(pr);
   await pr.hedge("require", "--none", "--reason", "Docs only");
   installRiskSkill(pr);
   const judge = fakeModel(pr, "JUDGE", verdict({ risk: { verdict: "pass", reason: "One text file changes: low, two-way", citations: [] }, shape: { verdict: "fail", reason: "no picture", citations: [] } }));
-  const words = (count: number) => Array.from({ length: count }, () => "word").join(" ");
-  const uncounted = `<!-- hedge-proof-receipt head=${"a".repeat(40)} hash=01 -->\n${words(50)}\n<!-- /hedge-proof-receipt -->\n\n\`\`\`\n${words(40)}\n\`\`\`example\n${words(20)}\n\`\`\`\n~~~\n${words(10)}\n~~~\`\n${words(10)}\n~~~\n<!-- ${words(30)} -->\n`;
-  pr.pullRequestState({ body: `${uncounted}${words(7)} - **\n\n${graded("non-critical")}` });
+  pr.pullRequestState({ body: `A queue now retries.\n\n${graded("non-critical")}` });
   const gate = await pr.hedge("gate");
   expect([gate.code, gate.output.includes("judge shape: fail: no picture"), gate.output.includes("judge shape: edit the PR body to fix it"), gate.output.includes("record hedge proof gap --kind judge")]).toEqual([1, true, true, false]);
   const prompt = judge.prompts().at(-1)!;
   expect(prompt).toContain("5. shape: Does the PR body keep the shape of pr-description? Fail it, and name the rule, when it shows no picture where GitHub renders it, which is a Mermaid diagram, an image, a video, an uploaded attachment, or a `No picture: <why>` line; when it holds more than 800 written words");
   expect(prompt).toContain("or when the callout holds more than 6 top-level bullets, Switch-off and Tier included. Rollout lines, such as Stages, Decided and Watch, are not callout bullets.");
-  expect(prompt).toContain("Hedge counts 17 words in the body outside fenced code and comments.");
+  expect(prompt).toContain("Leave the picture, the word cap and the callout's bullet count to the shape question.");
 });
 
 test("a judge run that fails only the shape question spends no judge budget, so a corrected body is always read", async () => {
@@ -728,7 +726,7 @@ test("the arbiter reads no shape reason, so a shape failure that comes back besi
   expect([history.includes("a finding has no answer"), history.includes("no picture")]).toEqual([true, false]);
 });
 
-test("the shape question needs no merge-risk skill, and an accepted judge gap never waives a shape failure", async () => {
+test("the shape question needs no merge-risk skill", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "greet new members\n");
   await reviewHead(pr);
@@ -739,65 +737,6 @@ test("the shape question needs no merge-risk skill, and an accepted judge gap ne
   expect([unskilled.code, unskilled.output.includes("judge shape: fail: no picture"), unskilled.output.includes("judge risk: not asked")]).toEqual([1, true, true]);
   expect(judge.prompts().at(-1)).toContain("4. shape: Does the PR body keep the shape of pr-description?");
 
-  await pr.hedge("gap", "--kind", "judge", "--reason", "The judge misreads the copy");
-  const pending = await pr.hedge("gate");
-  expect([pending.code, pending.output.includes("judge gap: a judge gap never waives the shape question")]).toEqual([1, true]);
-  pr.chooseGap("judge", "The judge misreads the copy");
-  await acceptGap(pr, "judge");
-  const waived = await pr.hedge("gate");
-  expect([waived.code, waived.output.includes("judge gap: a judge gap never waives the shape question")]).toEqual([1, true]);
-});
-
-test("an accepted judge gap passes an open PR with a callout only once the judge passes the shape question, so a spent budget never skips it", async () => {
-  const pr = await checkout();
-  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.reviewCeiling": 1 });
-  await pr.commit("feature.txt", "greet new members\n");
-  await reviewHead(pr);
-  await pr.hedge("require", "--none", "--reason", "Docs only");
-  fakeModel(pr, "JUDGE", verdict({ proof: { verdict: "fail", reason: "the evidence misses the greeting", citations: [] } }));
-  pr.pullRequestState({ body: `No picture: the diff shows it whole.\n\n${graded("non-critical")}` });
-  await pr.hedge("gap", "--kind", "judge", "--reason", "The judge misreads the evidence");
-  pr.chooseGap("judge", "The judge misreads the evidence");
-  await acceptGap(pr, "judge");
-  expect((await pr.hedge("gate")).code).toBe(0);
-
-  pr.pullRequestState({ body: `A queue now retries.\n\n${graded("non-critical")}` });
-  const spent = await pr.hedge("gate");
-  expect([spent.code, spent.output.includes("No judge gap passes an open PR with a merge-risk callout while no judge checks its shape question")]).toEqual([1, true]);
-});
-
-test("a spent judge budget on an open PR with a callout says only the user can raise the ceiling, and asks no decision on a gap that cannot pass", async () => {
-  const pr = await checkout();
-  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.reviewCeiling": 1 });
-  await pr.commit("feature.txt", "greet new members\n");
-  await reviewHead(pr);
-  await pr.hedge("require", "--none", "--reason", "Docs only");
-  fakeModel(pr, "JUDGE", verdict({ proof: { verdict: "fail", reason: "the evidence misses the greeting", citations: [] } }));
-  pr.pullRequestState({ body: `No picture: the diff shows it whole.\n\n${graded("non-critical")}` });
-  await pr.hedge("gate");
-  pr.pullRequestState({ body: `A queue now retries.\n\n${graded("non-critical")}` });
-  const spent = await pr.hedge("gate");
-  expect([spent.code, spent.output.includes("No judge gap passes an open PR with a merge-risk callout while no judge checks its shape question"), spent.output.includes("End it with a judge gap")]).toEqual([1, true, false]);
-  await pr.hedge("gap", "--kind", "judge", "--reason", "The judge misreads the evidence");
-  expect((await pr.hedge("gate")).code).toBe(1);
-});
-
-test("an accepted judge gap does not pass an open PR with a callout while the judge leaves out the shape question or gives no answer at all", async () => {
-  const pr = await checkout();
-  await pr.commit("feature.txt", "greet new members\n");
-  await reviewHead(pr);
-  await pr.hedge("require", "--none", "--reason", "Docs only");
-  const { shape: _, ...unshaped } = JSON.parse(verdict());
-  const judge = fakeModel(pr, "JUDGE", JSON.stringify(unshaped));
-  pr.pullRequestState({ body: `A queue now retries.\n\n${graded("non-critical")}` });
-  await pr.hedge("gap", "--kind", "judge", "--reason", "The judge misreads the copy");
-  pr.chooseGap("judge", "The judge misreads the copy");
-  await acceptGap(pr, "judge");
-  const gate = await pr.hedge("gate");
-  expect([gate.code, gate.output.includes("judge: unavailable (unparseable answer"), gate.output.includes("judge gap: a judge gap passes the gate only once the judge passes the shape question on this body")]).toEqual([1, true, true]);
-  judge.answer("");
-  const outage = await pr.hedge("gate");
-  expect([outage.code, outage.output.includes("judge: unavailable (empty answer)"), outage.output.includes("judge gap: a judge gap passes the gate only once the judge passes the shape question on this body")]).toEqual([1, true, true]);
 });
 
 test("the judge reads the body the gate first read and saved its pass for, even when the body changes during the gate", async () => {

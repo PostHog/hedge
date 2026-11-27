@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { acceptGap, checkout, cleanFixtures, fakeModel, fixture, graded, markPanel, reviewHead, reviewHeadFixed, verdict, type Checkout } from "./proof-testing.ts";
 
@@ -22,6 +22,21 @@ async function skippedOf(pr: Checkout) {
 const notGated = (short: string, landed = "") => ({
   stillYours: [`- example/product#42: the gate has not run at HEAD ${short} with these proofs, so they are not known to pass. Run hedge proof gate${landed}.`],
   proofs: [`| example/product#42 | none | gate: not run at HEAD ${short} with these proofs | none | none yet |`],
+});
+
+test("a gate pass saved by an engine without the shape question counts as no gate until the gate runs again", async () => {
+  const pr = await checkout();
+  const head = await pr.commit("feature.txt", "greet new members\n");
+  pr.pullRequestState({ body: graded("non-critical") });
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  fakeModel(pr, "JUDGE", verdict());
+  expect((await pr.hedge("gate")).code).toBe(0);
+  const saved = join(pr.pullRequest, "gate-outcome", `${head}.json`);
+  const outcome = JSON.parse(readFileSync(saved, "utf8"));
+  const { shape: _shape, ...oldKey } = outcome.key;
+  writeFileSync(saved, JSON.stringify({ ...outcome, key: oldKey }));
+  expect(await reportOf(pr)).toEqual(notGated(head.slice(0, 7)));
 });
 
 test("the report prints the gate's last summary at HEAD, and sends the user to the gate while no gate ran with these proofs", async () => {
@@ -100,12 +115,12 @@ test("the report shows a merged PR's post-deploy watch once the gate weighed it 
 test("the report shows the gate's outcome when the judge was unavailable and the user accepted that gap, and a later gate asks the judge again", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "greet new members\n");
-  pr.pullRequestState({ body: "A greeting for new members." });
+  pr.pullRequestState({ body: graded("non-critical") });
   await reviewHead(pr);
   await pr.hedge("require", "--none", "--reason", "Docs only");
-  const judge = fakeModel(pr, "JUDGE", "");
+  const judge = fakeModel(pr, "JUDGE", "not json");
 
-  expect((await pr.hedge("gate")).output).toContain("judge: unavailable (empty answer)");
+  expect((await pr.hedge("gate")).output).toContain("judge: unavailable (unparseable answer: not json)");
   await pr.hedge("gap", "--kind", "judge", "--reason", "The judge is down");
   pr.chooseGap("judge", "The judge is down");
   const accepted = idIn((await acceptGap(pr, "judge")).output);

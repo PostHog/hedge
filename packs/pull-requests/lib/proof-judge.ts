@@ -41,7 +41,7 @@ const verdictSchema = (asked: QuestionName[]) => ({
   properties: { ...Object.fromEntries(asked.map((name) => [name, questionSchema])), quality: qualitySchema },
 });
 
-const riskQuestion = "risk: Does the merge-risk callout's grade and door follow from what the diff measurably changes? Derive them yourself first with the merge-risk rubric, from the diff and the counted evidence, then compare. Fail when the callout's grade or door differs from yours, when a changed row with an incident, or an uncovered row, appears neither in the callout nor under Known issues, or when it rests on a hypothetical bug on a row a proof covers, on reach that counts traffic whose outcome does not change, on harm the base already caused, or on a grade carried forward from an earlier panel, lens, body, or thread. A claim in the body that a proof exists counts only when the evidence holds it. When the repository keeps a critical-path list, fail a Tier line that does not say critical while the diff touches a path on the list, and name the path; when hedge marks the diff test-only, a path that only its test files match does not count. Name the grade and door you derive in the reason. With no callout in the body, pass.";
+const riskQuestion = "risk: Does the merge-risk callout's grade and door follow from what the diff measurably changes? Derive them yourself first with the merge-risk rubric, from the diff and the counted evidence, then compare. Fail when the callout's grade or door differs from yours, when a changed row with an incident, or an uncovered row, appears neither in the callout nor under Known issues, or when it rests on a hypothetical bug on a row a proof covers, on reach that counts traffic whose outcome does not change, on harm the base already caused, or on a grade carried forward from an earlier panel, lens, body, or thread. A claim in the body that a proof exists counts only when the evidence holds it. When the repository keeps a critical-path list, fail a Tier line that does not say critical while the diff touches a path on the list, and name the path; when hedge marks the diff test-only, a path that only its test files match does not count. Leave the picture, the word cap and the callout's bullet count to the shape question. Name the grade and door you derive in the reason. With no callout in the body, pass.";
 const shapeQuestion = "shape: Does the PR body keep the shape of pr-description? Fail it, and name the rule, when it shows no picture where GitHub renders it, which is a Mermaid diagram, an image, a video, an uploaded attachment, or a `No picture: <why>` line; when it holds more than 800 written words, leaving out code, diagrams, checklist template lines, and comments; or when the callout holds more than 6 top-level bullets, Switch-off and Tier included. Rollout lines, such as Stages, Decided and Watch, are not callout bullets.";
 const qualityQuestion = "quality: List each problem of the diff against the rubric and rate it. high: a bug, data loss, a security hole, missing tests for changed behavior, or a plain breach of the rubric that a reviewer would block on. medium: a real design or test weakness. low: a nit.";
 
@@ -192,11 +192,9 @@ ${untrusted("PR body", withoutReceipt(risk.body))}
 const shapeSection = (body: string, shown: boolean) => `
 ## The PR body for the shape question
 
-Hedge counts ${roughWords(withoutReceipt(body))} words in the body outside fenced code and comments. The count is rough: it includes checklist template lines and link targets, so the written words can be fewer.${shown ? " The body is the one shown above for the risk question." : `\n\n${untrusted("PR body", withoutReceipt(body))}`}
+${shown ? "The body is the one shown above for the risk question." : untrusted("PR body", withoutReceipt(body))}
 `;
 
-const fence = /^ {0,3}(`{3,})[^`\n]*\n[\s\S]*?^ {0,3}\1`*[ \t]*$|^ {0,3}(~{3,})[^\n]*\n[\s\S]*?^ {0,3}\2~*[ \t]*$/gm;
-const roughWords = (body: string) => body.replace(fence, " ").split(/<!--[\s\S]*?-->/).join(" ").split(/\s+/).filter((word) => /[\p{L}\p{N}]/u.test(word)).length;
 
 function parseVerdict(text: string, asked: QuestionName[]): Verdict | undefined {
   try {
@@ -235,12 +233,10 @@ const failureReasons = (verdict: Verdict) => [
 
 export type JudgeRecord = { commit: string; model: string; verdict: Verdict; passed: boolean; escalation?: string; judgedAt: string };
 export type JudgeDeps = { ask: (request: ModelRequest) => Promise<ModelAnswer>; model: string; arbiter: Arbiter; directory: string; commit: string; now: Date; failLimit: number; decidesAll?: boolean; serialize: <T>(step: () => Promise<T>) => Promise<T> };
-export type JudgeOutcome = { state: "pass" | "fail" | "unavailable"; lines: string[]; model: string; broken: string[]; held?: true; unchecked?: string[]; spent?: true };
+export type JudgeOutcome = { state: "pass" | "fail" | "unavailable"; lines: string[]; model: string; broken: string[]; held?: true; unchecked?: string[] };
 
 const freeJudgeFails = 2;
-const judgeBudgetSpent = (failed: number, unchecked: string[], shape: boolean) => `judge: budget spent: the judge failed ${failed} times on this PR, as often as pull-requests.reviewCeiling allows, so hedge runs it no more.${unchecked.length ? ""
-  : shape ? " No judge gap passes an open PR with a merge-risk callout while no judge checks its shape question. Only the user can raise pull-requests.reviewCeiling, so the judge runs again"
-  : " End it with a judge gap on HEAD: record hedge proof gap --kind judge --reason <why HEAD holds now>, and have a decision accept it as the judge gap line says"}`;
+const judgeBudgetSpent = (failed: number, unchecked: string[]) => `judge: budget spent: the judge failed ${failed} times on this PR, as often as pull-requests.reviewCeiling allows, so hedge runs it no more.${unchecked.length ? "" : " End it with a judge gap on HEAD: record hedge proof gap --kind judge --reason <why HEAD holds now>, and have a decision accept it as the judge gap line says"}`;
 const arbiterInstructions = `You decide if an agent may keep trying to pass a judge, or must ask the user. Below are the reasons a judge failed one pull request on each run, oldest first.
 
 Answer ESCALATE only when the same failure comes back after the author answered it, or a later verdict contradicts an earlier one. In all other cases answer CONTINUE.
@@ -270,7 +266,7 @@ export async function judge(input: JudgeInput, deps: JudgeDeps): Promise<JudgeOu
   });
   if ("spent" in record) {
     const unchecked = [...new Set((input.conditions ?? []).map(({ id }) => id))];
-    return { state: "fail", lines: [judgeBudgetSpent(record.spent, unchecked, input.shape !== undefined)], model: deps.model, broken: [], unchecked, spent: true };
+    return { state: "fail", lines: [judgeBudgetSpent(record.spent, unchecked)], model: deps.model, broken: [], unchecked };
   }
   if ("cause" in record) return { state: "unavailable", lines: [`judge: unavailable (${record.cause})`], model: deps.model, broken: [], ...record.held ? { held: true } : {} };
   const escalation = !record.escalation ? []

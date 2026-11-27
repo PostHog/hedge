@@ -28,7 +28,7 @@ export type FinalGate = { code: number; reason: string; lines: string[]; verdict
 
 type Checked = Awaited<ReturnType<typeof proofGate>>;
 type Judged = { code: number; lines: string[]; covered: string; judge: JudgeSummary; reason?: string };
-type GateKey = { head: string; base: string; baseSha: string; tier: string; callout: string; landed: boolean; fingerprint: string; endTable: true };
+type GateKey = { head: string; base: string; baseSha: string; tier: string; callout: string; landed: boolean; fingerprint: string; endTable: true; shape: true };
 type Condition = Checked["conditions"][number];
 type SavedGate = { key: GateKey; gate: FinalGate; conditions: Condition[] };
 
@@ -60,7 +60,7 @@ async function fingerprintOf(home: string, ref: PrRef, files: string, decisions:
 }
 
 const keyOf = (pull: PullRequest, landed: boolean, fingerprint: string): GateKey =>
-  ({ head: pull.head, base: pull.base, baseSha: pull.baseSha, tier: tierOf(pull.body), callout: createHash("sha256").update(riskCalloutOf(pull.body) ?? "").digest("hex"), landed, fingerprint, endTable: true });
+  ({ head: pull.head, base: pull.base, baseSha: pull.baseSha, tier: tierOf(pull.body), callout: createHash("sha256").update(riskCalloutOf(pull.body) ?? "").digest("hex"), landed, fingerprint, endTable: true, shape: true });
 
 export async function finalGate(head: ProofIdentity, context: JudgingContext, { landed = false }: { landed?: boolean } = {}): Promise<FinalGate> {
   const { home, env, run, now, ssh } = context;
@@ -180,7 +180,6 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
     const open = weighedGap && { ...weighedGap, acceptance: undefined, line: `not accepted (the judge budget is spent, so no judge checks the condition of ${spentUnchecked.map(conditionName).join(" or ")})` };
     return { code: 1, lines, covered: "", judge: verdict(lines, open && judgeGapProof(head.commit, open)), reason: line };
   }
-  if (outcome.spent && known.shape !== undefined) return { code: 1, lines: outcome.lines, covered: "", judge: verdict(outcome.lines), reason };
   const gap = weighedGap && withBrokenConditions(weighedGap, outcome.broken);
   const unchecked = outcome.held ? [...new Set(known.conditions.map(({ id }) => id))] : [];
   if (gap?.acceptance && unchecked.length) {
@@ -189,13 +188,6 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
     return { code: 3, lines, covered: "", judge: verdict(lines, judgeGapProof(head.commit, { ...gap, acceptance: undefined, line })), reason: `judge gap: ${line}` };
   }
   const shapeFailure = outcome.lines.find((line) => line.startsWith("judge shape: fail"));
-  const shapeUnchecked = known.shape !== undefined && !outcome.lines.some((line) => line.startsWith("judge shape: pass"));
-  if (gap && (shapeFailure || (gap.acceptance && shapeUnchecked))) {
-    const line = shapeFailure ? "judge gap: a judge gap never waives the shape question. Edit the PR body to fix it, then run the gate again"
-      : "judge gap: a judge gap passes the gate only once the judge passes the shape question on this body. Run the gate again once the judge answers; when the judge budget is spent, only the user can raise pull-requests.reviewCeiling, so the judge runs again";
-    const lines = [...outcome.lines, line];
-    return { code: 1, lines, covered: "", judge: verdict(lines), reason: shapeFailure ?? line };
-  }
   if (gap?.acceptance) {
     const lines = [...outcome.lines, `judge gap: ${gap.acceptance.line}: ${gap.reason}`];
     return { code: 0, lines, covered: `${outcome.state} accepted by ${gap.acceptance.by}`, judge: verdict(lines, judgeGapProof(head.commit, gap)) };
@@ -210,7 +202,7 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
     ? "judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and ask the user; on ask an agent never decides on a one-way door"
     : `judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and decide it with hedge decision record --mark 🤖 --class proof-gap --kind judge --pr ${refText(head)} --question <q> --answer <a> --rejected <option> --reason <why>${decidesAll(env) ? "" : ", or ask the user"}`;
   const onlyShape = shapeFailure !== undefined && outcome.lines.filter((line) => /^judge [a-z]+: fail\b/.test(line)).length === 1;
-  const lines = [...outcome.lines, ...shapeFailure ? ["judge shape: edit the PR body to fix it, then run the gate again. A judge gap never waives the shape question"] : [], ...onlyShape ? [] : [hint]];
+  const lines = [...outcome.lines, ...shapeFailure ? ["judge shape: edit the PR body to fix it, then run the gate again"] : [], ...onlyShape ? [] : [hint]];
   return { code: 1, lines, covered: "", judge: verdict(lines), reason };
 }
 
