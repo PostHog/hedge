@@ -265,7 +265,7 @@ export type Plan = {
   settings: Record<string, SettingValue>;
   unanswered: PackSetting[];
   ask: PackSetting[];
-  dropped: Array<{ pack: string; item: string; reason: string; check?: string }>;
+  dropped: Array<{ pack: string; item: string; reason: string; check?: string; held?: boolean }>;
   repeatedHeadings?: Array<{ pack: string; guide: string; section: string; heading: string; owner: string }>;
 };
 

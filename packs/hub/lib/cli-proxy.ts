@@ -11,7 +11,7 @@ import { changedFiles, ownedFiles, readIfThere, removeUnits, requireInstalled, w
 import { refuseLinks, writePrivateFile, type Fetch } from "../../mcp-gateway/lib/client.ts";
 import type { Run } from "../../mcp-gateway/lib/hub.ts";
 import { isKeptForBoxes } from "../../../src/hub/names.ts";
-import { waitsForPerson } from "../../../src/pack/types.ts";
+import { cannotTell, waitsForPerson } from "../../../src/pack/types.ts";
 import { codexProvider, codexProviderTable, keyHelper } from "../../../src/adapters/provider-config/proxy-route.ts";
 import { refreshCodexCatalog } from "./codex-catalog.ts";
 import { must, proxyPort } from "./run.ts";
@@ -403,6 +403,7 @@ async function sendCodexHome(home: string): Promise<boolean> {
 export type Agent = "claude" | "codex";
 
 const applyWaits = (name: string) => `hedge apply keeps ${name} on its own sign-in until the proxy serves it.`;
+const applyHolds = (name: string) => `hedge apply keeps the ${name} settings as they are until it answers.`;
 
 async function check(machine: ProxyMachine, agent: Agent): Promise<number> {
   const hub = readRole(machine.home) === "hub";
@@ -412,8 +413,9 @@ async function check(machine: ProxyMachine, agent: Agent): Promise<number> {
   const models = key ? await listModels(machine.fetch, key) : noKey;
   const reason = danger ?? (agent === "claude" ? unserved(models, "claude") : await codexUnserved(machine.home, models));
   const name = agent === "claude" ? "Claude Code" : "Codex";
-  machine.print(reason ? `${reason} ${applyWaits(name)}` : `${name} reaches your own-account proxy at ${proxyUrl}.`);
+  machine.print(reason ? `${reason} ${reason === silent ? applyHolds(name) : applyWaits(name)}` : `${name} reaches your own-account proxy at ${proxyUrl}.`);
   if (!reason) return 0;
+  if (reason === silent) return cannotTell;
   return reason === missingModel[agent] || (reason === noKey && !hub) ? waitsForPerson : 1;
 }
 

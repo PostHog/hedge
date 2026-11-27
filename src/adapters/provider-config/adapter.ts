@@ -37,8 +37,9 @@ export function providerConfigAdapter(options: { run?: CommandRunner } = {}): Ad
     async apply(plan, context) {
       const outage = sourceOutage(plan);
       const gated = gatedKeys(plan);
+      const held = heldKeys(plan);
       const reconcile = async () => {
-        const { plugins, claudeEnabled, marketplaces, codexPlugins, ...result } = await reconcileFiles(plan, context.home, context.dryRun, context.adopt, outage, gated);
+        const { plugins, claudeEnabled, marketplaces, codexPlugins, ...result } = await reconcileFiles(plan, context.home, context.dryRun, context.adopt, outage, gated, held);
         const written = result.findings.filter((finding) => finding.todo);
         try {
           result.findings.push(...(await reconcilePlugins(plan, context.home, context.dryRun, run, { outage, accepted: plugins, claudeEnabled, marketplaces, acceptedCodex: codexPlugins })));
@@ -57,7 +58,7 @@ export function providerConfigAdapter(options: { run?: CommandRunner } = {}): Ad
   };
 }
 
-async function reconcileFiles(plan: Plan, home: string, dryRun: boolean, adopt: string[], outage: boolean, gated: string[]): Promise<FilesResult> {
+async function reconcileFiles(plan: Plan, home: string, dryRun: boolean, adopt: string[], outage: boolean, gated: string[], held: string[]): Promise<FilesResult> {
   const previous = await readFieldRecord(home);
   const next: FieldRecord = {};
   const writes: Array<Write & { action: Action }> = [];
@@ -70,7 +71,7 @@ async function reconcileFiles(plan: Plan, home: string, dryRun: boolean, adopt: 
     const fields = owned(plan, target);
     let merged: Merged;
     try {
-      merged = merge(target, before, old, fields, adopt.includes(target.path), { outage, gated: gatedPath(gated, target.provider), configPath: join(home, target.path) });
+      merged = merge(target, before, old, fields, adopt.includes(target.path), { outage, gated: gatedPath(gated, target.provider), held: gatedPath(held, target.provider), configPath: join(home, target.path) });
     } catch (error) {
       keepOld();
       result.findings.push({ id: `kept:${target.path}`, pack: "engine", say: `Kept ${target.path} as it is: Hedge cannot read it (${(error as Error).message}). Fix the file, then run hedge apply.`, repair: "human" });
@@ -112,7 +113,7 @@ function owned(plan: Plan, target: Target): Field[] {
   return fields;
 }
 
-function merge(target: Target, text: string | undefined, previous: Field[], wanted: Field[], adopt: boolean, options: { outage: boolean; gated: (path: string[]) => boolean; configPath: string }): Merged {
+function merge(target: Target, text: string | undefined, previous: Field[], wanted: Field[], adopt: boolean, options: { outage: boolean; gated: (path: string[]) => boolean; held: (path: string[]) => boolean; configPath: string }): Merged {
   const current: Document = text === undefined ? {} : target.format.decode(text);
   const original = target.format.encode(current);
   const record: Field[] = [];
@@ -163,7 +164,7 @@ function merge(target: Target, text: string | undefined, previous: Field[], want
   const all = [...wanted, ...trust];
   for (const field of previous) {
     if (all.some((item) => overlaps(item.path, field.path))) continue;
-    if ((options.outage && !options.gated(field.path)) || keepsEdit(field)) record.push(field);
+    if ((options.outage && !options.gated(field.path)) || options.held(field.path) || keepsEdit(field)) record.push(field);
     else if (get(current, field.path) !== undefined) {
       remove(current, field.path);
       removed.push(field.path.join("."));
@@ -204,7 +205,11 @@ function gatedKeys(plan: Plan) {
   return plan.dropped.flatMap((entry) => (entry.check && entry.item.startsWith("config ") ? [entry.item.slice("config ".length)] : []));
 }
 
-/** Whether a path overlaps a config key of this provider that the gate dropped, so an outage does not keep it. */
+function heldKeys(plan: Plan) {
+  return plan.dropped.flatMap((entry) => (entry.held && entry.item.startsWith("config ") ? [entry.item.slice("config ".length)] : []));
+}
+
+/** Whether a path overlaps one of these config keys of this provider. */
 function gatedPath(gated: string[], provider: Provider) {
   const paths = gated.filter((key) => key.startsWith(`${provider}:`)).map((key) => keyPath(key.slice(provider.length + 1)));
   return (path: string[]) => paths.some((item) => overlaps(item, path));
