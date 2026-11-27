@@ -496,6 +496,14 @@ test("the check cannot tell while the proxy does not answer, and changes no file
   expect(existsSync(keyFile(home))).toBe(true);
 });
 
+test("the check still fails, as on the base, when the proxy answers 200 and cuts the model list short", async () => {
+  const cut = async () => new Response(new ReadableStream({ start: (body) => (body.enqueue(new TextEncoder().encode('{"data":[')), body.error(new Error("connection reset"))) }), { status: 200, headers: { "Content-Type": "application/json" } });
+  const { machine, home, printed } = client({ fetch: cut });
+  connected(home);
+  expect(await cliProxy("check", machine)).toBe(1);
+  expect(printed).toEqual([`The proxy at ${proxyUrl} answers without a model list. hedge apply keeps Claude Code on its own sign-in until the proxy serves it.`]);
+});
+
 test("hedge apply while the proxy does not answer keeps the routes an earlier apply put in, and puts in none", async () => {
   const proxy: Proxy = { models: ["claude-sonnet-5-5", "gpt-6.1-sol"] };
   const { home, apply, connectAndApply } = connecting({ plan: "both" }, proxy);
