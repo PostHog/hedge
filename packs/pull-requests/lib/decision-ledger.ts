@@ -31,6 +31,14 @@ export const gateOverride = "gate-override";
 export const overrideChoice = "Override the gate";
 export const mergeCardChoice = "Merge";
 export const mergeCardCondition = (head: string) => `${head}: merge card`;
+export const standingOrder = "standing-order";
+const standingOrderUntil = /^until (\d{4}-\d{2}-\d{2})$/;
+/** When a standing order with this condition ends, in ms: never without one, NaN for a condition that names no date. */
+export function standingOrderEnd(condition: string | undefined) {
+  if (condition === undefined) return Infinity;
+  const until = standingOrderUntil.exec(condition)?.[1];
+  return until ? Date.parse(`${until}T00:00:00Z`) + 86_400_000 : NaN;
+}
 export const namesHead = (text: string, head: string) => new RegExp(`(?<![0-9a-f])${head}(?![0-9a-f])`, "i").test(text);
 export const namesId = (text: string, id: string) => new RegExp(`(?<![\\w-])${id.replace(/[^\w-]/g, "\\$&")}(?![\\w-])`).test(text);
 

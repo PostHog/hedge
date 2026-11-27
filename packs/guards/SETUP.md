@@ -34,7 +34,10 @@ Repositories that merge without the gate, such as their own tooling, go in
 repository, these included, a head with a proof gap that an agent accepted
 waits for the person's merge word for that head. That word is their "Merge"
 answer on a merge card, and it counts only in the T3 thread that asked it, so
-that thread merges or enqueues the PR itself.
+that thread merges or enqueues the PR itself. A standing order of the person's,
+recorded with `hedge decision record --kind standing-order` from their words in
+a T3 thread, is that word for every PR merged from that thread until it ends.
+It needs the gate pass all the same.
 
 When the person adds Claude allow rules that let agents request reviewers or
 post `/trunk merge` without the auto-mode review, list the same rules, one per

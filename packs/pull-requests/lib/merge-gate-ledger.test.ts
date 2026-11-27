@@ -75,6 +75,36 @@ test("a gate override is the user's 👤 answer for one PR at one full head, wit
   expect(ledgerDecisions(pr).at(-1)).toMatchObject({ class: "merge", mark: "👤", scope: { prs: ["example/product#42"], kinds: ["gate-override"], condition: `${head}: incident fix, the judge is down` } });
 });
 
+test("a standing order is the user's own typed words, quoted whole with their date, for one map, recorded once", async () => {
+  const pr = await checkout();
+  const words = "Go full autonomous mode again here until we reach the next goal milestone.";
+  const quoted = `2026-10-25 "${words}"`;
+  const order = (...args: string[]) => pr.decide("record", "--class", "merge", "--kind", "standing-order", "--pr", "example/maps#7", ...args);
+  await expect(order("--mark", "🤖", "--words", quoted, "--question", "q", "--answer", "a", "--rejected", "r", "--reason", "x")).rejects.toThrow("An agent never gives one");
+  await expect(order("--mark", "👍", "--words", quoted)).rejects.toThrow("--mark 👤");
+  await expect(order("--mark", "👤", "--pr", "example/maps#8", "--words", quoted)).rejects.toThrow("covers one map");
+  await expect(order("--mark", "👤")).rejects.toThrow("needs --words");
+  await expect(order("--mark", "👤", "--words", quoted, "--condition", "until the milestone")).rejects.toThrow("--condition 'until <YYYY-MM-DD>'");
+  await expect(order("--mark", "👤", "--words", quoted, "--condition", "until 2026-10-24")).rejects.toThrow("which has passed");
+  await expect(pr.decide("record", "--mark", "👤", "--class", "merge", "--kind", "standing-order", "--kind", "gate-override", "--pr", "example/maps#7", "--words", quoted)).rejects.toThrow("A gate override needs --condition");
+  await expect(pr.decide("record", "--mark", "👤", "--class", "merge", "--kind", "standing-order", "--kind", "ci", "--pr", "example/maps#7", "--words", quoted)).rejects.toThrow("only --kind gate-override or --kind standing-order");
+  await expect(order("--mark", "👤", "--words", quoted)).rejects.toThrow("is not in a message of the user's");
+  pr.say("Go full autonomous mode again here", "Shall I ask before each merge?");
+  await expect(order("--mark", "👤", "--words", quoted)).rejects.toThrow("is not in a message of the user's");
+  expect(ledgerDecisions(pr)).toEqual([]);
+
+  pr.say(words, "Shall I ask before each merge?");
+  const recorded = await order("--mark", "👤", "--words", quoted, "--condition", "until 2026-12-10");
+  expect(recorded.code).toBe(0);
+  expect(recorded.output).toContain("merge word for every PR merged or enqueued from T3 thread mcp:thread-1");
+  expect(recorded.output).toContain("hedge decision void");
+  expect(ledgerDecisions(pr).at(-1)).toMatchObject({
+    class: "merge", mark: "👤", question: "Shall I ask before each merge?", answer: quoted,
+    scope: { prs: ["example/maps#7"], kinds: ["standing-order"], condition: "until 2026-12-10" }, where: { thread: "mcp:thread-1" },
+  });
+  await expect(order("--mark", "👤", "--words", quoted)).rejects.toThrow("already recorded");
+});
+
 test("a gate run that throws after a pass at the same head is shared, so another machine's merge gate refuses the merge", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "new\n");

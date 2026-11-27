@@ -575,6 +575,67 @@ function homeIn(settings?: unknown) {
   return home;
 }
 
+describe("a standing order of the person's", () => {
+  const conductor = "thread:project:map:conductor-1";
+  const gap: LedgerEvent = {
+    type: "decide", decision: {
+      id: "d-agent", at: "2026-11-27T08:00:00Z", class: "proof-gap", mark: "🤖", question: "Accept the live-run gap? example/product#9: only a run from main proves it", answer: "Accept the gap", rejected: "Keep the gap open", reason: "x",
+      scope: { prs: ["example/product#9"], kinds: ["live-run"] }, effect: "accept", where: { thread: "lane", machine: "hub" },
+    },
+  };
+  const order = (condition?: string, thread = conductor): LedgerEvent => ({
+    type: "decide", decision: {
+      id: "d-order", at: "2026-11-27T07:00:00Z", class: "merge", mark: "👤", question: "Shall I ask before each merge?", answer: '2026-11-27 "Go full autonomous mode again here until we reach the next goal milestone."',
+      scope: { prs: ["example/maps#7"], kinds: ["standing-order"], ...condition ? { condition } : {} }, where: { thread, message: "m-order", machine: "hub" },
+    },
+  });
+  const at = (day: string) => Date.parse(`${day}T12:00:00Z`);
+  const mergeFrom = (thread: string | undefined, ledger: LedgerEvent[], now = at("2026-11-27"), passed = true) =>
+    risk(one(9), { ...gate({ ledger: passed ? [gatePass(9, head), ...ledger] : ledger }), thread, now: () => now });
+
+  test("covers a PR whose gaps an agent accepted, when the conductor merges it from the thread the person gave it in", async () => {
+    expect(await mergeFrom(conductor, [gap, order()])).toBeUndefined();
+    expect(await mergeFrom("conductor-1", [gap, order("until 2026-12-10")], at("2026-12-10"))).toBeUndefined();
+  });
+
+  test("without one, the PR stays held for the merge card", async () => {
+    const refusal = await mergeFrom(conductor, [gap]);
+    expect(refusal).toContain("an agent accepted proof gaps of example/product#9");
+    expect(refusal).toContain("or under a standing order they gave in this T3 thread");
+    expect(refusal).not.toContain("The standing order d-order");
+  });
+
+  test("a merge from another thread, another map's conductor or a lane, or from outside T3, stays held and says whose thread it covers", async () => {
+    for (const thread of ["thread:project:map:conductor-2", "lane", undefined]) {
+      const refusal = await mergeFrom(thread, [gap, order()]);
+      expect(refusal).toContain("an agent accepted proof gaps of example/product#9");
+      expect(refusal).toContain(`The standing order d-order (2026-11-27 "Go full autonomous mode again here until we reach the next goal milestone.") covers only merges from T3 thread ${conductor}`);
+    }
+    expect(await mergeFrom(undefined, [gap, order()])).toContain("this merge runs outside a T3 thread");
+  });
+
+  test("an order that ended stays held and says when: past its date, at the milestone, or withdrawn", async () => {
+    expect(await mergeFrom(conductor, [gap, order("until 2026-11-26")])).toContain("The standing order d-order");
+    expect(await mergeFrom(conductor, [gap, order("until 2026-11-26")])).toContain("ran until 2026-11-26 and has ended.");
+    expect(await mergeFrom(conductor, [gap, order("until 2026-12-10")], at("2026-12-11"))).toContain("ran until 2026-12-10 and has ended.");
+    expect(await mergeFrom(conductor, [gap, order("whenever")])).toContain("names no end date Hedge can read (whenever)");
+    const milestone: LedgerEvent = { type: "void", id: "d-order", reason: "milestone reached", at: "2026-11-28T09:00:00Z" };
+    expect(await mergeFrom(conductor, [gap, order(), milestone], at("2026-11-28"))).toContain("ended on 2026-11-28: milestone reached.");
+    const withdrawn: LedgerEvent = { type: "reverse", id: "d-order", words: '2026-11-28 "Stop merging on your own."', thread: conductor, message: "m-stop", machine: "hub", at: "2026-11-28T10:00:00Z" };
+    expect(await mergeFrom(conductor, [gap, order(), withdrawn], at("2026-11-28"))).toContain("was withdrawn on 2026-11-28.");
+  });
+
+  test("an agent's own order counts for nothing, and an order never stands in for a missing gate pass", async () => {
+    const agents = order();
+    if (agents.type === "decide") agents.decision.mark = "🤖";
+    expect(await mergeFrom(conductor, [gap, agents])).toContain("an agent accepted proof gaps");
+    const refusal = await mergeFrom(conductor, [gap, order()], at("2026-11-27"), false);
+    expect(refusal).toContain("has not passed at the head of example/product#9");
+    expect(refusal).toContain("Robin's standing order d-order");
+    expect(refusal).toContain("never for a missing gate pass");
+  });
+});
+
 describe("the PreToolUse hook", () => {
   const homeWith = homeIn;
   const call = (command: string) => ({ tool_name: "Bash", tool_input: { command }, cwd: "/work" });
