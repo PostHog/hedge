@@ -334,6 +334,22 @@ describe("a config entry that waits for a pack check", () => {
     expect(doctor.findings.map((finding) => finding.id)).toEqual(["check:helper-up"]);
   });
 
+  test("a check that cannot tell holds only Hedge's proxy route as it is; other config that waits on such a check leaves, and that check keeps its own words", async () => {
+    const home = temp.make("home-");
+    const withModel = [...config, { provider: "claude" as const, key: "model", value: "opus", after: "model-up", pack: "base" }];
+    const both = [...checks, { id: "model-up", run: ["model-check"], say: "No model yet.", pack: "base" }];
+    let code = 0;
+    const options = { home, adapters: [providerConfigAdapter()], run: async (command: string[]) => (command[0]!.endsWith("-check") ? code : 0) };
+    await apply(plan({ files: [], checks: both, config: withModel }), options);
+    code = 3;
+    const unsure = await apply(plan({ files: [], checks: both, config: withModel }), options);
+    expect(settings(home)).toEqual({ env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:8317" }, apiKeyHelper: keyHelper });
+    expect(unsure.findings).toEqual([
+      { id: "check:proxy-up", pack: "base", say: "Hedge cannot tell yet whether proxy-up passes, so it keeps the proxy route that waits on it as it is. Run proxy-check to see why.", repair: "apply" },
+      { id: "check:model-up", pack: "base", say: "No model yet.", repair: "apply" },
+    ]);
+  });
+
   const stepping = (codes: { before: number; after: number }) => {
     let ran = false;
     const seen: unknown[] = [];

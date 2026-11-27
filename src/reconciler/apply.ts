@@ -8,7 +8,7 @@ import type { Action, CatalogEntry, Finding, HumanStep, Owned, PackCheck, Plan, 
 import { engineCommand } from "./engine-command.ts";
 import { changeLedger, currentNames, ledgerKey, readLedger, renameLedger, undoVariable, type Ledger, type LedgerStep } from "./ledger.ts";
 import { hublessReason, listedPack } from "./resolve.ts";
-import { wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
+import { onRoute, wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
 import { withLegacyNames } from "../legacy.ts";
 
 export type AdapterContext = { home: string; dryRun: boolean; adopt: string[]; adoptFrom?: string[] };
@@ -115,18 +115,20 @@ async function reconcile(plan: Plan, options: ApplyOptions): Promise<{ report: R
   const afterSteps = adapters.filter((adapter) => adapter.name === "config");
   const configure = async () => {
     const checks: Checked = [];
+    const gatesRoute = (check: Owned<PackCheck>) => plan.config.some((entry) => entry.pack === check.pack && entry.after === check.id && onRoute(entry));
     const runChecks = async (items: Plan["checks"]) => {
       for (const item of items) checks.push([item, await run(item.run)]);
-      report.findings.push(...checks.filter(([item, code]) => code !== 0 && items.includes(item)).map(([item, code]) => checkFinding(item, code)));
+      report.findings.push(...checks.filter(([item, code]) => code !== 0 && items.includes(item)).map(([item, code]) => checkFinding(item, code, gatesRoute(item))));
     };
     const gates = plan.checks.filter((check) => plan.config.some((entry) => entry.pack === check.pack && entry.after === check.id));
     await runChecks(gates);
     const gateCode = (entry: Plan["config"][number]) => checks.find(([item]) => item.pack === entry.pack && item.id === entry.after)?.[1];
     const passing = (entry: Plan["config"][number]) => gateCode(entry) === 0;
     const waiting = plan.config.filter((entry) => waitsForCheck(plan, entry));
-    const kept = plan.config.filter((entry) => (waiting.includes(entry) ? passing(entry) : gated.plan.config.includes(entry)));
-    const routes = wholeRoutes(kept, plan.config.filter((entry) => !kept.includes(entry)));
-    const configured = { ...gated.plan, config: routes.config, dropped: [...gated.plan.dropped, ...waiting.filter((entry) => !passing(entry)).map((entry) => droppedConfig(entry, gateCode(entry))), ...routes.dropped] };
+    const holds = (entry: Plan["config"][number]) => onRoute(entry) && gateCode(entry) === cannotTell;
+    const kept = plan.config.filter((entry) => !holds(entry) && (waiting.includes(entry) ? passing(entry) : gated.plan.config.includes(entry)));
+    const routes = wholeRoutes(kept, plan.config.filter((entry) => !kept.includes(entry) && !holds(entry)));
+    const configured = { ...gated.plan, config: routes.config, dropped: [...gated.plan.dropped, ...waiting.filter((entry) => !passing(entry)).map((entry) => droppedConfig(entry, holds(entry))), ...routes.dropped] };
     for (const adapter of afterSteps) {
       const result = await adapter.apply(configured, context);
       report.actions.push(...result.actions);
@@ -221,7 +223,7 @@ export const todoLines = (findings: Finding[]) => findings.filter((finding) => f
 
 const waitsForCheck = (plan: Plan, entry: Plan["config"][number]) => entry.after !== undefined && !plan.human.some((step) => step.pack === entry.pack && step.id === entry.after);
 
-const droppedConfig = (entry: Plan["config"][number], code?: number): Plan["dropped"][number] => ({ pack: entry.pack, item: `config ${entry.provider}:${entry.key}`, reason: `check ${entry.after} ${code === cannotTell ? "cannot tell yet" : "does not pass"}`, check: entry.after, ...(code === cannotTell && { held: true }) });
+const droppedConfig = (entry: Plan["config"][number], held = false): Plan["dropped"][number] => ({ pack: entry.pack, item: `config ${entry.provider}:${entry.key}`, reason: held ? "its proxy route check cannot tell yet" : `check ${entry.after} does not pass`, check: entry.after, ...(held && { held }) });
 
 export type HumanStepsResult = { failing: Array<Owned<HumanStep>>; unchecked: Array<Owned<HumanStep>> };
 
@@ -348,9 +350,9 @@ export async function check(plan: Plan, options: { home: string; adapters?: Adap
   return report;
 }
 
-function checkFinding(item: Owned<PackCheck>, code: number): Finding {
+function checkFinding(item: Owned<PackCheck>, code: number, gatesRoute = false): Finding {
   const id = `check:${item.id}`;
-  if (code === cannotTell) return { id, pack: item.pack, say: cannotTellSay(item), repair: "apply" };
+  if (code === cannotTell && gatesRoute) return { id, pack: item.pack, say: cannotTellSay(item), repair: "apply" };
   return code === waitsForPerson && item.todo ? { id, pack: item.pack, say: item.todo, todo: true } : { id, pack: item.pack, say: item.say, repair: "apply" };
 }
 

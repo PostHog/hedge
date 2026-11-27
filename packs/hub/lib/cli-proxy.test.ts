@@ -509,8 +509,8 @@ test("hedge apply while the proxy does not answer keeps the routes an earlier ap
     const silent = await apply();
     expect(readFileSync(settingsFile(home), "utf8")).toBe(settings);
     expect(readFileSync(codexFile(home), "utf8")).toBe(codex);
-    expect(silent.stdout).toContain("Hedge cannot tell yet whether cli-proxy-client passes, so it keeps the settings that wait on it as they are. Run hedge cli-proxy check to see why.");
-    expect(silent.stdout).toContain("Hedge cannot tell yet whether cli-proxy-codex passes, so it keeps the settings that wait on it as they are. Run hedge cli-proxy check codex to see why.");
+    expect(silent.stdout).toContain("Hedge cannot tell yet whether cli-proxy-client passes, so it keeps the proxy route that waits on it as it is. Run hedge cli-proxy check to see why.");
+    expect(silent.stdout).toContain("Hedge cannot tell yet whether cli-proxy-codex passes, so it keeps the proxy route that waits on it as it is. Run hedge cli-proxy check codex to see why.");
   }
   proxy.down = false;
   expect((await apply()).code).toBe(0);

@@ -763,20 +763,6 @@ describe("Claude MCP servers", () => {
     expect(read(home, claudeJson).mcpServers).toEqual({});
   });
 
-  test("keep a server whose check cannot tell yet, with or without a source outage", async () => {
-    const home = temp.make("home-");
-    const cli = claudeMcp();
-    await apply(plan([server]), { home, adapters: cli.adapters });
-    const held = { pack: "posthog", item: "config claude:mcpServers.metabase", reason: "check gateway-ready cannot tell yet", check: "gateway-ready", held: true };
-    const outage = { name: "team", source: "", ref: "", available: false, reason: "not found; unreachable sources: team" };
-
-    await apply({ ...plan(), dropped: [held] }, { home, adapters: cli.adapters });
-    await apply({ ...plan(), packs: [...plan().packs, outage], dropped: [held] }, { home, adapters: cli.adapters });
-
-    expect(cli.mcp()).toHaveLength(1);
-    expect(read(home, claudeJson).mcpServers.metabase).toEqual(metabase);
-  });
-
   test("leave ~/.claude.json as it is while it is a link", async () => {
     const home = temp.make("home-");
     const dotfiles = temp.make("dotfiles-");

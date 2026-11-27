@@ -8,8 +8,9 @@
   answer or drops the connection mid-answer, such as while the hub's tunnel to
   a devbox reconnects. It still fails when the proxy refuses the key or serves
   no model.
-- `hedge apply` keeps the settings that wait on a check that cannot tell as
-  they are: it keeps the proxy route an earlier apply wrote, and adds none.
+- When a check that Hedge's proxy route waits on cannot tell, `hedge apply`
+  keeps the route an earlier apply wrote as it is, and adds none. Other
+  settings that wait on such a check leave as before.
   The hub's box handover says so when it meets this on a new box.
   Before, one silent answer during the hourly apply took the route out, so
   open sessions kept the proxy address without its key and failed with

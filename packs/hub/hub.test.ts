@@ -499,6 +499,20 @@ describe("the Own-account balancing workflow", () => {
       expect((await check(shaped, { home, adapters: [providerConfigAdapter()], run: realCheck(home, both) })).ok).toBe(true);
     });
 
+    test("keeps the whole Claude route while one of its checks cannot tell and the other passes", async () => {
+      const home = homeWith();
+      const split = (result: Plan): Plan => ({ ...result, config: result.config.map((entry) => (entry.key === "apiKeyHelper" ? { ...entry, after: "answers" } : entry)), checks: [...result.checks, { pack: "hub", id: "answers", run: ["true"], say: "Always passes." }] });
+      const routed = await applied(home, both, 1, split);
+      expect((await applied(home, "down", 1, split)).claude).toEqual(routed.claude);
+    });
+
+    test("a profile gateway in place of one part of the route still takes the whole route off while the proxy does not answer", async () => {
+      const home = homeWith();
+      await applied(home, both, 1);
+      const gateway = (result: Plan): Plan => ({ ...result, config: [...result.config, { pack: "profile", provider: "claude", key: "env.ANTHROPIC_BASE_URL", value: "https://gateway.example.com" }] });
+      expect((await applied(home, "down", 1, gateway)).claude).toEqual({ env: { ANTHROPIC_BASE_URL: "https://gateway.example.com" } });
+    });
+
     test("a proxy that answers routes both", async () => {
       const { claude, codex } = await applied(homeWith(), both);
       expect(claude.apiKeyHelper).toBe("cat \"$HOME/.config/hedge/cli-proxy.key\"");
