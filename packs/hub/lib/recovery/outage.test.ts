@@ -137,13 +137,13 @@ test("never retries a connection-shaped stop that is a usage limit or a refusal"
     outageThread("auth", { lastErrorClass: "transport_error", lastErrorCode: "authentication_failed", lastError: "Claude API authentication failed." }),
     outageThread("key", { lastErrorClass: "transport_error", lastErrorCode: "unknown", lastError: "Connection error: 401 Invalid API key" }),
     outageThread("ssl", { lastErrorClass: "provider_error", lastErrorCode: "api_error", lastError: "API Error: Unable to connect to API: SSL certificate has expired" }),
-    outageThread("quota", { ...codex, lastErrorClass: "transport_error", lastErrorCode: "responseStreamDisconnected", lastError: "exceeded retry limit, last status: 429 Too Many Requests" }),
+    outageThread("quota", { ...codex, lastErrorClass: "usage_limit", lastErrorCode: "responseStreamDisconnected", lastError: "exceeded retry limit, last status: 429 Too Many Requests" }),
     outageThread("plain", { lastErrorClass: "transport_error", lastErrorCode: null, lastError: "Provider turn failed." }),
     outageThread("tool", { lastErrorClass: "provider_error", lastErrorCode: null, lastError: "The tool call failed: Connection error." }),
   ], { "claude-test-1": 200, "gpt-test-1": 200 });
   await box.run(at("20:00"));
   expect(box.lines.filter((line) => line.includes("retried after a provider error"))).toEqual([]);
-  expect(box.inbox.delivered().map((message) => message.threadId)).toEqual(["quota"]);
+  expect(box.inbox.delivered()).toEqual([{ threadId: "quota", text: "Continue where you left off.", continuesRunId: "run-quota" }]);
 });
 
 test("forgets the tries of a thread that recovered, so its next outage gets four again", async () => {
