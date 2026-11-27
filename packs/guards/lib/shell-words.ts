@@ -588,7 +588,7 @@ function expandedBefore(pipeline: Command[]): boolean[] {
   let seen = false;
   return pipeline.map((command) => {
     const before = seen;
-    seen ||= command.fromExpansion || command.argExpands.includes(true) || command.stdin?.expands === true;
+    seen ||= command.fromExpansion || (command.name !== "tee" && command.argExpands.includes(true)) || command.stdin?.expands === true;
     return before;
   });
 }

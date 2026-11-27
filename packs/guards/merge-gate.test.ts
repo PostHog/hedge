@@ -36,7 +36,7 @@ const target = (repository: string, pr: number) => expect.objectContaining({ rep
 
 describe("which calls enqueue or merge", () => {
   test("a pipeline of many literal stages is read without stalling the hook", () => {
-    expect(bash(Array(40_000).fill("true").join(" | "))).toEqual({ targets: [] });
+    expect(bash([...Array(40_000).fill("true"), "gh pr merge 7 --repo example/product"].join(" | "))).toEqual({ targets: [target("example/product", 7)] });
   });
 
   test("a query file with a long name and no call is read without stalling the hook", () => {
@@ -235,6 +235,9 @@ describe("which calls enqueue or merge", () => {
     ["gh api repos/example/product/issues/%37/comments -f body=\"$B\"", unreadPayloadReason],
     ["gh api repos/example/product/pulls/7/comments/1/replies/../../../../../issues/7/comments -f body=\"$B\"", unreadPayloadReason],
     ["gh api repos/example/product/commits/abc/comments -f body=\"$B\"", unreadPayloadReason],
+    ["gh api -X PATCH repos/example/product/pulls/7 --input \"$F\"", unreadPayloadReason],
+    ["gh api graphql -f query='{ viewer { login } }' -f \"$KEY=x{ a }\"", graphqlReason],
+    ["gh api graphql -f Query='{ viewer { login } }' -f b=\"$B\"", graphqlReason],
     ["gh api repos/example/product/pulls/7/comments/1/replies$S -f body=\"$B\"", unreadPayloadReason],
     ["printf x | xargs gh api repos/example/product/pulls/7/comments/1/replies -f body=", unreadPayloadReason],
     ["gh api graphql -f 'query=mutation($b: String!) { query addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
@@ -282,6 +285,7 @@ describe("which calls enqueue or merge", () => {
     ["echo \"gh pr comment 7 --repo example/product --body 'Ready for review.'\" | sh"],
     ["echo \"gh pr comment 7 --repo example/product --body 'Ready for review.'\" | sh -s \"$X\""],
     ["echo \"gh pr comment 7 --repo example/product --body 'Ready for review.'\" | tee \"$LOG\" | sh"],
+    ["echo \"gh pr comment 7 --repo example/product --body 'Costs \\$5'\" | tee -a \"$LOG\" | sh"],
     ["bash -c \"gh api graphql -H 'X-Trace: $TRACE' -f query='{ viewer { login } }'\""],
     ["bash -c \"gh api -X GET repos/example/product/pulls/7/merge -H 'Accept: $ACCEPT'\""],
     ["timeout 380 bash -c \"until [ \\\"\\$(gh api repos/example/product/commits/$SHA/check-runs --jq .total_count)\\\" -gt 0 ]; do sleep 30; done\""],
