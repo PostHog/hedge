@@ -188,12 +188,13 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
     return { code: 3, lines, covered: "", judge: verdict(lines, judgeGapProof(head.commit, { ...gap, acceptance: undefined, line })), reason: `judge gap: ${line}` };
   }
   const shapeFailure = outcome.lines.find((line) => line.startsWith("judge shape: fail"));
+  const editBody = shapeFailure ? ["judge shape: edit the PR body to fix it, then run the gate again"] : [];
   if (gap?.acceptance) {
     const lines = [...outcome.lines, `judge gap: ${gap.acceptance.line}: ${gap.reason}`];
     return { code: 0, lines, covered: `${outcome.state} accepted by ${gap.acceptance.by}`, judge: verdict(lines, judgeGapProof(head.commit, gap)) };
   }
   if (gap) {
-    const lines = [...outcome.lines, `judge gap: ${gap.line}: ${gap.reason}. ${gap.broken ? endBroken(gap.broken) : askGap(head, "judge", gap.reason, gap.kept ? "ask" : autonomyOf(context.env, () => checked.grade, "proof-gap", ["judge"]))}`];
+    const lines = [...outcome.lines, ...editBody, `judge gap: ${gap.line}: ${gap.reason}. ${gap.broken ? endBroken(gap.broken) : askGap(head, "judge", gap.reason, gap.kept ? "ask" : autonomyOf(context.env, () => checked.grade, "proof-gap", ["judge"]))}`];
     return { code: 3, lines, covered: "", judge: verdict(lines, judgeGapProof(head.commit, gap)), reason: `judge gap: ${gap.line}: ${gap.reason}` };
   }
   const hint = checked.tier === "ungraded"
@@ -202,7 +203,7 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
     ? "judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and ask the user; on ask an agent never decides on a one-way door"
     : `judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and decide it with hedge decision record --mark 🤖 --class proof-gap --kind judge --pr ${refText(head)} --question <q> --answer <a> --rejected <option> --reason <why>${decidesAll(env) ? "" : ", or ask the user"}`;
   const onlyShape = shapeFailure !== undefined && outcome.lines.filter((line) => /^judge [a-z]+: fail\b/.test(line)).length === 1;
-  const lines = [...outcome.lines, ...shapeFailure ? ["judge shape: edit the PR body to fix it, then run the gate again"] : [], ...onlyShape ? [] : [hint]];
+  const lines = [...outcome.lines, ...editBody, ...onlyShape ? [] : [hint]];
   return { code: 1, lines, covered: "", judge: verdict(lines), reason };
 }
 

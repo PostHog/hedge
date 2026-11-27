@@ -26,8 +26,11 @@
   read. A gate that fails only on it says to edit the body. An accepted
   judge gap waives the shape question as it waives the other questions.
 - The risk question leaves the body rules to the shape question.
-- A gate pass saved before this release is not reused, so each open PR
-  gets one gate run with the shape question.
+- The decision report and the receipt reuse no gate pass saved before
+  this release, so each open PR gets one gate run with the shape
+  question. The merge guard still takes a gate pass by commit.
+- A shape failure never counts as breaking an accepted gap's condition,
+  and a gate with a pending judge gap still says to edit the body.
 - The judge's risk question accepts a changed row with an incident, or an
   uncovered row, that the Known issues section names, so the callout can
   stay within its 6 bullets.

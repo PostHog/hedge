@@ -22,6 +22,8 @@ const releaseOnce = (go: string) => {
   return release;
 };
 
+const idOf = (output: string) => /\[(d-[0-9a-f]+)\]/.exec(output)![1]!;
+
 test("the user's accepted gap settles its kind even when the judge rejects that kind's evidence, and an unaccepted gap still yields to it", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "new\n");
@@ -736,7 +738,24 @@ test("the shape question needs no merge-risk skill", async () => {
   const unskilled = await pr.hedge("gate");
   expect([unskilled.code, unskilled.output.includes("judge shape: fail: no picture"), unskilled.output.includes("judge risk: not asked")]).toEqual([1, true, true]);
   expect(judge.prompts().at(-1)).toContain("4. shape: Does the PR body keep the shape of pr-description?");
+});
 
+test("an accepted judge gap waives a shape failure like any other, a pending one still says to edit the body, and a shape citation never breaks a gap's condition", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  const judge = fakeModel(pr, "JUDGE", verdict({ shape: { verdict: "fail", reason: "no picture", citations: [] } }));
+  pr.pullRequestState({ body: `A queue now retries.\n\n${graded("non-critical")}` });
+  await pr.hedge("gap", "--kind", "judge", "--reason", "The judge misreads the copy");
+  const pending = await pr.hedge("gate");
+  expect([pending.code, pending.output.includes("judge shape: edit the PR body to fix it")]).toEqual([3, true]);
+  pr.chooseGap("judge", "The judge misreads the copy");
+  const judgeId = idOf((await acceptGap(pr, "judge", "--condition", "feature.txt holds copy only")).output);
+  judge.answer(verdict({ shape: { verdict: "fail", reason: `a callout bullet names decision ${judgeId}`, citations: [judgeId] } }));
+  pr.pullRequestState({ body: `A queue now retries again.\n\n${graded("non-critical")}` });
+  const waived = await pr.hedge("gate");
+  expect([waived.code, waived.output.includes("judge shape: fail"), waived.output.includes("broken")]).toEqual([0, true, false]);
 });
 
 test("the judge reads the body the gate first read and saved its pass for, even when the body changes during the gate", async () => {

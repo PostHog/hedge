@@ -195,7 +195,6 @@ const shapeSection = (body: string, shown: boolean) => `
 ${shown ? "The body is the one shown above for the risk question." : untrusted("PR body", withoutReceipt(body))}
 `;
 
-
 function parseVerdict(text: string, asked: QuestionName[]): Verdict | undefined {
   try {
     const value = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)) as Verdict;
@@ -276,7 +275,7 @@ export async function judge(input: JudgeInput, deps: JudgeDeps): Promise<JudgeOu
 }
 
 function brokenConditions(verdict: Verdict, conditions: JudgeInput["conditions"] = []) {
-  const failed = answeredQuestions(verdict).map((name) => verdict[name]!).filter((question) => question.verdict === "fail");
+  const failed = answeredQuestions({ ...verdict, shape: undefined }).map((name) => verdict[name]!).filter((question) => question.verdict === "fail");
   const named = (id: string) => failed.some(({ reason, citations }) => [reason, ...citations].some((text) => text.includes(id)));
   return [...new Set(conditions.map(({ id }) => id))].filter(named);
 }
