@@ -486,45 +486,14 @@ test("the check passes while the proxy answers the saved key, and keeps Claude C
   expect(printed).toEqual([`Claude Code reaches your own-account proxy at ${proxyUrl}.`]);
 });
 
-const cutAnswer = (cuts = Infinity) => {
-  let answered = 0;
-  const whole = JSON.stringify({ data: [{ id: "claude-sonnet-5-5" }] });
-  const answer = (body: string, length: number) => `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${length}\r\nConnection: close\r\n\r\n${body}`;
-  const refused = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno";
-  const keyed = (request: Buffer) => request.toString().toLowerCase().includes(`authorization: bearer ${clientKey}`);
-  return Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data: (socket, request) => void socket.end(!keyed(request) ? refused : answered++ < cuts ? answer('{"data":[', 100) : answer(whole, whole.length)) } });
-};
-
-test("connect retries a model list cut mid-answer like a proxy that does not answer: it connects once a whole list comes, and changes nothing while every answer is cut", async () => {
-  for (const [cuts, connects] of [[1, true], [Infinity, false]] as const) {
-    const cut = cutAnswer(cuts);
-    try {
-      const { machine, home } = connecting({}, { cutsBody: `http://127.0.0.1:${cut.port}` });
-      const connected = cliProxy("connect", machine);
-      if (connects) await connected;
-      else await expect(connected).rejects.toThrow(`The proxy at ${proxyUrl} does not answer. Nothing changed.`);
-      expect(existsSync(keyFile(home))).toBe(connects);
-    } finally {
-      cut.stop(true);
-    }
-  }
-});
-
-test("the check cannot tell while the proxy does not answer or its connection drops mid-answer, and changes no file", async () => {
-  const cut = cutAnswer();
-  try {
-    for (const proxy of [{ down: true }, { cutsBody: `http://127.0.0.1:${cut.port}` }]) {
-      const { machine, home, printed } = client({}, proxy);
-      connected(home);
-      const before = readFileSync(settingsFile(home), "utf8");
-      expect(await cliProxy("check", machine)).toBe(3);
-      expect(readFileSync(settingsFile(home), "utf8")).toBe(before);
-      expect(printed).toEqual([`The proxy at ${proxyUrl} does not answer. hedge apply keeps the Claude Code settings as they are until it answers.`]);
-      expect(existsSync(keyFile(home))).toBe(true);
-    }
-  } finally {
-    cut.stop(true);
-  }
+test("the check cannot tell while the proxy does not answer, and changes no file", async () => {
+  const { machine, home, printed } = client({}, { down: true });
+  connected(home);
+  const before = readFileSync(settingsFile(home), "utf8");
+  expect(await cliProxy("check", machine)).toBe(3);
+  expect(readFileSync(settingsFile(home), "utf8")).toBe(before);
+  expect(printed).toEqual([`The proxy at ${proxyUrl} does not answer. hedge apply keeps the Claude Code settings as they are until it answers.`]);
+  expect(existsSync(keyFile(home))).toBe(true);
 });
 
 test("hedge apply while the proxy does not answer keeps the routes an earlier apply put in, and puts in none", async () => {

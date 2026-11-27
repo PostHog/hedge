@@ -296,20 +296,10 @@ async function listModels(fetch: Fetch, key: string): Promise<string[] | string>
   const response = await fetch(`${proxyUrl}/v1/models`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(5000) }).catch(() => undefined);
   if (!response) return silent;
   if (!response.ok) return `The proxy at ${proxyUrl} refuses this machine's key (HTTP ${response.status}).`;
-  const text = await response.text().catch(() => undefined);
-  if (text === undefined) return silent;
-  const body = parseJson(text) as { data?: unknown } | undefined;
+  const body = (await response.json().catch(() => undefined)) as { data?: unknown } | undefined;
   const ids = Array.isArray(body?.data) ? (body.data as Array<{ id?: unknown } | null>).map((model) => model?.id) : undefined;
   if (!ids?.every((id): id is string => typeof id === "string" && id.length > 0)) return `The proxy at ${proxyUrl} answers without a model list.`;
   return ids;
-}
-
-function parseJson(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined;
-  }
 }
 
 const servedModel = { claude: (id: string) => id.includes("claude"), codex: (id: string) => id.startsWith("gpt-") };

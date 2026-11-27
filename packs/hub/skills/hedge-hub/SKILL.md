@@ -173,7 +173,7 @@ the person's own subscriptions, never for someone else's.
   `hedge apply` leaves that
   agent's settings out and removes Hedge's own values, so the agent uses its
   own sign-in, and the next apply changes nothing. When the proxy does not
-  answer, or cuts its answer short, both checks exit 3 instead: `hedge apply`
+  answer at all, both checks exit 3 instead: `hedge apply`
   keeps a route that is still whole on disk as it is and adds none, so open
   sessions keep working once the proxy answers again. A Claude credential
   beside Hedge's proxy address leaves with it, unless a pack sets that same

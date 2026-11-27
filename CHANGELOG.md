@@ -5,11 +5,10 @@
 ### A proxy that does not answer no longer takes Claude Code and Codex off it
 
 - `hedge cli-proxy check` exits 3, cannot tell, when the hub's proxy does not
-  answer or drops the connection mid-answer, such as while the hub's tunnel to
-  a devbox reconnects. It still fails when the proxy refuses the key or serves
+  answer, such as while the hub's tunnel to a devbox reconnects. It still fails when the proxy refuses the key or serves
   no model.
 - When a check that Hedge's proxy route waits on cannot tell, `hedge apply`
-  keeps the route an earlier apply wrote as it is, and adds none. Other
+  keeps the route an earlier apply wrote while it is whole, and adds none. Other
   settings that wait on such a check leave as before.
   The hub's box handover says so when it meets this on a new box.
   Before, one silent answer during the hourly apply took the route out, so
