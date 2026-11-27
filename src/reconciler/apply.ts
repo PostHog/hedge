@@ -115,11 +115,11 @@ async function reconcile(plan: Plan, options: ApplyOptions): Promise<{ report: R
   const afterSteps = adapters.filter((adapter) => adapter.name === "config");
   const configure = async () => {
     const checks: Checked = [];
-    const gatesRoute = (check: Owned<PackCheck>) => plan.config.some((entry) => entry.pack === check.pack && entry.after === check.id && onRoute(entry));
     const runChecks = async (items: Plan["checks"]) => {
       for (const item of items) checks.push([item, await run(item.run)]);
-      report.findings.push(...checks.filter(([item, code]) => code !== 0 && items.includes(item)).map(([item, code]) => checkFinding(item, code, gatesRoute(item))));
     };
+    const findChecks = (items: Plan["checks"], holdsRoute = (_item: Owned<PackCheck>) => false) =>
+      report.findings.push(...checks.filter(([item, code]) => code !== 0 && items.includes(item)).map(([item, code]) => checkFinding(item, code, holdsRoute(item))));
     const gates = plan.checks.filter((check) => plan.config.some((entry) => entry.pack === check.pack && entry.after === check.id));
     await runChecks(gates);
     const gateCodes = (entry: Plan["config"][number]) => checks.filter(([item]) => item.pack === entry.pack && item.id === entry.after).map(([, code]) => code);
@@ -132,6 +132,7 @@ async function reconcile(plan: Plan, options: ApplyOptions): Promise<{ report: R
     const holds = (entry: Plan["config"][number]) => onRoute(entry) && unsure(entry.provider);
     const kept = plan.config.filter((entry) => !holds(entry) && (waiting.includes(entry) ? passing(entry) : gated.plan.config.includes(entry)));
     const routes = wholeRoutes(kept, plan.config.filter((entry) => !kept.includes(entry) && !holds(entry)));
+    findChecks(gates, (check) => plan.config.some((entry) => entry.pack === check.pack && entry.after === check.id && holds(entry)));
     const configured = { ...gated.plan, config: routes.config, dropped: [...gated.plan.dropped, ...plan.config.filter(holds).map((entry) => droppedConfig(entry, true)), ...waiting.filter((entry) => !passing(entry) && !holds(entry)).map((entry) => droppedConfig(entry)), ...routes.dropped] };
     for (const adapter of afterSteps) {
       const result = await adapter.apply(configured, context);
@@ -139,7 +140,9 @@ async function reconcile(plan: Plan, options: ApplyOptions): Promise<{ report: R
       report.findings.push(...result.findings);
       if (result.failed || result.blocked) report.ok = false;
     }
-    await runChecks(plan.checks.filter((check) => check.todo && !gates.includes(check)));
+    const todos = plan.checks.filter((check) => check.todo && !gates.includes(check));
+    await runChecks(todos);
+    findChecks(todos);
     return { report, checks };
   };
   for (const adapter of adapters.filter((each) => !afterSteps.includes(each))) {
@@ -354,9 +357,9 @@ export async function check(plan: Plan, options: { home: string; adapters?: Adap
   return report;
 }
 
-function checkFinding(item: Owned<PackCheck>, code: number, gatesRoute = false): Finding {
+function checkFinding(item: Owned<PackCheck>, code: number, holdsRoute = false): Finding {
   const id = `check:${item.id}`;
-  if (code === cannotTell && gatesRoute) return { id, pack: item.pack, say: cannotTellSay(item), repair: "apply" };
+  if (code === cannotTell && holdsRoute) return { id, pack: item.pack, say: cannotTellSay(item), repair: "apply" };
   return code === waitsForPerson && item.todo ? { id, pack: item.pack, say: item.todo, todo: true } : { id, pack: item.pack, say: item.say, repair: "apply" };
 }
 

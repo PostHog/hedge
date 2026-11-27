@@ -365,8 +365,9 @@ describe("a config entry that waits for a pack check", () => {
     await applyWith(home, 0, 0);
     await applyWith(home, 3, 3);
     expect(settings(home)).toEqual(routed);
-    await applyWith(home, 1, 3);
+    const refused = await applyWith(home, 1, 3);
     expect(settings(home)).toEqual({});
+    expect(refused.findings.some((finding) => finding.say.includes("keeps the proxy route"))).toBe(false);
   });
 
   test("a route whose parts wait on different checks leaves whole unless every one of them cannot tell, and a route part with no check never holds", async () => {
@@ -376,8 +377,9 @@ describe("a config entry that waits for a pack check", () => {
     for (const [helper, expected] of [[3, routed], [1, {}], [0, {}]] as const) {
       const home = temp.make("home-");
       await run(home, split, 0, 0);
-      await run(home, split, 3, helper);
+      const unsure = await run(home, split, 3, helper);
       expect(settings(home)).toEqual(expected);
+      expect(unsure.findings.some((finding) => finding.say.includes("keeps the proxy route"))).toBe(helper === 3);
     }
     const home = temp.make("home-");
     const { after: _after, ...helper } = config[1]!;

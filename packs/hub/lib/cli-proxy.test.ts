@@ -486,16 +486,25 @@ test("the check passes while the proxy answers the saved key, and keeps Claude C
   expect(printed).toEqual([`Claude Code reaches your own-account proxy at ${proxyUrl}.`]);
 });
 
-const cutAnswer = () => Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data: (socket) => void socket.end('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"data":[') } });
+const cutAnswer = (cuts = Infinity) => {
+  let answered = 0;
+  const whole = JSON.stringify({ data: [{ id: "claude-sonnet-5-5" }] });
+  const answer = (body: string, length: number) => `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${length}\r\nConnection: close\r\n\r\n${body}`;
+  return Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data: (socket) => void socket.end(answered++ < cuts ? answer('{"data":[', 100) : answer(whole, whole.length)) } });
+};
 
-test("connect retries a model list cut mid-answer like a proxy that does not answer, then changes nothing", async () => {
-  const cut = cutAnswer();
-  try {
-    const { machine, home } = connecting({}, { cutsBody: `http://127.0.0.1:${cut.port}` });
-    await expect(cliProxy("connect", machine)).rejects.toThrow(`The proxy at ${proxyUrl} does not answer. Nothing changed.`);
-    expect(existsSync(keyFile(home))).toBe(false);
-  } finally {
-    cut.stop(true);
+test("connect retries a model list cut mid-answer like a proxy that does not answer: it connects once a whole list comes, and changes nothing while every answer is cut", async () => {
+  for (const [cuts, connects] of [[1, true], [Infinity, false]] as const) {
+    const cut = cutAnswer(cuts);
+    try {
+      const { machine, home } = connecting({}, { cutsBody: `http://127.0.0.1:${cut.port}` });
+      const connected = cliProxy("connect", machine);
+      if (connects) await connected;
+      else await expect(connected).rejects.toThrow(`The proxy at ${proxyUrl} does not answer. Nothing changed.`);
+      expect(existsSync(keyFile(home))).toBe(connects);
+    } finally {
+      cut.stop(true);
+    }
   }
 });
 
