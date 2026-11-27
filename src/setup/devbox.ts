@@ -215,7 +215,7 @@ async function coderOnBox(host: string, box: Machine, context: DevboxContext) {
   if (![0, otherSignIn, savedElsewhere].includes(state.code)) throw new Error(`Hedge could not read the Coder sign-in on ${host}: ${state.output.trim()}`);
   if (state.code !== otherSignIn && sameCoderUser(session, await coderSession(box))) return configSsh(host, box);
   if (state.code !== 0) return await leaveSignIn(host, box, session.address, state.stdout.split("\n").filter(Boolean), context), `  · Coder on ${host} is signed in another way, so Hedge leaves that sign-in alone and lists the sign-in to ${session.address} at the end.`;
-  await signInBox(host, box, context, session);
+  await signInBox(host, box, context, session.address);
 }
 
 async function configSsh(host: string, box: Machine) {
@@ -234,14 +234,12 @@ const savedElsewhere = 88;
 
 const signInState = (address: string) => `d=${coderConfig} a=${quote(address)} o=; for f in "$d/url" "$d/session"; do if [ -L "$f" ] || { [ -e "$f" ] && [ ! -f "$f" ]; }; then printf '%s\\n' "$f"; o=1; fi; done; [ -z "$CODER_URL" ] || { echo CODER_URL; o=1; }; [ -z "$CODER_SESSION_TOKEN" ] || { echo CODER_SESSION_TOKEN; o=1; }; [ -z "$o" ] || exit ${otherSignIn}; { [ ! -e "$d/url" ] && [ ! -e "$d/session" ]; } || [ "$(cat "$d/url" 2>/dev/null)" = "$a" ] || exit ${savedElsewhere};`;
 
-async function signInBox(host: string, box: Machine, context: DevboxContext, session: CoderSession) {
-  const { address } = session;
+async function signInBox(host: string, box: Machine, context: DevboxContext, address: string) {
   const here = context.machine;
   if (!(await reachesOverHttps(box, address))) throw new Error(`${host} does not reach Coder at ${address} over HTTPS, so Hedge makes no Coder token for it and sends none. Sign ${host} in to Coder yourself: install the Coder CLI there from your Coder deployment, run coder login there with an HTTPS address it reaches, and paste a token from ${address}/cli-auth. Then run hedge devbox add ${host} again.`);
   const placed = await stableCoder(box, address);
   if (placed.code === cliInTheWay) throw new Error(stableCoderMissing(host, placed));
   if (placed.code !== 0) throw new Error(`Hedge could not install the Coder CLI on ${host} from ${address}: ${placed.output.trim()}`);
-  if ((await box.exec(["sh", "-c", `${signInState(address)} :`])).code === 0 && sameCoderUser(session, await coderSession(box))) return configSsh(host, box);
   const name = `hedge-${Date.now().toString(36)}`;
   const token = await here.exec(["coder", "tokens", "create", "--name", name]);
   if (token.code !== 0 || !token.output.trim()) throw new Error(`Coder made no token for ${host}: ${token.output.trim()}`);
@@ -260,7 +258,7 @@ const versionLimitSeconds = 60;
 
 const stableCoderScript = (address?: string) => {
   const kept = `b="$HOME/.local/bin"; runs() { timeout -s KILL ${versionLimitSeconds} "$1" version >/dev/null 2>&1; }; kept() { if [ -e "$b/coder" ] || [ -L "$b/coder" ]; then [ -f "$b/coder" ] && [ -x "$b/coder" ] && [ -s "$b/coder" ] && runs "$b/coder" && exit 0; exit ${cliInTheWay}; fi; }; kept`;
-  const published = `{ ln "$p" "$b/coder" 2>/dev/null; rm -f "$p" "$b/coder/\${p##*/}" 2>/dev/null; kept; echo "Hedge could not write ${stableCoderPath}" >&2; exit 1; }`;
+  const published = `{ ln -T "$p" "$b/coder" 2>/dev/null; rm -f "$p"; kept; echo "Hedge could not write ${stableCoderPath}" >&2; exit 1; }`;
   const copied = `mkdir -p "$b" && p=$(mktemp "$b/.coder.XXXXXX") || exit 1; c=$(command -v coder) && cp "$c" "$p" && [ -s "$p" ] && chmod +x "$p" && runs "$p" && ${published}`;
   const downloaded = address === undefined
     ? `rm -f "$p"; echo "no Coder CLI on its PATH copied and ran" >&2; exit 1`

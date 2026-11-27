@@ -613,7 +613,7 @@ const loginStart = (login: CoderFails["login"], logs: CoderLogs) => {
 
 const asCopy = (then: string) => `case $0 in "$HOME"/.local/bin/.coder.*) [ -e "$HOME/.local/bin/coder" ] || { ${then}; } ;; esac`;
 const personInstallsCoder = asCopy(`printf %s ${quote(ownCoder)} > "$HOME/.local/bin/coder"; chmod +x "$HOME/.local/bin/coder"`);
-const personMakesFolder = asCopy('mkdir "$HOME/.local/bin/coder"');
+const personMakesFolder = asCopy('mkdir "$HOME/.local/bin/coder" && printf kept > "$HOME/.local/bin/coder/${0##*/}"');
 
 const stallsAsCopy = (stuck: string) => `case $0 in "$HOME"/.local/bin/.coder.*) echo $$ >> '${stuck}'; exec ${hangs} ;; esac`;
 
