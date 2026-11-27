@@ -507,6 +507,49 @@ test("while the proxy does not answer, the check fails as on the base without th
   }
 });
 
+test("through the real HTTP client, a proxy that closes before it answers or a port where nothing listens passes the check only with Hedge's whole Claude route", async () => {
+  let asked = "";
+  const closing = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data: (socket, chunk) => { asked += chunk.toString(); socket.end(); } } });
+  const gone = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data: () => {} } });
+  const nobody = gone.port;
+  gone.stop(true);
+  try {
+    for (const port of [closing.port, nobody]) {
+      const fetch = (url: string | URL | Request, init?: RequestInit) => globalThis.fetch(String(url).replace(proxyUrl, `http://127.0.0.1:${port}`), init);
+      const routed = client({ fetch });
+      connected(routed.home);
+      expect(await cliProxy("check", routed.machine)).toBe(0);
+      expect(routed.printed).toEqual([`The proxy at ${proxyUrl} does not answer. Claude Code has Hedge's whole proxy route, so the check passes and hedge apply keeps it on the proxy until it answers.`]);
+      const fresh = client({ fetch });
+      connected(fresh.home);
+      rmSync(settingsFile(fresh.home));
+      expect(await cliProxy("check", fresh.machine)).toBe(1);
+      expect(fresh.printed).toEqual([`The proxy at ${proxyUrl} does not answer. hedge apply keeps Claude Code on its own sign-in until the proxy serves it.`]);
+    }
+    expect(asked.split(" ").slice(0, 2)).toEqual(["GET", "/v1/models"]);
+  } finally {
+    closing.stop(true);
+  }
+});
+
+test("on a hub that is not safe to use, the check fails while the proxy does not answer, even with Hedge's whole route on disk", async () => {
+  const { machine, home } = hubMachine();
+  await cliProxy("install", machine);
+  mkdirSync(join(home, ".claude"), { recursive: true });
+  writeFileSync(settingsFile(home), JSON.stringify({ env: { ANTHROPIC_BASE_URL: proxyUrl }, apiKeyHelper: keyHelper }));
+  codexRouted(home);
+  expect(await cliProxy("check", hubMachine({ home }, { down: true }).machine)).toBe(0);
+  expect(await cliProxy("check", hubMachine({ home }, { down: true }).machine, "codex")).toBe(0);
+  mkdirSync(join(dataDir(home), "plugins"), { recursive: true });
+  writeFileSync(join(dataDir(home), "plugins/other.so"), "x");
+  for (const agent of ["claude", "codex"] as const) {
+    const unsafe = hubMachine({ home }, { down: true });
+    expect(await cliProxy("check", unsafe.machine, agent)).toBe(1);
+    expect(unsafe.printed.join("\n")).toContain("Remove the plugins Hedge did not install");
+    expect(unsafe.printed.join("\n")).not.toContain("whole proxy route");
+  }
+});
+
 test("the check still fails, as on the base, when the proxy answers 200 and cuts the model list short", async () => {
   const headers = (request: Buffer) => request.toString().split("\r\n\r\n")[0]!.split("\r\n").slice(1).map((line) => line.split(": ")).map(([name, value]) => [name!.toLowerCase(), value]);
   const keyed = (request: Buffer) => headers(request).some(([name, value]) => name === "authorization" && value === `Bearer ${clientKey}`);
@@ -524,7 +567,7 @@ test("the check still fails, as on the base, when the proxy answers 200 and cuts
     connected(home);
     expect(await cliProxy("check", machine)).toBe(1);
     expect(printed).toEqual([`The proxy at ${proxyUrl} answers without a model list. hedge apply keeps Claude Code on its own sign-in until the proxy serves it.`]);
-    expect(received.split("\r\n")[0]).toBe("GET /v1/models HTTP/1.1");
+    expect(received.split(" ").slice(0, 2)).toEqual(["GET", "/v1/models"]);
     expect(received.toLowerCase()).toContain(`authorization: bearer ${clientKey}`);
   } finally {
     server.stop(true);
