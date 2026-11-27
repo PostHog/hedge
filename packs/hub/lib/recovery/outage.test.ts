@@ -118,8 +118,10 @@ test("resumes a thread that lost its connection to the proxy once the proxy answ
     { lastErrorClass: "provider_error", lastErrorCode: "api_error", lastError: "API Error: Request timed out." },
     { lastErrorClass: "provider_error", lastErrorCode: "api_error", lastError: "API Error: Unable to connect to API (ECONNREFUSED)" },
     { lastErrorClass: "transport_error", lastErrorCode: "claude_request_unanswered", lastError: "Claude sent nothing for 5 minutes. The API or a gateway in front of it is not responding." },
-    { ...codex, lastErrorClass: "transport_error", lastErrorCode: "responseStreamDisconnected", lastError: "stream disconnected before completion: error sending request for url (http://127.0.0.1:8317/v1/responses)" },
-    { ...codex, lastErrorClass: "transport_error", lastErrorCode: "httpConnectionFailed", lastError: "error sending request for url (http://127.0.0.1:8317/v1/responses): Connection refused (os error 111)" },
+    { ...codex, lastErrorClass: "transport_error", lastErrorCode: "responseStreamDisconnected", lastError: "The response ended early." },
+    { ...codex, lastErrorClass: "transport_error", lastErrorCode: "responseStreamConnectionFailed", lastError: "The response ended early." },
+    { ...codex, lastErrorClass: "transport_error", lastErrorCode: "httpConnectionFailed", lastError: "The response ended early." },
+    { ...codex, lastErrorClass: "transport_error", lastErrorCode: "other", lastError: "error sending request for url (http://127.0.0.1:8317/v1/responses): Connection refused (os error 111)" },
   ];
   const box = await machine(stops.map((stop, index) => outageThread(`c${index}`, stop)), {});
   for (const time of ["20:00", "20:10", "20:30"]) await box.run(at(time));
@@ -127,11 +129,11 @@ test("resumes a thread that lost its connection to the proxy once the proxy answ
   expect(box.lines).toContain("Thread c0 (c0): waits for claude, which is unknown.");
   expect(box.lines).toContain("Thread c4 (c4): waits for codex, which is unknown.");
   await box.run(at("20:40"), fakeProxy({ "claude-test-1": 200, "gpt-test-1": 200 }));
-  expect(box.inbox.delivered().map((message) => message.threadId)).toEqual(["c0", "c1", "c2", "c3", "c4", "c5"]);
+  expect(box.inbox.delivered().map((message) => message.threadId)).toEqual(["c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7"]);
   expect(box.lines).toContain("Thread c4 (c4): retried after a provider error, try 1 of 4.");
 });
 
-test("never retries a connection-shaped stop that is a usage limit or a refusal", async () => {
+test("never retries a connection-shaped stop that is a usage limit or a refusal, and still retries a 5xx whose text names a 4xx", async () => {
   const box = await machine([
     outageThread("login", { lastErrorClass: "provider_error", lastErrorCode: null, lastError: "not logged in: run /login to add an API key" }),
     outageThread("auth", { lastErrorClass: "transport_error", lastErrorCode: "authentication_failed", lastError: "Claude API authentication failed." }),
@@ -140,10 +142,14 @@ test("never retries a connection-shaped stop that is a usage limit or a refusal"
     outageThread("quota", { ...codex, lastErrorClass: "usage_limit", lastErrorCode: "responseStreamDisconnected", lastError: "exceeded retry limit, last status: 429 Too Many Requests" }),
     outageThread("plain", { lastErrorClass: "transport_error", lastErrorCode: null, lastError: "Provider turn failed." }),
     outageThread("tool", { lastErrorClass: "provider_error", lastErrorCode: null, lastError: "The tool call failed: Connection error." }),
+    outageThread("gateway", { lastErrorClass: "provider_error", lastErrorCode: "api_error_503", lastError: "Service unavailable: upstream answered 403 Forbidden" }),
   ], { "claude-test-1": 200, "gpt-test-1": 200 });
   await box.run(at("20:00"));
-  expect(box.lines.filter((line) => line.includes("retried after a provider error"))).toEqual([]);
-  expect(box.inbox.delivered()).toEqual([{ threadId: "quota", text: "Continue where you left off.", continuesRunId: "run-quota" }]);
+  expect(box.lines.filter((line) => line.includes("retried after a provider error"))).toEqual(["Thread gateway (gateway): retried after a provider error, try 1 of 4."]);
+  expect(box.inbox.delivered()).toEqual([
+    { threadId: "quota", text: "Continue where you left off.", continuesRunId: "run-quota" },
+    { threadId: "gateway", text: "Continue where you left off." },
+  ]);
 });
 
 test("forgets the tries of a thread that recovered, so its next outage gets four again", async () => {

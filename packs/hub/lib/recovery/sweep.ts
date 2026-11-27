@@ -101,9 +101,9 @@ export function stoppedOnLimit(thread: StoppedThread, now: number, byId?: Map<st
 
 export function stoppedByOutage(thread: StoppedThread, now: number, byId?: Map<string, StoppedThread>): boolean {
   if (!stoppedByError(thread, now, byId) || (thread.lastErrorClass !== "provider_error" && thread.lastErrorClass !== "transport_error")) return false;
+  if (usageLimited(thread)) return false;
   const text = errorText(thread);
-  if (usageLimited(thread) || refusal.test(text)) return false;
-  return outageError.test(text) || lostConnection(thread);
+  return outageError.test(text) || (lostConnection(thread) && !refusal.test(text));
 }
 
 function lostConnection(thread: StoppedThread): boolean {
