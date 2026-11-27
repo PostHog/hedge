@@ -6,7 +6,7 @@ import { fullHeldAtAuto, type T3Reader } from "../../pull-requests/lib/mode.ts";
 import { beforeDeadline, exemptList, mergeGateRisk, mergeIntent, realGateIO, realIntentIO, unreadBody, unreadBodyNote, type GateIO, type IntentIO, type ToolCall } from "../lib/merge-gate.ts";
 
 export type Denial = { hookSpecificOutput: { hookEventName: "PreToolUse"; permissionDecision: "deny"; permissionDecisionReason: string } };
-export type Where = { home: string; env: Env; gate?: GateIO; github?: Pick<GateIO, "pull" | "pullFor">; intent?: IntentIO; deadline?: Promise<void>; reader?: T3Reader };
+export type Where = { home: string; env: Env; gate?: GateIO; github?: Pick<GateIO, "pull" | "pullFor">; now?: () => number; intent?: IntentIO; deadline?: Promise<void>; reader?: T3Reader };
 
 const fallbackPerson = "the person who runs this machine";
 const deny = (reason: string): Denial => ({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } });
@@ -40,7 +40,7 @@ export async function mergeGate(call: ToolCall, where: Where): Promise<Denial | 
   const explained = (reason: string) => deny(unreadBody(intent) ? `${unreadBodyNote} ${reason}` : reason);
   if (!settings) return explained(`Hedge blocked this merge: the merge gate could not read its settings (${problem}), so it cannot tell which repositories skip the gate. Fix that file.`);
   const env = { ...where.env, HEDGE_SETTINGS: where.env.HEDGE_SETTINGS ?? settings.text };
-  const io = where.gate ?? { ...realGateIO(where.home, env, settings.applied ? settings.text : fullHeldAtAuto(env.HEDGE_SETTINGS), settings.applied ? where.env.HEDGE_SETTINGS : undefined, where.reader), ...where.github };
+  const io = where.gate ?? { ...realGateIO(where.home, env, settings.applied ? settings.text : fullHeldAtAuto(env.HEDGE_SETTINGS), settings.applied ? where.env.HEDGE_SETTINGS : undefined, where.reader), ...where.github, ...where.now ? { now: where.now } : {} };
   const refusal = await beforeDeadline(() => mergeGateRisk(intent, io, settings.person), where.deadline);
   return refusal ? explained(refusal) : undefined;
 }

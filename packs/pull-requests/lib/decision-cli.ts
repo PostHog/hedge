@@ -5,7 +5,7 @@ import { readPullRequest, runIn } from "./pr-ci.ts";
 import { gapKind, refuseInstructionQuote, usedAnswer } from "./proof.ts";
 import { decidesAll } from "./proof-autonomy.ts";
 import {
-  agentRefusal, answerUse, sameThread, askClasses, gateOverride, mergeCardChoice, mergeCardCondition, namesHead, overrideChoice, brakeDays, brakeOf, covers, decisionLine, fold, hubLedger, HubUnreachable, isUsers, liftCounted, live, messageKey, namesKind, namesPr, panelRefusal, prRef, refText, thisMachine, tierOf,
+  agentRefusal, answerUse, sameThread, askClasses, gateOverride, mergeCardChoice, mergeCardCondition, namesHead, overrideChoice, brakeDays, brakeOf, covers, decisionLine, fold, hubLedger, HubUnreachable, isUsers, liftCounted, live, messageKey, namesKind, namesPr, panelRefusal, prRef, refText, asksStandingOrder, isStandingOrderEntry, picksStandingOrder, standingOrder, standingOrderQuestionCap, standingOrderChoice, standingOrderDate, standingOrderEnd, standingOrderQuestion, standingOrderRuns, thisMachine, tierOf,
   type AnswerUse, type AskClass, type Decision, type DecisionState, type Env, type Ledger, type LedgerEvent, type Lift, type PrRef, type Reversal, type Ssh, type UsersMark,
 } from "./decision-ledger.ts";
 
@@ -43,7 +43,13 @@ records it. With --class merge and --condition '<full head sha>: merge card', th
 on a merge card whose question names the PR and that head lifts the hold on each gap an agent accepted whose
 decision the question names as the hook's refusal does, its id with every proof kind it accepts, such as
 d-1a2b3c4d for live-run/prod-shape; any other choice is refused. It lifts the hold only in the T3 thread that asked it, so
-record it there, and merge or enqueue from there in the same turn. Each option other than --pr and --kind is taken once.
+record it there, and merge or enqueue from there in the same turn. With --class merge --kind standing-order and the map's issue as the one --pr,
+the user's 👤 choice of "${standingOrderChoice}" on the question "${standingOrderQuestion("<map owner/repo#n>", "<YYYY-MM-DD>")}",
+with "its milestone" in place of the date when they named none, is their standing order: their merge word for every PR merged or enqueued from that T3 thread, a head with gaps an agent accepted
+included. A typed message is not one: when they type such an order, ask them on a card. With a date, --condition
+'until <YYYY-MM-DD>' passes it, and the order lapses after that day in UTC. It never stands in for a hedge proof gate pass. End it with void when
+the map reaches its milestone, and with reverse when they withdraw it.
+Each option other than --pr and --kind is taken once.
 record with 🤖 records the agent's own decision with the option it rejected. Hedge reads each PR's Tier line in its
 merge-risk callout at HEAD: it refuses an ungraded PR, and on a critical PR anything but process (review and status
 asks, judge and post-deploy-watch gaps). In mode supervised it never takes a panel gap: ${panelRefusal}. In mode auto or
@@ -139,7 +145,8 @@ const scopeOf = ({ prs, kinds, condition }: Scope): Decision["scope"] => ({ prs:
 function checkScope({ class: decisionClass, prs, kinds }: Scope) {
   if (!prs.length) throw new Error("--pr is required. Run hedge decision --help");
   if (decisionClass === "merge" && kinds?.length) {
-    if (kinds.some((kind) => kind !== gateOverride)) throw new Error(`A merge decision takes only --kind ${gateOverride}`);
+    const named = [...new Set(kinds)];
+    if (named.length > 1 || ![gateOverride, standingOrder].includes(named[0]!)) throw new Error(`A merge decision takes only --kind ${gateOverride} or --kind ${standingOrder}`);
     return;
   }
   if (decisionClass === "proof-gap" && !kinds?.length) throw new Error("A proof-gap decision needs --kind with each gap kind it decides");
@@ -194,6 +201,32 @@ function checkOverride({ class: decisionClass, prs, kinds, condition }: Scope, m
   if (prs.length !== 1) throw new Error("A gate override covers one PR at one head: pass one --pr");
   if (!condition || !overrideCondition.test(condition)) throw new Error("A gate override needs --condition '<full 40-character head sha>: <the incident and why it cannot wait for the gate>'");
 }
+
+const isStandingOrder = ({ class: decisionClass, kinds }: Scope) => decisionClass === "merge" && kinds?.includes(standingOrder) === true;
+
+function checkStandingOrder(scope: Scope, mark: string, words: string | undefined, now: Date) {
+  if (!isStandingOrder(scope)) return;
+  if (words !== undefined) throw new Error("A standing order is a card answer: name it with --message <id>, or pass neither to take the user's latest answer that names the map and standing-order");
+  if (mark !== "👤") throw new Error("A standing order is the user's own choice on a question card: record it with --mark 👤. An agent never gives one");
+  if (scope.prs.length !== 1) throw new Error("A standing order covers one map: pass its issue once with --pr <owner/repo#n>");
+  const end = standingOrderEnd(scope.condition);
+  if (Number.isNaN(end)) throw new Error("A standing order takes --condition 'until <YYYY-MM-DD>' with a real date, and only when its question names that end date");
+  if (end <= now.getTime()) throw new Error(`The standing order would end ${scope.condition}, which has passed`);
+}
+
+function fitsStandingOrder(scope: Scope): ((heard: HeardAnswer) => void) | undefined {
+  if (!isStandingOrder(scope)) return undefined;
+  const map = refText(scope.prs[0]!);
+  const until = standingOrderDate(scope.condition);
+  return (heard) => {
+    if (!picksStandingOrder(heard.words)) throw new Error(`The user chose "${heard.words}", not "${standingOrderChoice}". No standing order is recorded`);
+    if (!asksStandingOrder(heard.answered, map, until)) throw new Error(`A standing order's question is exactly "${standingOrderQuestion(map, until)}", the map optionally as a Markdown link to its GitHub issue, in at most ${standingOrderQuestionCap} characters, and the user answered another. Ask them again with that question, and put no terms in the option's description: Hedge cannot read it. The question: ${heard.answered}`);
+  };
+}
+
+const standingOrderNote = (decision: Decision) => `This standing order is the user's merge word for every PR merged or enqueued from T3 thread ${decision.where.thread}, a head with gaps an agent accepted included, `
+  + `while it lives${decision.scope.condition ? ` and ${decision.scope.condition} (UTC)` : ""}. The merge gate still needs a hedge proof gate pass at each head. `
+  + `When the map reaches its milestone, end it with \`hedge decision void ${decision.id} --reason '<the milestone reached>'\`; when the user withdraws it, record their words with \`hedge decision reverse ${decision.id} --words '<date> "<their words>"' --thread ${decision.where.thread}\`.`;
 
 const quotes = (text: string) => [...text.matchAll(/["“]([^"”]*)["”]/g)].map((match) => normalized(match[1]!)).filter(Boolean);
 const isDatedQuote = (text: string) => /\b\d{4}-\d{2}-\d{2}\b/.test(text) && quotes(text).length > 0;
@@ -350,18 +383,20 @@ async function record(parsed: Parsed, context: DecisionContext, ledger: Ledger) 
   if (keepOwed && scope.class !== "proof-gap") throw new Error("--kind and --keep-owed belong to --class proof-gap");
   checkOverride(scope, mark);
   checkMergeCard(scope, mark);
+  checkStandingOrder(scope, mark, parsed.options.get("--words"), context.now?.() ?? new Date());
   let decision: Decision;
   if (mark === "🤖") {
     if (parsed.options.has("--words") || parsed.options.has("--message") || keepOwed) throw new Error("--words, --message and --keep-owed are the user's: an agent decision takes --question, --answer, --rejected and --reason");
     decision = await decideAlone({ ...scope, question: required(parsed, "--question"), answer: required(parsed, "--answer"), rejected: required(parsed, "--rejected"), reason: required(parsed, "--reason"), thread: parsed.options.get("--thread"), link: parsed.options.get("--link") }, context, ledger);
   } else if (mark === "👤" || mark === "👍") {
     for (const option of ["--question", "--answer", "--rejected", "--reason", "--link"]) if (parsed.options.has(option)) throw new Error(`${option} belongs to the agent's own decision. The user's decision takes its question and answer from T3`);
-    decision = await hearUser({ ...scope, mark, keepOwed, thread: parsed.options.get("--thread"), words: parsed.options.get("--words"), message: parsed.options.get("--message"), fits: fitsOverride(scope) ?? fitsMergeCard(scope) }, context, ledger);
+    decision = await hearUser({ ...scope, mark, keepOwed, thread: parsed.options.get("--thread"), words: parsed.options.get("--words"), message: parsed.options.get("--message"), fits: fitsOverride(scope) ?? fitsMergeCard(scope) ?? fitsStandingOrder(scope) }, context, ledger);
   } else throw new Error("--mark takes 👤 (the user's own answer), 👍 (they accepted the recommended default) or 🤖 (the agent's own decision)");
   await appendDecision(ledger, decision);
   context.print(decisionLine(decision));
   const head = mergeCardHead(scope);
   if (head) context.print(enqueueFrom(head, scope.prs, decision.where.thread, context.env.T3CODE_THREAD_ID));
+  if (isStandingOrder(scope)) context.print(standingOrderNote(decision));
   return 0;
 }
 
@@ -494,7 +529,7 @@ async function list(parsed: Parsed, context: DecisionContext, ledger: Ledger) {
   const ref = parsed.options.has("--pr") ? prRef(parsed.options.get("--pr")!) : undefined;
   const decisionClass = parsed.options.has("--class") ? askClass(parsed.options.get("--class")!) : undefined;
   const shown = fold(await reachHub(() => ledger.read())).filter((decision) =>
-    (!ref || covers(decision, ref)) && (!decisionClass || decision.class === decisionClass) && (!parsed.flags.has("--live") || live(decision)));
+    (!ref || covers(decision, ref)) && (!decisionClass || decision.class === decisionClass) && (!parsed.flags.has("--live") || (live(decision) && (decision.scope.kinds?.includes(standingOrder) !== true || (isStandingOrderEntry(decision) && standingOrderRuns(decision, (context.now?.() ?? new Date()).getTime()))))));
   if (!shown.length) context.print("No decisions.");
   for (const decision of shown) context.print(decisionLine(decision));
   return 0;

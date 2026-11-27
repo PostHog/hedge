@@ -580,6 +580,129 @@ function homeIn(settings?: unknown) {
   return home;
 }
 
+describe("a standing order of the person's", () => {
+  const conductor = "thread:project:map:conductor-1";
+  const words = "Go full autonomous mode again here until we reach the next goal milestone.";
+  const gap: LedgerEvent = {
+    type: "decide", decision: {
+      id: "d-agent", at: "2026-11-27T08:00:00Z", class: "proof-gap", mark: "🤖", question: "Accept the live-run gap? example/product#9: only a run from main proves it", answer: "Accept the gap", rejected: "Keep the gap open", reason: "x",
+      scope: { prs: ["example/product#9"], kinds: ["live-run"] }, effect: "accept", where: { thread: "lane", machine: "hub" },
+    },
+  };
+  const order = (condition?: string, thread = conductor): LedgerEvent => ({
+    type: "decide", decision: {
+      id: "d-order", at: "2026-11-27T07:00:00Z", class: "merge", mark: "👤", question: `Standing order (standing-order) for example/maps#7 until ${/^until (\S+)$/.exec(condition ?? "")?.[1] ?? "its milestone"}: may this T3 thread merge every PR it merges on your word, gaps an agent accepted included?`, answer: '2026-11-27 "Merge on your own"',
+      scope: { prs: ["example/maps#7"], kinds: ["standing-order"], ...condition ? { condition } : {} }, where: { thread, message: "m-order", machine: "hub" },
+    },
+  });
+  const pass = gatePass(9, head);
+  const github: Pick<GateIO, "pull" | "pullFor"> = { pull: async () => pulls[9], pullFor: async () => undefined };
+  const mergeFrom = async (thread: string | undefined, ledger: LedgerEvent[], clock: { now?: () => number; github?: typeof github; command?: string } = {}) => {
+    const home = homeIn({ "guards.person": "Robin" });
+    writeFileSync(join(home, ".local/state/hedge/decisions.jsonl"), ledger.map((event) => JSON.stringify(event)).join("\n") + "\n");
+    const env = thread === undefined ? {} : { T3CODE_THREAD_ID: thread };
+    const command = clock.command ?? "gh pr merge 9 --repo example/product";
+    return (await mergeGate({ tool_name: "Bash", tool_input: { command }, cwd: "/" }, { home, env, github: clock.github ?? github, now: clock.now, intent: io }))?.hookSpecificOutput.permissionDecisionReason;
+  };
+
+  test("covers a PR whose gaps an agent accepted, when the conductor merges it from the thread the person chose it in", async () => {
+    expect(await mergeFrom(conductor, [gap, pass, order()])).toBeUndefined();
+    expect(await mergeFrom("conductor-1", [gap, pass, order("until 2099-12-31")])).toBeUndefined();
+  });
+
+  test("without one, the PR stays held for the merge card", async () => {
+    const refusal = await mergeFrom(conductor, [gap, pass]);
+    expect(refusal).toContain("an agent accepted proof gaps of example/product#9");
+    expect(refusal).toContain("or under a standing order they chose on a question card in this T3 thread");
+    expect(refusal).not.toContain("The standing order d-order");
+  });
+
+  test("a merge from another thread, another map's conductor or a lane, or from outside T3, stays held, says whose thread it covers, and never copies the person's words", async () => {
+    for (const thread of ["thread:project:map:conductor-2", "lane", undefined]) {
+      const refusal = await mergeFrom(thread, [gap, pass, order()]);
+      expect(refusal).toContain("an agent accepted proof gaps of example/product#9");
+      expect(refusal).toContain(`The standing order d-order of 2026-11-27 covers only merges from T3 thread ${conductor}`);
+      expect(refusal).not.toContain(words);
+    }
+    expect(await mergeFrom(undefined, [gap, pass, order()])).toContain("this merge runs outside a T3 thread");
+    const lapsedElsewhere = await mergeFrom("lane", [gap, pass, order("until 2020-01-01")]);
+    expect(lapsedElsewhere).toContain("an agent accepted proof gaps");
+    expect(lapsedElsewhere).not.toContain("The standing order d-order");
+  });
+
+  test("an order that ended stays held and says when: past its date, at the milestone, or withdrawn", async () => {
+    expect(await mergeFrom(conductor, [gap, pass, order("until 2020-01-01")])).toContain("The standing order d-order of 2026-11-27 ran until 2020-01-01 and has ended.");
+    expect(await mergeFrom(conductor, [gap, pass, order("until 2099-02-30")])).toContain("names no end date Hedge can read (until 2099-02-30)");
+    expect(await mergeFrom(conductor, [gap, pass, order("whenever")])).toContain("names no end date Hedge can read (whenever)");
+    const milestone: LedgerEvent = { type: "void", id: "d-order", reason: "milestone reached", at: "2026-11-28T09:00:00Z" };
+    expect(await mergeFrom(conductor, [gap, pass, order(), milestone])).toContain("ended on 2026-11-28: milestone reached.");
+    const withdrawn: LedgerEvent = { type: "reverse", id: "d-order", words: '2026-11-28 "Stop merging on your own."', thread: conductor, message: "m-stop", machine: "hub", at: "2026-11-28T10:00:00Z" };
+    expect(await mergeFrom(conductor, [gap, pass, order(), withdrawn])).toContain("was withdrawn on 2026-11-28.");
+  });
+
+  test("an agent's own order counts for nothing, and an order never stands in for a missing gate pass", async () => {
+    const agents = order();
+    if (agents.type === "decide") agents.decision.mark = "🤖";
+    expect(await mergeFrom(conductor, [gap, pass, agents])).toContain("an agent accepted proof gaps");
+    const refusal = await mergeFrom(conductor, [gap, order()]);
+    expect(refusal).toContain("has not passed at the head of example/product#9");
+    expect(refusal).toContain("Robin's standing order d-order of 2026-11-27");
+    expect(refusal).toContain("never for a missing gate pass");
+  });
+
+  test("an order runs through the last day it names, in UTC, and the clock is read once every PR of the call is read", async () => {
+    const at = (time: string) => Date.parse(time);
+    const ledger = [gap, pass, order("until 2026-12-10")];
+    expect(await mergeFrom(conductor, ledger, { now: () => at("2026-12-10T23:59:59Z") })).toBeUndefined();
+    expect(await mergeFrom(conductor, ledger, { now: () => at("2026-12-11T00:00:00Z") })).toContain("ran until 2026-12-10 and has ended.");
+    let time = at("2026-12-10T23:59:59Z");
+    const lateGithub = { pull: async (_repository: string, pr: number) => { if (pr === 6) time = at("2026-12-11T00:00:01Z"); return pulls[pr]; }, pullFor: async (_repository: string, branch: string) => branch === "layer-1" ? 6 : undefined };
+    const both = "gh pr merge 9 --repo example/product && gh pr merge 7 --repo example/product";
+    const stacked = [...ledger, gatePass(7, head), gatePass(6, lower)];
+    expect(await mergeFrom(conductor, stacked, { now: () => time, github: lateGithub, command: both })).toContain("an agent accepted proof gaps of example/product#9");
+  });
+
+  test("a ledger entry counts as an order only with the person's choice on the exact standing-order question", async () => {
+    const reworded = (change: (decision: Decision) => void) => { const one = order(); if (one.type === "decide") change(one.decision); return one; };
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.answer = '2026-11-27 "Keep asking me"'; })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = `${decision.question} Only the docs PR.`; })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.scope.prs = ["example/maps#7", "example/maps#8"]; })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.answer = '2026-11-27 "Merge on your own (Recommended)"'; })])).toBeUndefined();
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "[example/maps#7](https://github.com/example/maps/issues/7)"); })])).toBeUndefined();
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "[example/maps#8](https://github.com/example/maps/issues/7)"); })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "[example/maps#7](https://github.com/example/maps/issues/8)"); })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.answer = '2026-11-27 "2026-11-27 Merge on your own"'; })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "[example/ma_ps#7](https://github.com/example/maps/issues/7)"); })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "[example/maps#7](https://github.com/example/ma_ps/issues/7)"); })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "example/ma_ps#7"); })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "[Example/Maps#7](https://github.com/example/maps/issues/7)"); })])).toBeUndefined();
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace(": may", `:${" ".repeat(600)} may`); })])).toContain("an agent accepted proof gaps");
+  });
+
+  test("an order voided while the call reads a later PR holds the merge", async () => {
+    const home = homeIn({ "guards.person": "Robin" });
+    const ledger = join(home, ".local/state/hedge/decisions.jsonl");
+    writeFileSync(ledger, [gap, pass, gatePass(7, head), gatePass(6, lower), order()].map((event) => JSON.stringify(event)).join("\n") + "\n");
+    const milestone = JSON.stringify({ type: "void", id: "d-order", reason: "milestone reached", at: "2026-11-28T09:00:00Z" });
+    const voidMidCall = { pull: async (_repository: string, pr: number) => { if (pr === 7) appendFileSync(ledger, `${milestone}\n`); return pulls[pr]; }, pullFor: async (_repository: string, branch: string) => branch === "layer-1" ? 6 : undefined };
+    const command = "gh pr merge 9 --repo example/product && gh pr merge 7 --repo example/product";
+    const refusal = await mergeGate({ tool_name: "Bash", tool_input: { command }, cwd: "/" }, { home, env: { T3CODE_THREAD_ID: conductor }, github: voidMidCall, intent: io });
+    expect(refusal?.hookSpecificOutput.permissionDecisionReason).toContain("ended on 2026-11-28: milestone reached.");
+  });
+
+  test("another live order of the same thread still covers the merge when the first ends while the call reads a later PR", async () => {
+    const home = homeIn({ "guards.person": "Robin" });
+    const ledger = join(home, ".local/state/hedge/decisions.jsonl");
+    const second = order();
+    if (second.type === "decide") Object.assign(second.decision, { id: "d-order-2", where: { ...second.decision.where, message: "m-order-2" } });
+    writeFileSync(ledger, [gap, pass, gatePass(7, head), gatePass(6, lower), order(), second].map((event) => JSON.stringify(event)).join("\n") + "\n");
+    const milestone = JSON.stringify({ type: "void", id: "d-order", reason: "milestone reached", at: "2026-11-28T09:00:00Z" });
+    const voidMidCall = { pull: async (_repository: string, pr: number) => { if (pr === 7) appendFileSync(ledger, `${milestone}\n`); return pulls[pr]; }, pullFor: async (_repository: string, branch: string) => branch === "layer-1" ? 6 : undefined };
+    const command = "gh pr merge 9 --repo example/product && gh pr merge 7 --repo example/product";
+    expect(await mergeGate({ tool_name: "Bash", tool_input: { command }, cwd: "/" }, { home, env: { T3CODE_THREAD_ID: conductor }, github: voidMidCall, intent: io })).toBeUndefined();
+  });
+});
+
 describe("the PreToolUse hook", () => {
   const homeWith = homeIn;
   const call = (command: string) => ({ tool_name: "Bash", tool_input: { command }, cwd: "/work" });
