@@ -1,6 +1,7 @@
 import { optionalStringSetting } from "../../base/lib/settings.ts";
 import { matchThread, t3CliRunner, withT3Session, type ShellThread } from "../../base/lib/t3/index.ts";
 import { sameThread, type Env, type LedgerEvent, type ModeGrant } from "./decision-ledger.ts";
+import { type ThreadWords } from "./proof-answers.ts";
 import { normalized } from "./proof-answers.ts";
 
 export const modes = ["supervised", "auto", "full"] as const;
@@ -82,8 +83,8 @@ export function grantFor(events: LedgerEvent[], chain: string[]): (ModeGrant & {
 export function resolveMode(env: Env, events: LedgerEvent[], chain: Lineage, repository?: string): ResolvedMode {
   const grant = grantFor(events, chain.threads);
   if (!grant) {
-    const configured = configuredMode({ ...env, HEDGE_SETTINGS: withoutThreadMode(env) }, repository);
-    return chain.complete || configured.mode !== "full" ? configured : { mode: "auto", from: `${configured.from}, held at auto: the thread's lineage could not be read in full, so a grant on a thread above it may be missing` };
+    if (!chain.complete) return { mode: "supervised", from: "the thread's lineage could not be read in full, so a grant on a thread above it may be missing" };
+    return configuredMode({ ...env, HEDGE_SETTINGS: withoutThreadMode(env) }, repository);
   }
   const said = `${grant.at.slice(0, 10)} in thread ${grant.thread}`;
   return { mode: grant.mode, from: grant.inherited ? `inherited from thread ${grant.for}, granted ${said}` : `granted ${said}` };
@@ -105,6 +106,23 @@ export function fullHeldAtAuto(text: string | undefined): string {
 const strictness = (mode: Mode) => modes.indexOf(mode);
 export const stricter = (a: Mode, b: Mode) => strictness(a) <= strictness(b) ? a : b;
 
+const sameGrant = (a: ModeGrant, b: ModeGrant) => a.message === b.message && sameThread(a.thread, b.thread) && sameThread(a.for, b.for);
+
+export async function heardGrant(grant: ModeGrant, words: ThreadWords): Promise<boolean> {
+  const answers = await words(grant.thread).catch(() => []);
+  return answers.some((answer) => answer.id === grant.message && answer.source === "question" && answer.at.slice(0, 10) === grant.at.slice(0, 10)
+    && sameThread(askedFor(answer.answered) ?? "", grant.for) && grantedBy(answer.text) === grant.mode);
+}
+
+export async function withHeardFull(events: LedgerEvent[], chain: Lineage, words: ThreadWords): Promise<LedgerEvent[]> {
+  let kept = events;
+  for (let grant = grantFor(kept, chain.threads); grant?.mode === "full" && !(await heardGrant(grant, words)); grant = grantFor(kept, chain.threads)) {
+    const unheard = grant;
+    kept = kept.filter((event) => event.type !== "mode" || !sameGrant(event, unheard));
+  }
+  return kept;
+}
+
 export const askedFor = (question: string) => /^which mode should thread (\S+) run in\?/i.exec(question.replace(/[`*"“”‘’']/g, "").trim())?.[1];
 
 const heldAtAuto = (settings: Record<string, unknown>) => ({
@@ -116,7 +134,7 @@ const heldAtAuto = (settings: Record<string, unknown>) => ({
 export function withThreadMode(env: Env, events: LedgerEvent[], chain: Lineage): Env {
   const grant = grantFor(events, chain.threads);
   const settings = JSON.parse(withoutThreadMode(env) ?? "{}") as Record<string, unknown>;
-  const scoped = grant ? { ...settings, [threadModeKey]: grant.mode } : chain.complete ? settings : heldAtAuto(settings);
+  const scoped = grant ? { ...settings, [threadModeKey]: grant.mode } : chain.complete ? settings : { ...settings, [threadModeKey]: "supervised" };
   return { ...env, HEDGE_SETTINGS: JSON.stringify(scoped) };
 }
 
