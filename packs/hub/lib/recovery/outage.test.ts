@@ -122,6 +122,10 @@ test("resumes a thread that lost its connection to the proxy once the proxy answ
     { ...codex, lastErrorClass: "transport_error", lastErrorCode: "responseStreamConnectionFailed", lastError: "The response ended early." },
     { ...codex, lastErrorClass: "transport_error", lastErrorCode: "httpConnectionFailed", lastError: "The response ended early." },
     { ...codex, lastErrorClass: "transport_error", lastErrorCode: "other", lastError: "error sending request for url (http://127.0.0.1:8317/v1/responses): Connection refused (os error 111)" },
+    { lastErrorClass: "provider_error", lastErrorCode: "api_error", lastError: "API Error: Connection dropped (ECONNRESET)" },
+    { lastErrorClass: "provider_error", lastErrorCode: "api_error", lastError: "API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)" },
+    { lastErrorClass: "provider_error", lastErrorCode: "api_error", lastError: "API Error: Connection closed before the response finished" },
+    { ...codex, lastErrorClass: "transport_error", lastErrorCode: "other", lastError: "Connection dropped" },
   ];
   const box = await machine(stops.map((stop, index) => outageThread(`c${index}`, stop)), {});
   for (const time of ["20:00", "20:10", "20:30"]) await box.run(at(time));
@@ -129,7 +133,7 @@ test("resumes a thread that lost its connection to the proxy once the proxy answ
   expect(box.lines).toContain("Thread c0 (c0): waits for claude, which is unknown.");
   expect(box.lines).toContain("Thread c4 (c4): waits for codex, which is unknown.");
   await box.run(at("20:40"), fakeProxy({ "claude-test-1": 200, "gpt-test-1": 200 }));
-  expect(box.inbox.delivered().map((message) => message.threadId)).toEqual(["c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7"]);
+  expect(box.inbox.delivered().map((message) => message.threadId)).toEqual(["c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9", "c10", "c11"]);
   expect(box.lines).toContain("Thread c4 (c4): retried after a provider error, try 1 of 4.");
 });
 

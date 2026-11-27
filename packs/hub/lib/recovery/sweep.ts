@@ -10,8 +10,8 @@ export const maxOutageTries = 4;
 const firstOutageWaitMs = 5 * 60_000;
 const outageError = /\bapi_error_5\d\d\b|\b(?:500|502|503|504|529)\b|auth_unavailable|provider_unavailable|overloaded|high demand/i;
 const connectionCode = /^(?:responseStreamDisconnected|responseStreamConnectionFailed|httpConnectionFailed|provider\.connection_error|claude_request_unanswered)$/;
-const connectionError = /connection error|unable to connect to api(?!:)|connection (?:refused|reset|closed)|\bECONN(?:REFUSED|RESET|ABORTED)\b|\bETIMEDOUT\b|\bEPIPE\b|socket hang up|request timed out|stream disconnected|error sending request|fetch failed/i;
-const claudeConnectionResult = /^API Error: (?:Connection error|Request timed out|Unable to connect to API(?!:))/;
+const connectionError = /connection error|unable to connect to api(?!:)|connection (?:refused|reset|closed|dropped)|\bECONN(?:REFUSED|RESET|ABORTED)\b|\bETIMEDOUT\b|\bEPIPE\b|socket hang up|request timed out|stream disconnected|error sending request|fetch failed/i;
+const claudeConnectionResult = /^API Error: (?:Connection (?:error|dropped|refused|closed before the response finished)|Request timed out|Unable to connect to API(?!:))/;
 const refusal = /authentication_failed|\b40[13]\b|unauthori[sz]ed|forbidden|invalid (?:x-)?api.key|login required|billing_error|account_on_hold|oauth_org_not_allowed|verification_required|cloud_credential_error/i;
 
 type Sweep = { client: Pick<T3Client, "call">; context: RecoverContext; availability: () => Promise<Availability>; failed: boolean };
