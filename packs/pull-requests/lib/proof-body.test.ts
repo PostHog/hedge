@@ -32,6 +32,7 @@ test("a picture that GitHub does not render fails: in a comment, in a code examp
     "<!-- No picture: the diff shows it whole. -->",
     "```md\n![example](https://example.com/a.png)\nNo picture: an example\n```",
     "Write `No picture: <why>` or `![alt](url)` here.",
+    "See https://example.com/?next=https://github.com/user-attachments/assets/0f1e for the old one.",
     "<!-- hedge-proof-receipt head=abc -->\n![shot](https://example.com/a.png)\n<!-- /hedge-proof-receipt -->",
     "No picture:",
   ]) expect(bodyProblems(`## Changes\n\nA queue now retries.\n\n${hidden}\n\n${callout(bullets(3))}`)).toEqual([noPicture]);

@@ -18,7 +18,7 @@ function pictured(html: string) {
   if (/<pre><code class="language-mermaid"/.test(html)) return true;
   const visible = html.replace(preformatted, "\n").replace(/<code>[\s\S]*?<\/code>/g, "");
   return /<(img|video)\b/i.test(visible)
-    || visible.includes("https://github.com/user-attachments/assets/")
+    || /(^|[\s>"])https:\/\/github\.com\/user-attachments\/assets\/[\w-]+/m.test(visible)
     || /<(p|li)>(<(strong|em)>)?No picture:(<\/(strong|em)>)?[ \t]*[^<\s]/.test(visible);
 }
 
