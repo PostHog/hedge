@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### A proxy that does not answer no longer takes Claude Code and Codex off it
+
+- `hedge cli-proxy check` exits 3, cannot tell, when the hub's proxy does not
+  answer, such as while the hub's tunnel to a devbox reconnects. It still
+  fails when the proxy refuses the key or serves no model.
+- `hedge apply` keeps the settings that wait on a check that cannot tell as
+  they are: it keeps the proxy route an earlier apply wrote, and adds none.
+  Before, one silent answer during the hourly apply took the route out, so
+  open sessions kept the proxy address without its key and failed with
+  "Invalid API key".
+
 ### An override refused for an older answer also says why the newer one failed
 
 - When `hedge proof review --override '<date> "<words>"'` finds that an older
