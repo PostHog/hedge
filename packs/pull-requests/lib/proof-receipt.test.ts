@@ -843,10 +843,10 @@ test("a receipt that Hedge wrote before the rename is replaced by the next one, 
   expect(body.replace(block(body), "")).toBe(template.replace("- [x] I ticked this box\n\n", "- [x] I ticked this box\n\n\n\n"));
 });
 
-const attachments = (pr: Checkout) => pr.githubCalls().filter((call) => call.startsWith("pr comment "));
-const asset = /^https:\/\/github\.com\/user-attachments\/assets\/[0-9a-f]{32}$/;
+const links = (body: string) => [...body.matchAll(/!\[[^\]]*\]\((https:\/\/[^)]+)\)/g)].map((match) => match[1]);
+const commentLinks = (pr: Checkout) => pr.githubComments().map(links);
 
-test("publish without an asset repository attaches the screenshot to the PR with gh, and the receipt links it without a warning", async () => {
+test("publish without an asset repository attaches the screenshot to the PR with gh, and the receipt links it and keeps the gate", async () => {
   const { pr, older } = await provedPr();
   expect((await pr.hedge("gate")).code).toBe(0);
   const warned = await pr.hedge("receipt");
@@ -855,38 +855,49 @@ test("publish without an asset repository attaches the screenshot to the PR with
 
   const published = await pr.hedge("publish", "--commit", older, "walk.png");
 
-  expect(published.code).toBe(0);
-  expect(published.output).toMatch(asset);
+  expect(commentLinks(pr)).toEqual([[published.output]]);
   expect(pr.githubBody()).toBe(body);
   const written = await pr.hedge("receipt");
   expect(written.output).not.toContain("warning: screenshot");
+  expect(block(pr.githubBody())).not.toContain("no gate at HEAD yet");
   expect(readFileSync(join(pr.pullRequest, "display", "receipt.md"), "utf8")).toContain(`[The sender settings page after the save](${published.output})`);
   expect((await pr.hedge("publish", "--commit", older, "walk.png")).output).toBe(published.output);
-  expect(attachments(pr)).toHaveLength(1);
+  expect(commentLinks(pr)).toEqual([[published.output]]);
 });
 
-test("a screenshot gh cannot attach gets no link, and publish names the asset repository route or the one to attach again", async () => {
-  const { pr, older, file } = await provedPr();
-  file("second.png", png("second"));
+test("a screenshot gh cannot attach gets no link, and publish says what to fix", async () => {
+  const { pr, older } = await provedPr();
   pr.githubFault("attach-error", "attaching files requires write access to the repository\n");
   await expect(pr.hedge("publish", "--commit", older, "walk.png")).rejects.toThrow("gh could not attach the screenshots to example/product#42: attaching files requires write access to the repository. When gh cannot attach to this PR, publish to a public repository of your own with --asset-repo <owner/fork>");
-
-  pr.githubFault("attach-error", undefined);
-  file("third.png", png("third"));
-  const hashed = (seed: string) => `${new Bun.CryptoHasher("sha256").update(png(seed)).digest("hex")}.png`;
-  pr.githubFault("attach-drop", hashed("second"));
-  await expect(pr.hedge("publish", "--commit", older, "walk.png", "second.png", "third.png")).rejects.toThrow(`gh did not attach ${hashed("second")}, ${hashed("third")}: upload failed for`);
-  pr.githubFault("attach-drop", undefined);
-  const again = await pr.hedge("publish", "--commit", older, "walk.png", "second.png", "third.png");
-
-  expect(again.output.split("\n")).toEqual([expect.stringMatching(asset), expect.stringMatching(asset), expect.stringMatching(asset)]);
-  expect(attachments(pr).at(-1)!.split("--attach ").slice(1)).toEqual([expect.stringContaining(`${hashed("second")}#`), expect.stringContaining(`${hashed("third")}#`)]);
+  pr.githubFault("attach-error", "unknown flag: --attach\n");
+  await expect(pr.hedge("publish", "--commit", older, "walk.png")).rejects.toThrow("gh could not attach the screenshots to example/product#42: unknown flag: --attach. Attaching needs gh 2.100.0 or newer, signed in to GitHub (gh auth status)");
+  expect(pr.githubComments()).toEqual([]);
 });
 
-test("publish refuses a log, and more screenshots than gh attaches at once, before gh attaches anything", async () => {
+test("publish after a partial upload or a lost read-back attaches only what has no link, and never posts a screenshot twice", async () => {
+  const { pr, older, file } = await provedPr();
+  file("second.png", png("second"));
+  file("third.png", png("third"));
+  pr.githubFault("attach-drop", "2");
+  await expect(pr.hedge("publish", "--commit", older, "walk.png", "second.png", "third.png")).rejects.toThrow("Run hedge proof publish again with the same screenshots");
+  pr.githubFault("attach-drop", undefined);
+  pr.githubFault("comment-read-error", "gh: Bad Gateway (HTTP 502)\n");
+  await expect(pr.hedge("publish", "--commit", older, "walk.png", "second.png", "third.png")).rejects.toThrow("Bad Gateway");
+  pr.githubFault("comment-read-error", undefined);
+
+  const again = await pr.hedge("publish", "--commit", older, "walk.png", "second.png", "third.png");
+
+  const [first, rest] = commentLinks(pr);
+  expect(commentLinks(pr)).toHaveLength(2);
+  expect(again.output.split("\n")).toEqual([...first!, ...rest!]);
+  expect(first).toHaveLength(1);
+  expect(rest).toHaveLength(2);
+});
+
+test("publish refuses a log, and more screenshots than gh attaches at once, before gh posts anything", async () => {
   const { pr, file } = await provedPr();
   await expect(pr.hedge("publish", file("run.txt.png", "Authorization: Bearer invented-token"))).rejects.toThrow("Publish only screenshots with invented test data");
   const many = Array.from({ length: 51 }, (_, index) => file(`step-${index}.png`, png(`step ${index}`)));
   await expect(pr.hedge("publish", ...many)).rejects.toThrow("gh attaches at most 50 files at once, and 51 of these screenshots have no link yet");
-  expect(attachments(pr)).toEqual([]);
+  expect(pr.githubComments()).toEqual([]);
 });

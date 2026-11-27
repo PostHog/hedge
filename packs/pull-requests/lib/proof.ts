@@ -106,13 +106,15 @@ export function isScreenshot(path: string, bytes: Buffer): boolean {
 
 export const uiWalkRule = "A UI walk keeps only screenshots of the running app";
 
+export const proofName = (source: string, bytes: Buffer) => createHash("sha256").update(bytes).digest("hex") + extname(source).toLowerCase();
+
 export async function saveProof(home: string, identity: ProofIdentity, source: string, kind?: string): Promise<string> {
   const bytes = await readFile(source);
   if (!bytes.length) throw new Error(`${source} is empty. Save the output that shows the behavior`);
   const extension = extname(source).toLowerCase();
   if (!/^\.[a-z0-9]{1,10}$/.test(extension)) throw new Error("Proof files need a simple file extension");
   if (kind === "ui-walk" && !isScreenshot(source, bytes)) throw new Error(uiWalkRule);
-  const name = createHash("sha256").update(bytes).digest("hex") + extension;
+  const name = proofName(source, bytes);
   const directory = kind === undefined ? proofDirectory(home, identity) : join(proofDirectory(home, identity), proofKind(kind));
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const destination = join(directory, name);

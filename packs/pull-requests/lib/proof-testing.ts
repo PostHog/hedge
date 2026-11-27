@@ -34,11 +34,11 @@ const seedRepository = template(async (repository) => {
 });
 
 const attachScript = `const fs = require("fs"), path = require("path"), crypto = require("crypto");
-const [github, ...args] = process.argv.slice(2);
+const [github, , , pr, ...args] = process.argv.slice(2);
 const fault = (name) => fs.existsSync(path.join(github, name)) ? fs.readFileSync(path.join(github, name), "utf8") : undefined;
 const refused = fault("attach-error");
 if (refused) { process.stderr.write(refused); process.exit(1); }
-const dropped = fault("attach-drop");
+const failAt = Number(fault("attach-drop") ?? 0);
 let body = "", failed = false;
 const assets = [];
 for (let index = 0; index < args.length; index++) {
@@ -46,13 +46,13 @@ for (let index = 0; index < args.length; index++) {
   if (args[index] !== "--attach") continue;
   const value = args[++index], cut = value.lastIndexOf("#");
   const [file, alt] = cut < 0 ? [value, path.basename(value)] : [value.slice(0, cut), value.slice(cut + 1)];
-  if (path.basename(file) === dropped) { failed = true; process.stderr.write("upload failed for " + file + "\\n"); break; }
+  if (assets.length + 1 === failAt) { failed = true; process.stderr.write("upload failed for " + file + "\\n"); break; }
   assets.push("![" + alt + "](https://github.com/user-attachments/assets/" + crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex").slice(0, 32) + ")");
 }
 if (!assets.length) process.exit(1);
-const id = 9001 + fs.readdirSync(github).filter((name) => name.startsWith("comment-")).length;
-fs.writeFileSync(path.join(github, "comment-" + id), JSON.stringify({ user: { login: "the-user" }, body: [body, ...assets].join("\\n\\n"), created_at: "2026-10-25T12:00:00Z", issue_url: "https://api.github.com/repos/example/product/issues/42" }));
-console.log("https://github.com/example/product/pull/42#issuecomment-" + id);
+const id = 9001 + fs.readdirSync(github).filter((name) => /^comment-\\d+$/.test(name)).length;
+fs.writeFileSync(path.join(github, "comment-" + id), JSON.stringify({ user: { login: "the-user" }, body: [body, ...assets].join("\\n\\n"), created_at: "2026-10-25T12:00:00Z", issue_url: "https://api.github.com/repos/example/product/issues/" + pr }));
+console.log("https://github.com/example/product/pull/" + pr + "#issuecomment-" + id);
 process.exit(failed ? 1 : 0);
 `;
 
@@ -110,6 +110,7 @@ case "$*" in
     exec "${process.execPath}" "${github}/attach.js" "${github}" "$@";;
   "api "*"/issues/comments/"*)
     all="$*"; id=\${all##*/issues/comments/}
+    [ -f "${github}/comment-read-error" ] && { cat "${github}/comment-read-error" >&2; exit 1; }
     [ -f "${github}/comment-$id" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
     cat "${github}/comment-$id"; exit 0;;
   "api "*"/branches/"*)
@@ -167,13 +168,16 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
     writeFileSync(join(github, "events"), JSON.stringify([{ event: "labeled", created_at: opened }, ...ready.map((at) => ({ event: "ready_for_review", created_at: at }))]));
   };
   const githubBody = (number = 42) => JSON.parse(readFileSync(join(github, existsSync(join(github, `body-${number}`)) ? `body-${number}` : "body"), "utf8")) as string;
-  const githubFault = (fault: "patch-error" | "patch-mangle" | "attach-error" | "attach-drop", text: string | undefined) => text === undefined ? rmSync(join(github, fault), { force: true }) : writeFileSync(join(github, fault), text);
+  const githubFault = (fault: "patch-error" | "patch-mangle" | "attach-error" | "attach-drop" | "comment-read-error", text: string | undefined) => text === undefined ? rmSync(join(github, fault), { force: true }) : writeFileSync(join(github, fault), text);
   const reviewThreads = (threads: ReviewThread[] | { error: string }, number = 42) => {
     rmSync(join(github, "threads-error"), { force: true });
     if ("error" in threads) return writeFileSync(join(github, "threads-error"), threads.error);
     const viewer = existsSync(join(github, "user")) ? readFileSync(join(github, "user"), "utf8").trim() : "the-user";
     writeFileSync(join(github, `threads-${number}`), JSON.stringify({ data: { viewer: { login: viewer }, repository: { pullRequest: { reviewThreads: page(threads.map((thread, index) => threadNode(thread, index, viewer))) } } } }));
   };
+  const githubComments = (number = 42) => readdirSync(github).filter((name) => /^comment-\d+$/.test(name)).sort()
+    .map((name) => JSON.parse(readFileSync(join(github, name), "utf8")) as { body: string; issue_url: string })
+    .filter((comment) => comment.issue_url.endsWith(`/issues/${number}`)).map((comment) => comment.body);
   const githubCalls = () => readFileSync(join(github, "calls"), "utf8").trim().split("\n");
   ci([{ name: "test", bucket: "pass" }]);
   mkdirSync(join(home, ".agents/guides"), { recursive: true });
@@ -247,7 +251,7 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
   const decide = (...args: string[]) => decideIn(repository, ...args);
   const pullRequest = join(home, ".local/state/hedge/proof/example/product/42");
   await seedRepository(repository);
-  return { home, repository, pullRequest, env, git, commit, advanceBase, hedge, hedgeIn, hedgeAs, ci, statuses, githubApp, required, pullRequestState, timeline, githubHead, githubCalls, githubBody, githubFault, githubComment, reviewThreads, whileGithubReadsPull, clock, say, choose, chooseGap, reader, panel, hub, pendingCards, decide, decideIn, startTimes };
+  return { home, repository, pullRequest, env, git, commit, advanceBase, hedge, hedgeIn, hedgeAs, ci, statuses, githubApp, required, pullRequestState, timeline, githubHead, githubCalls, githubBody, githubFault, githubComment, githubComments, reviewThreads, whileGithubReadsPull, clock, say, choose, chooseGap, reader, panel, hub, pendingCards, decide, decideIn, startTimes };
 }
 
 export type Checkout = Awaited<ReturnType<typeof checkout>>;
