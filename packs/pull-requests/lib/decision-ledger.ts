@@ -2,6 +2,7 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { HubUnreachable, remoteHub, runSsh, type Env, type Ssh, type SshResult } from "../../hub/lib/hub-transport.ts";
+import { normalized } from "./proof-answers.ts";
 
 export const askClasses = ["proof-gap", "review", "merge", "deploy", "secret", "design", "scope", "status"] as const;
 export type AskClass = (typeof askClasses)[number];
@@ -31,6 +32,35 @@ export const gateOverride = "gate-override";
 export const overrideChoice = "Override the gate";
 export const mergeCardChoice = "Merge";
 export const mergeCardCondition = (head: string) => `${head}: merge card`;
+export const standingOrder = "standing-order";
+export const standingOrderChoice = "Merge on your own";
+export const standingOrderQuestion = (map: string, until: string | undefined) =>
+  `Standing order (${standingOrder}) for ${map} until ${until ?? "its milestone"}: may this T3 thread merge every PR it merges on your word, gaps an agent accepted included?`;
+const issueLink = /\[([^\]]*)\]\(https:\/\/github\.com\/([^/\s()]+)\/([^/\s()]+)\/issues\/(\d+)\)/g;
+const sameIssue = (one: string, other: string) => one.trim().toLowerCase() === other.toLowerCase();
+const linkText = (text: string) => text.replace(issueLink, (link, label: string, owner: string, repo: string, number: string) => sameIssue(label, `${owner}/${repo}#${number}`) ? label.trim() : link);
+const namesMap = (question: string, map: string) => question.toLowerCase().includes(` for ${map.toLowerCase()} until `);
+export const standingOrderQuestionCap = 600;
+export const asksStandingOrder = (question: string, map: string, until: string | undefined) => {
+  const plain = linkText(question);
+  return question.length <= standingOrderQuestionCap && namesMap(plain, map) && normalized(plain) === normalized(standingOrderQuestion(map, until));
+};
+export const picksStandingOrder = (choice: string) => [standingOrderChoice, `${standingOrderChoice} (Recommended)`].map(normalized).includes(normalized(choice));
+const choseStandingOrder = (answer: string) => picksStandingOrder(/^\d{4}-\d{2}-\d{2} "(.*)"$/s.exec(answer)?.[1] ?? "");
+export const isStandingOrderEntry = (decision: DecisionState) => decision.class === "merge" && decision.scope.kinds?.includes(standingOrder) === true
+  && (decision.reversed?.mark ?? decision.mark) === "👤" && choseStandingOrder(decision.reversed?.answer ?? decision.answer)
+  && decision.scope.prs.length === 1 && asksStandingOrder(decision.question, decision.scope.prs[0]!, standingOrderDate(decision.scope.condition));
+export const standingOrderRuns = (decision: DecisionState, now: number) => live(decision) && now < standingOrderEnd(decision.scope.condition);
+export const standingOrderDate = (condition: string | undefined) => /^until (\d{4}-\d{2}-\d{2})$/.exec(condition ?? "")?.[1];
+const calendarDay = (date: string) => {
+  const start = Date.parse(`${date}T00:00:00Z`);
+  return !Number.isNaN(start) && new Date(start).toISOString().slice(0, 10) === date ? start : NaN;
+};
+export function standingOrderEnd(condition: string | undefined) {
+  if (condition === undefined) return Infinity;
+  const until = standingOrderDate(condition);
+  return until ? calendarDay(until) + 86_400_000 : NaN;
+}
 export const namesHead = (text: string, head: string) => new RegExp(`(?<![0-9a-f])${head}(?![0-9a-f])`, "i").test(text);
 export const namesId = (text: string, id: string) => new RegExp(`(?<![\\w-])${id.replace(/[^\w-]/g, "\\$&")}(?![\\w-])`).test(text);
 
