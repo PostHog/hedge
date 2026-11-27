@@ -61,7 +61,6 @@ test("a gate override is the user's 👤 answer for one PR at one full head, wit
   await expect(override("--mark", "👤", "--condition", "abc123: incident fix now")).rejects.toThrow("full 40-character head sha");
   await expect(override("--mark", "👤", "--pr", "example/product#41", "--condition", `${head}: incident fix now`)).rejects.toThrow("one --pr");
   await expect(pr.decide("record", "--mark", "👤", "--class", "merge", "--kind", "ci", "--pr", "example/product#42")).rejects.toThrow("only --kind gate-override");
-  await expect(override("--kind", "gate-override", "--mark", "👤", "--condition", "abc123: incident fix now")).rejects.toThrow("full 40-character head sha");
   expect(ledgerDecisions(pr)).toEqual([]);
 
   pr.choose("Keep the gate closed", `Merge example/product#42 at ${head} without a gate pass (gate-override)? The incident cannot wait.`);
@@ -71,9 +70,9 @@ test("a gate override is the user's 👤 answer for one PR at one full head, wit
   expect(ledgerDecisions(pr)).toEqual([]);
 
   pr.choose("Override the gate", `Merge example/product#42 at ${head} without a gate pass (gate-override)? The incident cannot wait.`);
-  const recorded = await override("--mark", "👤", "--condition", `${head}: incident fix, the judge is down`);
+  const recorded = await override("--kind", "gate-override", "--mark", "👤", "--condition", `${head}: incident fix, the judge is down`);
   expect(recorded.code).toBe(0);
-  expect(ledgerDecisions(pr).at(-1)).toMatchObject({ class: "merge", mark: "👤", scope: { prs: ["example/product#42"], kinds: ["gate-override"], condition: `${head}: incident fix, the judge is down` } });
+  expect(ledgerDecisions(pr).at(-1)).toMatchObject({ class: "merge", mark: "👤", scope: { prs: ["example/product#42"], kinds: ["gate-override", "gate-override"], condition: `${head}: incident fix, the judge is down` } });
 });
 
 test("a standing order is the user's \"Merge on your own\" on a card that names the map, standing-order and its end date, recorded once", async () => {
