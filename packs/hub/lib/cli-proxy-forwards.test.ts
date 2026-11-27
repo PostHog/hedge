@@ -197,7 +197,7 @@ test("a box apply that times out after it printed a proxy line makes the hub say
   expect(lines.filter((line) => line.startsWith("box-lane"))).toEqual(["box-lane: hedge apply exited 124 there. To see why, run on the hub: hedge box run box-lane -- hedge apply"]);
 });
 
-test("a handover prints only the hub's own words, and only for an apply line that is exactly a proxy check's To do, Fix, or cannot-tell finding", async () => {
+test("a handover prints only the hub's own words, and only for an apply line that is exactly a proxy check's To do or Fix", async () => {
   const box = proxyBox("claude", { models: ["claude-sonnet-5-5"] });
   const said = async (stdout: string) => (await handOverTo(box, async () => ({ ...ok, stdout }))).lines.filter((line) => line.startsWith("box-lane"));
   const noisy = [`token=secret ${checkLine("cli-proxy-client", "todo")}`, `${checkLine("cli-proxy-codex", "todo")} token=secret`, `\u001b[2J${checkLine("cli-proxy-client", "say")}`, `${checkLine("cli-proxy-codex", "say")}\u0007`].join("\n");
@@ -205,7 +205,4 @@ test("a handover prints only the hub's own words, and only for an apply line tha
   expect(await said(`${checkLine("cli-proxy-codex", "todo")}\n`)).toEqual(["box-lane: the proxy lists no Codex model yet, so Codex there keeps its own sign-in until the proxy serves it."]);
   expect(await said(`${checkLine("cli-proxy-client", "say")}\n`)).toEqual(["box-lane: Claude Code there keeps its own sign-in, because it cannot reach your own-account proxy or the proxy is not safe to use. To see why, run on the hub: hedge box run box-lane -- hedge cli-proxy check"]);
   expect(await said(`${checkLine("cli-proxy-codex", "say")}\n`)).toEqual(["box-lane: Codex there keeps its own sign-in, because it cannot reach your own-account proxy or the proxy is not safe to use. To see why, run on the hub: hedge box run box-lane -- hedge cli-proxy check codex"]);
-  const cannotTell = "Fix: Hedge cannot tell yet whether cli-proxy-codex passes, so it keeps the proxy route that waits on it while that route is whole, and adds none. Run hedge cli-proxy check codex to see why.";
-  expect(await said(`${cannotTell}\n`)).toEqual(["box-lane: Hedge cannot tell whether Codex there reaches your own-account proxy, so Codex there keeps the settings it has until the proxy answers. To see why, run on the hub: hedge box run box-lane -- hedge cli-proxy check codex"]);
-  expect(await said(`token=secret ${cannotTell}\n`)).toEqual([]);
 });

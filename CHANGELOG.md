@@ -21,14 +21,13 @@
 
 ### A proxy that does not answer no longer takes Claude Code and Codex off it
 
-- `hedge cli-proxy check` exits 3, cannot tell, when the hub's proxy does not
-  answer, such as while the hub's tunnel to a devbox reconnects. It still fails when the proxy refuses the key or serves
-  no model.
-- When a check that Hedge's proxy route waits on cannot tell, `hedge apply`
-  keeps the route an earlier apply wrote while it is whole, and adds none. Other
-  settings that wait on such a check leave as before.
-  The hub's box handover says so when it meets this on a new box.
-  Before, one silent answer during the hourly apply took the route out, so
+- While the hub's proxy does not answer, such as while the hub's tunnel to a
+  devbox reconnects, `hedge cli-proxy check` passes for an agent whose
+  settings hold Hedge's whole proxy route, and says so. `hedge apply` then
+  keeps that route as it is. Without the whole route the check fails as
+  before, so `hedge apply` adds no route while the proxy is silent. The check
+  still fails when the proxy refuses the key or serves no model.
+- Before, one silent answer during the hourly apply took the route out, so
   open sessions kept the proxy address without its key and failed with
   "Invalid API key".
 

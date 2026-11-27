@@ -486,14 +486,25 @@ test("the check passes while the proxy answers the saved key, and keeps Claude C
   expect(printed).toEqual([`Claude Code reaches your own-account proxy at ${proxyUrl}.`]);
 });
 
-test("the check cannot tell while the proxy does not answer, and changes no file", async () => {
+test("while the proxy does not answer, the check passes on a machine that holds Hedge's whole Claude route, and changes no file", async () => {
   const { machine, home, printed } = client({}, { down: true });
   connected(home);
   const before = readFileSync(settingsFile(home), "utf8");
-  expect(await cliProxy("check", machine)).toBe(3);
+  expect(await cliProxy("check", machine)).toBe(0);
   expect(readFileSync(settingsFile(home), "utf8")).toBe(before);
-  expect(printed).toEqual([`The proxy at ${proxyUrl} does not answer. hedge apply keeps the Claude Code settings as they are until it answers.`]);
+  expect(printed).toEqual([`The proxy at ${proxyUrl} does not answer. Claude Code has Hedge's whole proxy route, so the check passes and hedge apply keeps it on the proxy until it answers.`]);
   expect(existsSync(keyFile(home))).toBe(true);
+});
+
+test("while the proxy does not answer, the check fails as on the base without the whole Claude route: none, half of it, or one you changed", async () => {
+  for (const settings of [undefined, { model: "opus" }, { apiKeyHelper: keyHelper }, { env: { ANTHROPIC_BASE_URL: proxyUrl } }, { env: { ANTHROPIC_BASE_URL: proxyUrl }, apiKeyHelper: "cat ~/my.key" }]) {
+    const { machine, home, printed } = client({}, { down: true });
+    connected(home);
+    if (settings) writeFileSync(settingsFile(home), JSON.stringify(settings));
+    else rmSync(settingsFile(home));
+    expect(await cliProxy("check", machine)).toBe(1);
+    expect(printed).toEqual([`The proxy at ${proxyUrl} does not answer. hedge apply keeps Claude Code on its own sign-in until the proxy serves it.`]);
+  }
 });
 
 test("the check still fails, as on the base, when the proxy answers 200 and cuts the model list short", async () => {
@@ -509,10 +520,11 @@ test("the check still fails, as on the base, when the proxy answers 200 and cuts
     },
   });
   try {
-    const { machine, home, printed } = client({ fetch: (_url, init) => globalThis.fetch(`http://127.0.0.1:${server.port}/v1/models`, init) });
+    const { machine, home, printed } = client({ fetch: (url, init) => globalThis.fetch(String(url).replace(proxyUrl, `http://127.0.0.1:${server.port}`), init) });
     connected(home);
     expect(await cliProxy("check", machine)).toBe(1);
     expect(printed).toEqual([`The proxy at ${proxyUrl} answers without a model list. hedge apply keeps Claude Code on its own sign-in until the proxy serves it.`]);
+    expect(received.split("\r\n")[0]).toBe("GET /v1/models HTTP/1.1");
     expect(received.toLowerCase()).toContain(`authorization: bearer ${clientKey}`);
   } finally {
     server.stop(true);
@@ -545,8 +557,7 @@ test("hedge apply while the proxy does not answer keeps the routes an earlier ap
     const silent = await apply();
     expect(readFileSync(settingsFile(home), "utf8")).toBe(settings);
     expect(readFileSync(codexFile(home), "utf8")).toBe(codex);
-    expect(silent.stdout).toContain("Hedge cannot tell yet whether cli-proxy-client passes, so it keeps the proxy route that waits on it while that route is whole, and adds none. Run hedge cli-proxy check to see why.");
-    expect(silent.stdout).toContain("Hedge cannot tell yet whether cli-proxy-codex passes, so it keeps the proxy route that waits on it while that route is whole, and adds none. Run hedge cli-proxy check codex to see why.");
+    expect(silent.code).toBe(0);
   }
   proxy.down = false;
   expect((await apply()).code).toBe(0);
@@ -771,14 +782,28 @@ test("the Codex check judges the proxy before Hedge routes Codex, so apply can w
   expect(existsSync(codexFile(unserved.home))).toBe(false);
 });
 
-test("the Codex check cannot tell while the proxy does not answer, and changes no file", async () => {
+test("while the proxy does not answer, the Codex check passes on a machine that holds Hedge's whole Codex route, fails as on the base without it, and changes no file", async () => {
   const { machine, home, printed } = client({}, { down: true });
   connected(home);
   codexRouted(home);
   const before = readFileSync(codexFile(home), "utf8");
-  expect(await cliProxy("check", machine, "codex")).toBe(3);
+  expect(await cliProxy("check", machine, "codex")).toBe(0);
   expect(readFileSync(codexFile(home), "utf8")).toBe(before);
-  expect(printed.join("\n")).toContain("hedge apply keeps the Codex settings as they are until it answers.");
+  expect(printed).toEqual([`The proxy at ${proxyUrl} does not answer. Codex has Hedge's whole proxy route, so the check passes and hedge apply keeps it on the proxy until it answers.`]);
+
+  const fresh = client({}, { down: true });
+  connected(fresh.home);
+  expect(await cliProxy("check", fresh.machine, "codex")).toBe(1);
+  expect(fresh.printed.join("\n")).toContain("hedge apply keeps Codex on its own sign-in until the proxy serves it.");
+  expect(existsSync(codexFile(fresh.home))).toBe(false);
+
+  for (const config of [{ ...mine, model_provider: "work", model_providers: { ...mine.model_providers, "hedge-proxy": hedgeProxy } }, { model_provider: "hedge-proxy", model_providers: { "hedge-proxy": { ...hedgeProxy, name: "My proxy" } } }]) {
+    const part = client({}, { down: true });
+    connected(part.home);
+    codexRouted(part.home, config);
+    expect(await cliProxy("check", part.machine, "codex")).toBe(1);
+    expect(readCodex(part.home)).toEqual(config);
+  }
 });
 
 test("a proxy that lists no Codex model holds back only the Codex check, which waits for the person", async () => {
@@ -801,13 +826,13 @@ test("Codex that does not use Hedge's proxy is left alone by both checks", async
   const own = client({}, { down: true });
   connected(own.home);
   codexRouted(own.home, { ...mine, model_provider: "work" });
-  expect(await cliProxy("check", own.machine, "codex")).toBe(3);
+  expect(await cliProxy("check", own.machine, "codex")).toBe(1);
   expect(readCodex(own.home)).toEqual({ ...mine, model_provider: "work" });
 
   const edited = client({}, { down: true });
   connected(edited.home);
   codexRouted(edited.home, { model_provider: "hedge-proxy", model_providers: { "hedge-proxy": { ...hedgeProxy, base_url: "https://gateway.example.com/v1" } } });
-  expect(await cliProxy("check", edited.machine)).toBe(3);
+  expect(await cliProxy("check", edited.machine)).toBe(0);
   expect(await cliProxy("check", edited.machine, "codex")).toBe(1);
   expect(readCodex(edited.home)).toEqual({ model_provider: "hedge-proxy", model_providers: { "hedge-proxy": { ...hedgeProxy, base_url: "https://gateway.example.com/v1" } } });
 });

@@ -173,9 +173,10 @@ the person's own subscriptions, never for someone else's.
   `hedge apply` leaves that
   agent's settings out and removes Hedge's own values, so the agent uses its
   own sign-in, and the next apply changes nothing. When the proxy does not
-  answer at all, both checks exit 3 instead: `hedge apply`
-  keeps a route that is still whole on disk as it is and adds none, so open
-  sessions keep working once the proxy answers again. A Claude credential
+  answer at all, a check passes for an agent whose settings hold Hedge's
+  whole proxy route, so `hedge apply` keeps that route and open sessions
+  work again once the proxy answers; without the whole route it fails, and
+  apply adds none. A Claude credential
   beside Hedge's proxy address leaves with it, unless a pack sets that same
   value now, and a `To do:` names it. Only the Hub pack may set Hedge's
   proxy values; a profile that sets one fails to load and names the

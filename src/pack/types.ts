@@ -86,10 +86,8 @@ export type HumanStep = Scope & {
   left?: string[];
 };
 
-/** The exit code of a check that means it cannot tell yet, such as before the step's human step passes. When Hedge decides whether to run a step, 3 fails like any other code. */
+/** The exit code of a step's check that means it cannot tell yet, such as before the step's human step passes. Only an undo reads it. When Hedge decides whether to run a step, 3 fails like any other code. */
 export const cannotTell = 3;
-
-export const cannotTellSay = (item: Pick<PackCheck, "id" | "run">) => `Hedge cannot tell yet whether ${item.id} passes, so it keeps the proxy route that waits on it while that route is whole, and adds none. Run ${item.run.join(" ")} to see why.`;
 
 export type PackStep = Scope & {
   id: string;
@@ -267,7 +265,7 @@ export type Plan = {
   settings: Record<string, SettingValue>;
   unanswered: PackSetting[];
   ask: PackSetting[];
-  dropped: Array<{ pack: string; item: string; reason: string; check?: string; held?: boolean }>;
+  dropped: Array<{ pack: string; item: string; reason: string; check?: string }>;
   repeatedHeadings?: Array<{ pack: string; guide: string; section: string; heading: string; owner: string }>;
 };
 

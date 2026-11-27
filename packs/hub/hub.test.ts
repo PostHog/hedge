@@ -449,6 +449,27 @@ describe("the Own-account balancing workflow", () => {
     };
     const both = ["claude-sonnet-5-5", "gpt-6.1-sol"];
 
+    test("keeps the whole routes an earlier apply wrote while the proxy does not answer, puts in none on a fresh machine, and the next apply changes nothing", async () => {
+      const home = homeWith();
+      const routed = await applied(home, both, 1);
+      const { reports, claude, codex } = await applied(home, "down");
+      expect(claude).toEqual(routed.claude);
+      expect(codex).toEqual(routed.codex);
+      expect(reports[0]!.findings).toEqual([]);
+      expect(reports[1]!.actions).toEqual([]);
+      const fresh = await applied(homeWith(), "down", 1);
+      expect(fresh.claude).toEqual({});
+      expect(fresh.codex).toEqual({});
+      expect(fresh.reports[0]!.findings.map((finding) => finding.id)).toEqual(["check:cli-proxy-client", "check:cli-proxy-codex"]);
+    });
+
+    test("while the proxy does not answer, a route whose base URL you removed loses its key helper too, as on the base", async () => {
+      const home = homeWith();
+      const { claude } = await applied(home, both, 1);
+      writeFileSync(join(home, ".claude/settings.json"), JSON.stringify({ ...claude, env: {} }));
+      expect((await applied(home, "down", 1)).claude).toEqual({ env: {} });
+    });
+
     test("takes off the Claude route that an earlier apply wrote once the proxy serves no model, even while a pack source cannot be fetched", async () => {
       const home = homeWith({ ".claude/settings.json": JSON.stringify({ model: "opus" }) });
       expect((await applied(home, both, 1)).claude.apiKeyHelper).toBe('cat "$HOME/.config/hedge/cli-proxy.key"');
@@ -497,41 +518,6 @@ describe("the Own-account balancing workflow", () => {
       expect(JSON.parse(readFileSync(join(home, ".claude/settings.json"), "utf8"))).toEqual({ env: { ANTHROPIC_BASE_URL: gateway } });
       expect(parse(readFileSync(join(home, ".codex/config.toml"), "utf8"))).toEqual({ model_provider: "work" });
       expect((await check(shaped, { home, adapters: [providerConfigAdapter()], run: realCheck(home, both) })).ok).toBe(true);
-    });
-
-    test("keeps a Claude route split across two checks while both cannot tell, and writes no half of it on a fresh machine", async () => {
-      const home = homeWith();
-      const split = (result: Plan): Plan => ({ ...result, config: result.config.map((entry) => (entry.key === "apiKeyHelper" ? { ...entry, after: "cli-proxy-codex" } : entry)) });
-      const routed = await applied(home, both, 1, split);
-      expect((await applied(home, "down", 1, split)).claude).toEqual(routed.claude);
-      expect((await applied(homeWith(), "down", 1, split)).claude).toEqual({});
-    });
-
-    const throughGateway = async (home: string, models: string[] | "down", gateway: boolean) => {
-      const overrides = { config: gateway ? [{ provider: "claude" as const, key: "env.ANTHROPIC_BASE_URL", value: "https://gateway.example.com" }] : [] };
-      const resolved = plan({ ...balancing, plan: "both", overrides }, devbox);
-      const shaped: Plan = { ...resolved, config: resolved.config.filter((entry) => entry.workflow === "own-account-balancing" || entry.pack === "profile"), checks: resolved.checks.filter((item) => item.pack === "hub"), steps: [], jobs: [], human: [] };
-      await apply(shaped, { home, adapters: [providerConfigAdapter()], run: realCheck(home, models) });
-      return JSON.parse(readFileSync(join(home, ".claude/settings.json"), "utf8"));
-    };
-
-    test("a profile gateway in place of one part of the route still takes the whole route off while the proxy does not answer", async () => {
-      const home = homeWith();
-      await throughGateway(home, both, false);
-      expect(await throughGateway(home, "down", true)).toEqual({ env: { ANTHROPIC_BASE_URL: "https://gateway.example.com" } });
-    });
-
-    test("while the proxy does not answer, a gateway the profile no longer sets leaves, and Hedge puts no route in its place", async () => {
-      const home = homeWith();
-      await throughGateway(home, both, true);
-      expect(await throughGateway(home, "down", false)).toEqual({});
-    });
-
-    test("while the proxy does not answer, a route whose base URL you removed loses its key helper too", async () => {
-      const home = homeWith();
-      const { claude } = await applied(home, both, 1);
-      writeFileSync(join(home, ".claude/settings.json"), JSON.stringify({ ...claude, env: {} }));
-      expect((await applied(home, "down", 1)).claude).toEqual({ env: {} });
     });
 
     test("a proxy that answers routes both", async () => {

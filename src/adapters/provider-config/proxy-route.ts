@@ -28,14 +28,12 @@ export const proxyRoute: Partial<Record<Provider, Route>> = {
 
 type Entry = Plan["config"][number];
 
-export const onRoute = (entry: Entry) => proxyRoute[entry.provider]?.fields.some((item) => samePath(item.path, keyPath(entry.key)) && same(item.value, entry.value)) === true;
-
 export function wholeRoutes(config: Entry[], dropped: Entry[]): Pick<Plan, "config" | "dropped"> {
   const leaving = Object.entries(proxyRoute).flatMap(([provider, route]) => {
-    const part = (entry: Entry) => entry.provider === provider && onRoute(entry);
-    const parts = config.filter(part);
+    const onRoute = (entry: Entry) => entry.provider === provider && route.fields.some((item) => samePath(item.path, keyPath(entry.key)) && same(item.value, entry.value));
+    const parts = config.filter(onRoute);
     const other = config.find((entry) => entry.provider === provider && !onRoute(entry) && route.fields.some((item) => overlaps(item.path, keyPath(entry.key))));
-    const gone = dropped.find(part);
+    const gone = dropped.find(onRoute);
     if (!parts.length || (!other && !gone)) return [];
     const reason = other ? `${other.pack === "profile" ? "your profile" : `the ${other.pack} pack`} sets ${provider}:${other.key}, so Hedge's ${route.agent} proxy route leaves as one unit` : `${provider}:${gone!.key} left the plan, so Hedge's ${route.agent} proxy route leaves as one unit`;
     return parts.map((entry) => ({ entry, reason }));

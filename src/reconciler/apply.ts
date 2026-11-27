@@ -3,12 +3,12 @@ import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { install, plan as planFiles } from "../files/install.ts";
 import { packName } from "../pack/manifest.ts";
-import { cannotTell, cannotTellSay, waitsForPerson } from "../pack/types.ts";
-import type { Action, CatalogEntry, Finding, HumanStep, Owned, PackCheck, Plan, Provider, Report } from "../pack/types.ts";
+import { cannotTell, waitsForPerson } from "../pack/types.ts";
+import type { Action, CatalogEntry, Finding, HumanStep, Owned, PackCheck, Plan, Report } from "../pack/types.ts";
 import { engineCommand } from "./engine-command.ts";
 import { changeLedger, currentNames, ledgerKey, readLedger, renameLedger, undoVariable, type Ledger, type LedgerStep } from "./ledger.ts";
 import { hublessReason, listedPack } from "./resolve.ts";
-import { onRoute, proxyRoute, wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
+import { wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
 import { withLegacyNames } from "../legacy.ts";
 
 export type AdapterContext = { home: string; dryRun: boolean; adopt: string[]; adoptFrom?: string[] };
@@ -117,32 +117,22 @@ async function reconcile(plan: Plan, options: ApplyOptions): Promise<{ report: R
     const checks: Checked = [];
     const runChecks = async (items: Plan["checks"]) => {
       for (const item of items) checks.push([item, await run(item.run)]);
+      report.findings.push(...checks.filter(([item, code]) => code !== 0 && items.includes(item)).map(([item, code]) => checkFinding(item, code)));
     };
-    const findChecks = (items: Plan["checks"], holdsRoute = (_item: Owned<PackCheck>) => false) =>
-      report.findings.push(...checks.filter(([item, code]) => code !== 0 && items.includes(item)).map(([item, code]) => checkFinding(item, code, holdsRoute(item))));
     const gates = plan.checks.filter((check) => plan.config.some((entry) => entry.pack === check.pack && entry.after === check.id));
     await runChecks(gates);
-    const gateCodes = (entry: Plan["config"][number]) => checks.filter(([item]) => item.pack === entry.pack && item.id === entry.after).map(([, code]) => code);
-    const passing = (entry: Plan["config"][number]) => gateCodes(entry).includes(0);
+    const passing = (entry: Plan["config"][number]) => checks.some(([item, code]) => item.pack === entry.pack && item.id === entry.after && code === 0);
     const waiting = plan.config.filter((entry) => waitsForCheck(plan, entry));
-    const unsure = (provider: Provider) => {
-      const parts = plan.config.filter((entry) => entry.provider === provider && onRoute(entry));
-      return parts.length === proxyRoute[provider]?.fields.length && parts.every((entry) => waiting.includes(entry) && gateCodes(entry).length > 0 && gateCodes(entry).every((code) => code === cannotTell));
-    };
-    const holds = (entry: Plan["config"][number]) => onRoute(entry) && unsure(entry.provider);
-    const kept = plan.config.filter((entry) => !holds(entry) && (waiting.includes(entry) ? passing(entry) : gated.plan.config.includes(entry)));
-    const routes = wholeRoutes(kept, plan.config.filter((entry) => !kept.includes(entry) && !holds(entry)));
-    findChecks(gates, (check) => plan.config.some((entry) => entry.pack === check.pack && entry.after === check.id && holds(entry)));
-    const configured = { ...gated.plan, config: routes.config, dropped: [...gated.plan.dropped, ...plan.config.filter(holds).map((entry) => droppedConfig(entry, true)), ...waiting.filter((entry) => !passing(entry) && !holds(entry)).map((entry) => droppedConfig(entry)), ...routes.dropped] };
+    const kept = plan.config.filter((entry) => (waiting.includes(entry) ? passing(entry) : gated.plan.config.includes(entry)));
+    const routes = wholeRoutes(kept, plan.config.filter((entry) => !kept.includes(entry)));
+    const configured = { ...gated.plan, config: routes.config, dropped: [...gated.plan.dropped, ...waiting.filter((entry) => !passing(entry)).map(droppedConfig), ...routes.dropped] };
     for (const adapter of afterSteps) {
       const result = await adapter.apply(configured, context);
       report.actions.push(...result.actions);
       report.findings.push(...result.findings);
       if (result.failed || result.blocked) report.ok = false;
     }
-    const todos = plan.checks.filter((check) => check.todo && !gates.includes(check));
-    await runChecks(todos);
-    findChecks(todos);
+    await runChecks(plan.checks.filter((check) => check.todo && !gates.includes(check)));
     return { report, checks };
   };
   for (const adapter of adapters.filter((each) => !afterSteps.includes(each))) {
@@ -230,7 +220,7 @@ export const todoLines = (findings: Finding[]) => findings.filter((finding) => f
 
 const waitsForCheck = (plan: Plan, entry: Plan["config"][number]) => entry.after !== undefined && !plan.human.some((step) => step.pack === entry.pack && step.id === entry.after);
 
-const droppedConfig = (entry: Plan["config"][number], held = false): Plan["dropped"][number] => ({ pack: entry.pack, item: `config ${entry.provider}:${entry.key}`, reason: held ? "its proxy route check cannot tell yet" : `check ${entry.after} does not pass`, check: entry.after, ...(held && { held }) });
+const droppedConfig = (entry: Plan["config"][number]): Plan["dropped"][number] => ({ pack: entry.pack, item: `config ${entry.provider}:${entry.key}`, reason: `check ${entry.after} does not pass`, check: entry.after });
 
 export type HumanStepsResult = { failing: Array<Owned<HumanStep>>; unchecked: Array<Owned<HumanStep>> };
 
@@ -357,9 +347,8 @@ export async function check(plan: Plan, options: { home: string; adapters?: Adap
   return report;
 }
 
-function checkFinding(item: Owned<PackCheck>, code: number, holdsRoute = false): Finding {
+function checkFinding(item: Owned<PackCheck>, code: number): Finding {
   const id = `check:${item.id}`;
-  if (code === cannotTell && holdsRoute) return { id, pack: item.pack, say: cannotTellSay(item), repair: "apply" };
   return code === waitsForPerson && item.todo ? { id, pack: item.pack, say: item.todo, todo: true } : { id, pack: item.pack, say: item.say, repair: "apply" };
 }
 
