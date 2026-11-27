@@ -7,10 +7,12 @@ const receipt = /<!-- (fleet|hedge)-proof-receipt\b[\s\S]*?<!-- \/(fleet|hedge)-
 const templateLine = /^[ \t]*[-*] (\[[ xX]\] .*|.*<!-- release-status:.*)$/gm;
 const preformatted = /<pre\b[\s\S]*?<\/pre>/g;
 
-const rendered = (markdown: string) => Bun.markdown.html(markdown.replace(receipt, "\n")).replace(/<!--[\s\S]*?-->/g, "\n");
+const inline = /<\/?(a|b|code|del|em|i|s|span|strong|sub|sup)\b[^>]*>/g;
+
+const rendered = (markdown: string) => Bun.markdown.html(markdown).replace(receipt, "\n").replace(/<!--[\s\S]*?-->/g, "\n");
 
 function writtenWords(html: string) {
-  const text = html.replace(preformatted, "\n").replace(/<[^>]*>/g, " ").replace(/&[#\w]+;/g, " & ");
+  const text = html.replace(preformatted, "\n").replace(inline, "").replace(/<[^>]*>/g, " ").replace(/&[#\w]+;/g, "&");
   return text.split(/\s+/).filter((word) => /[\p{L}\p{N}]/u.test(word)).length;
 }
 
@@ -19,14 +21,15 @@ function pictured(html: string) {
   const visible = html.replace(preformatted, "\n").replace(/<code>[\s\S]*?<\/code>/g, "");
   return /<(img|video)\b/i.test(visible)
     || /(^|[\s>"])https:\/\/github\.com\/user-attachments\/assets\/[\w-]+/m.test(visible)
-    || /<(p|li)>(<(strong|em)>)?No picture:(<\/(strong|em)>)?[ \t]*[^<\s]/.test(visible);
+    || /<(p|li)>No picture:[ \t]*[^<\s]/.test(visible.replace(inline, ""));
 }
 
 function topLevelItems(html: string) {
-  const rollout = html.search(/<h[1-6]>Rollout\b/i);
+  const shown = html.replace(inline, "");
+  const rollout = shown.search(/<h[1-6]>Rollout\b/i);
   let depth = 0;
   let items = 0;
-  for (const [, close, tag] of (rollout === -1 ? html : html.slice(0, rollout)).matchAll(/<(\/?)(ul|ol|li)\b/g)) {
+  for (const [, close, tag] of (rollout === -1 ? shown : shown.slice(0, rollout)).matchAll(/<(\/?)(ul|ol|li)\b/g)) {
     if (tag !== "li") depth += close ? -1 : 1;
     else if (!close && depth === 1) items += 1;
   }

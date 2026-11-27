@@ -23,6 +23,8 @@ test("a picture passes in every form that GitHub renders", () => {
     "https://github.com/user-attachments/assets/0f1e",
     "No picture: the diff shows it whole.",
     "**No picture:** the diff shows it whole.",
+    "No picture: **the diff shows it whole.**",
+    "`<!-- hedge-proof-receipt head=abc -->` opens the receipt.\n\n![shot](https://example.com/a.png)\n\n`<!-- /hedge-proof-receipt -->` closes it.",
   ]) expect(bodyProblems(`## Changes\n\n${picture}\n\n${callout(bullets(3))}`)).toEqual([]);
 });
 
@@ -74,4 +76,11 @@ test("an image reference without its definition renders as text, so it is no pic
 
 test("a deeply nested quote without a picture still gets its answer", () => {
   expect(bodyProblems(`${"> ".repeat(5000)}text\n${callout(bullets(3))}`)).toEqual([noPicture]);
+});
+
+test("formatting adds no words and hides no heading: R&D in a link or in bold is one word, and a bold Rollout heading still ends the callout's count", () => {
+  const formatted = Array.from({ length: 4 }, () => "**R**&D [R&D](https://example.com)").join(" ");
+  expect(bodyProblems(`No picture: copy.\n${filler(786)} ${formatted}\n${callout(bullets(3))}`)).toEqual([]);
+  expect(bodyProblems(`No picture: copy.\n${filler(787)} ${formatted}\n${callout(bullets(3))}`)).toEqual([overWords(801)]);
+  expect(bodyProblems(`No picture: copy.\n${callout([...bullets(6), "", "## **Rollout**", "", "- **Stages:** one", "- **Watch:** two"])}`)).toEqual([]);
 });
