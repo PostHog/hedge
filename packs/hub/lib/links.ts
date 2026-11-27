@@ -8,6 +8,7 @@ import hubPack from "../pack.json";
 import { quote, remoteHedge, type Machine, type PeerLinkInput, type PeerMachine } from "./machine.ts";
 import { GatewayClientError, gatewayPort, localGatewayUrl, readGatewayClient, writePrivateFile, type GatewaySettings } from "../../mcp-gateway/lib/client.ts";
 import { boxPrefix, isBoxName } from "../../../src/hub/names.ts";
+import { cannotTellSay } from "../../../src/pack/types.ts";
 import { poolFile, recorded } from "./pool.ts";
 
 export type BoxCoder = Pick<Coder, "binary" | "env" | "boxes" | "ssh" | "sshAfterStartup" | "remove" | "stop" | "extend" | "start" | "create" | "run">;
@@ -76,7 +77,8 @@ async function handOverProxy(coder: Pick<Coder, "ssh">, here: Machine, box: stri
   const lines = applied.stdout.split("\n");
   for (const { check, model, name, args } of proxyChecks) {
     const found = hubPack.checks.find((item) => item.id === check);
-    if (lines.includes(`To do: ${found?.todo}`)) here.say(`${box}: the proxy lists no ${model} model yet, so ${name} there keeps its own sign-in until the proxy serves it.`);
+    if (found && lines.includes(`Fix: ${cannotTellSay(found)}`)) here.say(`${box}: Hedge cannot tell whether ${name} there reaches your own-account proxy, so ${name} there keeps the settings it has until the proxy answers. To see why, run on the hub: hedge box run ${box} -- hedge cli-proxy check${args}`);
+    else if (lines.includes(`To do: ${found?.todo}`)) here.say(`${box}: the proxy lists no ${model} model yet, so ${name} there keeps its own sign-in until the proxy serves it.`);
     else if (lines.includes(`Fix: ${found?.say}`)) here.say(`${box}: ${name} there keeps its own sign-in, because it cannot reach your own-account proxy or the proxy is not safe to use. To see why, run on the hub: hedge box run ${box} -- hedge cli-proxy check${args}`);
   }
 }

@@ -449,16 +449,6 @@ describe("the Own-account balancing workflow", () => {
     };
     const both = ["claude-sonnet-5-5", "gpt-6.1-sol"];
 
-    test("keeps the Claude Code and Codex routes an earlier apply wrote while the proxy does not answer, names both checks, and the next apply changes nothing", async () => {
-      const home = homeWith();
-      const routed = await applied(home, both, 1);
-      const { reports, claude, codex } = await applied(home, "down");
-      expect(claude).toEqual(routed.claude);
-      expect(codex).toEqual(routed.codex);
-      expect(reports[0]!.findings.map((finding) => finding.id)).toEqual(["check:cli-proxy-client", "check:cli-proxy-codex"]);
-      expect(reports[1]!.actions).toEqual([]);
-    });
-
     test("takes off the Claude route that an earlier apply wrote once the proxy serves no model, even while a pack source cannot be fetched", async () => {
       const home = homeWith({ ".claude/settings.json": JSON.stringify({ model: "opus" }) });
       expect((await applied(home, both, 1)).claude.apiKeyHelper).toBe('cat "$HOME/.config/hedge/cli-proxy.key"');

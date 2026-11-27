@@ -486,14 +486,16 @@ test("the check passes while the proxy answers the saved key, and keeps Claude C
   expect(printed).toEqual([`Claude Code reaches your own-account proxy at ${proxyUrl}.`]);
 });
 
-test("the check cannot tell while the proxy does not answer, and changes no file", async () => {
-  const { machine, home, printed } = client({}, { down: true });
-  connected(home);
-  const before = readFileSync(settingsFile(home), "utf8");
-  expect(await cliProxy("check", machine)).toBe(3);
-  expect(readFileSync(settingsFile(home), "utf8")).toBe(before);
-  expect(printed).toEqual([`The proxy at ${proxyUrl} does not answer. hedge apply keeps the Claude Code settings as they are until it answers.`]);
-  expect(existsSync(keyFile(home))).toBe(true);
+test("the check cannot tell while the proxy does not answer or its connection drops mid-answer, and changes no file", async () => {
+  for (const proxy of [{ down: true }, { cutsBody: true }]) {
+    const { machine, home, printed } = client({}, proxy);
+    connected(home);
+    const before = readFileSync(settingsFile(home), "utf8");
+    expect(await cliProxy("check", machine)).toBe(3);
+    expect(readFileSync(settingsFile(home), "utf8")).toBe(before);
+    expect(printed).toEqual([`The proxy at ${proxyUrl} does not answer. hedge apply keeps the Claude Code settings as they are until it answers.`]);
+    expect(existsSync(keyFile(home))).toBe(true);
+  }
 });
 
 test("hedge apply while the proxy does not answer keeps the routes an earlier apply put in, and puts in none", async () => {
@@ -503,10 +505,13 @@ test("hedge apply while the proxy does not answer keeps the routes an earlier ap
   const settings = readFileSync(settingsFile(home), "utf8");
   const codex = readFileSync(codexFile(home), "utf8");
   proxy.down = true;
-  const silent = await apply();
-  expect(readFileSync(settingsFile(home), "utf8")).toBe(settings);
-  expect(readFileSync(codexFile(home), "utf8")).toBe(codex);
-  expect(silent.stdout).toContain("Hedge cannot tell yet whether cli-proxy-client passes, so it keeps the settings that wait on it as they are. Run hedge cli-proxy check to see why.");
+  for (let run = 0; run < 2; run++) {
+    const silent = await apply();
+    expect(readFileSync(settingsFile(home), "utf8")).toBe(settings);
+    expect(readFileSync(codexFile(home), "utf8")).toBe(codex);
+    expect(silent.stdout).toContain("Hedge cannot tell yet whether cli-proxy-client passes, so it keeps the settings that wait on it as they are. Run hedge cli-proxy check to see why.");
+    expect(silent.stdout).toContain("Hedge cannot tell yet whether cli-proxy-codex passes, so it keeps the settings that wait on it as they are. Run hedge cli-proxy check codex to see why.");
+  }
   proxy.down = false;
   expect((await apply()).code).toBe(0);
   expect(readFileSync(settingsFile(home), "utf8")).toBe(settings);

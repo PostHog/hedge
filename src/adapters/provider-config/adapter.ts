@@ -36,14 +36,13 @@ export function providerConfigAdapter(options: { run?: CommandRunner } = {}): Ad
     targets: (plan) => [...configTargets.filter((target) => plan.config.some(ownedBy(target))).map((target) => target.path), ...(wantedServers(plan).length ? [claudeJson] : [])],
     async apply(plan, context) {
       const outage = sourceOutage(plan);
-      const gated = gatedKeys(plan);
-      const held = heldKeys(plan);
+      const stays = staying(plan, outage);
       const reconcile = async () => {
-        const { plugins, claudeEnabled, marketplaces, codexPlugins, ...result } = await reconcileFiles(plan, context.home, context.dryRun, context.adopt, outage, gated, held);
+        const { plugins, claudeEnabled, marketplaces, codexPlugins, ...result } = await reconcileFiles(plan, context.home, context.dryRun, context.adopt, outage, stays);
         const written = result.findings.filter((finding) => finding.todo);
         try {
           result.findings.push(...(await reconcilePlugins(plan, context.home, context.dryRun, run, { outage, accepted: plugins, claudeEnabled, marketplaces, acceptedCodex: codexPlugins })));
-          const servers = await reconcileServers(plan, context.home, { dryRun: context.dryRun, adopt: context.adopt.includes(claudeJson), outage, gated: gatedPath(gated, "claude"), run });
+          const servers = await reconcileServers(plan, context.home, { dryRun: context.dryRun, adopt: context.adopt.includes(claudeJson), stays: stays("claude"), run });
           result.actions.push(...servers.actions);
           result.findings.push(...servers.findings);
         } catch (error) {
@@ -58,7 +57,7 @@ export function providerConfigAdapter(options: { run?: CommandRunner } = {}): Ad
   };
 }
 
-async function reconcileFiles(plan: Plan, home: string, dryRun: boolean, adopt: string[], outage: boolean, gated: string[], held: string[]): Promise<FilesResult> {
+async function reconcileFiles(plan: Plan, home: string, dryRun: boolean, adopt: string[], outage: boolean, stays: Staying): Promise<FilesResult> {
   const previous = await readFieldRecord(home);
   const next: FieldRecord = {};
   const writes: Array<Write & { action: Action }> = [];
@@ -71,7 +70,7 @@ async function reconcileFiles(plan: Plan, home: string, dryRun: boolean, adopt: 
     const fields = owned(plan, target);
     let merged: Merged;
     try {
-      merged = merge(target, before, old, fields, adopt.includes(target.path), { outage, gated: gatedPath(gated, target.provider), held: gatedPath(held, target.provider), configPath: join(home, target.path) });
+      merged = merge(target, before, old, fields, adopt.includes(target.path), { outage, stays: stays(target.provider), configPath: join(home, target.path) });
     } catch (error) {
       keepOld();
       result.findings.push({ id: `kept:${target.path}`, pack: "engine", say: `Kept ${target.path} as it is: Hedge cannot read it (${(error as Error).message}). Fix the file, then run hedge apply.`, repair: "human" });
@@ -113,7 +112,7 @@ function owned(plan: Plan, target: Target): Field[] {
   return fields;
 }
 
-function merge(target: Target, text: string | undefined, previous: Field[], wanted: Field[], adopt: boolean, options: { outage: boolean; gated: (path: string[]) => boolean; held: (path: string[]) => boolean; configPath: string }): Merged {
+function merge(target: Target, text: string | undefined, previous: Field[], wanted: Field[], adopt: boolean, options: { outage: boolean; stays: (path: string[]) => boolean; configPath: string }): Merged {
   const current: Document = text === undefined ? {} : target.format.decode(text);
   const original = target.format.encode(current);
   const record: Field[] = [];
@@ -164,7 +163,7 @@ function merge(target: Target, text: string | undefined, previous: Field[], want
   const all = [...wanted, ...trust];
   for (const field of previous) {
     if (all.some((item) => overlaps(item.path, field.path))) continue;
-    if ((options.outage && !options.gated(field.path)) || options.held(field.path) || keepsEdit(field)) record.push(field);
+    if (options.stays(field.path) || keepsEdit(field)) record.push(field);
     else if (get(current, field.path) !== undefined) {
       remove(current, field.path);
       removed.push(field.path.join("."));
@@ -200,19 +199,15 @@ function acceptedCodexPlugins(document: Document) {
 
 const isHookTrust = (field: Field) => field.path[0] === "hooks" && field.path[1] === "state";
 
-/** The provider:key of each config entry the gate dropped because its check fails. An outage never keeps these. */
-function gatedKeys(plan: Plan) {
-  return plan.dropped.flatMap((entry) => (entry.check && entry.item.startsWith("config ") ? [entry.item.slice("config ".length)] : []));
-}
+type Staying = (provider: Provider) => (path: string[]) => boolean;
 
-function heldKeys(plan: Plan) {
-  return plan.dropped.flatMap((entry) => (entry.held && entry.item.startsWith("config ") ? [entry.item.slice("config ".length)] : []));
-}
-
-/** Whether a path overlaps one of these config keys of this provider. */
-function gatedPath(gated: string[], provider: Provider) {
-  const paths = gated.filter((key) => key.startsWith(`${provider}:`)).map((key) => keyPath(key.slice(provider.length + 1)));
-  return (path: string[]) => paths.some((item) => overlaps(item, path));
+/** Whether a setting an earlier apply wrote stays although the plan no longer wants it. A check that cannot tell yet keeps the config that waits on it. A pack source outage keeps the rest, but never what a failing check dropped. */
+function staying(plan: Plan, outage: boolean): Staying {
+  const gated = plan.dropped.filter((entry) => entry.check && entry.item.startsWith("config ")).map((entry) => ({ key: entry.item.slice("config ".length), held: entry.held === true }));
+  return (provider) => (path) => {
+    const hit = gated.filter((entry) => entry.key.startsWith(`${provider}:`) && overlaps(keyPath(entry.key.slice(provider.length + 1)), path));
+    return hit.some((entry) => entry.held) || (outage && !hit.length);
+  };
 }
 
 /** True while an enabled pack is missing because its source cannot be fetched. Its settings must not look departed. */
