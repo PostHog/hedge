@@ -255,7 +255,8 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const args = expandAlias(written, io);
   if (!args) return { targets: [], refusal: shellAliasReason };
   const gh = parseGh(inOrder(args));
-  const marked = parseGh(inOrder(expandAlias(ghArguments({ ...found, args: found.args.map((arg, index) => found.argExpands[index] ? `${arg}${runTimeMark}` : arg) })!, io) ?? []));
+  const offset = found.args.length - written.length;
+  const marked = parseGh(inOrder(expandAlias(written.map((arg, index) => found.argExpands[offset + index] ? `${arg}${runTimeMark}` : arg), io) ?? []));
   const builtBody = () => values(marked, "-b", "--body", "-F", "--body-file").some(isRunTime);
   if ((gh.group === "pr" || gh.group === "issue") && gh.action === "comment") {
     const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"), builtBody());

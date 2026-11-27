@@ -102,6 +102,7 @@ describe("which calls enqueue or merge", () => {
     ["gh pr comment 7 --repo example/product --body $\"/trunk merge\""],
     ["zsh -c 'B=\"/trunk merge\"; gh pr comment 7 --repo example/product --body \"$~B\"'"],
     ["zsh -c 'B=\"/trunk merge\"; gh pr comment 7 --repo example/product --body \"$^B\"'"],
+    ["bash -c \"echo $X; xargs $'gh' pr comment 7 --repo example/product --body '/trunk merge' < /dev/null\""],
   ])("%s targets example/product#7", (command) => {
     expect(bash(command)).toMatchObject({ targets: [target("example/product", 7)] });
   });
