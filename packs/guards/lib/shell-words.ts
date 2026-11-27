@@ -9,7 +9,9 @@ export type Command = {
   substitutions: string[];
   leadingSubstitutions: string[];
   argSubstitutions: string[][];
-  stdin?: { body: string; substitutions: string[] };
+  stdin?: { body: string; substitutions: string[]; expands?: boolean };
+  argExpands: boolean[];
+  fromExpansion: boolean;
   outputs: string[];
   writes: string[];
   redirects: string[];
@@ -28,9 +30,9 @@ export type Command = {
   chdir?: string;
 };
 
-type Context = { env: ReadonlyMap<string, string>; inLoop: boolean; scope?: Scope };
-type Word = { text: string; raw: string; bare: string; substitutions: string[]; processes: string[] };
-type Heredoc = { delimiter: string; literal: boolean; stripTabs: boolean; body: string; substitutions: string[] };
+type Context = { env: ReadonlyMap<string, string>; inLoop: boolean; scope?: Scope; expands?: boolean };
+type Word = { text: string; raw: string; bare: string; substitutions: string[]; processes: string[]; expands: boolean };
+type Heredoc = { delimiter: string; literal: boolean; stripTabs: boolean; body: string; substitutions: string[]; expands?: boolean };
 type Token = { word: Word } | { operator: string; at: number } | { heredoc: Heredoc } | { herestring: true };
 
 export const shellTools = new Set(["Bash", "exec_command", "shell", "shell_command", "local_shell"]);
@@ -168,6 +170,13 @@ function braceEnd(text: string, start: number, inDoubleQuotes: boolean): number 
   throw unclosed("a ${");
 }
 
+const parameterStart = /[\w@*#?$!{(-]/;
+const outerSite = /[$`]/;
+const startsParameter = (text: string, index: number) => {
+  let at = index + 1;
+  while (text.startsWith("\\\n", at)) at += 2;
+  return text[index] === "$" && parameterStart.test(text[at] ?? "");
+};
 const programsInside = (inner: string) => doubleQuoted(inner, 0, false).substitutions;
 
 function expansion(text: string, index: number, inDoubleQuotes: boolean): { end: number; programs: string[] } | undefined {
@@ -194,6 +203,7 @@ function expansion(text: string, index: number, inDoubleQuotes: boolean): { end:
 function doubleQuoted(text: string, start: number, stopAtQuote: boolean) {
   let value = "";
   const substitutions: string[] = [];
+  let expands = false;
   let index = start;
   for (; index < text.length; index++) {
     const char = text[index];
@@ -204,6 +214,7 @@ function doubleQuoted(text: string, start: number, stopAtQuote: boolean) {
       continue;
     }
     const found = expansion(text, index, true);
+    if (found || startsParameter(text, index)) expands = true;
     if (found) {
       substitutions.push(...found.programs);
       value += text.slice(index, found.end + 1);
@@ -211,7 +222,7 @@ function doubleQuoted(text: string, start: number, stopAtQuote: boolean) {
     } else value += char;
   }
   if (stopAtQuote && index >= text.length) throw unclosed('a " quote');
-  return { value, substitutions, end: index };
+  return { value, substitutions, expands, end: index };
 }
 
 function readDelimiter(text: string, start: number) {
@@ -264,7 +275,11 @@ function readBodies(text: string, start: number, pending: Heredoc[], mustClose =
       if (!closed) heredoc.body += `${line}\n`;
     }
     if (mustClose && !closed) throw unclosed(`a heredoc that ${heredoc.delimiter} should end inside a substitution`);
-    if (!heredoc.literal) heredoc.substitutions = doubleQuoted(heredoc.body, 0, false).substitutions;
+    if (!heredoc.literal) {
+      const quoted = doubleQuoted(heredoc.body, 0, false);
+      heredoc.substitutions = quoted.substitutions;
+      heredoc.expands = quoted.expands;
+    }
   }
   pending.length = 0;
   return index;
@@ -275,8 +290,9 @@ function tokenize(text: string): Token[] {
   const pending: Heredoc[] = [];
   let word: Word | undefined;
   let commentAt: number | undefined;
-  const append = (value: string, raw: string, substitutions: string[] = [], bare = "_", processes: string[] = []) => {
-    word ??= { text: "", raw: "", bare: "", substitutions: [], processes: [] };
+  const append = (value: string, raw: string, substitutions: string[] = [], bare = "_", processes: string[] = [], expands = false) => {
+    word ??= { text: "", raw: "", bare: "", substitutions: [], processes: [], expands: false };
+    word.expands ||= expands;
     word.text += value;
     word.raw += raw;
     word.bare += bare;
@@ -310,7 +326,7 @@ function tokenize(text: string): Token[] {
       index = end + 1;
     } else if (char === '"') {
       const quoted = doubleQuoted(text, index + 1, true);
-      append(quoted.value, text.slice(index, quoted.end + 1), quoted.substitutions);
+      append(quoted.value, text.slice(index, quoted.end + 1), quoted.substitutions, "_", [], quoted.expands);
       index = quoted.end + 1;
     } else if ((char === "<" || char === ">") && next === "(") {
       const end = parenEnd(text, index + 1);
@@ -351,7 +367,7 @@ function tokenize(text: string): Token[] {
       if ((char === "<" || char === ">") && word && !/^\d+$|[<>&]$/.test(word.raw)) endWord();
       const found = expansion(text, index, false);
       const end = found?.end ?? index;
-      append(text.slice(index, end + 1), text.slice(index, end + 1), found?.programs, found ? "_" : char);
+      append(text.slice(index, end + 1), text.slice(index, end + 1), found?.programs, found ? "_" : char, [], found !== undefined || startsParameter(text, index));
       index = end + 1;
     }
   }
@@ -423,6 +439,7 @@ function skipWrapper(texts: string[], start: number, env: Map<string, string>): 
  * `env A=1`, `timeout 5`, `hedge heavy --` and keywords such as `then` are taken off, so `name` is the command that runs. */
 export function parse(program: string, context: Context = { env: new Map(), inLoop: false }): Command[][] {
   const env = new Map(context.env);
+  const expandsHere = (expands: boolean | undefined, raw: string) => expands === true || (context.expands === true && outerSite.test(raw));
   const pipelines: Command[][] = [];
   let pipeline: Command[] = [];
   let words: Word[] = [];
@@ -476,11 +493,12 @@ export function parse(program: string, context: Context = { env: new Map(), inLo
     const substitutions = [...words.flatMap((word) => word.substitutions), ...(stdin?.substitutions ?? [])];
     const leadingSubstitutions = kept.slice(0, index + 1).flatMap((word) => word.substitutions);
     const argSubstitutions = kept.slice(index + 1).map((word) => word.substitutions);
+    const argExpands = kept.slice(index + 1).map((word) => expandsHere(word.expands, word.raw));
     const bare = kept.slice(index).map((word) => word.bare);
     const rawArgs = kept.slice(index + 1).map((word) => word.raw);
     const rawPrefix = kept.slice(0, index).map((word) => word.raw);
     const prefix = kept.slice(0, index).map((word) => basename(word.text));
-    pipeline.push({ name, args, env: commandEnv, substitutions, leadingSubstitutions, argSubstitutions, stdin, outputs, writes, redirects, bare, rawArgs, rawPrefix, prefix, keywords: stripped, processSubstitutions: words.flatMap((word) => word.processes), inLoop, tested, ...(after && { after, afterAt }), scope, chdir });
+    pipeline.push({ name, args, env: commandEnv, substitutions, leadingSubstitutions, argSubstitutions, argExpands, fromExpansion: context.expands === true, stdin, outputs, writes, redirects, bare, rawArgs, rawPrefix, prefix, keywords: stripped, processSubstitutions: words.flatMap((word) => word.processes), inLoop, tested, ...(after && { after, afterAt }), scope, chdir });
     words = [];
     stdin = undefined;
   };
@@ -496,11 +514,11 @@ export function parse(program: string, context: Context = { env: new Map(), inLo
     const definition = opened && "operator" in token && token.operator === ")";
     opened = "operator" in token && token.operator === "(";
     if ("word" in token && hereString) {
-      stdin = { body: token.word.text, substitutions: token.word.substitutions };
+      stdin = { body: token.word.text, substitutions: token.word.substitutions, expands: expandsHere(token.word.expands, token.word.raw) };
       hereString = false;
     } else if ("word" in token) words.push(token.word);
     else if ("herestring" in token) hereString = true;
-    else if ("heredoc" in token) stdin = { body: token.heredoc.body, substitutions: [...(stdin?.substitutions ?? []), ...token.heredoc.substitutions] };
+    else if ("heredoc" in token) stdin = { body: token.heredoc.body, substitutions: [...(stdin?.substitutions ?? []), ...token.heredoc.substitutions], expands: expandsHere(token.heredoc.expands, token.heredoc.body) };
     else if (token.operator === "|" || token.operator === "|&") finishCommand("|");
     else {
       finishPipeline(token.operator === "(" || token.operator === ")" ? undefined : token.operator, token.at);
@@ -566,29 +584,42 @@ function output(pipeline: Command[], index: number): string | undefined {
   return passes ? command.stdin?.body ?? output(pipeline, index - 1) : undefined;
 }
 
-function nestedPrograms(command: Command, piped?: string): { program: string; scope: Scope; substituted?: true }[] {
+function expandedBefore(pipeline: Command[]): boolean[] {
+  let seen = false;
+  return pipeline.map((command) => {
+    const before = seen;
+    seen ||= command.fromExpansion || (command.name !== "tee" && command.argExpands.includes(true)) || command.stdin?.expands === true;
+    return before;
+  });
+}
+
+function nestedPrograms(command: Command, piped?: string, pipedExpands = false): { program: string; scope: Scope; substituted?: true; expands?: boolean }[] {
   const input = shellInput(command);
   const child = { parent: command.scope, chdir: command.chdir };
   const stdin = command.stdin?.body ?? piped;
+  const stdinExpands = command.fromExpansion || (command.stdin ? command.stdin.expands === true : pipedExpands);
   return [
-    ...command.substitutions.map((program) => ({ program, scope: { parent: command.scope }, substituted: true as const })),
-    ...(input && "program" in input ? [{ program: input.program, scope: child }] : []),
-    ...(input && "stdin" in input && stdin !== undefined ? [{ program: stdin, scope: child }] : []),
-    ...(command.name === "eval" ? [{ program: command.args.join(" "), scope: command.scope }] : []),
+    ...command.substitutions.map((program) => ({ program, scope: { parent: command.scope }, substituted: true as const, expands: command.fromExpansion })),
+    ...(input && "program" in input ? [{ program: input.program, scope: child, expands: command.fromExpansion || command.argExpands[input.index] === true }] : []),
+    ...(input && "stdin" in input && stdin !== undefined ? [{ program: stdin, scope: child, expands: stdinExpands }] : []),
+    ...(command.name === "eval" ? [{ program: command.args.join(" "), scope: command.scope, expands: command.fromExpansion || command.argExpands.includes(true) }] : []),
   ];
 }
 
-export const nestedProgramsAt = (pipeline: Command[], index: number) => nestedPrograms(pipeline[index], output(pipeline, index - 1));
+export const nestedProgramsAt = (pipeline: Command[], index: number) => nestedPrograms(pipeline[index], output(pipeline, index - 1), expandedBefore(pipeline)[index]);
 
 /** Every pipeline a command line runs, including those in `sh -c` programs, `$(...)` and backtick substitutions, `eval`,
  * heredocs fed to a shell, and `echo`, `printf` or `cat` text piped into one. A nested program comes before the command
  * that holds it. */
 export function pipelinesIn(program: string, context?: Context, depth = 0): Command[][] {
   if (depth > maxDepth) throw new Error(`it nests more than ${maxDepth} shell programs`);
-  return parse(program, context).flatMap((pipeline) => [
-    ...pipeline.flatMap((command, index) => nestedPrograms(command, output(pipeline, index - 1)).flatMap(({ program: nested, scope }) => pipelinesIn(nested, { ...command, scope }, depth + 1))),
-    pipeline,
-  ]);
+  return parse(program, context).flatMap((pipeline) => {
+    const expanded = expandedBefore(pipeline);
+    return [
+      ...pipeline.flatMap((command, index) => nestedPrograms(command, output(pipeline, index - 1), expanded[index]).flatMap(({ program: nested, scope, expands }) => pipelinesIn(nested, { ...command, scope, expands }, depth + 1))),
+      pipeline,
+    ];
+  });
 }
 
 export const commandsIn = (program: string) => pipelinesIn(program).flat();

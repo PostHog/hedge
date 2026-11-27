@@ -5,7 +5,7 @@ import { fold, gateOverride, sameThread, live, mergeCardChoice, mergeCardConditi
 import { isTextList, lastGateResult, latestGateResult, type GateResult } from "../../pull-requests/lib/proof.ts";
 import { decidesAll } from "../../pull-requests/lib/proof-autonomy.ts";
 import { normalized } from "../../pull-requests/lib/proof-answers.ts";
-import { endpointOf, ghGroups, inOrder, parseGh, values, type Gh } from "./gh.ts";
+import { endpointOf, fieldName, ghGroups, inOrder, parseGh, values, type Gh } from "./gh.ts";
 import { githubSlug } from "./git.ts";
 import { commandsIn, shellTools, type Command, type Scope } from "./shell-words.ts";
 
@@ -19,14 +19,14 @@ const restMerge = /\/repos\/[^/\s]+\/[^/\s]+\/pulls\/\d+\/merge\b/i;
 
 const oneShape = "`gh pr comment <number> --repo <owner>/<repo> --body '/trunk merge'`";
 export const cliReason = `Hedge blocked this command: an agent enters the Trunk merge queue only with ${oneShape}, which the merge gate checks. Use that form.`;
-export const graphqlReason = `Hedge blocked this call: a GraphQL merge, auto-merge, enqueue, or comment that posts \`/trunk merge\` skips the merge gate, and a query read from piped input or an unreadable file may be one. Enqueue with ${oneShape}, or merge with \`gh pr merge <number> --repo <owner>/<repo>\`.`;
+export const graphqlReason = `Hedge blocked this call: a GraphQL merge, auto-merge, enqueue, or comment that posts \`/trunk merge\` skips the merge gate, and a query read from piped input or an unreadable file, a query built from a shell variable or substitution, or a variable built that way for a mutation that posts a comment or review, may be one. Write the query as literal text and pass run-time values as its variables, such as \`-F n="$n"\`. A mutation that posts a comment or review takes only literal variables, such as a body file by its literal path, \`-F b=@body.md\`, written in a call of its own. Enqueue with ${oneShape}, or merge with \`gh pr merge <number> --repo <owner>/<repo>\`.`;
 export const rawReason = `Hedge blocked this command: it merges a PR or posts \`/trunk merge\` straight to the GitHub API, or sends GitHub a payload the merge gate cannot read, which skips the merge gate. Enqueue with ${oneShape}.`;
 export const otherEndpointReason = `Hedge blocked this call: it writes \`/trunk merge\` somewhere other than a new PR comment, such as an edited comment or a review. Enqueue with ${oneShape}.`;
-export const unreadPayloadReason = "Hedge blocked this call: the merge gate cannot read the file it sends, such as one that this command writes before the call or a path it cannot open, so it cannot tell whether the call posts `/trunk merge`. Write the file in one call, then send it with a call of its own.";
+export const unreadPayloadReason = "Hedge blocked this call: the merge gate cannot read what it sends, such as a body built from a shell variable or substitution, a file that this command writes before the call, or a path it cannot open, so it cannot tell whether the call posts `/trunk merge`. Give the body as literal text or by its literal file path, and write a file in one call, then send it with a call of its own.";
 export const splitStringReason = "Hedge blocked this command: `env -S` runs a command line that the merge gate cannot read. Write the gh, trunk, or curl command out as its own words.";
 export const shellAliasReason = "Hedge blocked this command: it runs a gh alias that the merge gate cannot read, a shell alias or one with arguments. Write the gh command out.";
 const unreadVia = " (unread body)";
-export const unreadBodyNote = "The merge gate could not read the body of this comment, such as a piped body or a file named by a shell variable, so it checks the comment as a `/trunk merge` enqueue. If the comment does not post `/trunk merge`, give the body by its literal file path or as literal text, and it posts without this check.";
+export const unreadBodyNote = "The merge gate could not read the body of this comment, such as a piped body, a body built from a shell variable or substitution, or a file named by a shell variable, so it checks the comment as a `/trunk merge` enqueue. If the comment does not post `/trunk merge`, give the body by its literal file path or as literal text, and it posts without this check.";
 const unnamedReason = (what: string) => `Hedge blocked this command: it ${what} without naming the PR, so the merge gate cannot check it. Name the PR by number and repository: ${oneShape}.`;
 
 /** Parses guards.merge-gate-exempt: owner/repo or owner/* entries, separated by commas or spaces. */
@@ -122,12 +122,59 @@ function repositoryOf(gh: Gh, found: Command, cwd: string | undefined, io: Inten
 const stdinPath = /^(?:-|\/dev\/stdin|\/dev\/fd\/\d+|\/proc\/(?:self|\d+)\/fd\/\d+)$/;
 const home = (path: string) => path === "~" ? homedir() : path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
 
-function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline: string[], files: string[]) {
+const builtAtRunTime = /[$`]/;
+const runTimeMark = "\u0000";
+const isRunTime = (value: string) => value.endsWith(runTimeMark);
+const ghPlaceholder = /\{(?:owner|repo|branch)\}|:(?:owner|repo|branch)\b/;
+const unreadByTrunk = /^repos\/[\w.-]+\/[\w.-]+\/(?:pulls\/(?:\d+\/comments(?:\/\d+\/replies)?|comments\/\d+)|stacks)$/;
+const graphqlCall = /(?<!\w)(?:(?<=(?:^|\})[\s,]*)(mutation|query|subscription)[\s,]+)?([A-Za-z_]\w*)[\s,]*\(/g;
+const postingField = (name: string) => (/^(?:add|update|submit)/.test(name) && /Comment|Review/.test(name)) || /^update(?:PullRequest|Issue)$/.test(name);
+const lineEnd = (char: string | undefined) => char === "\n" || char === "\r";
+
+function graphqlCode(query: string): string {
+  let code = "";
+  let index = 0;
+  while (index < query.length) {
+    if (query[index] === "#") {
+      while (index < query.length && !lineEnd(query[index])) index++;
+      code += " ";
+    } else if (query.startsWith('"""', index)) {
+      index += 3;
+      while (index < query.length && !query.startsWith('"""', index)) index += query.startsWith('\\"""', index) ? 4 : 1;
+      index += 3;
+      code += " ";
+    } else if (query[index] === '"') {
+      index++;
+      while (index < query.length && query[index] !== '"' && !lineEnd(query[index])) index += query[index] === "\\" && !lineEnd(query[index + 1]) ? 2 : 1;
+      if (query[index] === '"') index++;
+      code += " ";
+    } else code += query[index++];
+  }
+  return code;
+}
+
+const postsText = (query: string) => [...graphqlCode(query).matchAll(graphqlCall)].some(([, keyword, name]) => !keyword && postingField(name!));
+const readAt = (found: Command, cwd: string | undefined, io: IntentIO, path: string) => io.readText(resolve(cwd ?? ".", found.chdir ?? ".", home(path)));
+
+function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline: string[], files: string[], built: boolean) {
   const paths = files.map((path) => stdinPath.test(path) ? "-" : path);
   const piped = paths.includes("-") && !found.stdin;
-  const read = paths.map((path) => path === "-" ? found.stdin?.body ?? "" : io.readText(resolve(cwd ?? ".", found.chdir ?? ".", home(path))));
-  const texts = [...inline, ...read.filter((text) => text !== undefined), found.stdin?.body ?? ""];
-  return { texts: [...texts, ...texts.flatMap(jsonStrings)], unread: read.includes(undefined), piped };
+  const read = paths.map((path) => path === "-" ? found.stdin?.body ?? "" : readAt(found, cwd, io, path));
+  const texts = [...inline, ...read.filter((text) => text !== undefined)];
+  const runTime = built || found.name === "xargs" || (paths.includes("-") && found.stdin?.expands === true);
+  return { texts: [...texts, ...texts.flatMap(jsonStrings)], unread: read.includes(undefined) || runTime, missing: read.includes(undefined), built: runTime, dollar: texts.some((text) => builtAtRunTime.test(text)), piped };
+}
+
+function runTimeFields(fields: string[], typed: string[], graphql: boolean, bodyFromInput: boolean, readQuery: (path: string) => string | undefined) {
+  const built = fields.filter(isRunTime);
+  const key = (field: string) => field.replace(/=.*$/s, "");
+  const named = (field: string, name: string) => builtAtRunTime.test(key(field)) || fieldName(key(field)).toLowerCase() === name;
+  if (bodyFromInput) return false;
+  if (!graphql) return built.some((field) => named(field, "body"));
+  const queries = fields.filter((field) => key(field) === "query").map((field) => field.slice("query=".length)).map((query) => query.startsWith("@") ? readQuery(query.slice(1)) : query);
+  const filled = typed.some((field) => key(field) === "query" && !field.startsWith("query=@") && ghPlaceholder.test(field));
+  const quiet = !filled && queries.length > 0 && queries.every((query) => query !== undefined && !postsText(query));
+  return built.some((field) => named(field, "query")) || (built.length > 0 && !quiet);
 }
 
 function jsonStrings(text: string): string[] {
@@ -135,10 +182,9 @@ function jsonStrings(text: string): string[] {
   try { return strings(JSON.parse(text)); } catch { return []; }
 }
 
-const builtAtRunTime = /[$`]/;
-type Sent = { texts: string[]; unread: boolean };
-const readsEnqueue = ({ texts }: Sent, raw: string) => texts.some((text) => enqueueLine.test(text)) || (texts.some((text) => builtAtRunTime.test(text)) && mentionsEnqueue.test(raw));
-const sendsEnqueue = (sent: Sent, raw: string) => sent.unread || readsEnqueue(sent, raw);
+type Sent = { texts: string[]; unread: boolean; missing: boolean; built: boolean; dollar: boolean; piped: boolean };
+const readsEnqueue = ({ texts, built, dollar }: Sent, raw: string) => texts.some((text) => enqueueLine.test(text)) || ((built || dollar) && mentionsEnqueue.test(raw));
+const sendsEnqueue = (sent: Sent, raw: string) => sent.unread || sent.piped || readsEnqueue(sent, raw);
 const elsewhere = (sent: Sent, raw: string): MergeIntent => ({ targets: [], refusal: readsEnqueue(sent, raw) ? otherEndpointReason : unreadPayloadReason });
 
 const readOptions = {
@@ -209,9 +255,12 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const args = expandAlias(written, io);
   if (!args) return { targets: [], refusal: shellAliasReason };
   const gh = parseGh(inOrder(args));
+  const offset = found.args.length - written.length;
+  const marked = parseGh(inOrder(expandAlias(written.map((arg, index) => found.argExpands[offset + index] ? `${arg}${runTimeMark}` : arg), io) ?? []));
+  const builtBody = () => values(marked, "-b", "--body", "-F", "--body-file").some(isRunTime);
   if ((gh.group === "pr" || gh.group === "issue") && gh.action === "comment") {
-    const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"));
-    if (!sent.piped && !sendsEnqueue(sent, raw)) return { targets: [] };
+    const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"), builtBody());
+    if (!sendsEnqueue(sent, raw)) return { targets: [] };
     const named = namedPr(gh, found, cwd, io);
     const reads = readsEnqueue(sent, raw);
     const unread = reads ? {} : { unreadOnly: true as const };
@@ -219,7 +268,7 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
     return { targets: [{ ...named, via: `gh ${gh.group} comment${reads ? "" : unreadVia}` }], ...unread };
   }
   if (gh.group === "pr" && gh.action === "review") {
-    const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"));
+    const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"), builtBody());
     return sendsEnqueue(sent, raw) ? elsewhere(sent, raw) : { targets: [] };
   }
   if (gh.group === "pr" && gh.action === "merge") {
@@ -231,24 +280,25 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const fields = values(gh, "-f", "--raw-field", "-F", "--field");
   const inline = [...fields, ...fields.map((field) => field.replace(/^[^=]*=/, ""))];
   const fieldFiles = values(gh, "-F", "--field").flatMap((field) => field.match(/^[^=]*=@(.+)$/s)?.[1] ?? []);
-  const sent = sentTexts(found, cwd, io, inline, [...values(gh, "--input"), ...fieldFiles]);
-  const enqueues = sendsEnqueue(sent, raw);
   let endpoint = endpointOf(gh).replace(/[?#].*$/s, "").replace(/\/$/, "");
+  const sent = sentTexts(found, cwd, io, inline, values(gh, "--input").length > 0 ? values(gh, "--input") : fieldFiles, values(marked, "--input").some(isRunTime) || runTimeFields(values(marked, "-f", "--raw-field", "-F", "--field"), values(marked, "-F", "--field"), endpoint === "graphql", values(gh, "--input").length > 0, (path) => stdinPath.test(path) ? found.stdin?.body : readAt(found, cwd, io, path)));
   if (endpoint === "graphql") return sent.piped || sent.unread || sent.texts.some((text) => mentionsEnqueue.test(text) || graphqlMerge.test(text)) || mentionsEnqueue.test(raw) ? { targets: [], refusal: graphqlReason } : { targets: [] };
   if (/\{owner\}|\{repo\}|:owner|:repo/.test(endpoint)) {
     const [owner, repo] = (repositoryOf(gh, found, cwd, io) ?? "/").split("/");
     endpoint = endpoint.replace(/\{owner\}|:owner/, owner ?? "").replace(/\{repo\}|:repo/, repo ?? "");
   }
   const method = (values(gh, "-X", "--method").at(-1) ?? (fields.length || values(gh, "--input").length ? "POST" : "GET")).toUpperCase();
-  if (method === "GET") return { targets: [] };
+  if (method === "GET" && found.name !== "xargs") return { targets: [] };
+  const opaque = !unreadByTrunk.test(endpoint) || isRunTime(endpointOf(marked)) || found.name === "xargs";
+  const scoped = opaque ? sent : { ...sent, unread: sent.missing, built: false, piped: false };
   const comment = endpoint.match(/^repos\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)\/comments$/);
   const posted = (reads: boolean): MergeIntent => ({ targets: [{ repository: comment![1]!, pr: Number(comment![2]), via: `gh api issues/<n>/comments${reads ? "" : unreadVia}` }], ...reads ? {} : { unreadOnly: true as const } });
   if (comment && method === "POST" && sent.piped) return posted(false);
   const merge = endpoint.match(/^repos\/([\w.-]+\/[\w.-]+)\/pulls\/(\d+)\/merge$/);
   if (merge) return { targets: [{ repository: merge[1]!, pr: Number(merge[2]), via: "gh api pulls/<n>/merge" }] };
-  if (!enqueues) return { targets: [] };
-  if (comment && method === "POST") return posted(readsEnqueue(sent, raw));
-  return elsewhere(sent, raw);
+  if (!sendsEnqueue({ ...scoped, piped: false }, raw)) return { targets: [] };
+  if (comment && method === "POST") return posted(readsEnqueue(scoped, raw));
+  return elsewhere(scoped, raw);
 }
 
 function strings(value: unknown): string[] {

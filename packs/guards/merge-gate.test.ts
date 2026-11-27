@@ -9,7 +9,7 @@ import { gateRunDirectory, startGateRun, writeJson } from "../pull-requests/lib/
 import { git } from "../../src/testing/git.ts";
 import { mergeGate } from "./hooks/merge-gate.ts";
 import {
-  beforeDeadline, cliReason, exemptList, ghAliases, ghBaseRepo, graphqlReason, mergeGateDeadlineMs, readPayload, realIntentIO, mergeGateRisk, mergeIntent, otherEndpointReason, rawReason, shellAliasReason, splitStringReason,
+  beforeDeadline, cliReason, exemptList, ghAliases, ghBaseRepo, graphqlReason, mergeGateDeadlineMs, readPayload, realIntentIO, mergeGateRisk, mergeIntent, otherEndpointReason, rawReason, shellAliasReason, splitStringReason, unreadPayloadReason,
   type GateIO, type IntentIO, type MergeIntent, type Pull,
 } from "./lib/merge-gate.ts";
 
@@ -20,7 +20,7 @@ const head = "a".repeat(40);
 const lower = "b".repeat(40);
 const older = "c".repeat(40);
 const exempt = exemptList("own/*, example/notes");
-const files: Record<string, string> = { "body.md": "/trunk merge\n", "note.md": "Merged after review.\n", "payload.json": '{"body":"/trunk merge"}', "query.json": '{"query":"mutation { mergePullRequest(input: {}) { clientMutationId } }"}', "deep.json": `{"body":"/trunk merge","junk":${"[".repeat(200_000)}${"]".repeat(200_000)}}` };
+const files: Record<string, string> = { "body.md": "/trunk merge\n", "note.md": "Merged after review.\n", "payload.json": '{"body":"/trunk merge"}', "query.json": '{"query":"mutation { mergePullRequest(input: {}) { clientMutationId } }"}', "merge.graphql": "mutation { mergePullRequest(input: {}) { clientMutationId } }", "read.graphql": "query($owner: String!) { repository(owner: $owner, name: \"product\") { id } }", "note.json": '{"body":"Ready for review."}', "read.json": '{"query":"query { viewer { login } }"}', "$F": "Ready for review.\n", "repo-read.graphql": "query($q: String!) { search(query: $q, type: ISSUE, first: 1) { issueCount } } # {repo} :owner", "{repo}.graphql": "query($q: String!) { search(query: $q, type: ISSUE, first: 1) { issueCount } }", "comment.graphql": "mutation($b: String!) { addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }", "deep.json": `{"body":"/trunk merge","junk":${"[".repeat(200_000)}${"]".repeat(200_000)}}` };
 const workFiles = mkdtempSync(join(tmpdir(), "merge-gate-work-"));
 for (const [name, text] of Object.entries(files)) writeFileSync(join(workFiles, name), text);
 afterAll(() => rmSync(workFiles, { recursive: true, force: true }));
@@ -35,6 +35,25 @@ const mcp = (tool: string, input: Record<string, unknown>) => mergeIntent({ tool
 const target = (repository: string, pr: number) => expect.objectContaining({ repository, pr });
 
 describe("which calls enqueue or merge", () => {
+  test("a merge after 40,000 literal pipeline stages still targets its PR", () => {
+    expect(bash([...Array(40_000).fill("true"), "gh pr merge 7 --repo example/product"].join(" | "))).toEqual({ targets: [target("example/product", 7)] });
+  });
+
+  test("a comment mutation after a 300,000-character name in a query file is still refused", () => {
+    writeFileSync(join(workFiles, "long.graphql"), `${"x".repeat(300_000)}\nmutation($b: String!) { addComment(input: {subjectId: "x", body: $b}) { clientMutationId } }`);
+    expect(bash("gh api graphql -F query=@long.graphql -f b=\"$B\"").refusal).toBe(graphqlReason);
+  });
+
+  test("a run-time body beside a field with a 128,000-character key is still refused", () => {
+    expect(bash(`gh api -X PATCH repos/example/product/issues/comments/1 -f ${"x".repeat(128_000)}[]="$V" -f body="$B"`).refusal).toBe(unreadPayloadReason);
+    expect(bash(`gh api -X PATCH repos/example/product/issues/comments/1 -f ${"x".repeat(128_000)}[body]="$B"`).refusal).toBe(unreadPayloadReason);
+  });
+
+  test("a comment mutation after an unclosed string of 100,000 escaped quotes is still refused", () => {
+    writeFileSync(join(workFiles, "slow.graphql"), `"${'\\"'.repeat(100_000)}\nmutation($b: String!) { addComment(input: {subjectId: "x", body: $b}) { clientMutationId } }`);
+    expect(bash("gh api graphql -F query=@slow.graphql -f b=\"$B\"").refusal).toBe(graphqlReason);
+  });
+
   test.each([
     ["gh pr comment 7 --repo example/product --body '/trunk merge'"],
     ["gh pr comment 7 --repo example/product --body /trunk\\ merge"],
@@ -80,6 +99,10 @@ describe("which calls enqueue or merge", () => {
     ["B='/trunk merge'; gh pr comment 7 --repo example/product --body \"$B\""],
     ["gh pr comment 7 --repo example/product --body \"`echo /trunk merge`\""],
     ["gh api repos/example/product/issues/7/comments -f body=\"$(echo /trunk merge)\""],
+    ["gh pr comment 7 --repo example/product --body $\"/trunk merge\""],
+    ["zsh -c 'B=\"/trunk merge\"; gh pr comment 7 --repo example/product --body \"$~B\"'"],
+    ["zsh -c 'B=\"/trunk merge\"; gh pr comment 7 --repo example/product --body \"$^B\"'"],
+    ["bash -c \"echo $X; xargs $'gh' pr comment 7 --repo example/product --body '/trunk merge' < /dev/null\""],
   ])("%s targets example/product#7", (command) => {
     expect(bash(command)).toMatchObject({ targets: [target("example/product", 7)] });
   });
@@ -88,7 +111,6 @@ describe("which calls enqueue or merge", () => {
     ["gh pr comment 7 --repo example/product --body '/trunk cancel'"],
     ["gh pr comment 7 --repo example/product --body 'Waiting for CI before the next step.'"],
     ["gh pr comment 7 --repo example/product --body-file note.md"],
-    ["gh pr comment 7 --repo example/product --body \"$(cat note.md) Ready for review.\""],
     ["gh pr merge 7 --repo example/product --disable-auto"],
     ["gh pr merge 7 --repo example/product --disable-auto=1"],
     ["gh pr merge 7 --repo example/product --disable-auto=True"],
@@ -150,8 +172,175 @@ describe("which calls enqueue or merge", () => {
     ["make-body | curl https://api.github.com/repos/example/product/issues/7/comments -d @-", rawReason],
     ["make-query | gh api graphql --input -", graphqlReason],
     ["gh api graphql -F query=@missing.graphql", graphqlReason],
+    ["B='/trunk merge'; gh api --hostname \"$H\" repos/example/product/pulls/7/comments/1/replies -f body=\"$B\"", otherEndpointReason],
+    ["B='/trunk merge'; gh api repos/example/product/pulls/7/comments/1/replies -f body=\"$B\"", otherEndpointReason],
+    ["gh api repos/example/product/pulls/7/comments/1/replies -f body=\"After CI, run /trunk merge on $PR.\"", otherEndpointReason],
+    ["B='/trunk merge'; gh api \"$E\" -f query='mutation($b: String!) { addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", otherEndpointReason],
   ])("%s is refused outright", (command, reason) => {
     expect(bash(command).refusal).toBe(reason);
+  });
+
+  test.each([
+    ["B=$(cat body.md); gh pr comment 7 --repo example/product --body \"$B\""],
+    ["gh pr comment 7 --repo example/product --body \"$(cat body.md)\""],
+    ["gh pr comment 7 --repo example/product --body \"$(cat note.md) Ready for review.\""],
+    ["gh pr comment 7 --repo example/product --body=$B"],
+    ["gh pr comment 7 --repo example/product -b\"${B}\""],
+    ["gh pr comment 7 --repo example/product --body \"`cat body.md`\""],
+    ["gh pr comment 7 --repo example/product --body $B"],
+    ["bash -c \"gh pr comment 7 --repo example/product --body '$(cat body.md)'\""],
+    ["eval \"gh pr comment 7 --repo example/product --body '$B'\""],
+    ["bash <<EOF\ngh pr comment 7 --repo example/product --body '$B'\nEOF"],
+    ["echo \"gh pr comment 7 --repo example/product --body '$B'\" | sh"],
+    ["cat args.txt | xargs gh pr comment 7 --repo example/product --body x"],
+    ["gh issue comment 7 --repo example/product -b \"$B\""],
+    ["gh pr comment 7 --repo example/product --body-file - <<EOF\n$(cat body.md)\nEOF"],
+    ["gh pr comment 7 --repo example/product --body-file - <<EOF\nReady.\n$B\nEOF"],
+    ["gh pr comment 7 --repo example/product -F - <<< \"$B\""],
+    ["sh -c 'gh pr comment 7 --repo example/product --body \"$B\"'"],
+    ["gh api repos/example/product/issues/7/comments -f body=\"$B\""],
+    ["gh api repos/example/product/issues/7/comments -F \"body=$(cat body.md)\""],
+    ["gh api repos/example/product/issues/7/comments --raw-field body=`cat body.md`"],
+    ["gh pr comment 7 --repo example/product --body-file \"$F\""],
+    ["bash -c \"X=\\$(gh pr comment 7 --repo example/product --body '$B')\""],
+    ["bash -c \"gh pr comment 7 --repo example/product -F - <<'EOF'\n$B\nEOF\""],
+    ["bash -c \"gh pr comment 7 --repo example/product -F - <<< '$B'\""],
+    ["bash -c \"gh pr comment 7 --repo example/product --body '`cat body.md`'\""],
+    ["gh pr comment 7 --repo example/product --body \"$\\\nB\""],
+    ["gh pr comment 7 --repo example/product --body $\\\nB"],
+  ])("a comment body built at run time is checked as an unread body: %s", (command) => {
+    expect(bash(command)).toEqual({ targets: [target("example/product", 7)], unreadOnly: true });
+  });
+
+  test.each([
+    ["gh pr review 7 --repo example/product --comment --body \"$B\"", unreadPayloadReason],
+    ["gh pr review 7 --repo example/product --approve -b \"$(cat body.md)\"", unreadPayloadReason],
+    ["gh api -X PATCH repos/example/product/issues/comments/1 -f body=\"$B\"", unreadPayloadReason],
+    ["gh api -X PATCH repos/example/product/pulls/7 -f body=\"$(cat body.md)\"", unreadPayloadReason],
+    ["gh api repos/example/product/pulls/7/reviews -f event=COMMENT -f \"comments[][body]=$B\"", unreadPayloadReason],
+    ["Q=$(cat merge.graphql); gh api graphql -f query=\"$Q\"", graphqlReason],
+    ["gh api graphql -F query=\"$(cat merge.graphql)\"", graphqlReason],
+    ["gh api graphql -f query=\"`cat merge.graphql`\"", graphqlReason],
+    ["gh api graphql -f query='mutation($b: String!) { addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
+    ["gh api graphql -f 'query=query { viewer { login } }' -f \"$K=$V\"", graphqlReason],
+    ["gh api graphql -F query=@comment.graphql -f b=\"$B\"", graphqlReason],
+    ["gh api graphql -F query=@- -f owner=\"$OWNER\" <<< \"$Q\"", graphqlReason],
+    ["gh api graphql -f 'query=mutation,($b: String!) { addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
+    ["gh api graphql -f 'query=mutation # c\n($b: String!) { addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
+    ["gh api graphql -f 'query=query A { viewer { login } } mutation B($b: String!) { addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f operationName=B -f b=\"$B\"", graphqlReason],
+    ["cat body.md | gh pr review 7 --repo example/product --comment -F -", unreadPayloadReason],
+    ["gh api graphql -f 'query=query A { viewer { login } },mutation B($b: String!) { addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f operationName=B -f b=\"$B\"", graphqlReason],
+    ["cat args.txt | xargs gh api repos/example/product/issues/7/comments", unreadPayloadReason],
+    ["echo body=x | xargs gh api repos/example/product/issues/comments/1 -X PATCH -f", unreadPayloadReason],
+    ["gh api -X PATCH repos/example/product/issues/comments/1 -f \"$K=$V\"", unreadPayloadReason],
+    ["gh api graphql -f 'query=mutation($t: ID!, $b: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $t, body: $b}) { comment { id } } }' -f t=x -f b=\"$B\"", graphqlReason],
+    ["gh api graphql -f 'query=mutation($id: ID!) { submitPullRequestReview(input: {pullRequestReviewId: $id, event: COMMENT}) { clientMutationId } }' -f id=\"$ID\"", graphqlReason],
+    ["gh api graphql -f 'query=mutation($b: String!) { updateIssueComment(input: {id: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
+    ["gh api graphql -f 'query=mutation($b: String!) { updatePullRequest(input: {pullRequestId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
+    ["gh api graphql -f query=\"mutation { resolveReviewThread(input: {threadId: \\\"$T\\\"}) { thread { isResolved } } }\"", graphqlReason],
+    ["gh api graphql -f query=\"query A { repository(owner: \\\"example\\\", name: \\\"product\\\") { pullRequest(number: $n) { id } } }\"", graphqlReason],
+    ["gh api graphql -F query=@\"$F\"", graphqlReason],
+    ["gh api \"$R/1/replies\" -f body=\"$A\"", unreadPayloadReason],
+    ["gh api -X PATCH repos/example/product/issues/7 -f body=\"$B\"", unreadPayloadReason],
+    ["gh api repos/example/product/pulls/7/reviews/1/events -f event=COMMENT -f body=\"$B\"", unreadPayloadReason],
+    ["gh api repos/{owner}/{repo}/issues/{branch}/comments -f body=\"$B\"", unreadPayloadReason],
+    ["gh api repos/example/product/issues/%37/comments -f body=\"$B\"", unreadPayloadReason],
+    ["gh api repos/example/product/pulls/7/comments/1/replies/../../../../../issues/7/comments -f body=\"$B\"", unreadPayloadReason],
+    ["gh api repos/example/product/commits/abc/comments -f body=\"$B\"", unreadPayloadReason],
+    ["gh api -X PATCH repos/example/product/pulls/7 --input \"$F\"", unreadPayloadReason],
+    ["gh api graphql -f query='{ viewer { login } }' -f \"$KEY=x{ a }\"", graphqlReason],
+    ["gh api graphql -f Query='{ viewer { login } }' -f b=\"$B\"", graphqlReason],
+    ["gh api graphql -F query='mutation($b: String!) { {repo}(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
+    ["gh api graphql --field query='mutation($b: String!) { :repo(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
+    ["gh api graphql -f query={viewer{login$X}}", graphqlReason],
+    ["gh api graphql -f query=\"{ viewer { login } }\"$X", graphqlReason],
+    ["gh api graphql -f \"query={ viewer { login\"$X\" } }\"", graphqlReason],
+    ["gh api graphql -f \"query={ viewer { login } } $@\"", graphqlReason],
+    ["gh api graphql -f \"query={ viewer { login } } ${args[@]}\"", graphqlReason],
+    ["gh api graphql -f query=\"query{repository(owner:\\\"example\\\",name:\\\"product\\\"){pullRequest(number:$n){id}}}\"", graphqlReason],
+    ["gh api graphql -f query=\" { repository(owner: \\\"example\\\", name: \\\"product\\\") { pullRequest(number: $n) { id } } }\"", graphqlReason],
+    ["gh api repos/example/product/pulls/7/comments/1/replies$S -f body=\"$B\"", unreadPayloadReason],
+    ["gh api \"https://$H/repos/example/product/pulls/7/comments/1/replies\" -f body=\"$B\"", unreadPayloadReason],
+    ["gh api \"https://api.github.com$X/repos/example/product/pulls/7/comments/1/replies\" -f body=\"$B\"", unreadPayloadReason],
+    ["printf x | xargs gh api repos/example/product/pulls/7/comments/1/replies -f body=", unreadPayloadReason],
+    ["gh api graphql -f 'query=mutation($b: String!) { query addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
+    ["gh api graphql -f query=$'mutation($b: String!) { # c\\raddComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
+    ["gh api graphql -f query=$'mutation($b: String!) { resolveReviewThread(input: {threadId: \"x\\\\\\naddComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
+    ["gh api repos/example/product/pulls/7/comments/1/replies --input missing.json", unreadPayloadReason],
+    ["cat args.txt | xargs gh api", unreadPayloadReason],
+  ])("a review, comment edit or GraphQL call whose body or query is built at run time is refused: %s", (command, reason) => {
+    expect(bash(command).refusal).toBe(reason);
+  });
+
+  test.each([
+    ["gh pr comment 7 --repo example/product --body 'Costs $5, see `merge-gate`.'"],
+    ["gh pr comment 7 --repo example/product --body \"Costs \\$5, see \\`merge-gate\\`.\""],
+    ["gh pr comment 7 --repo example/product --body $'Costs $5.\\n'"],
+    ["gh pr comment 7 --repo example/product --body-file - <<'EOF'\nUses $HOME and $(date).\nEOF"],
+    ["gh pr comment 7 --repo example/product --body-file - <<EOF\nReady for review.\nEOF"],
+    ["gh pr comment 7 --repo example/product --body-file note.md"],
+    ["gh pr comment \"$PR\" --repo example/product --body 'Ready for review.'"],
+    ["gh pr review 7 --repo example/product --approve --body 'Looks good.'"],
+    ["gh pr edit 7 --repo example/product --body-file note.md --add-label \"$LABEL\""],
+    ["gh api graphql -f query='query($owner: String!) { repository(owner: $owner, name: \"product\") { id } }' -f owner=\"$OWNER\""],
+    ["gh api -X POST repos/example/product/git/refs -f ref=refs/heads/next -f sha=\"$(git rev-parse HEAD)\""],
+    ["gh api repos/example/product/issues/7/comments -F body=@note.md"],
+    ["gh pr edit 7 --repo example/product --title \"Notes for $USER\" --body '$USER'"],
+    ["gh pr comment 7 --repo example/product --body \"Currency symbol: $\""],
+    ["gh pr comment 7 --repo example/product --body Costs\\ 5$"],
+    ["gh pr comment 7 --repo example/product -F - <<EOF\nCurrency symbol: $\nEOF"],
+    ["gh pr comment 7 --repo example/product -F - <<< \"Currency symbol: $\""],
+    ["gh api graphql -F query=@read.graphql -f owner=\"$OWNER\""],
+    ["gh api graphql -f 'query=query($owner: String!) { repository(owner: $owner, name: \"mutation\") { id } }' -f owner=\"$OWNER\""],
+    ["gh api -X PATCH repos/example/product/pulls/7 --input note.json -f body=\"$NOTE\""],
+    ["gh api graphql -f 'query=query($q: String!) { search(query: $q, type: REPOSITORY, first: 1) { repositoryCount } } # mutation (x)' -f q=\"$Q\""],
+    ["gh api graphql -f 'query=query($n: Int!) { search(query: \"mutation testing\", type: REPOSITORY, first: $n) { repositoryCount } }' -F n=\"$N\""],
+    ["gh api graphql --input read.json -f owner=\"$OWNER\""],
+    ["gh api graphql -F query=@- -f owner=\"$OWNER\" <<'EOF'\nquery($owner: String!) { repository(owner: $owner, name: \"product\") { id } }\nEOF"],
+    ["gh api graphql -F query=@- -f owner=\"$OWNER\" <<< 'query { viewer { login } }'"],
+    ["gh api graphql -f 'query=# mutation example\nquery { viewer { login } }' -f owner=\"$OWNER\""],
+    ["gh api graphql -f 'query=query mutation($n: Int!) { repository(owner: \"example\", name: \"product\") { pullRequest(number: $n) { id } } }' -F n=\"$N\""],
+    ["gh api graphql -f 'query=query($n: Int!) { search(query: \"} mutation\", type: REPOSITORY, first: $n) { repositoryCount } }' -F n=\"$N\""],
+    ["gh pr edit 7 --repo example/product --body 'After CI, run `/trunk merge`.'"],
+    ["gh pr edit 7 --repo example/product --body 'Ready for review.' <<EOF\n/trunk merge\nEOF"],
+    ["bash -c \"gh pr comment 7 --repo example/product --body 'Ready for review.'\""],
+    ["bash <<'EOF'\ngh pr comment 7 --repo example/product --body '$B'\nEOF"],
+    ["echo \"gh pr comment 7 --repo example/product --body 'Ready for review.'\" | sh"],
+    ["echo \"gh pr comment 7 --repo example/product --body 'Ready for review.'\" | sh -s \"$X\""],
+    ["echo \"gh pr comment 7 --repo example/product --body 'Ready for review.'\" | tee \"$LOG\" | sh"],
+    ["echo \"gh pr comment 7 --repo example/product --body 'Costs \\$5'\" | tee -a \"$LOG\" | sh"],
+    ["bash -c \"gh api graphql -H 'X-Trace: $TRACE' -f query='{ viewer { login } }'\""],
+    ["bash -c \"gh api -X GET repos/example/product/pulls/7/merge -H 'Accept: $ACCEPT'\""],
+    ["timeout 380 bash -c \"until [ \\\"\\$(gh api repos/example/product/commits/$SHA/check-runs --jq .total_count)\\\" -gt 0 ]; do sleep 30; done\""],
+    ["gh pr edit 7 --repo example/product --body \"$(cat body.md)\""],
+    ["gh issue edit 7 --repo example/product --body-file \"$S/body.md\""],
+    ["gh api graphql -f 'query=mutation($t: ID!) { resolveReviewThread(input: {threadId: $t}) { thread { isResolved } } }' -f t=\"$T\""],
+    ["gh api graphql -f 'query=mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { clientMutationId } }' -f id=\"$ID\""],
+    ["gh api graphql -f 'query=mutation($id: ID!) { updatePullRequestBranch(input: {pullRequestId: $id}) { clientMutationId } }' -f id=\"$ID\""],
+    ["gh api graphql -f 'query=mutation($t: ID!) { resolveReviewThread(input: {threadId: $t}) { thread { body: id } } } # addComment(input: {})' -f t=\"$T\""],
+    ["gh api graphql -f 'query=query($n: Int!) { search(query: \"addComment(input: {})\", type: REPOSITORY, first: $n) { repositoryCount } }' -F n=\"$N\""],
+    ["gh api repos/example/product/pulls/7/comments/1/replies -f body=\"$A\""],
+    ["printf 'x' | gh api -X PATCH repos/example/product/pulls/7 --input note.json -F note=@-"],
+    ["gh api graphql -f query='query($q: String!) { search(query: $q, type: ISSUE, first: 1) { issueCount } } # {repo}' -f q=\"$Q\""],
+    ["gh api graphql -F query=@repo-read.graphql -f q=\"$Q\""],
+    ["gh api graphql -F query=@'{repo}.graphql' -f q=\"$Q\""],
+    ["gh api https://api.github.com/repos/example/product/pulls/7/comments/1/replies -f body=\"$B\""],
+    ["gh api graphql -f query='mutation($id: ID!, $b: String!) { addComment(input: {subjectId: $id, body: $b}) { clientMutationId } }' -f id=X -F b=@note.md"],
+    ["gh api repos/example/product/pulls/7/merge --cache \"$TTL\""],
+    ["gh api repos/example/product/pulls/7/merge -H \"Accept: $ACCEPT\""],
+    ["gh api graphql -f 'query=mutation UpdateReviewThread($t: ID!) { resolveReviewThread(input: {threadId: $t}) { thread { isResolved } } }' -f t=\"$T\""],
+    ["gh api graphql -f 'query=mutation addComment($t: ID!) { resolveReviewThread(input: {threadId: $t}) { thread { isResolved } } }' -f t=\"$T\""],
+    ["gh api graphql -f 'query=query($n: Int!) { addComment: repository(owner: \"example\", name: \"product\") { pullRequest(number: $n) { id } } }' -F n=\"$N\""],
+    ["gh api graphql -f 'query=mutation($t: ID!) { resolveReviewThread(input: {threadId: $t, clientMutationId: \"\"\"has \\\"\"\" addComment( inside\"\"\"}) { thread { isResolved } } }' -f t=\"$T\""],
+    ["gh api graphql -f query=$'mutation($t: ID!) { resolveReviewThread(input: {threadId: $t, clientMutationId: \"\"\"one\\naddComment( two\"\"\"}) { thread { isResolved } } }' -f t=\"$T\""],
+    ["timeout 380 bash -c \"until gh api 'repos/example/product/commits/$SHA/check-runs' --jq '.total_count'; do sleep 30; done\""],
+    ["gh api -X PATCH repos/example/product/pulls/comments/1 -f body=\"Fixed in $SHA.\""],
+    ["echo '{\"pull_requests\":[7,8]}' | gh api -X POST repos/example/product/stacks --input -"],
+    ["make-body | gh api -X PATCH repos/example/product/pulls/7 --input -"],
+    ["cat release.json | gh api repos/example/product/releases --input -"],
+    ["jq -n '{ref:\"main\"}' | gh api -X POST repos/example/product/actions/workflows/ci.yml/dispatches --input -"],
+  ])("a literal body, literal path or literal heredoc posts without a check: %s", (command) => {
+    expect(bash(command)).toEqual({ targets: [] });
   });
 
   test("a cd before the call moves it to that checkout's repository, out of an exempt one", () => {
@@ -660,7 +849,6 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     ["gh api -X PATCH repos/example/product/issues/9 --input body.json"],
     ["gh api -X PATCH repos/example/product/pulls/9 -F body=@body.md"],
     ["gh api -X PATCH repos/example/product/pulls/9 --field body=@body.md"],
-    ["gh api -X PATCH repos/example/product/pulls/9 -f body=\"$(cat body.md)\""],
     ["gh api -X PATCH repos/example/product/pulls/9 --raw-field 'body=Fixes the `merge-gate` guard.'"],
     ["gh api -X PATCH repos/example/product/pulls/9 -f title='Read the PR body payload'"],
     ["gh api -X PATCH repos/example/product/issues/comments/1 --input body.json"],
@@ -677,12 +865,13 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     ["gh api -X PATCH repos/example/product/pulls/9 --input missing.json"],
     ["gh api -X PATCH repos/example/product/pulls/9 --input <(make-body)"],
     ["f=$(mktemp); gh api -X PATCH repos/example/product/pulls/9 --input \"$f\""],
+    ["gh api -X PATCH repos/example/product/pulls/9 -f body=\"$(cat body.md)\""],
     ["gh pr review 9 --repo example/product --comment --body-file missing.md"],
   ])("a body edit whose payload the gate cannot read, such as a file the same command writes first, is refused and told to write it first: %s", async (command) => {
     const { dir, hook } = bodyEdits();
     const reason = await hook(command, dir);
-    expect(reason).toContain("the merge gate cannot read the file it sends");
-    expect(reason).toContain("Write the file in one call, then send it with a call of its own.");
+    expect(reason).toContain("the merge gate cannot read what it sends");
+    expect(reason).toContain("write a file in one call, then send it with a call of its own.");
   });
 
   test.each([
@@ -822,6 +1011,50 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     const reason = (await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr comment 9 --repo example/product --body-file \"$R\"" }, cwd: "/" }, { home, env: {}, intent: realIntentIO }))?.hookSpecificOutput.permissionDecisionReason;
     expect(reason).toStartWith(opensWithNote);
     expect(reason).toContain("could not read its settings");
+  });
+
+  const runTimeDir = () => {
+    const dir = reportDir();
+    writeFileSync(join(dir, "merge.graphql"), "mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }\n");
+    return dir;
+  };
+  const unpassedNine = () => machine({ "repos/example/product/pulls/9": pull(head) });
+
+  test.each([
+    ["B=$(cat enqueue.md); gh pr comment 9 --repo example/product --body \"$B\""],
+    ["gh issue comment 9 --repo example/product --body \"$(cat enqueue.md)\""],
+    ["gh pr comment 9 --repo example/product --body \"`cat enqueue.md`\""],
+    ["gh pr comment 9 --repo example/product --body-file - <<EOF\n$(cat enqueue.md)\nEOF"],
+    ["X=$(cat enqueue.md); gh api repos/example/product/issues/9/comments -f body=\"$X\""],
+    ["bash -c \"gh pr comment 9 --repo example/product --body '$(cat enqueue.md)'\""],
+  ])("a comment body built at run time from a real file is checked as an enqueue, with the unread note first: %s", async (command) => {
+    const reason = await unpassedNine()(command, runTimeDir());
+    expect(reason).toStartWith(opensWithNote);
+    expect(reason).toContain("has not passed at the head of example/product#9");
+  });
+
+  test.each([
+    ["B=$(cat enqueue.md); gh pr review 9 --repo example/product --comment --body \"$B\"", unreadPayloadReason],
+    ["X=$(cat enqueue.md); gh api -X PATCH repos/example/product/issues/comments/1 -f body=\"$X\"", unreadPayloadReason],
+    ["cat enqueue.md | gh pr review 9 --repo example/product --comment -F -", unreadPayloadReason],
+    ["Q=$(cat merge.graphql); gh api graphql -f query=\"$Q\"", graphqlReason],
+    ["gh api graphql -f query=\"query{repository(owner:\\\"example\\\",name:\\\"product\\\"){pullRequest(number:$n){id}}}\"", graphqlReason],
+  ])("a review, comment edit or GraphQL call built at run time from a real file is refused: %s", async (command, reason) => {
+    expect(await unpassedNine()(command, runTimeDir())).toBe(reason);
+  });
+
+  test.each([
+    ["gh pr comment 9 --repo example/product --body-file report.md"],
+    ["gh pr comment 9 --repo example/product --body 'Costs $5 and runs `hedge proof gate`.'"],
+    ["gh pr comment 9 --repo example/product --body-file - <<'EOF'\nRun $(hedge proof gate) when $HOME is set.\nEOF"],
+    ["gh pr review 9 --repo example/product --comment --body-file report.md"],
+    ["gh pr edit 9 --repo example/product --body-file report.md"],
+    ["gh pr edit 9 --repo example/product --body \"$(cat enqueue.md)\""],
+    ["gh api graphql -f query='mutation($t: ID!) { resolveReviewThread(input: {threadId: $t}) { thread { isResolved } } }' -f t=\"$T\""],
+    ["gh api graphql -f query='query($n: Int!) { repository(owner: \"example\", name: \"product\") { pullRequest(number: $n) { id } } }' -F n=\"$N\""],
+    ["A=$(cat enqueue.md); gh api repos/example/product/pulls/9/comments/1/replies -f body=\"$A\""],
+  ])("a literal body, path, heredoc or GraphQL read posts through the hook: %s", async (command) => {
+    expect(await unpassedNine()(command, runTimeDir())).toBeUndefined();
   });
 });
 
