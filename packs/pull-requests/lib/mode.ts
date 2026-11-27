@@ -95,7 +95,17 @@ function withoutThreadMode(env: Env) {
   return JSON.stringify(rest);
 }
 
-export const fullHeldAtAuto = (text: string | undefined) => text === undefined ? text : JSON.stringify(heldAtAuto(JSON.parse(text) as Record<string, unknown>));
+export function fullHeldAtAuto(text: string | undefined): string {
+  try {
+    const settings: unknown = JSON.parse(text ?? "{}");
+    return typeof settings === "object" && settings !== null && !Array.isArray(settings) ? JSON.stringify(heldAtAuto(settings as Record<string, unknown>)) : "{}";
+  } catch { return "{}"; }
+}
+
+const strictness = (mode: Mode) => modes.indexOf(mode);
+export const stricter = (a: Mode, b: Mode) => strictness(a) <= strictness(b) ? a : b;
+
+export const askedFor = (question: string) => /^which mode should thread (\S+) run in\?/i.exec(question.trim())?.[1];
 
 const heldAtAuto = (settings: Record<string, unknown>) => ({
   ...settings,

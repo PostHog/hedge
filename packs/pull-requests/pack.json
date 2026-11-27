@@ -69,7 +69,7 @@
     },
     {
       "key": "pull-requests.mode",
-      "question": "Which autonomy mode should a thread start in? Supervised: the agent decides nothing alone and asks you. Auto: it decides review rounds, proof gaps and routine asks alone, and brings each pull request to your merge card. Full: it decides everything, merges, and reports once at the end. You switch a thread's mode yourself with the words \"mode supervised\", \"mode auto\" or \"mode full\". Leave it empty to follow pull-requests.autonomy.",
+      "question": "Which autonomy mode should a thread start in? Supervised: the agent decides nothing alone and asks you. Auto: it decides review rounds, proof gaps and routine asks alone, and brings each pull request to your merge card. Full: it decides everything, merges, and reports once at the end. You switch a thread's mode yourself: the words \"mode supervised\", \"mode auto\" or \"mode full\" make the agent ask you on a card, and your choice there switches it. Leave it empty to follow pull-requests.autonomy.",
       "type": "choice",
       "optional": true,
       "ask": "never",

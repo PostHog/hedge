@@ -81,6 +81,7 @@ describe("where a mode comes from", () => {
     expect(configuredMode({ HEDGE_SETTINGS: held }, "own/tools").mode).toBe("auto");
     expect(configuredMode({ HEDGE_SETTINGS: held }, "own/strict").mode).toBe("supervised");
     expect(configuredMode({ HEDGE_SETTINGS: held }, "else/where").mode).toBe("auto");
+    for (const unreadable of ["{", "[]", "", "null", undefined]) expect(fullHeldAtAuto(unreadable)).toBe("{}");
   });
 
   test("a ledger row whose words do not grant its mode counts for nothing", () => {
@@ -148,17 +149,26 @@ describe("hedge mode", () => {
   });
 
   test("an older answer never replaces a newer grant, and an answer for one lane never blocks another", async () => {
+    const printed: string[] = [];
     const run = context([
       card("mode full", "Which mode should thread conductor run in?", "early", "2026-11-27T08:00:00.000Z"),
       card("mode supervised", "Which mode should thread conductor run in?", "late", "2026-11-27T09:00:00.000Z"),
       card("mode full", "Which mode should thread lane run in?", "lane-early", "2026-11-27T07:00:00.000Z"),
       card("mode auto", "Which mode should thread lane-2 run in?", "lane-2-late", "2026-11-27T10:00:00.000Z"),
-    ], threads, []);
+    ], threads, printed);
     expect(await set(run, "full", "mode full", "early")).toBe(0);
     expect(await set(run, "supervised", "mode supervised", "late")).toBe(0);
-    await expect(set(run, "full", "mode full", "early")).resolves.toBe(0);
+    expect(await set(run, "full", "mode full", "early")).toBe(0);
+    expect(printed.at(-1)).toBe("Mode: Supervised for thread conductor, the answer for mode full already recorded\nlabel: mode:supervised. Put it on the thread's tracking issue in place of the other mode labels.");
     expect(await set(run, "auto", "mode auto", "lane-2-late", "conductor", "lane-2")).toBe(0);
     await expect(set(run, "full", "mode full", "lane-early", "conductor", "lane")).rejects.toThrow("newer than this one");
+    await modeCommand(["show", "--thread", "lane-2"], run);
+    expect(printed.at(-1)).toStartWith("Mode: Auto\nfrom: granted");
+  });
+
+  test("a card names its thread in either T3 id form", async () => {
+    const run = context([card("mode full", "Which mode should thread lane run in?", "bare")], [thread("conductor"), thread("t3:lane", "conductor")], []);
+    expect(await set(run, "full", "mode full", "bare", "conductor", "t3:lane")).toBe(0);
   });
 
   test("show reads the repository from the checkout's GitHub origin, with or without a trailing slash", async () => {

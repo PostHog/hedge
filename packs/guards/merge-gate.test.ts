@@ -1114,4 +1114,6 @@ test("the hook reads the mode from the applied settings, never from a mode its o
   const brought = { HEDGE_SETTINGS: JSON.stringify({ "pull-requests.mode": "full", "pull-requests.repoModes": "own/tools=full" }) };
   expect(await realGateIO(home, brought, JSON.stringify({ "pull-requests.autonomy": "ask" })).mode!("own/tools", [])).toBe("supervised");
   expect(await realGateIO(home, brought, JSON.stringify({ "pull-requests.autonomy": "end" })).mode!("own/tools", [])).toBe("auto");
+  expect(await realGateIO(home, {}, JSON.stringify({ "pull-requests.autonomy": "end" }), JSON.stringify({ "pull-requests.autonomy": "ask" })).mode!("own/tools", [])).toBe("supervised");
+  expect(await realGateIO(home, {}, JSON.stringify({ "pull-requests.autonomy": "end" }), "{").mode!("own/tools", [])).toBe("supervised");
 });

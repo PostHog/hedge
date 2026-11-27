@@ -109,7 +109,11 @@ test("a gate pass with a gap the agent accepted holds the merge, own tooling inc
     const bare = join(tmpdir(), `merge-card-bare-${process.pid}-${Date.now()}`);
     mkdirSync(join(bare, ".local/state/hedge"), { recursive: true });
     writeFileSync(join(bare, ".local/state/hedge/decisions.jsonl"), readFileSync(join(pr.home, ".local/state/hedge/decisions.jsonl"), "utf8"));
-    try { expect((await mergeWith(bare))?.hookSpecificOutput.permissionDecisionReason).toContain("an agent accepted proof gaps of example/product#42"); }
+    try {
+      expect((await mergeWith(bare))?.hookSpecificOutput.permissionDecisionReason).toContain("an agent accepted proof gaps of example/product#42");
+      const unreadable = await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home: bare, env: { HEDGE_SETTINGS: "{" }, github });
+      expect(unreadable?.hookSpecificOutput.permissionDecision).toBe("deny");
+    }
     finally { rmSync(bare, { recursive: true, force: true }); }
     await expect(mergeWord(head, "Keep it open")).rejects.toThrow('The user chose "Keep it open", not "Merge"');
     await expect(mergeWord(head, "Merge", "Merge example/product#42?")).rejects.toThrow(`does not name the head ${head}`);

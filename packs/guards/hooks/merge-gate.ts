@@ -40,7 +40,7 @@ export async function mergeGate(call: ToolCall, where: Where): Promise<Denial | 
   const explained = (reason: string) => deny(unreadBody(intent) ? `${unreadBodyNote} ${reason}` : reason);
   if (!settings) return explained(`Hedge blocked this merge: the merge gate could not read its settings (${problem}), so it cannot tell which repositories skip the gate. Fix that file.`);
   const env = { ...where.env, HEDGE_SETTINGS: where.env.HEDGE_SETTINGS ?? settings.text };
-  const io = where.gate ?? { ...realGateIO(where.home, env, settings.applied ? settings.text : fullHeldAtAuto(env.HEDGE_SETTINGS)), ...where.github };
+  const io = where.gate ?? { ...realGateIO(where.home, env, settings.applied ? settings.text : fullHeldAtAuto(env.HEDGE_SETTINGS), settings.applied ? where.env.HEDGE_SETTINGS : undefined), ...where.github };
   const refusal = await beforeDeadline(() => mergeGateRisk(intent, io, settings.person), where.deadline);
   return refusal ? explained(refusal) : undefined;
 }

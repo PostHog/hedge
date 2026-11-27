@@ -1,8 +1,7 @@
 import { appendHeard, answeredAt, heardInThread, ledgerOf, type DecisionContext } from "./decision-cli.ts";
 import { runIn } from "./pr-ci.ts";
 import { sameThread, thisMachine, type Env, type LedgerEvent, type ModeGrant } from "./decision-ledger.ts";
-import { chainOf, grantedBy, grantFor, isMode, modeChoices, modeLabel, modeLine, modeQuestion, modes, resolveMode, t3Threads, withThreadMode, type Mode, type ReadThreads } from "./mode.ts";
-import { normalized } from "./proof-answers.ts";
+import { askedFor, chainOf, grantedBy, grantFor, isMode, modeChoices, modeLabel, modeLine, modeQuestion, modes, resolveMode, t3Threads, withThreadMode, type Mode, type ReadThreads } from "./mode.ts";
 
 export type ModeContext = DecisionContext & { threads?: ReadThreads; repository?: () => string | undefined };
 
@@ -71,7 +70,8 @@ async function set(parsed: Parsed, context: ModeContext) {
   const ask = `ask them with your question tool: "${modeQuestion(target)}", with the options ${modeChoices.map((choice) => `"${choice}"`).join(", ")}, in thread ${thread}`;
   const heard = await heardInThread(thread, words, parsed.options.get("--message"), context);
   if (heard.source !== "question") throw new Error(`"${heard.text}" is a typed message. A mode switches only on the user's answer to your question tool; ${ask}`);
-  if (!normalized(heard.answered).startsWith(normalized(modeQuestion(target)))) throw new Error(`The user chose "${heard.text}" on a question that does not start with "${modeQuestion(target)}"; ${ask}`);
+  const asked = askedFor(heard.answered);
+  if (!asked || !sameThread(asked, target)) throw new Error(`The user chose "${heard.text}" on a question that does not start with "${modeQuestion(target)}"; ${ask}`);
   const granted = grantedBy(heard.text);
   if (granted !== mode || grantedBy(words) !== mode) throw new Error(`The user chose "${heard.text}", not "mode ${mode}"`);
   const chain = await chainOf(target, threadsOf(context));
@@ -87,7 +87,8 @@ async function set(parsed: Parsed, context: ModeContext) {
     throw new Error(`Thread ${target} runs in mode ${newer.mode} on an answer of ${newer.at.slice(0, 10)} in thread ${newer.thread}, newer than this one. Only a newer answer switches it; ${ask}`);
   }
   if (!same) await appendHeard(ledger, grant);
-  context.print(`${modeLine(mode)} for thread ${target}${same ? ", already recorded" : ""}\nlabel: ${modeLabel(mode)}. Put it on the thread's tracking issue in place of the other mode labels.`);
+  const now = same ? resolveMode(context.env, events, chain).mode : mode;
+  context.print(`${modeLine(now)} for thread ${target}${same ? `, the answer for mode ${mode} already recorded` : ""}\nlabel: ${modeLabel(now)}. Put it on the thread's tracking issue in place of the other mode labels.`);
   return 0;
 }
 
