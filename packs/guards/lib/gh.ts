@@ -132,7 +132,10 @@ function apiFields(gh: Gh): [string, string][] {
   return fields.filter((field) => field !== null).map(([, key, value]) => [key.toLowerCase(), value.toLowerCase()]);
 }
 
-export const fieldName = (key: string) => key.match(/([^[\]]*)\]?$/)?.[1] ?? key;
+export function fieldName(key: string): string {
+  const open = key.endsWith("]") ? key.slice(0, -1) : key;
+  return open.slice(Math.max(open.lastIndexOf("["), open.lastIndexOf("]")) + 1);
+}
 const readOnlyQuery = /^\s*(?:query\b|\{)/;
 
 function publishesByGraphql(fields: [string, string][]): boolean {

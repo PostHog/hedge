@@ -44,6 +44,11 @@ describe("which calls enqueue or merge", () => {
     expect(bash("gh api graphql -F query=@long.graphql -f b=\"$B\"").refusal).toBe(graphqlReason);
   });
 
+  test("a run-time field with a long key is read without stalling the hook", () => {
+    expect(bash(`gh api -X PATCH repos/example/product/issues/comments/1 -f ${"x".repeat(128_000)}[]="$V" -f body="$B"`).refusal).toBe(unreadPayloadReason);
+    expect(bash(`gh api -X PATCH repos/example/product/issues/comments/1 -f ${"x".repeat(128_000)}[body]="$B"`).refusal).toBe(unreadPayloadReason);
+  });
+
   test("a query file with an unclosed string of escaped quotes is read without stalling the hook", () => {
     writeFileSync(join(workFiles, "slow.graphql"), `"${'\\"'.repeat(100_000)}\nmutation($b: String!) { addComment(input: {subjectId: "x", body: $b}) { clientMutationId } }`);
     expect(bash("gh api graphql -F query=@slow.graphql -f b=\"$B\"").refusal).toBe(graphqlReason);
@@ -312,6 +317,7 @@ describe("which calls enqueue or merge", () => {
     ["printf 'x' | gh api -X PATCH repos/example/product/pulls/7 --input note.json -F note=@-"],
     ["gh api graphql -f query='query($q: String!) { search(query: $q, type: ISSUE, first: 1) { issueCount } } # {repo}' -f q=\"$Q\""],
     ["gh api graphql -F query=@repo-read.graphql -f q=\"$Q\""],
+    ["gh api graphql -f query='mutation($id: ID!, $b: String!) { addComment(input: {subjectId: $id, body: $b}) { clientMutationId } }' -f id=X -F b=@note.md"],
     ["gh api repos/example/product/pulls/7/merge --cache \"$TTL\""],
     ["gh api repos/example/product/pulls/7/merge -H \"Accept: $ACCEPT\""],
     ["gh api graphql -f 'query=mutation UpdateReviewThread($t: ID!) { resolveReviewThread(input: {threadId: $t}) { thread { isResolved } } }' -f t=\"$T\""],
