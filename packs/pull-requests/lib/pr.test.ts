@@ -346,6 +346,45 @@ test("review hands its parsed arguments to the review-bot handler and exits with
   expect(result.code).toBe(1);
 });
 
+const riskCallout = (tier: string) => `## Problem\n\n<!-- merge-risk -->\n> [!CAUTION]\n> - **Switch-off:** none\n> - **Tier:** ${tier}\n<!-- /merge-risk -->\n`;
+
+test("review asks for Deep when the merge-risk Tier says critical, and says so", () => {
+  const box = sandbox();
+  box.reviewBot(0);
+  box.reply("pr", { body: riskCallout("critical (b: changes a public API)") });
+  const result = box.run("review", "--repo", "acme/widgets", "--pr", "12");
+  expect(box.calls()).toEqual(["pr view 12 --repo acme/widgets --json body"]);
+  expect(box.botArgs()).toEqual(["review", "--repo", "acme/widgets", "--pr", "12", "--minutes", "15", "--deep"]);
+  expect(result.out).toBe("The merge-risk Tier is critical, so this asks for a Deep review.\nbot says hi");
+});
+
+test.each([
+  ["a non-critical Tier", riskCallout("non-critical")],
+  ["no merge-risk callout", "## Problem\n\n**Tier:** critical, outside any callout.\n"],
+])("review keeps Standard for %s", (_, body) => {
+  const box = sandbox();
+  box.reviewBot(0);
+  box.reply("pr", { body });
+  expect(box.run("review", "--repo", "acme/widgets", "--pr", "12").out).toBe("bot says hi");
+  expect(box.botArgs()).toEqual(["review", "--repo", "acme/widgets", "--pr", "12", "--minutes", "15"]);
+});
+
+test("review keeps Standard and says why when GitHub does not give the body", () => {
+  const box = sandbox();
+  box.reviewBot(0);
+  const result = box.run("review", "--repo", "acme/widgets", "--pr", "12");
+  expect(box.botArgs()).toEqual(["review", "--repo", "acme/widgets", "--pr", "12", "--minutes", "15"]);
+  expect(result.out).toBe("Could not read the merge-risk Tier, so this asks for a Standard review: gh pr failed: no pr reply\nbot says hi");
+});
+
+test("an explicit --deep and a stamp read no PR body", () => {
+  const box = sandbox();
+  box.reviewBot(0);
+  box.run("review", "--repo", "acme/widgets", "--pr", "12", "--deep");
+  box.run("stamp", "--repo", "acme/widgets", "--pr", "12");
+  expect(box.calls()).toEqual([]);
+});
+
 test("stamp hands its parsed arguments to the review-bot handler", () => {
   const box = sandbox();
   box.reviewBot(0);

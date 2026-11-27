@@ -1,4 +1,6 @@
 import { bunScript } from "../../../src/runner/bun.ts";
+import { tierOf } from "./decision-ledger.ts";
+import { runGh, type Gh } from "./gh.ts";
 
 type Env = Record<string, string | undefined>;
 export type ReviewBotAction = "review" | "stamp" | "forecast";
@@ -44,12 +46,25 @@ export function handlerArgs(request: ReviewBotRequest): string[] {
   return [request.action, "--repo", request.repo, ...source(request), "--minutes", String(request.minutes), ...(request.deep ? ["--deep"] : [])];
 }
 
-export async function askReviewBot(request: ReviewBotRequest, env: Env = Bun.env): Promise<number> {
+export async function askReviewBot(request: ReviewBotRequest, env: Env = Bun.env, gh: Gh = runGh): Promise<number> {
   const handler = (JSON.parse(env.HEDGE_HANDLERS || "{}") as Record<string, string>)["review-bot"];
-  if (handler) return runHandler(handler, handlerArgs(request), env);
+  if (handler) return runHandler(handler, handlerArgs(await deepWhenCritical(request, gh)), env);
   const fallback = fallbackText(request.action, env);
   console.log(`${noBot[request.action]} ${fallback.replaceAll("{repo}", request.repo).replaceAll("{pr}", String(request.pr ?? request.branch ?? request.paths))}`);
   return 2;
+}
+
+async function deepWhenCritical(request: ReviewBotRequest, gh: Gh): Promise<ReviewBotRequest> {
+  if (request.action !== "review" || request.deep || request.pr === undefined) return request;
+  try {
+    const { body } = JSON.parse(await gh(["pr", "view", String(request.pr), "--repo", request.repo, "--json", "body"])) as { body: string };
+    if (tierOf(body) !== "critical") return request;
+    console.log("The merge-risk Tier is critical, so this asks for a Deep review.");
+    return { ...request, deep: true };
+  } catch (error) {
+    console.log(`Could not read the merge-risk Tier, so this asks for a Standard review: ${(error as Error).message}`);
+    return request;
+  }
 }
 
 export async function runHandler(handler: string, args: string[], env: Env): Promise<number> {

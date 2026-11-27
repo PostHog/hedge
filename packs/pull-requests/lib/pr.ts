@@ -16,7 +16,8 @@ export const help = `hedge pr: review threads, blockers, review bots, and handov
   hedge pr blockers --repo <owner/repo> --pr <number> [--record]
                      List what blocks a PR; with --record, exit 3 when a fix left the same blockers
   hedge pr review --repo <owner/repo> --pr <number> [--deep] [--minutes <n>]
-                     Ask the review bot to review the PR's head and print its findings; exit 1 on findings, 2 without a bot
+                     Ask the review bot to review the PR's head and print its findings; exit 1 on findings, 2 without a bot.
+                     It asks for a Deep review when you pass --deep or the merge-risk Tier of the PR body is critical
   hedge pr stamp --repo <owner/repo> --pr <number> [--minutes <n>]
                      Ask the review bot to approve the PR and print its verdict; exit 0 only when it approved, 2 without a bot
   hedge pr forecast --repo <owner/repo> (--pr <number> [--request] | --branch <name> | --paths <file>)
