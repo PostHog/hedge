@@ -91,6 +91,11 @@ test("formatting adds no words and hides no heading: R&D in a link or in bold is
   expect(bodyProblems(`No picture: copy.\n${callout([...bullets(6), "", "## **Rollout**", "", "- **Stages:** one", "- **Watch:** two"])}`)).toEqual([]);
 });
 
+test("inline formatting inside a raw HTML block adds no words", () => {
+  const formatted = Array.from({ length: 4 }, () => "<b>re</b>try").join(" ");
+  expect(bodyProblems(`No picture: copy.\n\n<p>${filler(790)} ${formatted}</p>\n\n${callout(bullets(3))}`)).toEqual([]);
+});
+
 test("words inside a raw HTML block count, and its comments do not", () => {
   expect(bodyProblems(`No picture: copy.\n\n<details><summary>Decisions</summary><p>${filler(794)}</p><!-- ${filler(50)} --></details>\n\n${callout(bullets(3))}`)).toEqual([overWords(801)]);
   expect(bodyProblems(`No picture: copy.\n\n<details><summary>Decisions</summary><p>${filler(793)}</p><!-- ${filler(50)} --></details>\n\n${callout(bullets(3))}`)).toEqual([]);

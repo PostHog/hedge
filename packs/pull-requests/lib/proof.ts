@@ -1445,7 +1445,7 @@ export type GateOptions = { ci: () => CiResult; pushedHead: () => PushedHead; op
 
 // A fenced block is an example, never the section: drop it before looking for the heading.
 const unfenced = (body: string) => body.replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[^\n]*$/gm, "");
-export const knownIssuesSection = (body: string) => /^#+\s*Known issues\b.*$([\s\S]*?)(?=^#|(?![\s\S]))/im.exec(unfenced(body))?.[1] ?? "";
+export const knownIssuesSection = (body: string) => /^#+\s*(?:\*\*|__)?Known issues\b.*$([\s\S]*?)(?=^#|(?![\s\S]))/im.exec(unfenced(body))?.[1] ?? "";
 export const knownIssues = (body: string) => knownIssuesSection(body).split("\n").filter((line) => /^\s*[-*]\s+\S/.test(line)).map((line) => line.trim());
 const knownBlocker = (body: string) => knownIssues(body).find((line) => /^[-*]\s+\**blocker\b/i.test(line));
 
