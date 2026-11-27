@@ -640,7 +640,7 @@ test("the shape question holds pr-description's body rules, and hedge gives the 
   expect([gate.code, gate.output.includes("judge shape: fail: no picture")]).toEqual([1, true]);
   const prompt = judge.prompts().at(-1)!;
   expect(prompt).toContain("5. shape: Does the PR body keep the shape of pr-description? Fail it, and name the rule, when it shows no picture where GitHub renders it, which is a Mermaid diagram, an image, a video, an uploaded attachment, or a `No picture: <why>` line; when it holds more than 800 written words");
-  expect(prompt).toContain("or when the callout holds more than 6 top-level bullets, Switch-off and Tier included.");
+  expect(prompt).toContain("or when the callout holds more than 6 top-level bullets, Switch-off and Tier included. Rollout lines, such as Stages, Decided and Watch, are not callout bullets.");
   expect(prompt).toContain("Hedge counts 17 words in the body outside fenced code and comments.");
 });
 
@@ -719,6 +719,8 @@ test("the shape question needs no merge-risk skill, and an accepted judge gap ne
   expect(judge.prompts().at(-1)).toContain("4. shape: Does the PR body keep the shape of pr-description?");
 
   await pr.hedge("gap", "--kind", "judge", "--reason", "The judge misreads the copy");
+  const pending = await pr.hedge("gate");
+  expect([pending.code, pending.output.includes("judge gap: a judge gap never waives the shape question")]).toEqual([1, true]);
   pr.chooseGap("judge", "The judge misreads the copy");
   await acceptGap(pr, "judge");
   const waived = await pr.hedge("gate");
@@ -741,6 +743,21 @@ test("an accepted judge gap passes an open PR with a callout only once the judge
   pr.pullRequestState({ body: `A queue now retries.\n\n${graded("non-critical")}` });
   const spent = await pr.hedge("gate");
   expect([spent.code, spent.output.includes("judge: budget spent"), spent.output.includes("judge gap: a judge gap passes the gate only once the judge passes the shape question on this body")]).toEqual([1, true, true]);
+});
+
+test("a judge answer that leaves out the shape question is no judge outage, so an accepted judge gap does not pass it", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  const { shape: _, ...unshaped } = JSON.parse(verdict());
+  fakeModel(pr, "JUDGE", JSON.stringify(unshaped));
+  pr.pullRequestState({ body: `A queue now retries.\n\n${graded("non-critical")}` });
+  await pr.hedge("gap", "--kind", "judge", "--reason", "The judge misreads the copy");
+  pr.chooseGap("judge", "The judge misreads the copy");
+  await acceptGap(pr, "judge");
+  const gate = await pr.hedge("gate");
+  expect([gate.code, gate.output.includes("judge: unavailable (unparseable answer"), gate.output.includes("judge gap: a judge gap passes the gate only once the judge passes the shape question on this body")]).toEqual([1, true, true]);
 });
 
 test("the judge reads the body the gate first read and saved its pass for, even when the body changes during the gate", async () => {

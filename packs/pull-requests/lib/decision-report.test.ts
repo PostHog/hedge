@@ -103,9 +103,9 @@ test("the report shows the gate's outcome when the judge was unavailable and the
   pr.pullRequestState({ body: graded("non-critical") });
   await reviewHead(pr);
   await pr.hedge("require", "--none", "--reason", "Docs only");
-  const judge = fakeModel(pr, "JUDGE", "not json");
+  const judge = fakeModel(pr, "JUDGE", "");
 
-  expect((await pr.hedge("gate")).output).toContain("judge: unavailable (unparseable answer: not json)");
+  expect((await pr.hedge("gate")).output).toContain("judge: unavailable (empty answer)");
   await pr.hedge("gap", "--kind", "judge", "--reason", "The judge is down");
   pr.chooseGap("judge", "The judge is down");
   const accepted = idIn((await acceptGap(pr, "judge")).output);
