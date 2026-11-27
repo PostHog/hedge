@@ -30,7 +30,7 @@ case "$*" in
   *PullRequestReviewThread*) reply="comments-$id-\${after:-first}" ;;
   "api graphql"*) reply="threads\${after:+-$after}" ;;
   "pr view"*) reply=pr ;;
-  "api repos/"*"/pulls/"*) reply=pull ;;
+  "api --hostname github.com repos/"*"/pulls/"*) reply=pull ;;
   *) echo "unexpected gh call" >&2; exit 9 ;;
 esac
 [ -f "${replies}/$reply.json" ] || { echo "no $reply reply" >&2; exit 1; }
@@ -355,7 +355,7 @@ test("review asks for Deep when the merge-risk Tier says critical, and says so",
   box.reviewBot(0);
   box.reply("pull", { body: riskCallout("critical (b: changes a public API)") });
   const result = box.run("review", "--repo", "acme/widgets", "--pr", "12");
-  expect(box.calls()).toEqual(["api repos/acme/widgets/pulls/12"]);
+  expect(box.calls()).toEqual(["api --hostname github.com repos/acme/widgets/pulls/12"]);
   expect(box.botArgs()).toEqual(["review", "--repo", "acme/widgets", "--pr", "12", "--minutes", "15", "--deep"]);
   expect(result.out).toBe("The merge-risk Tier is critical, so this asks for a Deep review.\nbot says hi");
 });
