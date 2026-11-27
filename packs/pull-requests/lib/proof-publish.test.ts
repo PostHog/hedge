@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { publishProof, type GitHub } from "./proof-publish.ts";
+import { attachProofs, isAttachmentRecord, publishProof, type GitHub } from "./proof-publish.ts";
 
 const homes: string[] = [];
 afterEach(() => homes.splice(0).forEach((path) => rmSync(path, { recursive: true, force: true })));
@@ -36,6 +36,21 @@ function fakeGitHub(target: { private: boolean; owner: string }) {
   };
   return { github, calls, writes: () => calls.filter((call) => call.method !== "GET") };
 }
+
+test("a screenshot over 10 MiB that has an asset-repository link gets that link without gh", async () => {
+  const { home, source } = screenshot("large.png", Buffer.concat([png, Buffer.alloc(11 * 1024 * 1024)]));
+  const url = await publishProof(home, identity, source, "octocat/assets", fakeGitHub({ private: false, owner: "octocat" }).github);
+  expect(await attachProofs(home, identity, [source], () => { throw new Error("gh ran"); })).toEqual([url]);
+});
+
+test("the gate's attachment filter matches only attachment records and their temporary files", () => {
+  const name = `${"a".repeat(64)}.png`;
+  expect(isAttachmentRecord(`ui-walk/${name}.pr-attachment.published.json`)).toBe(true);
+  expect(isAttachmentRecord(`${name}.pr-attachment.published.json.${crypto.randomUUID()}`)).toBe(true);
+  expect(isAttachmentRecord(`${name}.octocat_assets.pr-attachment.published.json.published.json`)).toBe(false);
+  expect(isAttachmentRecord(`${name}.octocat_assets.published.json`)).toBe(false);
+  expect(isAttachmentRecord(name)).toBe(false);
+});
 
 test("publishing refuses a log renamed as a screenshot before contacting GitHub", async () => {
   const { home, source } = screenshot("capture.png", "Authorization: Bearer invented-token");

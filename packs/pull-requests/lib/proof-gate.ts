@@ -9,6 +9,7 @@ import { ghThrough } from "./gh.ts";
 import { openBotFindings } from "./pr-threads.ts";
 import { askGap, authorOf, ciRunningCode, conditionName, isStandingCondition, judgeDirectory, judgeGap, judgeGapProof, listStanding, parseVerdict, prDirectory, proofGate, pullRequestDirectory, readDecisions, readJson, receiptOf, reviewRecords, withBrokenConditions, writeJson, type Arbiter, type Decisions, type JudgeSummary, type ProofIdentity, type ProofSummary, type PushedHead } from "./proof.ts";
 import { displayEntry } from "./proof-display.ts";
+import { isAttachmentRecord } from "./proof-publish.ts";
 import { receiptMarker } from "./proof-receipt.ts";
 import { baseRefs, cleanBaseMerge, devPullOf, diffOf, mergeBase, pullRequestDetails, remotesOf, topLevel } from "./proof-checkout.ts";
 import { gitCommitReader, quietCommitIn, testOnlyRange } from "./proof-delta.ts";
@@ -47,7 +48,7 @@ async function proofFiles(home: string, ref: PrRef) {
   const root = prDirectory(home, ref);
   const entries = await readdir(root, { recursive: true, withFileTypes: true }).catch(() => []);
   const files = entries.filter((entry) => entry.isFile()).map((entry) => relative(root, join(entry.parentPath, entry.name)))
-    .filter((path) => !unhashed.has(path.split(sep)[0]!)).sort();
+    .filter((path) => !unhashed.has(path.split(sep)[0]!) && !isAttachmentRecord(path)).sort();
   const hash = createHash("sha256");
   for (const path of files) hash.update(`${path}\0`).update(await readFile(join(root, path))).update("\0");
   return hash.digest("hex");

@@ -13,7 +13,7 @@ import { runProof, type RunIO } from "./proof-run.ts";
 import { combinedLens, parseGuide, lensBrief, lensIdle, lensLog, panelGuideText, panelLines, publishPanel, readPanelGuide, readPlan, recordWorker, requeueFailed, resolveLens, runLens, stagedPlan, stagePanel, waitForPanel, withRoundLock, withSlot, lockNewRound, processStart, roundLock, RoundBusy, RoundGone, type Lens, type LockOwner, type PanelGuide, type PanelIO, type Plan, type RoundLock, type StartTime } from "./proof-panel.ts";
 import { evalsPath, promptTemplateHash, readRuns, reportLines, saveRun, scoreCases, type EvalIO } from "./proof-eval.ts";
 import { hashOf, missesPath, missSource, missSources, readMisses, recordMiss } from "./proof-misses.ts";
-import { githubRequest, publishProof, type GitHub } from "./proof-publish.ts";
+import { attachProofs, githubRequest, publishProof, type GitHub } from "./proof-publish.ts";
 import { displayLine, recordCaption, recordLines } from "./proof-display.ts";
 import { prodShapeResult, receiptClose, receiptOpen } from "./proof-receipt.ts";
 import { runReceipt } from "./proof-receipt-command.ts";
@@ -164,17 +164,27 @@ screenshots, so save them with hedge proof save.`,
     },
   },
   publish: {
-    usage: "publish --asset-repo <owner/name> [--recheck] <file>...",
-    summary: `Publish screenshots to a public repository of your own GitHub account when gh cannot attach them to the PR.
---asset-repo names that repository; hedge has no default. It refuses a private repository and one your account does
-not own, and it publishes each screenshot under proof/ on the hedge-proof branch, named by the hash of its bytes,
-with no name of the PR or its repository. Publish only screenshots with invented test data. --recheck asks GitHub
-again after you change the repository's access.`,
-    examples: ["hedge proof publish --asset-repo octocat/assets after.png"], options: ["--asset-repo"], flags: ["--recheck"],
-    run: async ({ options, flags, files }, identity, { print, home, cwd, github }) => {
+    usage: "publish [--asset-repo <owner/name> [--recheck]] <file>...",
+    summary: `Give screenshots a link that the full receipt shows, and print each link. Without --asset-repo, hedge
+attaches them to the PR with gh, which needs gh 2.100.0 or newer and write access to the PR's repository: it posts one
+PR comment that holds them, at most 50 at once, reads the comment back, and records the link of each. The PR body stays as
+it is. A screenshot that has a link from either route is not attached again, so after a partial failure run the same command again.
+GitHub keeps an attached file for good, so publish only screenshots with invented test data. When gh cannot attach,
+as for a PR from a fork into a repository you cannot write, --asset-repo names a public repository of your own
+GitHub account; hedge has no default. It refuses a private repository and one your account does not own, and it
+publishes each screenshot under proof/ on the hedge-proof branch, named by the hash of its bytes, with no name of
+the PR or its repository. --recheck asks GitHub again after you change the repository's access.`,
+    examples: ["hedge proof publish after.png", "hedge proof publish --asset-repo octocat/assets after.png"], options: ["--asset-repo"], flags: ["--recheck"],
+    run: async ({ options, flags, files }, identity, { print, home, cwd, github, run }) => {
       requireFiles(files, "publish");
-      const assets = required(options, "--asset-repo", "publish");
-      for (const file of files) print(await publishProof(home, identity(), resolve(cwd, file), assets, github ?? githubRequest, flags.has("--recheck")));
+      const sources = files.map((file) => resolve(cwd, file));
+      const assets = options.get("--asset-repo");
+      if (assets === undefined) {
+        if (flags.has("--recheck")) throw usageError("publish", "--recheck needs --asset-repo");
+        for (const url of await attachProofs(home, identity(), sources, run)) print(url);
+        return 0;
+      }
+      for (const source of sources) print(await publishProof(home, identity(), source, assets, github ?? githubRequest, flags.has("--recheck")));
       return 0;
     },
   },
@@ -209,7 +219,7 @@ and HTML blocks are left out wherever they sit, and headings show as bold lines.
 bytes, the page leaves out the raw lens answers, then the judge reasons, then note lines past the 40th, and says so.
 hedge refuses an empty body read, a body that changed between its read and the write,
 broken markers, a write that would change the merge-risk callout, and a body that reads back different. It warns about each proof without a line and each screenshot
-without a caption or a published URL. Exit 0 when the receipt is current or written; 1 when publishing or GitHub
+without a caption or a published URL, which hedge proof publish gives it. Exit 0 when the receipt is current or written; 1 when publishing or GitHub
 fails, or the page is still over the budget; 2 when the guard refuses a field; 3 when the hub ledger cannot be reached. --comment records a comment you
 posted on the PR as its receipt instead: GitHub must show the comment on this PR. hedge proof gate --json and hedge
 decision report link the receipt.`,

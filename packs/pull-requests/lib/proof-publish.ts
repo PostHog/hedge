@@ -1,6 +1,8 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
-import { entries, isScreenshot, saveProof, type ProofIdentity } from "./proof.ts";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, extname, join } from "node:path";
+import { readComment, type Run } from "./pr-ci.ts";
+import { entries, isScreenshot, proofDirectory, proofName, saveProof, writeJson, type ProofIdentity } from "./proof.ts";
 
 export type GitHub = (path: string, body?: unknown, method?: string) => Promise<unknown>;
 
@@ -9,7 +11,7 @@ async function cached(path: string): Promise<Record<string, unknown> | undefined
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
 }
 
-const publishedSuffix = ".published.json";
+export const publishedSuffix = ".published.json";
 const publishedRecord = (saved: string, repository: string) => `${saved}.${repository.replace("/", "_")}${publishedSuffix}`;
 
 export async function publishedUrl(saved: string) {
@@ -21,11 +23,102 @@ export async function publishedUrl(saved: string) {
   return undefined;
 }
 
-export async function publishProof(home: string, identity: ProofIdentity, source: string, repository: string, github: GitHub, recheck = false): Promise<string> {
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || repository.split("/").some((part) => part === "." || part === "..")) throw new Error("Invalid asset repository");
+const attachedSuffix = `.pr-attachment${publishedSuffix}`;
+const attachedRecord = (directory: string, name: string) => join(directory, `${name}${attachedSuffix}`);
+export const isAttachmentRecord = (path: string) => /^[0-9a-f]{64}\.[a-z0-9]{1,10}\.pr-attachment\.published\.json(\.[0-9a-f-]{36})?$/.test(basename(path));
+const attachLimit = 50;
+const attachBytes = 10 * 1024 * 1024;
+const firstLine = (text: string) => text.trim().split("\n")[0] ?? "";
+const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+type Shot = { source: string; name: string; size: number };
+type Staged = { name: string; path: string };
+
+async function savedScreenshot(home: string, identity: ProofIdentity, source: string) {
   const saved = await saveProof(home, identity, source);
   const bytes = await readFile(saved);
   if (!isScreenshot(saved, bytes)) throw new Error("Publish only screenshots with invented test data");
+  return { saved, bytes };
+}
+
+async function screenshot(source: string): Promise<Shot> {
+  const bytes = await readFile(source);
+  if (!isScreenshot(source, bytes)) throw new Error("Publish only screenshots with invented test data");
+  if (!/^\.[a-z0-9]{1,10}$/.test(extname(source).toLowerCase())) throw new Error(`${source} needs a simple file extension, such as .png`);
+  return { source, name: proofName(source, bytes), size: bytes.length };
+}
+
+async function staged({ source, name }: Shot, staging: string): Promise<Staged> {
+  const bytes = await readFile(source);
+  if (proofName(source, bytes) !== name) throw new Error(`${source} changed while hedge proof publish ran. Run it again`);
+  const path = join(staging, name);
+  await writeFile(path, bytes, { mode: 0o600 });
+  return { name, path };
+}
+
+function linksIn(body: string, names: string[]) {
+  return new Map(names.flatMap((name) => {
+    const url = new RegExp(`!\\[${escaped(name)}\\]\\((https://\\S+?)\\)`).exec(body)?.[1];
+    return url ? [[name, url] as const] : [];
+  }));
+}
+
+async function readBack(identity: ProofIdentity, directory: string, comment: string, names: string[], gh: Run) {
+  try {
+    const links = linksIn(readComment(comment, gh).body, names);
+    for (const [name, url] of links) await writeJson(attachedRecord(directory, name), { ...identity, comment, url });
+    return links;
+  } catch (error) {
+    throw new Error(`gh posted ${comment}, but Hedge could not record its links: ${firstLine((error as Error).message)}. Delete that comment before you run hedge proof publish again`);
+  }
+}
+
+const refusal = (identity: ProofIdentity, stderr: string) => `gh could not attach the screenshots to ${identity.repository}#${identity.pr}: ${firstLine(stderr) || "gh named no comment"}. ${/write access|unsupported authentication/i.test(stderr)
+  ? "When gh cannot attach to this PR, publish to a public repository of your own with --asset-repo <owner/fork>"
+  : "Attaching needs gh 2.100.0 or newer, signed in to GitHub (gh auth status)"}`;
+
+async function attach(identity: ProofIdentity, directory: string, shots: Staged[], gh: Run) {
+  const posted = gh(["gh", "pr", "comment", String(identity.pr), "--repo", identity.repository, "--body", `Proof screenshots of \`${identity.commit.slice(0, 7)}\``, ...shots.flatMap(({ name, path }) => ["--attach", `${path}#${name}`])]);
+  const comment = /^https:\/\/\S+#issuecomment-\d+$/m.exec(posted.stdout)?.[0];
+  if (!comment) throw new Error(refusal(identity, posted.stderr));
+  const links = await readBack(identity, directory, comment, shots.map(({ name }) => name), gh);
+  const failed = shots.filter(({ name }) => !links.has(name));
+  if (failed.length) throw new Error(`gh did not attach ${failed.map(({ name }) => name).join(", ")}: ${firstLine(posted.stderr) || "no link in its comment"}. Run hedge proof publish again with the same screenshots`);
+  return links;
+}
+
+export async function attachProofs(home: string, identity: ProofIdentity, sources: string[], gh: Run): Promise<string[]> {
+  const directory = proofDirectory(home, identity);
+  const shots: Shot[] = [];
+  for (const source of sources) shots.push(await screenshot(source));
+  const links = new Map<string, string>();
+  for (const { name } of shots) {
+    const url = await publishedUrl(join(directory, name));
+    if (url !== undefined) links.set(name, url);
+  }
+  const missing = [...new Map(shots.filter(({ name }) => !links.has(name)).map((shot) => [shot.name, shot])).values()];
+  if (missing.length > attachLimit) throw new Error(`gh attaches at most ${attachLimit} files at once, and ${missing.length} of these screenshots have no link yet. Publish them in groups of ${attachLimit} or fewer`);
+  const large = missing.find(({ size }) => size > attachBytes);
+  if (large) throw new Error(`${large.source} is larger than 10 MiB, which gh cannot attach. Make the screenshot smaller, or publish it with --asset-repo <owner/fork>`);
+  if (missing.length) {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const probe = `${attachedRecord(directory, missing[0]!.name)}.${crypto.randomUUID()}`;
+    await writeFile(probe, "", { flag: "wx", mode: 0o600 });
+    await rm(probe);
+    const staging = await mkdtemp(join(tmpdir(), "hedge-attach-"));
+    try {
+      const files: Staged[] = [];
+      for (const shot of missing) files.push(await staged(shot, staging));
+      for (const [name, url] of await attach(identity, directory, files, gh)) links.set(name, url);
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+    }
+  }
+  return shots.map(({ name }) => links.get(name)!);
+}
+
+export async function publishProof(home: string, identity: ProofIdentity, source: string, repository: string, github: GitHub, recheck = false): Promise<string> {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || repository.split("/").some((part) => part === "." || part === "..")) throw new Error("Invalid asset repository");
+  const { saved, bytes } = await savedScreenshot(home, identity, source);
   const receiptPath = publishedRecord(saved, repository);
   const receipt = await cached(receiptPath);
   if (typeof receipt?.url === "string") return receipt.url;
