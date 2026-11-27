@@ -56,10 +56,11 @@ export async function askReviewBot(request: ReviewBotRequest, env: Env = Bun.env
 const githubSeconds = 10;
 
 async function pullBody(repo: string, pr: number, env: Env): Promise<string> {
-  const child = Bun.spawn(["gh", "api", `repos/${repo}/pulls/${pr}`], { env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(githubSeconds * 1000) });
-  const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-  if (child.signalCode) throw new Error(`GitHub did not answer within ${githubSeconds} s.`);
-  if (code) throw new Error(`gh api failed: ${stderr.trim()}`);
+  const deadline = AbortSignal.timeout(githubSeconds * 1000);
+  const late = new Promise<never>((_, reject) => deadline.addEventListener("abort", () => reject(new Error(`GitHub did not answer within ${githubSeconds} s.`)), { once: true }));
+  const child = Bun.spawn(["gh", "api", `repos/${repo}/pulls/${pr}`], { env, stdout: "pipe", stderr: "pipe", signal: deadline, killSignal: "SIGKILL" });
+  const [stdout, stderr, code] = await Promise.race([Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]), late]);
+  if (code) throw new Error(`gh api failed: ${stderr.trim() || `stopped by ${child.signalCode}`}`);
   return (JSON.parse(stdout) as { body: string | null }).body ?? "";
 }
 

@@ -1,5 +1,6 @@
 import { afterEach, expect, jest, spyOn, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tempDirs } from "../../../src/testing/git.ts";
 import { prCommand } from "./pr.ts";
@@ -30,7 +31,7 @@ case "$*" in
   *PullRequestReviewThread*) reply="comments-$id-\${after:-first}" ;;
   "api graphql"*) reply="threads\${after:+-$after}" ;;
   "pr view"*) reply=pr ;;
-  "api repos/"*"/pulls/"*) [ -f "${replies}/stall" ] && { echo $$ > "${replies}/stalled"; exec sleep 30; }; reply=pull ;;
+  "api repos/"*"/pulls/"*) [ -f "${replies}/stall" ] && { trap '' TERM; sleep 30 & echo "$$ $!" > "${replies}/stalled"; wait; }; [ -f "${replies}/killed.json" ] && kill -9 $$; reply=pull ;;
   *) echo "unexpected gh call" >&2; exit 9 ;;
 esac
 [ -f "${replies}/$reply.json" ] || { echo "no $reply reply" >&2; exit 1; }
@@ -381,26 +382,36 @@ test("review keeps Standard and says why when GitHub does not give the body", ()
   expect(result.out).toBe("Could not read the merge-risk Tier, so this asks for a Standard review: gh api failed: no pull reply\nbot says hi");
 });
 
-test("when GitHub does not answer within 10 s, review keeps Standard, says why, and kills gh", async () => {
+test("when GitHub does not answer within 10 s, even through a gh that ignores SIGTERM and a helper that holds its output, review keeps Standard, says why, and kills gh", async () => {
   const box = sandbox();
   box.reviewBot(0);
   const stalled = box.stall();
   const path = process.env.PATH;
+  let gh: number | undefined, helper: number | undefined;
   process.env.PATH = box.path;
   jest.useFakeTimers();
   try {
     const result = box.call("review", "--repo", "acme/widgets", "--pr", "12");
-    const gh = Number(readFileSync(stalled, "utf8"));
+    [gh, helper] = (await readFile(stalled, "utf8")).trim().split(" ").map(Number);
     jest.advanceTimersByTime(9_999);
-    expect(() => process.kill(gh, 0)).not.toThrow();
+    expect(() => process.kill(gh!, 0)).not.toThrow();
     jest.advanceTimersByTime(1);
     expect((await result).out).toBe("Could not read the merge-risk Tier, so this asks for a Standard review: GitHub did not answer within 10 s.");
     expect(box.botArgs()).toEqual(["review", "--repo", "acme/widgets", "--pr", "12", "--minutes", "15"]);
-    expect(() => process.kill(gh, 0)).toThrow();
+    expect(() => process.kill(gh!, 0)).toThrow();
   } finally {
     jest.useRealTimers();
     process.env.PATH = path;
+    closeSync(openSync(stalled, constants.O_RDWR | constants.O_NONBLOCK));
+    if (helper) process.kill(helper, "SIGKILL");
   }
+});
+
+test("a gh stopped by a signal keeps Standard and names the signal", () => {
+  const box = sandbox();
+  box.reviewBot(0);
+  box.reply("killed", "");
+  expect(box.run("review", "--repo", "acme/widgets", "--pr", "12").out).toBe("Could not read the merge-risk Tier, so this asks for a Standard review: gh api failed: stopped by SIGKILL\nbot says hi");
 });
 
 test("an explicit --deep and a stamp read no PR body", () => {
