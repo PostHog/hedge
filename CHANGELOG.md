@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### The merge gate says when it could not read a comment
+
+- A comment whose body the merge-gate hook cannot read, such as a piped body
+  or a file named by a shell variable (`--body-file $R`), still counts as a
+  `/trunk merge` enqueue. Its refusal now starts by saying so, and tells the
+  agent to give the body by its literal file path or as literal text.
+  Before, it read like a refusal of a merge: an end-of-run report that names
+  a pending merge looked like the cause, and the comment was not posted.
+
 ### An override refused for an older answer also says why the newer one failed
 
 - When `hedge proof review --override '<date> "<words>"'` finds that an older
