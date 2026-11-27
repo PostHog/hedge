@@ -591,12 +591,13 @@ describe("a standing order of the person's", () => {
     },
   });
   const pass = gatePass(9, head);
-  const github = { pull: async () => pulls[9], pullFor: async () => undefined };
-  const mergeFrom = async (thread: string | undefined, ledger: LedgerEvent[]) => {
+  const github: Pick<GateIO, "pull" | "pullFor"> = { pull: async () => pulls[9], pullFor: async () => undefined };
+  const mergeFrom = async (thread: string | undefined, ledger: LedgerEvent[], clock: { now?: () => number; github?: typeof github; command?: string } = {}) => {
     const home = homeIn({ "guards.person": "Robin" });
     writeFileSync(join(home, ".local/state/hedge/decisions.jsonl"), ledger.map((event) => JSON.stringify(event)).join("\n") + "\n");
     const env = thread === undefined ? {} : { T3CODE_THREAD_ID: thread };
-    return (await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 9 --repo example/product" }, cwd: "/" }, { home, env, github, intent: io }))?.hookSpecificOutput.permissionDecisionReason;
+    const command = clock.command ?? "gh pr merge 9 --repo example/product";
+    return (await mergeGate({ tool_name: "Bash", tool_input: { command }, cwd: "/" }, { home, env, github: clock.github ?? github, now: clock.now, intent: io }))?.hookSpecificOutput.permissionDecisionReason;
   };
 
   test("covers a PR whose gaps an agent accepted, when the conductor merges it from the thread the person chose it in", async () => {
@@ -644,14 +645,18 @@ describe("a standing order of the person's", () => {
     expect(refusal).toContain("never for a missing gate pass");
   });
 
-  test("an order runs through the last day it names, in UTC, and the clock is read after GitHub and the ledger answer", async () => {
+  test("an order runs through the last day it names, in UTC, and the clock is read once every PR of the call is read", async () => {
     const at = (time: string) => Date.parse(time);
-    const merge = (now: () => number) => risk(one(9), { ...gate({ ledger: [gap, pass, order("until 2026-12-10")] }), thread: conductor, now });
-    expect(await merge(() => at("2026-12-10T23:59:59Z"))).toBeUndefined();
-    expect(await merge(() => at("2026-12-11T00:00:00Z"))).toContain("ran until 2026-12-10 and has ended.");
+    const ledger = [gap, pass, order("until 2026-12-10")];
+    expect(await mergeFrom(conductor, ledger, { now: () => at("2026-12-10T23:59:59Z") })).toBeUndefined();
+    expect(await mergeFrom(conductor, ledger, { now: () => at("2026-12-11T00:00:00Z") })).toContain("ran until 2026-12-10 and has ended.");
     let time = at("2026-12-10T23:59:59Z");
-    const lateGithub: GateIO = { ...gate({ ledger: [gap, pass, order("until 2026-12-10")] }), thread: conductor, now: () => time, pull: async () => { time = at("2026-12-11T00:00:01Z"); return pulls[9]; } };
-    expect(await risk(one(9), lateGithub)).toContain("an agent accepted proof gaps");
+    const read: number[] = [];
+    const lateGithub = { pull: async (_repository: string, pr: number) => { read.push(pr); if (pr === 6) time = at("2026-12-11T00:00:01Z"); return pulls[pr]; }, pullFor: async (_repository: string, branch: string) => branch === "layer-1" ? 6 : undefined };
+    const both = "gh pr merge 9 --repo example/product && gh pr merge 7 --repo example/product";
+    const stacked = [...ledger, gatePass(7, head), gatePass(6, lower)];
+    expect(await mergeFrom(conductor, stacked, { now: () => time, github: lateGithub, command: both })).toContain("an agent accepted proof gaps of example/product#9");
+    expect(read).toEqual([9, 7, 6]);
   });
 });
 

@@ -87,17 +87,19 @@ test("a standing order is the user's \"Merge on your own\" on a card that names 
   await expect(order("--mark", "👤", "--condition", "until 2026-10-24")).rejects.toThrow("which has passed");
   await expect(pr.decide("record", "--mark", "👤", "--class", "merge", "--kind", "standing-order", "--kind", "ci", "--pr", "example/maps#7")).rejects.toThrow("only --kind gate-override or --kind standing-order");
 
-  pr.say("Continue.", "Shall I go on?");
-  await expect(order("--mark", "👤", "--words", '2026-10-25 "Continue."')).rejects.toThrow("No standing order is recorded");
   pr.say("Merge on your own", question());
-  await expect(order("--mark", "👤", "--words", '2026-10-25 "Merge on your own"')).rejects.toThrow("is a message the user typed");
+  await expect(order("--mark", "👤", "--words", '2026-10-25 "Merge on your own"')).rejects.toThrow("A standing order is a card answer");
+  await expect(order("--mark", "👤", "--message", "message-1")).rejects.toThrow("is a message the user typed");
   pr.choose("Keep asking me", question());
   await expect(order("--mark", "👤")).rejects.toThrow('not "Merge on your own"');
   pr.choose("Merge on your own", "Merge each map PR on your own until the milestone?");
-  await expect(order("--mark", "👤", "--message", "request-4:0")).rejects.toThrow("does not name example/maps#7");
+  await expect(order("--mark", "👤", "--message", "request-3:0")).rejects.toThrow("does not name example/maps#7");
+  pr.choose("Merge on your own", question(" until 2026-12-10, and look again on 2027-01-01"));
+  await expect(order("--mark", "👤", "--condition", "until 2027-01-01")).rejects.toThrow("must name the end date 2027-01-01 and no other date");
+  await expect(order("--mark", "👤", "--condition", "until 2026-12-10")).rejects.toThrow("must name the end date 2026-12-10 and no other date");
   pr.choose("Merge on your own", question(" until 2026-12-10"));
   await expect(order("--mark", "👤")).rejects.toThrow("pass the end date with --condition 'until <YYYY-MM-DD>'");
-  await expect(order("--mark", "👤", "--condition", "until 2026-12-11")).rejects.toThrow("does not name the end date 2026-12-11");
+  await expect(order("--mark", "👤", "--condition", "until 2026-12-11")).rejects.toThrow("must name the end date 2026-12-11");
   expect(ledgerDecisions(pr)).toEqual([]);
 
   const recorded = await order("--mark", "👤", "--condition", "until 2026-12-10");
@@ -113,10 +115,13 @@ test("a standing order is the user's \"Merge on your own\" on a card that names 
   await expect(order("--mark", "👤", "--condition", "until 2026-12-10")).rejects.toThrow("already recorded");
   pr.choose("Merge on your own (Recommended)", question());
   expect((await order("--mark", "👤")).code).toBe(0);
-  const listed = async () => (await pr.decide("list", "--class", "merge", "--live")).output.split("\n").filter((line) => line.startsWith("- ")).length;
-  expect(await listed()).toBe(2);
+  const listed = async () => (await pr.decide("list", "--class", "merge", "--live")).output.split("\n").filter((line) => line.startsWith("- "));
+  expect(await listed()).toHaveLength(2);
   pr.clock.now = new Date("2026-12-11T00:00:00Z");
-  expect(await listed()).toBe(1);
+  const left = await listed();
+  expect(left).toHaveLength(1);
+  expect(left[0]).toContain(question());
+  expect(left[0]).not.toContain("until 2026-12-10");
 });
 
 test("a gate run that throws after a pass at the same head is shared, so another machine's merge gate refuses the merge", async () => {

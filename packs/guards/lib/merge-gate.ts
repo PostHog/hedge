@@ -505,7 +505,7 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
   const held: string[] = [];
   const now = () => io.now?.() ?? Date.now();
   const order = () => decisions.find((decision) => orderCovers(decision, io.thread, now()));
-  const hold = (results: GateResult[], layer: Layer) => { if (!order()) held.push(...heldLayer(decisions, layer, heldGaps(results, decisions, layer, io.thread))); };
+  const hold = (results: GateResult[], layer: Layer) => held.push(...heldLayer(decisions, layer, heldGaps(results, decisions, layer, io.thread)));
   const readLedger = async () => {
     if (events !== undefined || hubError !== undefined) return;
     try { events = await io.ledger(); decisions = fold(events); } catch (error) { hubError = (error as Error).message; }
@@ -534,7 +534,7 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
     return `Hedge blocked this merge: the merge gate could not check it (${(error as Error).message}). A merge needs a \`hedge proof gate\` pass at each PR's head on GitHub; try again when GitHub answers.`;
   }
   if (!missing.length && hubError !== undefined) return unreadReason([...new Set(intent.targets.map((target) => target.repository))]);
-  if (!missing.length) return held.length ? heldReason(held, person) + uncoveredWhy(decisions, io.thread, now()) : undefined;
+  if (!missing.length) return held.length && !order() ? heldReason(held, person) + uncoveredWhy(decisions, io.thread, now()) : undefined;
   const hub = hubError ? ` The decision ledger could not be read (${hubError}), so only this machine's gate records counted.` : "";
   const covering = order();
   const ordered = covering ? ` ${person}'s standing order ${orderName(covering)} is their merge word for gaps an agent accepted, never for a missing gate pass.` : "";

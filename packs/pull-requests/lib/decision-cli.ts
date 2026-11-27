@@ -204,8 +204,9 @@ function checkOverride({ class: decisionClass, prs, kinds, condition }: Scope, m
 
 const isStandingOrder = ({ class: decisionClass, kinds }: Scope) => decisionClass === "merge" && kinds?.includes(standingOrder) === true;
 
-function checkStandingOrder(scope: Scope, mark: string, now: Date) {
+function checkStandingOrder(scope: Scope, mark: string, words: string | undefined, now: Date) {
   if (!isStandingOrder(scope)) return;
+  if (words !== undefined) throw new Error("A standing order is a card answer: name it with --message <id>, or pass neither to take the user's latest answer that names the map and standing-order");
   if (mark !== "👤") throw new Error("A standing order is the user's own choice on a question card: record it with --mark 👤. An agent never gives one");
   if (scope.prs.length !== 1) throw new Error("A standing order covers one map: pass its issue once with --pr <owner/repo#n>");
   const end = standingOrderEnd(scope.condition);
@@ -220,8 +221,8 @@ function fitsStandingOrder(scope: Scope): ((heard: HeardAnswer) => void) | undef
   const until = standingOrderDate(scope.condition);
   return (heard) => {
     if (![standingOrderChoice, `${standingOrderChoice} (Recommended)`].map(normalized).includes(normalized(heard.words))) throw new Error(`The user chose "${heard.words}", not "${standingOrderChoice}". No standing order is recorded`);
-    const dates = datesIn(heard.answered);
-    if (until && !dates.includes(until)) throw new Error(`The question the user answered does not name the end date ${until}. Ask them again with the date in the question. The question: ${heard.answered}`);
+    const dates = [...new Set(datesIn(heard.answered))];
+    if (until && (dates.length !== 1 || dates[0] !== until)) throw new Error(`The question the user answered must name the end date ${until} and no other date. Ask them again. The question: ${heard.answered}`);
     if (!until && dates.length) throw new Error(`The question the user answered names ${dates.join(", ")}: pass the end date with --condition 'until <YYYY-MM-DD>'. The question: ${heard.answered}`);
   };
 }
@@ -385,7 +386,7 @@ async function record(parsed: Parsed, context: DecisionContext, ledger: Ledger) 
   if (keepOwed && scope.class !== "proof-gap") throw new Error("--kind and --keep-owed belong to --class proof-gap");
   checkOverride(scope, mark);
   checkMergeCard(scope, mark);
-  checkStandingOrder(scope, mark, context.now?.() ?? new Date());
+  checkStandingOrder(scope, mark, parsed.options.get("--words"), context.now?.() ?? new Date());
   let decision: Decision;
   if (mark === "🤖") {
     if (parsed.options.has("--words") || parsed.options.has("--message") || keepOwed) throw new Error("--words, --message and --keep-owed are the user's: an agent decision takes --question, --answer, --rejected and --reason");
