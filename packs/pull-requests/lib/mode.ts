@@ -15,21 +15,12 @@ export const modeLabel = (mode: Mode) => `mode:${mode}`;
 export const threadModeKey = "pull-requests.threadMode";
 const legacyAutonomy = "pull-requests.autonomy";
 
-const negation = /\b(not|no|never|don'?t|doesn'?t|won'?t|without|instead of|stop|leave|drop|end)\b/;
-const hypothetical = /\b(if|when|whenever|unless|would|could|should|might|maybe|once|after|before|until|later)\b/;
-const sentences = (text: string) => [...normalized(text).matchAll(/[^.!?;\n]+[.!?;\n]*/g)].map((match) => match[0].trim()).filter(Boolean);
-const named = (mode: Mode) => `(?:mode[\\s:=]+${mode}|${mode} mode)(?!/)`;
-const work = "(?: (?:this|it|this task|this thread|the task|the work|everything|all of it))?";
-const ask = `(?:(?:run|do|work|continue|keep going|go|switch|switch over|move|change|put|set|use)${work}(?: (?:in|to|into|on|with))?(?: the)? )?`;
-const grantForm = (mode: Mode) => new RegExp(`^(?:please |ok,? |okay,? |now,? )?${ask}${named(mode)}(?: (?:for|on) (?:this|it|this task|this thread|the task|the work|everything))?(?:,? please)?(?: \\(recommended\\))?[.!]*$`);
-const mentions = (sentence: string) => modes.filter((mode) => new RegExp(`\\b${named(mode)}`).test(sentence));
-const unsure = (sentence: string) => sentence.endsWith("?") || negation.test(sentence) || hypothetical.test(sentence);
+export const modeQuestion = (thread: string) => `Which mode should thread ${thread} run in?`;
+export const modeChoices = modes.map((mode) => `mode ${mode}`);
 
-export function grantedBy(text: string): Mode | undefined {
-  const all = sentences(text.replace(/^\s*\d{4}-\d{2}-\d{2}\s+/, ""));
-  if (all.some((sentence) => mentions(sentence).length && unsure(sentence))) return undefined;
-  const granted = new Set(all.flatMap((sentence) => modes.filter((mode) => grantForm(mode).test(sentence))));
-  return granted.size === 1 ? [...granted][0] : undefined;
+export function grantedBy(choice: string): Mode | undefined {
+  const match = /^mode (supervised|auto|full)(?: \(recommended\))?$/.exec(normalized(choice.replace(/^\s*\d{4}-\d{2}-\d{2}\s+/, "")));
+  return match ? match[1] as Mode : undefined;
 }
 
 function parsedMode(value: string, from: string): Mode {
@@ -103,6 +94,8 @@ function withoutThreadMode(env: Env) {
   const { [threadModeKey]: _, ...rest } = JSON.parse(env.HEDGE_SETTINGS) as Record<string, unknown>;
   return JSON.stringify(rest);
 }
+
+export const fullHeldAtAuto = (text: string | undefined) => text === undefined ? text : JSON.stringify(heldAtAuto(JSON.parse(text) as Record<string, unknown>));
 
 const heldAtAuto = (settings: Record<string, unknown>) => ({
   ...settings,

@@ -9,7 +9,7 @@ The default mode. You run the work on your own until each pull request is ready 
 
 ## Start
 
-1. When the user said "mode auto" or "auto mode", record it: `hedge mode set auto --thread <this thread> --words '<date> "<their whole message>"'`. Never switch the mode yourself.
+1. When the user said "mode auto" or "auto mode" and `hedge mode show` prints another mode, ask the question `hedge mode set` names on your question tool, "Which mode should thread <this thread> run in?", with the options "mode supervised", "mode auto", and "mode full", and record the mode they chose: `hedge mode set <mode> --thread <this thread> --words '<date> "mode <mode>"'`. Their typed words alone switch nothing. Never switch the mode yourself.
 2. Put the label `mode:auto` on the work's tracking issue, and take off any other `mode:` label.
 3. Run `hedge mode show` when you are unsure which mode a thread runs in.
 

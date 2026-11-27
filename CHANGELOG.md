@@ -11,10 +11,11 @@
   each pull request to the user's merge card with an explainer. Full also
   accepts gaps, stamps, and merges alone, with the council for hard calls,
   and reports once at the end.
-- `hedge mode set <mode> --thread <id> --words '<date> "<message>"'`
-  records the user's grant. It reads the message in the T3 thread, and a
-  sentence of it must name the mode without a "not". `--for` gives it to a
-  thread that thread started. `hedge mode show` prints a thread's mode and
+- `hedge mode set <mode> --thread <id> --words '<date> "mode <mode>"'`
+  records the user's grant: their choice on the question "Which mode should
+  thread <id> run in?", read in the T3 thread. Typed words switch nothing.
+  `--for` gives it to a thread that thread started, and the question must
+  name that thread. `hedge mode show` prints a thread's mode and
   where it comes from.
 - A thread takes its mode from its own grant, else from the thread that
   started it, else from the new `pull-requests.repoModes` for its

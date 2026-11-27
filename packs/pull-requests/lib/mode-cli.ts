@@ -1,14 +1,15 @@
 import { appendHeard, answeredAt, heardInThread, ledgerOf, type DecisionContext } from "./decision-cli.ts";
 import { runIn } from "./pr-ci.ts";
 import { sameThread, thisMachine, type Env, type LedgerEvent, type ModeGrant } from "./decision-ledger.ts";
-import { chainOf, grantedBy, grantFor, isMode, modeLabel, modeLine, modes, resolveMode, t3Threads, withThreadMode, type Mode, type ReadThreads } from "./mode.ts";
+import { chainOf, grantedBy, grantFor, isMode, modeChoices, modeLabel, modeLine, modeQuestion, modes, resolveMode, t3Threads, withThreadMode, type Mode, type ReadThreads } from "./mode.ts";
+import { normalized } from "./proof-answers.ts";
 
 export type ModeContext = DecisionContext & { threads?: ReadThreads; repository?: () => string | undefined };
 
 const usage = `hedge mode: the autonomy mode of a thread.
 
   hedge mode show [--thread <id>] [--repo <owner/name>]
-  hedge mode set <${modes.join("|")}> --thread <id> --words '<date> "<the user's whole message>"' [--message <id>] [--for <thread>]
+  hedge mode set <${modes.join("|")}> --thread <id> --words '<date> "<the option the user chose>"' [--message <id>] [--for <thread>]
 
 A thread runs in one of three modes. supervised: the agent decides nothing alone and asks the user. auto: the
 agent decides review rounds, proof gaps and routine asks alone, and brings each PR to the user's merge card. full:
@@ -17,16 +18,15 @@ the agent decides everything, merges, and reports once at the end.
 show prints the thread's mode and where it comes from: the thread's own grant, a grant it inherits from the thread
 that started it, the default of --repo in pull-requests.repoModes, or the profile default in pull-requests.mode.
 --thread defaults to this thread, and --repo to the GitHub repository of this checkout's origin. When the thread's
-lineage cannot be read in full, it shows supervised: a grant above the gap may say so.
+lineage cannot be read in full and no grant is found, a default of full is held at auto.
 
-set records the user's grant. Only the user switches a mode: quote their whole message in thread --thread, typed in
-the T3 app or chosen on your question tool, with the date they wrote it. One sentence of it must be the mode alone, as
-"mode full", or a short ask to run the work in it, as "run this task in full mode". A message that also names a mode
-in a question, a condition or a "not" grants none, and so does one that asks for two modes. A choice on your question
-tool counts only on a question that starts with "Which mode" and, with --for, names that thread. An older message
-never replaces a newer grant. --for applies it to a thread that thread --thread
-started, such as a lane; it defaults to --thread. A thread that another thread started inherits its mode until a
-grant of its own. A thread that starts on its own, such as a side fix, takes the defaults.`;
+set records the user's answer. Only the user switches a mode, and only on your question tool: ask
+"Which mode should thread <id> run in?" with the options "mode supervised", "mode auto", and "mode full", where <id>
+is the thread the mode is for. Then quote their choice with the date they gave it, as --words '<date> "mode full"'.
+Words they type, such as "mode full", start the mode's skill, which asks this question; they switch nothing alone.
+--for applies the answer to a thread that thread --thread started, such as a lane, and the question must name that
+thread. A thread that another thread started inherits its mode until a grant of its own. A thread that starts on its
+own, such as a side fix, takes the defaults. An older answer never replaces a newer grant.`;
 
 type Parsed = { options: Map<string, string>; positional: string[] };
 
@@ -66,31 +66,26 @@ async function set(parsed: Parsed, context: ModeContext) {
   if (!isMode(mode) || rest.length) throw new Error(`Name one mode: ${modes.join(", ")}. Run hedge mode --help`);
   const words = parsed.options.get("--words");
   const thread = parsed.options.get("--thread");
-  if (!words || !thread) throw new Error("Pass --thread and --words: only the user's words switch a mode. Run hedge mode --help");
+  if (!words || !thread) throw new Error("Pass --thread and --words: only the user's answer switches a mode. Run hedge mode --help");
   const target = parsed.options.get("--for") ?? thread;
+  const ask = `ask them with your question tool: "${modeQuestion(target)}", with the options ${modeChoices.map((choice) => `"${choice}"`).join(", ")}, in thread ${thread}`;
   const heard = await heardInThread(thread, words, parsed.options.get("--message"), context);
-  const granted = grantedBy(heard.text) === grantedBy(words) ? grantedBy(words) : undefined;
-  if (heard.source === "question" && !/^which mode\b/i.test(heard.answered.trim())) {
-    throw new Error(`The user chose "${heard.text}" on a question that does not ask which mode a thread runs in. Ask them with your question tool, in a question that starts with "Which mode", naming the thread`);
-  }
-  if (granted !== mode) throw new Error(`The user's message "${heard.text}" does not grant mode ${mode}${granted ? `: it grants mode ${granted}` : ""}. Only "mode ${mode}" alone, or a short ask such as "run this task in ${mode} mode", switches it; ask them with your question tool, "Which mode should this thread run in?", with "mode ${mode}" as an option`);
+  if (heard.source !== "question") throw new Error(`"${heard.text}" is a typed message. A mode switches only on the user's answer to your question tool; ${ask}`);
+  if (!normalized(heard.answered).startsWith(normalized(modeQuestion(target)))) throw new Error(`The user chose "${heard.text}" on a question that does not start with "${modeQuestion(target)}"; ${ask}`);
+  const granted = grantedBy(heard.text);
+  if (granted !== mode || grantedBy(words) !== mode) throw new Error(`The user chose "${heard.text}", not "mode ${mode}"`);
   const chain = await chainOf(target, threadsOf(context));
   if (!sameThread(target, thread) && !chain.threads.some((link) => sameThread(link, thread))) {
-    throw new Error(`Thread ${target} was not started by thread ${thread}, so the user's words there do not reach it. Ask in thread ${target}`);
-  }
-  const title = (await threadsOf(context)().catch(() => [])).find((item) => sameThread(item.id, target))?.title;
-  if (!sameThread(target, thread) && heard.source === "question" && !heard.answered.includes(target) && !(title && heard.answered.toLowerCase().includes(title.toLowerCase()))) {
-    throw new Error(`The question the user answered does not name thread ${target}. Ask "Which mode should <its title or id> run in?" with your question tool`);
+    throw new Error(`Thread ${target} was not started by thread ${thread}, so the user's answer there does not reach it. Ask in thread ${target}`);
   }
   const ledger = ledgerOf(context);
   const grant: ModeGrant = { type: "mode", mode, for: target, words, thread: heard.thread, message: heard.id, machine: thisMachine(context.env), at: answeredAt(heard) };
   const events = await ledger.read();
-  const newer = [grantFor(events, chain.threads), ...events.filter((event): event is ModeGrant => event.type === "mode" && sameThread(event.thread, grant.thread))]
-    .find((other) => other && other.message !== grant.message && Date.parse(other.at) > Date.parse(grant.at));
-  if (newer) {
-    throw new Error(`Thread ${target} runs in mode ${newer.mode} on a grant of ${newer.at.slice(0, 10)} in thread ${newer.thread}, newer than this message. Only a newer message of the user's switches it; ask them with your question tool, "Which mode should this thread run in?", with "mode ${mode}" as an option`);
-  }
   const same = events.find((event): event is ModeGrant => event.type === "mode" && event.message === grant.message && sameThread(event.thread, grant.thread) && sameThread(event.for, target));
+  const newer = grantFor(events, chain.threads);
+  if (!same && newer && Date.parse(newer.at) > Date.parse(grant.at)) {
+    throw new Error(`Thread ${target} runs in mode ${newer.mode} on an answer of ${newer.at.slice(0, 10)} in thread ${newer.thread}, newer than this one. Only a newer answer switches it; ${ask}`);
+  }
   if (!same) await appendHeard(ledger, grant);
   context.print(`${modeLine(mode)} for thread ${target}${same ? ", already recorded" : ""}\nlabel: ${modeLabel(mode)}. Put it on the thread's tracking issue in place of the other mode labels.`);
   return 0;
