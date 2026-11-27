@@ -683,9 +683,11 @@ test("the judge reads a long body whole, and asks no shape question once GitHub 
   expect(judge.prompts().at(-1)).not.toContain("GitHub reports this PR merged");
 
   pr.pullRequestState({ body: graded("non-critical"), merged: true });
-  await pr.hedge("gate", "--landed");
+  judge.answer(verdict({ risk: { verdict: "pass", reason: "One text file changes: low, two-way", citations: [] }, shape: { verdict: "fail", reason: "no picture", citations: [] } }));
+  const landed = await pr.hedge("gate", "--landed");
   expect(judge.prompts().at(-1)).toContain("Answer five questions:");
   expect(judge.prompts().at(-1)).not.toContain("shape: Does the PR body keep the shape");
+  expect([landed.code, landed.output.includes("judge shape")]).toEqual([0, false]);
 });
 
 test("a shape-only failure never goes to the arbiter, so it is never escalated as a judge dispute", async () => {
