@@ -260,6 +260,7 @@ describe("which calls enqueue or merge", () => {
     ["gh api graphql -f 'query=mutation($t: ID!) { resolveReviewThread(input: {threadId: $t}) { thread { body: id } } } # addComment' -f t=\"$T\""],
     ["gh api graphql -f 'query=query($n: Int!) { search(query: \"addComment\", type: REPOSITORY, first: $n) { repositoryCount } }' -F n=\"$N\""],
     ["gh api repos/example/product/pulls/7/comments/1/replies -f body=\"$A\""],
+    ["timeout 380 bash -c \"until gh api 'repos/example/product/commits/$SHA/check-runs' --jq '.total_count'; do sleep 30; done\""],
     ["gh api repos/example/product/pulls/7/comments/1/replies -f body=\"After CI, run /trunk merge on $PR.\""],
     ["gh api -X PATCH repos/example/product/pulls/comments/1 -f body=\"Fixed in $SHA.\""],
     ["echo '{\"pull_requests\":[7,8]}' | gh api -X POST repos/example/product/stacks --input -"],

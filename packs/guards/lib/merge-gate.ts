@@ -262,7 +262,7 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
     endpoint = endpoint.replace(/\{owner\}|:owner/, owner ?? "").replace(/\{repo\}|:repo/, repo ?? "");
   }
   const method = (values(gh, "-X", "--method").at(-1) ?? (fields.length || values(gh, "--input").length ? "POST" : "GET")).toUpperCase();
-  if (method === "GET" && !found.fromExpansion && found.name !== "xargs") return { targets: [] };
+  if (method === "GET" && !found.argExpands.includes(true) && found.name !== "xargs") return { targets: [] };
   const opaque = trunkReads.test(endpoint) || isRunTime(endpointOf(marked)) || found.fromExpansion || found.name === "xargs";
   const scoped = opaque ? sent : { ...sent, unread: sent.missing, built: false, piped: false };
   const comment = endpoint.match(/^repos\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)\/comments$/);
