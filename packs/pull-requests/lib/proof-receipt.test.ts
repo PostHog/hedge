@@ -869,21 +869,20 @@ test("a screenshot gh cannot attach gets no link, and publish says what to fix",
   const { pr, older } = await provedPr();
   pr.githubFault("attach-error", "attaching files requires write access to the repository\n");
   await expect(pr.hedge("publish", "--commit", older, "walk.png")).rejects.toThrow("gh could not attach the screenshots to example/product#42: attaching files requires write access to the repository. When gh cannot attach to this PR, publish to a public repository of your own with --asset-repo <owner/fork>");
+  pr.githubFault("attach-error", "unsupported authentication type\n");
+  await expect(pr.hedge("publish", "--commit", older, "walk.png")).rejects.toThrow("unsupported authentication type. When gh cannot attach to this PR, publish to a public repository of your own with --asset-repo <owner/fork>");
   pr.githubFault("attach-error", "unknown flag: --attach\n");
   await expect(pr.hedge("publish", "--commit", older, "walk.png")).rejects.toThrow("gh could not attach the screenshots to example/product#42: unknown flag: --attach. Attaching needs gh 2.100.0 or newer, signed in to GitHub (gh auth status)");
   expect(pr.githubComments()).toEqual([]);
 });
 
-test("publish after a partial upload or a lost read-back attaches only what has no link, and never posts a screenshot twice", async () => {
+test("publish after a partial upload attaches only what has no link", async () => {
   const { pr, older, file } = await provedPr();
   file("second.png", png("second"));
   file("third.png", png("third"));
   pr.githubFault("attach-drop", "2");
   await expect(pr.hedge("publish", "--commit", older, "walk.png", "second.png", "third.png")).rejects.toThrow("Run hedge proof publish again with the same screenshots");
   pr.githubFault("attach-drop", undefined);
-  pr.githubFault("comment-read-error", "gh: Bad Gateway (HTTP 502)\n");
-  await expect(pr.hedge("publish", "--commit", older, "walk.png", "second.png", "third.png")).rejects.toThrow("Bad Gateway");
-  pr.githubFault("comment-read-error", undefined);
 
   const again = await pr.hedge("publish", "--commit", older, "walk.png", "second.png", "third.png");
 

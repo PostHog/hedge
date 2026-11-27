@@ -39,6 +39,8 @@ const fault = (name) => fs.existsSync(path.join(github, name)) ? fs.readFileSync
 const refused = fault("attach-error");
 if (refused) { process.stderr.write(refused); process.exit(1); }
 const failAt = Number(fault("attach-drop") ?? 0);
+const files = args.filter((_, index) => args[index - 1] === "--attach").map((value) => value.slice(0, value.lastIndexOf("#")));
+if (files.length > 50 || files.some((file) => !/\\.(png|jpe?g|gif|webp)$/i.test(file) || !fs.existsSync(file))) { process.stderr.write("gh: up to 50 existing image files per command\\n"); process.exit(1); }
 let body = "", failed = false;
 const assets = [];
 for (let index = 0; index < args.length; index++) {
@@ -110,7 +112,6 @@ case "$*" in
     exec "${process.execPath}" "${github}/attach.js" "${github}" "$@";;
   "api "*"/issues/comments/"*)
     all="$*"; id=\${all##*/issues/comments/}
-    [ -f "${github}/comment-read-error" ] && { cat "${github}/comment-read-error" >&2; exit 1; }
     [ -f "${github}/comment-$id" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
     cat "${github}/comment-$id"; exit 0;;
   "api "*"/branches/"*)
@@ -168,7 +169,7 @@ printf '{"number":42,"url":"https://github.com/example/product/pull/42","baseRef
     writeFileSync(join(github, "events"), JSON.stringify([{ event: "labeled", created_at: opened }, ...ready.map((at) => ({ event: "ready_for_review", created_at: at }))]));
   };
   const githubBody = (number = 42) => JSON.parse(readFileSync(join(github, existsSync(join(github, `body-${number}`)) ? `body-${number}` : "body"), "utf8")) as string;
-  const githubFault = (fault: "patch-error" | "patch-mangle" | "attach-error" | "attach-drop" | "comment-read-error", text: string | undefined) => text === undefined ? rmSync(join(github, fault), { force: true }) : writeFileSync(join(github, fault), text);
+  const githubFault = (fault: "patch-error" | "patch-mangle" | "attach-error" | "attach-drop", text: string | undefined) => text === undefined ? rmSync(join(github, fault), { force: true }) : writeFileSync(join(github, fault), text);
   const reviewThreads = (threads: ReviewThread[] | { error: string }, number = 42) => {
     rmSync(join(github, "threads-error"), { force: true });
     if ("error" in threads) return writeFileSync(join(github, "threads-error"), threads.error);

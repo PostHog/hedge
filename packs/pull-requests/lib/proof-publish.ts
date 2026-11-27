@@ -58,20 +58,7 @@ async function readBack(identity: ProofIdentity, directory: string, comment: str
   return links;
 }
 
-async function resumed(identity: ProofIdentity, directory: string, names: string[], gh: Run) {
-  const waiting = new Map<string, string[]>();
-  for (const name of names) {
-    const comment = (await cached(attachedRecord(directory, name)))?.comment;
-    if (typeof comment === "string") waiting.set(comment, [...waiting.get(comment) ?? [], name]);
-  }
-  const links = new Map<string, string>();
-  for (const [comment, held] of waiting) {
-    for (const [name, url] of await readBack(identity, directory, comment, held, gh).catch(() => new Map<string, string>())) links.set(name, url);
-  }
-  return links;
-}
-
-const refusal = (identity: ProofIdentity, stderr: string) => `gh could not attach the screenshots to ${identity.repository}#${identity.pr}: ${firstLine(stderr) || "gh named no comment"}. ${/write access/i.test(stderr)
+const refusal = (identity: ProofIdentity, stderr: string) => `gh could not attach the screenshots to ${identity.repository}#${identity.pr}: ${firstLine(stderr) || "gh named no comment"}. ${/write access|unsupported authentication/i.test(stderr)
   ? "When gh cannot attach to this PR, publish to a public repository of your own with --asset-repo <owner/fork>"
   : "Attaching needs gh 2.100.0 or newer, signed in to GitHub (gh auth status)"}`;
 
@@ -79,7 +66,6 @@ async function attach(identity: ProofIdentity, directory: string, shots: Staged[
   const posted = gh(["gh", "pr", "comment", String(identity.pr), "--repo", identity.repository, "--body", `Proof screenshots of \`${identity.commit.slice(0, 7)}\``, ...shots.flatMap(({ name, path }) => ["--attach", `${path}#${name}`])]);
   const comment = /^https:\/\/\S+#issuecomment-\d+$/m.exec(posted.stdout)?.[0];
   if (!comment) throw new Error(refusal(identity, posted.stderr));
-  for (const { name } of shots) await writeJson(attachedRecord(directory, name), { ...identity, comment });
   const links = await readBack(identity, directory, comment, shots.map(({ name }) => name), gh);
   const failed = shots.filter(({ name }) => !links.has(name));
   if (failed.length) throw new Error(`gh did not attach ${failed.map(({ name }) => name).join(", ")}: ${firstLine(posted.stderr) || "no link in its comment"}. Run hedge proof publish again with the same screenshots`);
@@ -97,9 +83,7 @@ export async function attachProofs(home: string, identity: ProofIdentity, source
       const url = await publishedUrl(join(directory, name));
       if (url !== undefined) links.set(name, url);
     }
-    const unlinked = () => [...new Map(shots.filter(({ name }) => !links.has(name)).map((shot) => [shot.name, shot])).values()];
-    for (const [name, url] of await resumed(identity, directory, unlinked().map(({ name }) => name), gh)) links.set(name, url);
-    const missing = unlinked();
+    const missing = [...new Map(shots.filter(({ name }) => !links.has(name)).map((shot) => [shot.name, shot])).values()];
     if (missing.length > attachLimit) throw new Error(`gh attaches at most ${attachLimit} files at once, and ${missing.length} of these screenshots have no link yet. Publish them in groups of ${attachLimit} or fewer`);
     if (missing.length) for (const [name, url] of await attach(identity, directory, missing, gh)) links.set(name, url);
     return shots.map(({ name }) => links.get(name)!);
