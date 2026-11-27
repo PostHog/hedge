@@ -1,7 +1,7 @@
 import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { fold, gateOverride, sameThread, live, mergeCardChoice, mergeCardCondition, namesHead, namesId, overrideChoice, hubLedger, prRef, standingOrder, standingOrderChoice, standingOrderDate, standingOrderEnd, standingOrderQuestion, type DecisionState, type Env, type LedgerEvent } from "../../pull-requests/lib/decision-ledger.ts";
+import { fold, gateOverride, sameThread, live, mergeCardChoice, mergeCardCondition, namesHead, namesId, overrideChoice, hubLedger, isStandingOrderEntry, prRef, standingOrderEnd, standingOrderRuns, type DecisionState, type Env, type LedgerEvent } from "../../pull-requests/lib/decision-ledger.ts";
 import { isTextList, lastGateResult, latestGateResult, type GateResult } from "../../pull-requests/lib/proof.ts";
 import { decidesAll } from "../../pull-requests/lib/proof-autonomy.ts";
 import { normalized } from "../../pull-requests/lib/proof-answers.ts";
@@ -465,11 +465,9 @@ const cardNames = (decisions: DecisionState[], id: string, question: string) => 
 const heldGaps = (results: GateResult[], decisions: DecisionState[], layer: Layer, thread: string | undefined) => decisions.some((decision) => overrideAt(decision, layer)) ? []
   : agentGapsAt(results, decisions, layer).filter((id) => !decisions.some((decision) => mergeWordAt(decision, layer, thread) && cardNames(decisions, id, decision.question)));
 
-const isOrder = (decision: DecisionState) => decision.class === "merge" && (decision.reversed?.mark ?? decision.mark) === "👤" && decision.scope.kinds?.includes(standingOrder) === true
-  && [standingOrderChoice, `${standingOrderChoice} (Recommended)`].map(normalized).includes(chosen(decision.reversed?.answer ?? decision.answer))
-  && decision.scope.prs.length === 1 && normalized(decision.question) === normalized(standingOrderQuestion(decision.scope.prs[0]!, standingOrderDate(decision.scope.condition)));
+const isOrder = isStandingOrderEntry;
 const inThread = (decision: DecisionState, thread: string | undefined) => thread !== undefined && sameThread(decision.where.thread, thread);
-const runs = (decision: DecisionState, now: number) => live(decision) && now < standingOrderEnd(decision.scope.condition);
+const runs = standingOrderRuns;
 const orderCovers = (decision: DecisionState, thread: string | undefined, now: number) => isOrder(decision) && runs(decision, now) && inThread(decision, thread);
 const orderName = (order: DecisionState) => `${order.id} of ${order.at.slice(0, 10)}`;
 

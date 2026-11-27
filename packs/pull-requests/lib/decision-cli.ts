@@ -5,7 +5,7 @@ import { readPullRequest, runIn } from "./pr-ci.ts";
 import { gapKind, refuseInstructionQuote, usedAnswer } from "./proof.ts";
 import { decidesAll } from "./proof-autonomy.ts";
 import {
-  agentRefusal, answerUse, sameThread, askClasses, gateOverride, mergeCardChoice, mergeCardCondition, namesHead, overrideChoice, brakeDays, brakeOf, covers, decisionLine, fold, hubLedger, HubUnreachable, isUsers, liftCounted, live, messageKey, namesKind, namesPr, panelRefusal, prRef, refText, standingOrder, standingOrderChoice, standingOrderDate, standingOrderEnd, standingOrderQuestion, thisMachine, tierOf,
+  agentRefusal, answerUse, sameThread, askClasses, gateOverride, mergeCardChoice, mergeCardCondition, namesHead, overrideChoice, brakeDays, brakeOf, covers, decisionLine, fold, hubLedger, HubUnreachable, isUsers, liftCounted, live, messageKey, namesKind, namesPr, panelRefusal, prRef, refText, asksStandingOrder, choseStandingOrder, isStandingOrderEntry, standingOrder, standingOrderChoice, standingOrderDate, standingOrderEnd, standingOrderQuestion, standingOrderRuns, thisMachine, tierOf,
   type AnswerUse, type AskClass, type Decision, type DecisionState, type Env, type Ledger, type LedgerEvent, type Lift, type PrRef, type Reversal, type Ssh, type UsersMark,
 } from "./decision-ledger.ts";
 
@@ -215,10 +215,11 @@ function checkStandingOrder(scope: Scope, mark: string, words: string | undefine
 
 function fitsStandingOrder(scope: Scope): ((heard: HeardAnswer) => void) | undefined {
   if (!isStandingOrder(scope)) return undefined;
-  const question = standingOrderQuestion(refText(scope.prs[0]!), standingOrderDate(scope.condition));
+  const map = refText(scope.prs[0]!);
+  const until = standingOrderDate(scope.condition);
   return (heard) => {
-    if (![standingOrderChoice, `${standingOrderChoice} (Recommended)`].map(normalized).includes(normalized(heard.words))) throw new Error(`The user chose "${heard.words}", not "${standingOrderChoice}". No standing order is recorded`);
-    if (normalized(heard.answered) !== normalized(question)) throw new Error(`A standing order's question is exactly "${question}", and the user answered another. Ask them again with that question; put their words and any link in the option's description. The question: ${heard.answered}`);
+    if (!choseStandingOrder(heard.words)) throw new Error(`The user chose "${heard.words}", not "${standingOrderChoice}". No standing order is recorded`);
+    if (!asksStandingOrder(heard.answered, map, until)) throw new Error(`A standing order's question is exactly "${standingOrderQuestion(map, until)}", the map optionally as a Markdown link, and the user answered another. Ask them again with that question, and put no terms in the option's description: Hedge cannot read it. The question: ${heard.answered}`);
   };
 }
 
@@ -527,7 +528,7 @@ async function list(parsed: Parsed, context: DecisionContext, ledger: Ledger) {
   const ref = parsed.options.has("--pr") ? prRef(parsed.options.get("--pr")!) : undefined;
   const decisionClass = parsed.options.has("--class") ? askClass(parsed.options.get("--class")!) : undefined;
   const shown = fold(await reachHub(() => ledger.read())).filter((decision) =>
-    (!ref || covers(decision, ref)) && (!decisionClass || decision.class === decisionClass) && (!parsed.flags.has("--live") || (live(decision) && (decision.scope.kinds?.includes(standingOrder) !== true || (context.now?.() ?? new Date()).getTime() < standingOrderEnd(decision.scope.condition)))));
+    (!ref || covers(decision, ref)) && (!decisionClass || decision.class === decisionClass) && (!parsed.flags.has("--live") || (live(decision) && (decision.scope.kinds?.includes(standingOrder) !== true || (isStandingOrderEntry(decision) && standingOrderRuns(decision, (context.now?.() ?? new Date()).getTime()))))));
   if (!shown.length) context.print("No decisions.");
   for (const decision of shown) context.print(decisionLine(decision));
   return 0;

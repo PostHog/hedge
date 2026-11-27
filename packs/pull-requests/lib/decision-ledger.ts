@@ -2,6 +2,7 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { HubUnreachable, remoteHub, runSsh, type Env, type Ssh, type SshResult } from "../../hub/lib/hub-transport.ts";
+import { normalized } from "./proof-answers.ts";
 
 export const askClasses = ["proof-gap", "review", "merge", "deploy", "secret", "design", "scope", "status"] as const;
 export type AskClass = (typeof askClasses)[number];
@@ -35,6 +36,13 @@ export const standingOrder = "standing-order";
 export const standingOrderChoice = "Merge on your own";
 export const standingOrderQuestion = (map: string, until: string | undefined) =>
   `Standing order (${standingOrder}) for ${map} until ${until ?? "its milestone"}: may this T3 thread merge every PR it merges on your word, gaps an agent accepted included?`;
+const linkText = (text: string) => text.replace(/\[([^\]]*)\]\([^)\s]*\)/g, "$1");
+export const asksStandingOrder = (question: string, map: string, until: string | undefined) => normalized(linkText(question)) === normalized(standingOrderQuestion(map, until));
+export const choseStandingOrder = (answer: string) => [standingOrderChoice, `${standingOrderChoice} (Recommended)`].map(normalized).includes(normalized(answer.replace(/^\d{4}-\d{2}-\d{2}\s+/, "")));
+export const isStandingOrderEntry = (decision: DecisionState) => decision.class === "merge" && decision.scope.kinds?.includes(standingOrder) === true
+  && (decision.reversed?.mark ?? decision.mark) === "👤" && choseStandingOrder(decision.reversed?.answer ?? decision.answer)
+  && decision.scope.prs.length === 1 && asksStandingOrder(decision.question, decision.scope.prs[0]!, standingOrderDate(decision.scope.condition));
+export const standingOrderRuns = (decision: DecisionState, now: number) => live(decision) && now < standingOrderEnd(decision.scope.condition);
 export const standingOrderDate = (condition: string | undefined) => /^until (\d{4}-\d{2}-\d{2})$/.exec(condition ?? "")?.[1];
 const calendarDay = (date: string) => {
   const start = Date.parse(`${date}T00:00:00Z`);

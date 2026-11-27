@@ -123,6 +123,11 @@ test("a standing order is the user's \"Merge on your own\" on a card that names 
   expect(left).toHaveLength(1);
   expect(left[0]).toContain(question());
   expect(left[0]).not.toContain("until 2026-12-10");
+
+  pr.choose("Merge on your own", question().replace("example/maps#7", "[example/maps#7](https://github.com/example/maps/issues/7)"));
+  expect((await order("--mark", "👤")).code).toBe(0);
+  pr.choose("Merge on your own", question().replace("example/maps#7", "[example/maps#8](https://github.com/example/maps/issues/7)"));
+  await expect(order("--mark", "👤")).rejects.toThrow("and the user answered another");
 });
 
 test("a gate run that throws after a pass at the same head is shared, so another machine's merge gate refuses the merge", async () => {

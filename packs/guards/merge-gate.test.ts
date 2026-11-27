@@ -663,6 +663,8 @@ describe("a standing order of the person's", () => {
     expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = `${decision.question} Only the docs PR.`; })])).toContain("an agent accepted proof gaps");
     expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.scope.prs = ["example/maps#7", "example/maps#8"]; })])).toContain("an agent accepted proof gaps");
     expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.answer = '2026-11-27 "Merge on your own (Recommended)"'; })])).toBeUndefined();
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "[example/maps#7](https://github.com/example/maps/issues/7)"); })])).toBeUndefined();
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "[example/maps#8](https://github.com/example/maps/issues/7)"); })])).toContain("an agent accepted proof gaps");
   });
 });
 
