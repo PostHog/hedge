@@ -9,7 +9,7 @@ import { gateRunDirectory, startGateRun, writeJson } from "../pull-requests/lib/
 import { git } from "../../src/testing/git.ts";
 import { mergeGate } from "./hooks/merge-gate.ts";
 import {
-  beforeDeadline, cliReason, exemptList, ghAliases, ghBaseRepo, graphqlReason, mergeGateDeadlineMs, readPayload, realIntentIO, mergeGateRisk, mergeIntent, otherEndpointReason, rawReason, shellAliasReason, splitStringReason,
+  beforeDeadline, cliReason, exemptList, ghAliases, ghBaseRepo, graphqlReason, mergeGateDeadlineMs, readPayload, realIntentIO, mergeGateRisk, mergeIntent, otherEndpointReason, rawReason, shellAliasReason, splitStringReason, unreadPayloadReason,
   type GateIO, type IntentIO, type MergeIntent, type Pull,
 } from "./lib/merge-gate.ts";
 
@@ -20,7 +20,7 @@ const head = "a".repeat(40);
 const lower = "b".repeat(40);
 const older = "c".repeat(40);
 const exempt = exemptList("own/*, example/notes");
-const files: Record<string, string> = { "body.md": "/trunk merge\n", "note.md": "Merged after review.\n", "payload.json": '{"body":"/trunk merge"}', "query.json": '{"query":"mutation { mergePullRequest(input: {}) { clientMutationId } }"}', "deep.json": `{"body":"/trunk merge","junk":${"[".repeat(200_000)}${"]".repeat(200_000)}}` };
+const files: Record<string, string> = { "body.md": "/trunk merge\n", "note.md": "Merged after review.\n", "payload.json": '{"body":"/trunk merge"}', "query.json": '{"query":"mutation { mergePullRequest(input: {}) { clientMutationId } }"}', "merge.graphql": "mutation { mergePullRequest(input: {}) { clientMutationId } }", "deep.json": `{"body":"/trunk merge","junk":${"[".repeat(200_000)}${"]".repeat(200_000)}}` };
 const workFiles = mkdtempSync(join(tmpdir(), "merge-gate-work-"));
 for (const [name, text] of Object.entries(files)) writeFileSync(join(workFiles, name), text);
 afterAll(() => rmSync(workFiles, { recursive: true, force: true }));
@@ -88,7 +88,6 @@ describe("which calls enqueue or merge", () => {
     ["gh pr comment 7 --repo example/product --body '/trunk cancel'"],
     ["gh pr comment 7 --repo example/product --body 'Waiting for CI before the next step.'"],
     ["gh pr comment 7 --repo example/product --body-file note.md"],
-    ["gh pr comment 7 --repo example/product --body \"$(cat note.md) Ready for review.\""],
     ["gh pr merge 7 --repo example/product --disable-auto"],
     ["gh pr merge 7 --repo example/product --disable-auto=1"],
     ["gh pr merge 7 --repo example/product --disable-auto=True"],
@@ -152,6 +151,62 @@ describe("which calls enqueue or merge", () => {
     ["gh api graphql -F query=@missing.graphql", graphqlReason],
   ])("%s is refused outright", (command, reason) => {
     expect(bash(command).refusal).toBe(reason);
+  });
+
+  test.each([
+    ["B=$(cat body.md); gh pr comment 7 --repo example/product --body \"$B\""],
+    ["gh pr comment 7 --repo example/product --body \"$(cat body.md)\""],
+    ["gh pr comment 7 --repo example/product --body \"$(cat note.md) Ready for review.\""],
+    ["gh pr comment 7 --repo example/product --body=$B"],
+    ["gh pr comment 7 --repo example/product -b\"${B}\""],
+    ["gh pr comment 7 --repo example/product --body \"`cat body.md`\""],
+    ["gh pr comment 7 --repo example/product --body $(cat body.md)"],
+    ["gh issue comment 7 --repo example/product -b \"$B\""],
+    ["gh pr comment 7 --repo example/product --body-file - <<EOF\n$(cat body.md)\nEOF"],
+    ["gh pr comment 7 --repo example/product --body-file - <<EOF\nReady.\n$B\nEOF"],
+    ["gh pr comment 7 --repo example/product -F - <<< \"$B\""],
+    ["sh -c 'gh pr comment 7 --repo example/product --body \"$B\"'"],
+    ["gh api repos/example/product/issues/7/comments -f body=\"$B\""],
+    ["gh api repos/example/product/issues/7/comments -F \"body=$(cat body.md)\""],
+    ["gh api repos/example/product/issues/7/comments --raw-field body=`cat body.md`"],
+  ])("a comment body built at run time is checked as an unread body: %s", (command) => {
+    expect(bash(command)).toEqual({ targets: [target("example/product", 7)], unreadOnly: true });
+  });
+
+  test.each([
+    ["gh pr review 7 --repo example/product --comment --body \"$B\"", unreadPayloadReason],
+    ["gh pr review 7 --repo example/product --approve -b \"$(cat body.md)\"", unreadPayloadReason],
+    ["gh pr edit 7 --repo example/product --body \"$(cat body.md)\"", unreadPayloadReason],
+    ["gh issue edit 7 --repo example/product --body=\"$B\"", unreadPayloadReason],
+    ["gh pr edit 7 --repo example/product --body '/trunk merge'", otherEndpointReason],
+    ["gh api -X PATCH repos/example/product/issues/comments/1 -f body=\"$B\"", unreadPayloadReason],
+    ["gh api -X PATCH repos/example/product/pulls/7 -f body=\"$(cat body.md)\"", unreadPayloadReason],
+    ["gh api repos/example/product/pulls/7/reviews -f event=COMMENT -f \"comments[][body]=$B\"", unreadPayloadReason],
+    ["Q=$(cat merge.graphql); gh api graphql -f query=\"$Q\"", graphqlReason],
+    ["gh api graphql -F query=\"$(cat merge.graphql)\"", graphqlReason],
+    ["gh api graphql -f query=\"`cat merge.graphql`\"", graphqlReason],
+    ["gh api graphql -f query='mutation($b: String!) { addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
+    ["gh api graphql -f 'query=query { viewer { login } }' -f \"$K=$V\"", graphqlReason],
+    ["gh api -X PATCH repos/example/product/issues/comments/1 -f \"$K=$V\"", unreadPayloadReason],
+  ])("a review, edit or GraphQL call whose body or query is built at run time is refused: %s", (command, reason) => {
+    expect(bash(command).refusal).toBe(reason);
+  });
+
+  test.each([
+    ["gh pr comment 7 --repo example/product --body 'Costs $5, see `merge-gate`.'"],
+    ["gh pr comment 7 --repo example/product --body \"Costs \\$5, see \\`merge-gate\\`.\""],
+    ["gh pr comment 7 --repo example/product --body $'Costs $5.\\n'"],
+    ["gh pr comment 7 --repo example/product --body-file - <<'EOF'\nUses $HOME and $(date).\nEOF"],
+    ["gh pr comment 7 --repo example/product --body-file - <<EOF\nReady for review.\nEOF"],
+    ["gh pr comment 7 --repo example/product --body-file note.md"],
+    ["gh pr comment \"$PR\" --repo example/product --body 'Ready for review.'"],
+    ["gh pr review 7 --repo example/product --approve --body 'Looks good.'"],
+    ["gh pr edit 7 --repo example/product --body-file note.md --add-label \"$LABEL\""],
+    ["gh api graphql -f query='query($owner: String!) { repository(owner: $owner, name: \"product\") { id } }' -f owner=\"$OWNER\""],
+    ["gh api -X POST repos/example/product/git/refs -f ref=refs/heads/next -f sha=\"$(git rev-parse HEAD)\""],
+    ["gh api repos/example/product/issues/7/comments -F body=@note.md"],
+  ])("a literal body, literal path or literal heredoc posts without a check: %s", (command) => {
+    expect(bash(command)).toEqual({ targets: [] });
   });
 
   test("a cd before the call moves it to that checkout's repository, out of an exempt one", () => {
@@ -660,7 +715,6 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     ["gh api -X PATCH repos/example/product/issues/9 --input body.json"],
     ["gh api -X PATCH repos/example/product/pulls/9 -F body=@body.md"],
     ["gh api -X PATCH repos/example/product/pulls/9 --field body=@body.md"],
-    ["gh api -X PATCH repos/example/product/pulls/9 -f body=\"$(cat body.md)\""],
     ["gh api -X PATCH repos/example/product/pulls/9 --raw-field 'body=Fixes the `merge-gate` guard.'"],
     ["gh api -X PATCH repos/example/product/pulls/9 -f title='Read the PR body payload'"],
     ["gh api -X PATCH repos/example/product/issues/comments/1 --input body.json"],
@@ -677,12 +731,13 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     ["gh api -X PATCH repos/example/product/pulls/9 --input missing.json"],
     ["gh api -X PATCH repos/example/product/pulls/9 --input <(make-body)"],
     ["f=$(mktemp); gh api -X PATCH repos/example/product/pulls/9 --input \"$f\""],
+    ["gh api -X PATCH repos/example/product/pulls/9 -f body=\"$(cat body.md)\""],
     ["gh pr review 9 --repo example/product --comment --body-file missing.md"],
   ])("a body edit whose payload the gate cannot read, such as a file the same command writes first, is refused and told to write it first: %s", async (command) => {
     const { dir, hook } = bodyEdits();
     const reason = await hook(command, dir);
-    expect(reason).toContain("the merge gate cannot read the file it sends");
-    expect(reason).toContain("Write the file in one call, then send it with a call of its own.");
+    expect(reason).toContain("the merge gate cannot read what it sends");
+    expect(reason).toContain("write a file in one call, then send it with a call of its own.");
   });
 
   test.each([
@@ -822,6 +877,37 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     const reason = (await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr comment 9 --repo example/product --body-file \"$R\"" }, cwd: "/" }, { home, env: {}, intent: realIntentIO }))?.hookSpecificOutput.permissionDecisionReason;
     expect(reason).toStartWith(opensWithNote);
     expect(reason).toContain("could not read its settings");
+  });
+
+  test("a body or query built at run time from a real file is checked as unread, and literal bodies, paths and heredocs still post", async () => {
+    const dir = reportDir();
+    writeFileSync(join(dir, "merge.graphql"), "mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }\n");
+    const unpassed = machine({ "repos/example/product/pulls/9": pull(head) });
+    for (const command of [
+      "B=$(cat enqueue.md); gh pr comment 9 --repo example/product --body \"$B\"",
+      "gh issue comment 9 --repo example/product --body \"$(cat enqueue.md)\"",
+      "gh pr comment 9 --repo example/product --body \"`cat enqueue.md`\"",
+      "gh pr comment 9 --repo example/product --body-file - <<EOF\n$(cat enqueue.md)\nEOF",
+      "X=$(cat enqueue.md); gh api repos/example/product/issues/9/comments -f body=\"$X\"",
+    ]) {
+      const reason = await unpassed(command, dir);
+      expect(reason).toStartWith(opensWithNote);
+      expect(reason).toContain("has not passed at the head of example/product#9");
+    }
+    for (const command of [
+      "B=$(cat enqueue.md); gh pr review 9 --repo example/product --comment --body \"$B\"",
+      "gh pr edit 9 --repo example/product --body \"$(cat enqueue.md)\"",
+      "X=$(cat enqueue.md); gh api -X PATCH repos/example/product/issues/comments/1 -f body=\"$X\"",
+    ]) expect(await unpassed(command, dir)).toBe(unreadPayloadReason);
+    expect(await unpassed("Q=$(cat merge.graphql); gh api graphql -f query=\"$Q\"", dir)).toBe(graphqlReason);
+    for (const command of [
+      "gh pr comment 9 --repo example/product --body-file report.md",
+      "gh pr comment 9 --repo example/product --body 'Costs $5 and runs `hedge proof gate`.'",
+      "gh pr comment 9 --repo example/product --body-file - <<'EOF'\nRun $(hedge proof gate) when $HOME is set.\nEOF",
+      "gh pr review 9 --repo example/product --comment --body-file report.md",
+      "gh pr edit 9 --repo example/product --body-file report.md",
+      "gh api graphql -f query='query($n: Int!) { repository(owner: \"example\", name: \"product\") { pullRequest(number: $n) { id } } }' -F n=\"$N\"",
+    ]) expect(await unpassed(command, dir)).toBeUndefined();
   });
 });
 

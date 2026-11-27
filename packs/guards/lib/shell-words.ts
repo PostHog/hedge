@@ -9,7 +9,8 @@ export type Command = {
   substitutions: string[];
   leadingSubstitutions: string[];
   argSubstitutions: string[][];
-  stdin?: { body: string; substitutions: string[] };
+  stdin?: { body: string; substitutions: string[]; expands?: boolean };
+  argExpands: boolean[];
   outputs: string[];
   writes: string[];
   redirects: string[];
@@ -29,8 +30,8 @@ export type Command = {
 };
 
 type Context = { env: ReadonlyMap<string, string>; inLoop: boolean; scope?: Scope };
-type Word = { text: string; raw: string; bare: string; substitutions: string[]; processes: string[] };
-type Heredoc = { delimiter: string; literal: boolean; stripTabs: boolean; body: string; substitutions: string[] };
+type Word = { text: string; raw: string; bare: string; substitutions: string[]; processes: string[]; expands: boolean };
+type Heredoc = { delimiter: string; literal: boolean; stripTabs: boolean; body: string; substitutions: string[]; expands?: boolean };
 type Token = { word: Word } | { operator: string; at: number } | { heredoc: Heredoc } | { herestring: true };
 
 export const shellTools = new Set(["Bash", "exec_command", "shell", "shell_command", "local_shell"]);
@@ -194,6 +195,7 @@ function expansion(text: string, index: number, inDoubleQuotes: boolean): { end:
 function doubleQuoted(text: string, start: number, stopAtQuote: boolean) {
   let value = "";
   const substitutions: string[] = [];
+  let expands = false;
   let index = start;
   for (; index < text.length; index++) {
     const char = text[index];
@@ -204,6 +206,7 @@ function doubleQuoted(text: string, start: number, stopAtQuote: boolean) {
       continue;
     }
     const found = expansion(text, index, true);
+    if (found || char === "$") expands = true;
     if (found) {
       substitutions.push(...found.programs);
       value += text.slice(index, found.end + 1);
@@ -211,7 +214,7 @@ function doubleQuoted(text: string, start: number, stopAtQuote: boolean) {
     } else value += char;
   }
   if (stopAtQuote && index >= text.length) throw unclosed('a " quote');
-  return { value, substitutions, end: index };
+  return { value, substitutions, expands, end: index };
 }
 
 function readDelimiter(text: string, start: number) {
@@ -264,7 +267,11 @@ function readBodies(text: string, start: number, pending: Heredoc[], mustClose =
       if (!closed) heredoc.body += `${line}\n`;
     }
     if (mustClose && !closed) throw unclosed(`a heredoc that ${heredoc.delimiter} should end inside a substitution`);
-    if (!heredoc.literal) heredoc.substitutions = doubleQuoted(heredoc.body, 0, false).substitutions;
+    if (!heredoc.literal) {
+      const quoted = doubleQuoted(heredoc.body, 0, false);
+      heredoc.substitutions = quoted.substitutions;
+      heredoc.expands = quoted.expands;
+    }
   }
   pending.length = 0;
   return index;
@@ -275,8 +282,9 @@ function tokenize(text: string): Token[] {
   const pending: Heredoc[] = [];
   let word: Word | undefined;
   let commentAt: number | undefined;
-  const append = (value: string, raw: string, substitutions: string[] = [], bare = "_", processes: string[] = []) => {
-    word ??= { text: "", raw: "", bare: "", substitutions: [], processes: [] };
+  const append = (value: string, raw: string, substitutions: string[] = [], bare = "_", processes: string[] = [], expands = false) => {
+    word ??= { text: "", raw: "", bare: "", substitutions: [], processes: [], expands: false };
+    word.expands ||= expands;
     word.text += value;
     word.raw += raw;
     word.bare += bare;
@@ -310,7 +318,7 @@ function tokenize(text: string): Token[] {
       index = end + 1;
     } else if (char === '"') {
       const quoted = doubleQuoted(text, index + 1, true);
-      append(quoted.value, text.slice(index, quoted.end + 1), quoted.substitutions);
+      append(quoted.value, text.slice(index, quoted.end + 1), quoted.substitutions, "_", [], quoted.expands);
       index = quoted.end + 1;
     } else if ((char === "<" || char === ">") && next === "(") {
       const end = parenEnd(text, index + 1);
@@ -351,7 +359,7 @@ function tokenize(text: string): Token[] {
       if ((char === "<" || char === ">") && word && !/^\d+$|[<>&]$/.test(word.raw)) endWord();
       const found = expansion(text, index, false);
       const end = found?.end ?? index;
-      append(text.slice(index, end + 1), text.slice(index, end + 1), found?.programs, found ? "_" : char);
+      append(text.slice(index, end + 1), text.slice(index, end + 1), found?.programs, found ? "_" : char, [], found !== undefined || char === "$");
       index = end + 1;
     }
   }
@@ -476,11 +484,12 @@ export function parse(program: string, context: Context = { env: new Map(), inLo
     const substitutions = [...words.flatMap((word) => word.substitutions), ...(stdin?.substitutions ?? [])];
     const leadingSubstitutions = kept.slice(0, index + 1).flatMap((word) => word.substitutions);
     const argSubstitutions = kept.slice(index + 1).map((word) => word.substitutions);
+    const argExpands = kept.slice(index + 1).map((word) => word.expands);
     const bare = kept.slice(index).map((word) => word.bare);
     const rawArgs = kept.slice(index + 1).map((word) => word.raw);
     const rawPrefix = kept.slice(0, index).map((word) => word.raw);
     const prefix = kept.slice(0, index).map((word) => basename(word.text));
-    pipeline.push({ name, args, env: commandEnv, substitutions, leadingSubstitutions, argSubstitutions, stdin, outputs, writes, redirects, bare, rawArgs, rawPrefix, prefix, keywords: stripped, processSubstitutions: words.flatMap((word) => word.processes), inLoop, tested, ...(after && { after, afterAt }), scope, chdir });
+    pipeline.push({ name, args, env: commandEnv, substitutions, leadingSubstitutions, argSubstitutions, argExpands, stdin, outputs, writes, redirects, bare, rawArgs, rawPrefix, prefix, keywords: stripped, processSubstitutions: words.flatMap((word) => word.processes), inLoop, tested, ...(after && { after, afterAt }), scope, chdir });
     words = [];
     stdin = undefined;
   };
@@ -496,11 +505,11 @@ export function parse(program: string, context: Context = { env: new Map(), inLo
     const definition = opened && "operator" in token && token.operator === ")";
     opened = "operator" in token && token.operator === "(";
     if ("word" in token && hereString) {
-      stdin = { body: token.word.text, substitutions: token.word.substitutions };
+      stdin = { body: token.word.text, substitutions: token.word.substitutions, expands: token.word.expands };
       hereString = false;
     } else if ("word" in token) words.push(token.word);
     else if ("herestring" in token) hereString = true;
-    else if ("heredoc" in token) stdin = { body: token.heredoc.body, substitutions: [...(stdin?.substitutions ?? []), ...token.heredoc.substitutions] };
+    else if ("heredoc" in token) stdin = { body: token.heredoc.body, substitutions: [...(stdin?.substitutions ?? []), ...token.heredoc.substitutions], expands: token.heredoc.expands };
     else if (token.operator === "|" || token.operator === "|&") finishCommand("|");
     else {
       finishPipeline(token.operator === "(" || token.operator === ")" ? undefined : token.operator, token.at);
