@@ -172,7 +172,7 @@ function runTimeFields(fields: string[], typed: string[], graphql: boolean, body
   if (bodyFromInput) return false;
   if (!graphql) return built.some((field) => named(field, "body"));
   const queries = fields.filter((field) => key(field) === "query").map((field) => field.slice("query=".length)).map((query) => query.startsWith("@") ? readQuery(query.slice(1)) : query);
-  const filled = typed.some((field) => key(field) === "query" && ghPlaceholder.test(field));
+  const filled = typed.some((field) => key(field) === "query" && !field.startsWith("query=@") && ghPlaceholder.test(field));
   const quiet = !filled && queries.length > 0 && queries.every((query) => query !== undefined && !postsText(query));
   return built.some((field) => named(field, "query")) || (built.length > 0 && !quiet);
 }
@@ -288,7 +288,7 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   }
   const method = (values(gh, "-X", "--method").at(-1) ?? (fields.length || values(gh, "--input").length ? "POST" : "GET")).toUpperCase();
   if (method === "GET" && found.name !== "xargs") return { targets: [] };
-  const opaque = !unreadByTrunk.test(endpoint) || found.name === "xargs";
+  const opaque = !unreadByTrunk.test(endpoint) || isRunTime(endpointOf(marked)) || found.name === "xargs";
   const scoped = opaque ? sent : { ...sent, unread: sent.missing, built: false, piped: false };
   const comment = endpoint.match(/^repos\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)\/comments$/);
   const posted = (reads: boolean): MergeIntent => ({ targets: [{ repository: comment![1]!, pr: Number(comment![2]), via: `gh api issues/<n>/comments${reads ? "" : unreadVia}` }], ...reads ? {} : { unreadOnly: true as const } });
