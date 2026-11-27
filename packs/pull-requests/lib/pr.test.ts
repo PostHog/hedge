@@ -30,6 +30,7 @@ case "$*" in
   *PullRequestReviewThread*) reply="comments-$id-\${after:-first}" ;;
   "api graphql"*) reply="threads\${after:+-$after}" ;;
   "pr view"*) reply=pr ;;
+  "api repos/"*"/pulls/"*) reply=pull ;;
   *) echo "unexpected gh call" >&2; exit 9 ;;
 esac
 [ -f "${replies}/$reply.json" ] || { echo "no $reply reply" >&2; exit 1; }
@@ -351,9 +352,9 @@ const riskCallout = (tier: string) => `## Problem\n\n<!-- merge-risk -->\n> [!CA
 test("review asks for Deep when the merge-risk Tier says critical, and says so", () => {
   const box = sandbox();
   box.reviewBot(0);
-  box.reply("pr", { body: riskCallout("critical (b: changes a public API)") });
+  box.reply("pull", { body: riskCallout("critical (b: changes a public API)") });
   const result = box.run("review", "--repo", "acme/widgets", "--pr", "12");
-  expect(box.calls()).toEqual(["pr view 12 --repo acme/widgets --json body"]);
+  expect(box.calls()).toEqual(["api repos/acme/widgets/pulls/12"]);
   expect(box.botArgs()).toEqual(["review", "--repo", "acme/widgets", "--pr", "12", "--minutes", "15", "--deep"]);
   expect(result.out).toBe("The merge-risk Tier is critical, so this asks for a Deep review.\nbot says hi");
 });
@@ -361,10 +362,11 @@ test("review asks for Deep when the merge-risk Tier says critical, and says so",
 test.each([
   ["a non-critical Tier", riskCallout("non-critical")],
   ["no merge-risk callout", "## Problem\n\n**Tier:** critical, outside any callout.\n"],
+  ["an empty body", null],
 ])("review keeps Standard for %s", (_, body) => {
   const box = sandbox();
   box.reviewBot(0);
-  box.reply("pr", { body });
+  box.reply("pull", { body });
   expect(box.run("review", "--repo", "acme/widgets", "--pr", "12").out).toBe("bot says hi");
   expect(box.botArgs()).toEqual(["review", "--repo", "acme/widgets", "--pr", "12", "--minutes", "15"]);
 });
@@ -374,7 +376,7 @@ test("review keeps Standard and says why when GitHub does not give the body", ()
   box.reviewBot(0);
   const result = box.run("review", "--repo", "acme/widgets", "--pr", "12");
   expect(box.botArgs()).toEqual(["review", "--repo", "acme/widgets", "--pr", "12", "--minutes", "15"]);
-  expect(result.out).toBe("Could not read the merge-risk Tier, so this asks for a Standard review: gh pr failed: no pr reply\nbot says hi");
+  expect(result.out).toBe("Could not read the merge-risk Tier, so this asks for a Standard review: gh api failed: no pull reply\nbot says hi");
 });
 
 test("an explicit --deep and a stamp read no PR body", () => {

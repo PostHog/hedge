@@ -57,8 +57,8 @@ export async function askReviewBot(request: ReviewBotRequest, env: Env = Bun.env
 async function deepWhenCritical(request: ReviewBotRequest, gh: Gh): Promise<ReviewBotRequest> {
   if (request.action !== "review" || request.deep || request.pr === undefined) return request;
   try {
-    const { body } = JSON.parse(await gh(["pr", "view", String(request.pr), "--repo", request.repo, "--json", "body"])) as { body: string };
-    if (tierOf(body) !== "critical") return request;
+    const { body } = JSON.parse(await gh(["api", `repos/${request.repo}/pulls/${request.pr}`])) as { body: string | null };
+    if (tierOf(body ?? "") !== "critical") return request;
     console.log("The merge-risk Tier is critical, so this asks for a Deep review.");
     return { ...request, deep: true };
   } catch (error) {
