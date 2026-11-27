@@ -808,7 +808,8 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     expect(await unpassed("gh pr merge 9 --repo example/product", dir)).toStartWith("Hedge blocked this merge");
     expect(await unpassed("gh pr merge 9 --repo example/product; gh pr comment 10 --repo example/product --body-file \"$R\"", dir)).toStartWith("Hedge blocked this merge");
     expect(await unpassed("gh pr comment 9 --repo example/product --body-file \"$R\"; trunk merge 9", dir)).not.toStartWith(opensWithNote);
-    expect(await unpassed("gh pr comment 9 --body-file \"$R\"; gh pr merge 10 --repo example/product", dir)).not.toStartWith(opensWithNote);
+    const unnamedWithMerge = await unpassed("gh pr comment 9 --body-file \"$R\"; gh pr merge 10 --repo example/product", dir);
+    expect(unnamedWithMerge).toStartWith("Hedge blocked this command: it posts a comment without naming the PR");
     writeFileSync(join(dir, "enqueue.json"), JSON.stringify({ body: "/trunk merge" }));
     expect(await unpassed("printf x | gh api repos/example/product/issues/9/comments --input enqueue.json -F trace=@-", dir)).toStartWith("Hedge blocked this merge");
   });
