@@ -162,7 +162,7 @@ function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline
   const read = paths.map((path) => path === "-" ? found.stdin?.body ?? "" : readAt(found, cwd, io, path));
   const texts = [...inline, ...read.filter((text) => text !== undefined)];
   const runTime = built || found.name === "xargs" || (paths.includes("-") && found.stdin?.expands === true);
-  return { texts: [...texts, ...texts.flatMap(jsonStrings)], unread: read.includes(undefined) || runTime, missing: read.includes(undefined), built: runTime || texts.some((text) => builtAtRunTime.test(text)), piped };
+  return { texts: [...texts, ...texts.flatMap(jsonStrings)], unread: read.includes(undefined) || runTime, missing: read.includes(undefined), built: runTime, dollar: texts.some((text) => builtAtRunTime.test(text)), piped };
 }
 
 function runTimeFields(fields: string[], typed: string[], graphql: boolean, bodyFromInput: boolean, readQuery: (path: string) => string | undefined) {
@@ -182,8 +182,8 @@ function jsonStrings(text: string): string[] {
   try { return strings(JSON.parse(text)); } catch { return []; }
 }
 
-type Sent = { texts: string[]; unread: boolean; missing: boolean; built: boolean; piped: boolean };
-const readsEnqueue = ({ texts, built }: Sent, raw: string) => texts.some((text) => enqueueLine.test(text)) || (built && mentionsEnqueue.test(raw));
+type Sent = { texts: string[]; unread: boolean; missing: boolean; built: boolean; dollar: boolean; piped: boolean };
+const readsEnqueue = ({ texts, built, dollar }: Sent, raw: string) => texts.some((text) => enqueueLine.test(text)) || ((built || dollar) && mentionsEnqueue.test(raw));
 const sendsEnqueue = (sent: Sent, raw: string) => sent.unread || sent.piped || readsEnqueue(sent, raw);
 const elsewhere = (sent: Sent, raw: string): MergeIntent => ({ targets: [], refusal: readsEnqueue(sent, raw) ? otherEndpointReason : unreadPayloadReason });
 

@@ -171,6 +171,9 @@ describe("which calls enqueue or merge", () => {
     ["make-body | curl https://api.github.com/repos/example/product/issues/7/comments -d @-", rawReason],
     ["make-query | gh api graphql --input -", graphqlReason],
     ["gh api graphql -F query=@missing.graphql", graphqlReason],
+    ["B='/trunk merge'; gh api --hostname \"$H\" repos/example/product/pulls/7/comments/1/replies -f body=\"$B\"", otherEndpointReason],
+    ["B='/trunk merge'; gh api repos/example/product/pulls/7/comments/1/replies -f body=\"$B\"", otherEndpointReason],
+    ["gh api repos/example/product/pulls/7/comments/1/replies -f body=\"After CI, run /trunk merge on $PR.\"", otherEndpointReason],
     ["B='/trunk merge'; gh api \"$E\" -f query='mutation($b: String!) { addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", otherEndpointReason],
   ])("%s is refused outright", (command, reason) => {
     expect(bash(command).refusal).toBe(reason);
@@ -330,7 +333,6 @@ describe("which calls enqueue or merge", () => {
     ["gh api graphql -f 'query=mutation($t: ID!) { resolveReviewThread(input: {threadId: $t, clientMutationId: \"\"\"has \\\"\"\" addComment( inside\"\"\"}) { thread { isResolved } } }' -f t=\"$T\""],
     ["gh api graphql -f query=$'mutation($t: ID!) { resolveReviewThread(input: {threadId: $t, clientMutationId: \"\"\"one\\naddComment( two\"\"\"}) { thread { isResolved } } }' -f t=\"$T\""],
     ["timeout 380 bash -c \"until gh api 'repos/example/product/commits/$SHA/check-runs' --jq '.total_count'; do sleep 30; done\""],
-    ["gh api repos/example/product/pulls/7/comments/1/replies -f body=\"After CI, run /trunk merge on $PR.\""],
     ["gh api -X PATCH repos/example/product/pulls/comments/1 -f body=\"Fixed in $SHA.\""],
     ["echo '{\"pull_requests\":[7,8]}' | gh api -X POST repos/example/product/stacks --input -"],
     ["make-body | gh api -X PATCH repos/example/product/pulls/7 --input -"],
