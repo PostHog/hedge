@@ -122,10 +122,10 @@ async function reconcile(plan: Plan, options: ApplyOptions): Promise<{ report: R
     };
     const gates = plan.checks.filter((check) => plan.config.some((entry) => entry.pack === check.pack && entry.after === check.id));
     await runChecks(gates);
-    const gateCode = (entry: Plan["config"][number]) => checks.find(([item]) => item.pack === entry.pack && item.id === entry.after)?.[1];
-    const passing = (entry: Plan["config"][number]) => gateCode(entry) === 0;
+    const gateCodes = (entry: Plan["config"][number]) => checks.filter(([item]) => item.pack === entry.pack && item.id === entry.after).map(([, code]) => code);
+    const passing = (entry: Plan["config"][number]) => gateCodes(entry).includes(0);
     const waiting = plan.config.filter((entry) => waitsForCheck(plan, entry));
-    const holds = (entry: Plan["config"][number]) => onRoute(entry) && gateCode(entry) === cannotTell;
+    const holds = (entry: Plan["config"][number]) => onRoute(entry) && !passing(entry) && gateCodes(entry).includes(cannotTell);
     const kept = plan.config.filter((entry) => !holds(entry) && (waiting.includes(entry) ? passing(entry) : gated.plan.config.includes(entry)));
     const routes = wholeRoutes(kept, plan.config.filter((entry) => !kept.includes(entry) && !holds(entry)));
     const configured = { ...gated.plan, config: routes.config, dropped: [...gated.plan.dropped, ...waiting.filter((entry) => !passing(entry)).map((entry) => droppedConfig(entry, holds(entry))), ...routes.dropped] };

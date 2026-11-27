@@ -487,14 +487,19 @@ test("the check passes while the proxy answers the saved key, and keeps Claude C
 });
 
 test("the check cannot tell while the proxy does not answer or its connection drops mid-answer, and changes no file", async () => {
-  for (const proxy of [{ down: true }, { cutsBody: true }]) {
-    const { machine, home, printed } = client({}, proxy);
-    connected(home);
-    const before = readFileSync(settingsFile(home), "utf8");
-    expect(await cliProxy("check", machine)).toBe(3);
-    expect(readFileSync(settingsFile(home), "utf8")).toBe(before);
-    expect(printed).toEqual([`The proxy at ${proxyUrl} does not answer. hedge apply keeps the Claude Code settings as they are until it answers.`]);
-    expect(existsSync(keyFile(home))).toBe(true);
+  const cut = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data: (socket) => void socket.end('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"data":[') } });
+  try {
+    for (const proxy of [{ down: true }, { cutsBody: `http://127.0.0.1:${cut.port}` }]) {
+      const { machine, home, printed } = client({}, proxy);
+      connected(home);
+      const before = readFileSync(settingsFile(home), "utf8");
+      expect(await cliProxy("check", machine)).toBe(3);
+      expect(readFileSync(settingsFile(home), "utf8")).toBe(before);
+      expect(printed).toEqual([`The proxy at ${proxyUrl} does not answer. hedge apply keeps the Claude Code settings as they are until it answers.`]);
+      expect(existsSync(keyFile(home))).toBe(true);
+    }
+  } finally {
+    cut.stop(true);
   }
 });
 

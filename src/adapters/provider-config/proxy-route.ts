@@ -28,7 +28,6 @@ export const proxyRoute: Partial<Record<Provider, Route>> = {
 
 type Entry = Plan["config"][number];
 
-/** Whether a config entry is one part of Hedge's proxy route for its provider. */
 export const onRoute = (entry: Entry) => proxyRoute[entry.provider]?.fields.some((item) => samePath(item.path, keyPath(entry.key)) && same(item.value, entry.value)) === true;
 
 export function wholeRoutes(config: Entry[], dropped: Entry[]): Pick<Plan, "config" | "dropped"> {

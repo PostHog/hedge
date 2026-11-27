@@ -112,7 +112,7 @@ function owned(plan: Plan, target: Target): Field[] {
   return fields;
 }
 
-function merge(target: Target, text: string | undefined, previous: Field[], wanted: Field[], adopt: boolean, options: { outage: boolean; stays: (path: string[]) => boolean; configPath: string }): Merged {
+function merge(target: Target, text: string | undefined, previous: Field[], wanted: Field[], adopt: boolean, options: { outage: boolean; stays: ReturnType<Staying>; configPath: string }): Merged {
   const current: Document = text === undefined ? {} : target.format.decode(text);
   const original = target.format.encode(current);
   const record: Field[] = [];
@@ -163,7 +163,7 @@ function merge(target: Target, text: string | undefined, previous: Field[], want
   const all = [...wanted, ...trust];
   for (const field of previous) {
     if (all.some((item) => overlaps(item.path, field.path))) continue;
-    if (options.stays(field.path) || keepsEdit(field)) record.push(field);
+    if (options.stays(field.path, routeOnDisk.length === route?.fields.length) || keepsEdit(field)) record.push(field);
     else if (get(current, field.path) !== undefined) {
       remove(current, field.path);
       removed.push(field.path.join("."));
@@ -199,14 +199,13 @@ function acceptedCodexPlugins(document: Document) {
 
 const isHookTrust = (field: Field) => field.path[0] === "hooks" && field.path[1] === "state";
 
-type Staying = (provider: Provider) => (path: string[]) => boolean;
+type Staying = (provider: Provider) => (path: string[], routeOnDisk?: boolean) => boolean;
 
-/** Whether a setting an earlier apply wrote stays although the plan no longer wants it. A check that cannot tell yet keeps the config that waits on it. A pack source outage keeps the rest, but never what a failing check dropped. */
 function staying(plan: Plan, outage: boolean): Staying {
   const gated = plan.dropped.filter((entry) => entry.check && entry.item.startsWith("config ")).map((entry) => ({ key: entry.item.slice("config ".length), held: entry.held === true }));
-  return (provider) => (path) => {
+  return (provider) => (path, routeOnDisk = false) => {
     const hit = gated.filter((entry) => entry.key.startsWith(`${provider}:`) && overlaps(keyPath(entry.key.slice(provider.length + 1)), path));
-    return hit.some((entry) => entry.held) || (outage && !hit.length);
+    return hit.length ? routeOnDisk && hit.some((entry) => entry.held) : outage;
   };
 }
 

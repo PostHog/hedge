@@ -350,6 +350,15 @@ describe("a config entry that waits for a pack check", () => {
     ]);
   });
 
+  test("is written while any of two checks with its id passes, even when the other cannot tell", async () => {
+    const home = temp.make("home-");
+    const twice = [{ ...checks[0]!, run: ["first-check"] }, { ...checks[0]!, run: ["second-check"] }];
+    for (const first of [1, 3]) {
+      await apply(plan({ files: [], checks: twice, config }), { home, adapters: [providerConfigAdapter()], run: async (command: string[]) => (command[0] === "first-check" ? first : 0) });
+      expect(settings(home)).toEqual({ env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:8317" }, apiKeyHelper: keyHelper });
+    }
+  });
+
   const stepping = (codes: { before: number; after: number }) => {
     let ran = false;
     const seen: unknown[] = [];
