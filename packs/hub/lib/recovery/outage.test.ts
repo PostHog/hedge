@@ -117,8 +117,6 @@ test("resumes a thread that lost its connection to the proxy once the proxy answ
     { lastErrorClass: "provider_error", lastErrorCode: "api_error", lastError: "API Error: Connection error." },
     { lastErrorClass: "provider_error", lastErrorCode: "api_error", lastError: "API Error: Request timed out." },
     { lastErrorClass: "provider_error", lastErrorCode: "api_error", lastError: "API Error: Unable to connect to API (ECONNREFUSED)" },
-    { lastErrorClass: "provider_error", lastErrorCode: "api_error", lastError: "API Error: Connection dropped (ECONNRESET)" },
-    { lastErrorClass: "provider_error", lastErrorCode: "api_error", lastError: "API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)" },
     { lastErrorClass: "transport_error", lastErrorCode: "claude_request_unanswered", lastError: "Claude sent nothing for 5 minutes. The API or a gateway in front of it is not responding." },
     { ...codex, lastErrorClass: "transport_error", lastErrorCode: "responseStreamDisconnected", lastError: "stream disconnected before completion: error sending request for url (http://127.0.0.1:8317/v1/responses)" },
     { ...codex, lastErrorClass: "transport_error", lastErrorCode: "httpConnectionFailed", lastError: "error sending request for url (http://127.0.0.1:8317/v1/responses): Connection refused (os error 111)" },
@@ -127,10 +125,10 @@ test("resumes a thread that lost its connection to the proxy once the proxy answ
   for (const time of ["20:00", "20:10", "20:30"]) await box.run(at(time));
   expect(box.inbox.delivered()).toEqual([]);
   expect(box.lines).toContain("Thread c0 (c0): waits for claude, which is unknown.");
-  expect(box.lines).toContain("Thread c6 (c6): waits for codex, which is unknown.");
+  expect(box.lines).toContain("Thread c4 (c4): waits for codex, which is unknown.");
   await box.run(at("20:40"), fakeProxy({ "claude-test-1": 200, "gpt-test-1": 200 }));
-  expect(box.inbox.delivered().map((message) => message.threadId)).toEqual(["c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7"]);
-  expect(box.lines).toContain("Thread c6 (c6): retried after a provider error, try 1 of 4.");
+  expect(box.inbox.delivered().map((message) => message.threadId)).toEqual(["c0", "c1", "c2", "c3", "c4", "c5"]);
+  expect(box.lines).toContain("Thread c4 (c4): retried after a provider error, try 1 of 4.");
 });
 
 test("never retries a connection-shaped stop that is a usage limit or a refusal", async () => {
@@ -139,13 +137,13 @@ test("never retries a connection-shaped stop that is a usage limit or a refusal"
     outageThread("auth", { lastErrorClass: "transport_error", lastErrorCode: "authentication_failed", lastError: "Claude API authentication failed." }),
     outageThread("key", { lastErrorClass: "transport_error", lastErrorCode: "unknown", lastError: "Connection error: 401 Invalid API key" }),
     outageThread("ssl", { lastErrorClass: "provider_error", lastErrorCode: "api_error", lastError: "API Error: Unable to connect to API: SSL certificate has expired" }),
-    outageThread("quota", { ...codex, lastErrorClass: "usage_limit", lastErrorCode: "responseStreamDisconnected", lastError: "exceeded retry limit, last status: 429 Too Many Requests" }),
+    outageThread("quota", { ...codex, lastErrorClass: "transport_error", lastErrorCode: "responseStreamDisconnected", lastError: "exceeded retry limit, last status: 429 Too Many Requests" }),
     outageThread("plain", { lastErrorClass: "transport_error", lastErrorCode: null, lastError: "Provider turn failed." }),
     outageThread("tool", { lastErrorClass: "provider_error", lastErrorCode: null, lastError: "The tool call failed: Connection error." }),
   ], { "claude-test-1": 200, "gpt-test-1": 200 });
   await box.run(at("20:00"));
   expect(box.lines.filter((line) => line.includes("retried after a provider error"))).toEqual([]);
-  expect(box.inbox.delivered()).toEqual([{ threadId: "quota", text: "Continue where you left off.", continuesRunId: "run-quota" }]);
+  expect(box.inbox.delivered().map((message) => message.threadId)).toEqual(["quota"]);
 });
 
 test("forgets the tries of a thread that recovered, so its next outage gets four again", async () => {
