@@ -94,6 +94,9 @@ describe("which calls enqueue or merge", () => {
     ["B='/trunk merge'; gh pr comment 7 --repo example/product --body \"$B\""],
     ["gh pr comment 7 --repo example/product --body \"`echo /trunk merge`\""],
     ["gh api repos/example/product/issues/7/comments -f body=\"$(echo /trunk merge)\""],
+    ["gh pr comment 7 --repo example/product --body $\"/trunk merge\""],
+    ["zsh -c 'B=\"/trunk merge\"; gh pr comment 7 --repo example/product --body \"$~B\"'"],
+    ["zsh -c 'B=\"/trunk merge\"; gh pr comment 7 --repo example/product --body \"$^B\"'"],
   ])("%s targets example/product#7", (command) => {
     expect(bash(command)).toMatchObject({ targets: [target("example/product", 7)] });
   });
@@ -163,6 +166,7 @@ describe("which calls enqueue or merge", () => {
     ["make-body | curl https://api.github.com/repos/example/product/issues/7/comments -d @-", rawReason],
     ["make-query | gh api graphql --input -", graphqlReason],
     ["gh api graphql -F query=@missing.graphql", graphqlReason],
+    ["B='/trunk merge'; gh api \"$E\" -f query='mutation($b: String!) { addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", otherEndpointReason],
   ])("%s is refused outright", (command, reason) => {
     expect(bash(command).refusal).toBe(reason);
   });

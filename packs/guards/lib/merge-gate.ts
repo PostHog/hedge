@@ -162,7 +162,7 @@ function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline
   const read = paths.map((path) => path === "-" ? found.stdin?.body ?? "" : readAt(found, cwd, io, path));
   const texts = [...inline, ...read.filter((text) => text !== undefined)];
   const runTime = built || found.name === "xargs" || (paths.includes("-") && found.stdin?.expands === true);
-  return { texts: [...texts, ...texts.flatMap(jsonStrings)], unread: read.includes(undefined) || runTime, missing: read.includes(undefined), built: runTime, piped };
+  return { texts: [...texts, ...texts.flatMap(jsonStrings)], unread: read.includes(undefined) || runTime, missing: read.includes(undefined), built: runTime || texts.some((text) => builtAtRunTime.test(text)), piped };
 }
 
 function runTimeFields(fields: string[], typed: string[], graphql: boolean, bodyFromInput: boolean, readQuery: (path: string) => string | undefined) {
