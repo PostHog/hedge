@@ -11,7 +11,13 @@ const rawClose = "\u0005";
 const rawChunk = new RegExp(`${rawOpen}([^${rawClose}]*)${rawClose}`, "g");
 const templateLine = /^[ \t]*[-*] (\[[ xX]\] .*|.*<!-- release-status:.*)$/gm;
 const receiptMarker = /^<!-- \/?(fleet|hedge)-proof-receipt\b/;
-const media = /^<(img|video)\b/i;
+const media = /<(img|video)\b/i;
+const markers = /[\u0001-\u0005]/g;
+
+function rawBlock(raw: string) {
+  const shown = raw.split(/<!--[\s\S]*?-->/).join(" ");
+  return `${media.test(shown) ? pictureMark : ""} ${shown.split(/<[^>]*>/).join(" ")}\n\n`;
+}
 
 type Shape = { text: string; visible: string; topLevelItems: number };
 
@@ -23,7 +29,7 @@ function shapeOf(markdown: string): Shape {
   const kept = (text: string) => inReceipt ? "" : text;
   const block = (children: string) => kept(`${children}\n\n`);
   const rendered = Bun.markdown.render(markdown, {
-    text: (written: string) => /^<[\s\S]*>$/.test(written) ? `${rawOpen}${written}${rawClose}` : kept(written),
+    text: (written: string) => /^<[\s\S]*>$/.test(written) ? `${rawOpen}${written.replace(markers, "")}${rawClose}` : kept(written.replace(markers, "")),
     html: (children: string) => {
       const raw = children.replace(rawChunk, "$1").trim();
       if (receiptMarker.test(raw)) {
@@ -32,7 +38,7 @@ function shapeOf(markdown: string): Shape {
         inReceipt = !closing && closingsAhead > 0;
         return "\n\n";
       }
-      return kept(`${media.test(raw) ? pictureMark : ""}\n\n`);
+      return kept(rawBlock(raw));
     },
     codespan: (children: string) => kept(`${codeOpen}${children.replace(rawChunk, "$1")}${codeClose}`),
     code: (_children: string, meta?: { language?: string }) => kept(/^mermaid\b/.test(meta?.language ?? "") ? `${pictureMark}\n\n` : "\n\n"),
@@ -51,7 +57,7 @@ function shapeOf(markdown: string): Shape {
     tr: (children: string) => kept(`${children}\n`),
     hr: () => "\n\n",
   });
-  const text = rendered.replace(rawChunk, (_chunk, raw: string) => media.test(raw) ? pictureMark : " ");
+  const text = rendered.replace(rawChunk, (_chunk, raw: string) => /^<(img|video)\b/i.test(raw) ? pictureMark : " ");
   const visible = text.replace(new RegExp(`${codeOpen}[^${codeClose}]*${codeClose}`, "g"), " ");
   return { text: text.replaceAll(codeOpen, "").replaceAll(codeClose, "").replaceAll(pictureMark, " "), visible, topLevelItems };
 }

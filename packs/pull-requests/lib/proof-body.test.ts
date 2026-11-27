@@ -20,6 +20,7 @@ test("a picture passes in every form that GitHub renders", () => {
     "![After][after]\n\n[after]: https://example.com/after.png",
     "<img src=\"https://example.com/a.png\">",
     "<video src=\"https://example.com/a.mp4\">",
+    "<p align=\"center\"><img src=\"https://example.com/a.png\" width=\"600\"></p>",
     "https://github.com/user-attachments/assets/0f1e",
     "No picture: the diff shows it whole.",
     "**No picture:** the diff shows it whole.",
@@ -37,6 +38,7 @@ test("a picture that GitHub does not render fails: in a comment, in a code examp
     "See https://example.com/?next=https://github.com/user-attachments/assets/0f1e for the old one.",
     "<!-- hedge-proof-receipt head=abc -->\n![shot](https://example.com/a.png)\n<!-- /hedge-proof-receipt -->",
     "No picture:",
+    "&#1; stands in for a picture.",
   ]) expect(bodyProblems(`## Changes\n\nA queue now retries.\n\n${hidden}\n\n${callout(bullets(3))}`)).toEqual([noPicture]);
 });
 
@@ -87,4 +89,9 @@ test("formatting adds no words and hides no heading: R&D in a link or in bold is
   expect(bodyProblems(`No picture: copy.\n${filler(786)} ${formatted}\n${callout(bullets(3))}`)).toEqual([]);
   expect(bodyProblems(`No picture: copy.\n${filler(787)} ${formatted}\n${callout(bullets(3))}`)).toEqual([overWords(801)]);
   expect(bodyProblems(`No picture: copy.\n${callout([...bullets(6), "", "## **Rollout**", "", "- **Stages:** one", "- **Watch:** two"])}`)).toEqual([]);
+});
+
+test("words inside a raw HTML block count, and its comments do not", () => {
+  expect(bodyProblems(`No picture: copy.\n\n<details><summary>Decisions</summary><p>${filler(794)}</p><!-- ${filler(50)} --></details>\n\n${callout(bullets(3))}`)).toEqual([overWords(801)]);
+  expect(bodyProblems(`No picture: copy.\n\n<details><summary>Decisions</summary><p>${filler(793)}</p><!-- ${filler(50)} --></details>\n\n${callout(bullets(3))}`)).toEqual([]);
 });

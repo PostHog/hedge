@@ -305,6 +305,19 @@ test("the report drops a gate pass once a row leaves the Known issues section th
   expect(await reportOf(pr)).toEqual(notGated(head.slice(0, 7)));
 });
 
+test("the report drops a gate pass once a Known issues row loses the continuation line that names the uncovered behaviour", async () => {
+  const pr = await checkout();
+  const head = await pr.commit("feature.txt", "greet new members\n");
+  const known = (rows: string) => `${graded("non-critical")}\n## Known issues\n\n${rows}`;
+  pr.pullRequestState({ body: known("- An uncovered retry:\n  a slow send retries twice.\n") });
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  expect((await pr.hedge("gate")).code).toBe(0);
+
+  pr.pullRequestState({ body: known("- An uncovered retry:\n") });
+  expect(await reportOf(pr)).toEqual(notGated(head.slice(0, 7)));
+});
+
 test("the report never offers the merge on an accepted gap whose condition the judge has not weighed", async () => {
   const pr = await checkout();
   const head = await pr.commit("feature.txt", "greet new members\n");

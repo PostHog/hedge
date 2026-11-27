@@ -7,9 +7,9 @@ import { covers, hubLedger, refText, riskCalloutOf, tierOf, type Env, type Ledge
 import { ciOf, readPullRequest, type PullRequest, type Run } from "./pr-ci.ts";
 import { ghThrough } from "./gh.ts";
 import { openBotFindings } from "./pr-threads.ts";
-import { askGap, authorOf, knownIssues, ciRunningCode, conditionName, isStandingCondition, judgeDirectory, judgeGap, judgeGapProof, listStanding, parseVerdict, prDirectory, proofGate, pullRequestDirectory, readDecisions, readJson, receiptOf, reviewRecords, withBrokenConditions, writeJson, type Arbiter, type Decisions, type JudgeSummary, type ProofIdentity, type ProofSummary, type PushedHead } from "./proof.ts";
+import { askGap, authorOf, knownIssuesSection, ciRunningCode, conditionName, isStandingCondition, judgeDirectory, judgeGap, judgeGapProof, listStanding, parseVerdict, prDirectory, proofGate, pullRequestDirectory, readDecisions, readJson, receiptOf, reviewRecords, withBrokenConditions, writeJson, type Arbiter, type Decisions, type JudgeSummary, type ProofIdentity, type ProofSummary, type PushedHead } from "./proof.ts";
 import { displayEntry } from "./proof-display.ts";
-import { receiptMarker } from "./proof-receipt.ts";
+import { receiptMarker, withoutReceipt } from "./proof-receipt.ts";
 import { baseRefs, cleanBaseMerge, devPullOf, diffOf, mergeBase, pullRequestDetails, remotesOf, topLevel } from "./proof-checkout.ts";
 import { gitCommitReader, quietCommitIn, testOnlyRange } from "./proof-delta.ts";
 import { isCommitSha, measureGrowth, type Growth } from "./proof-end-table.ts";
@@ -62,7 +62,7 @@ async function fingerprintOf(home: string, ref: PrRef, files: string, decisions:
 const describedProblems = (pull: PullRequest) => pull.state === "merged" ? [] : bodyProblems(pull.body ?? "");
 
 const keyOf = (pull: PullRequest, landed: boolean, fingerprint: string): GateKey =>
-  ({ head: pull.head, base: pull.base, baseSha: pull.baseSha, tier: tierOf(pull.body), callout: createHash("sha256").update(riskCalloutOf(pull.body) ?? "").digest("hex"), knownIssues: createHash("sha256").update(JSON.stringify(knownIssues(pull.body ?? ""))).digest("hex"), body: describedProblems(pull), landed, fingerprint, endTable: true });
+  ({ head: pull.head, base: pull.base, baseSha: pull.baseSha, tier: tierOf(pull.body), callout: createHash("sha256").update(riskCalloutOf(pull.body) ?? "").digest("hex"), knownIssues: createHash("sha256").update(knownIssuesSection(withoutReceipt(pull.body ?? "")).trim()).digest("hex"), body: describedProblems(pull), landed, fingerprint, endTable: true });
 
 export async function finalGate(head: ProofIdentity, context: JudgingContext, { landed = false }: { landed?: boolean } = {}): Promise<FinalGate> {
   const { home, env, run, now, ssh } = context;
