@@ -10,7 +10,7 @@ import { gateRunDirectory, startGateRun, writeJson } from "../pull-requests/lib/
 import { git } from "../../src/testing/git.ts";
 import { mergeGate } from "./hooks/merge-gate.ts";
 import {
-  beforeDeadline, cliReason, exemptList, ghAliases, ghBaseRepo, graphqlReason, mergeGateDeadlineMs, readPayload, realIntentIO, mergeGateRisk, mergeIntent, otherEndpointReason, rawReason, shellAliasReason, splitStringReason, unreadPayloadReason,
+  beforeDeadline, cliReason, realGateIO, exemptList, ghAliases, ghBaseRepo, graphqlReason, mergeGateDeadlineMs, readPayload, realIntentIO, mergeGateRisk, mergeIntent, otherEndpointReason, rawReason, shellAliasReason, splitStringReason, unreadPayloadReason,
   type GateIO, type IntentIO, type MergeIntent, type Pull,
 } from "./lib/merge-gate.ts";
 
@@ -1107,4 +1107,11 @@ test("a payload swapped for a FIFO after the reader checked it is read from the 
 test("the merge-gate risk names the deadline the hook keeps", () => {
   const pack = JSON.parse(readFileSync(join(import.meta.dir, "pack.json"), "utf8")) as { workflows: { id: string; risk: string }[] };
   expect(pack.workflows.find((workflow) => workflow.id === "merge-gate")?.risk).toContain(`up to ${mergeGateDeadlineMs / 1000} seconds`);
+});
+
+test("the hook reads the mode from the applied settings, never from a mode its own process brings in", async () => {
+  const home = temp.make("gate-mode-");
+  const brought = { HEDGE_SETTINGS: JSON.stringify({ "pull-requests.mode": "full", "pull-requests.repoModes": "own/tools=full" }) };
+  expect(await realGateIO(home, brought, JSON.stringify({ "pull-requests.autonomy": "ask" })).mode!("own/tools", [])).toBe("supervised");
+  expect(await realGateIO(home, brought, JSON.stringify({ "pull-requests.autonomy": "end" })).mode!("own/tools", [])).toBe("auto");
 });

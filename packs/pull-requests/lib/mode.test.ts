@@ -31,12 +31,16 @@ describe("the words that grant a mode", () => {
     expect(grantedBy("The last line reads Mode: Full/Auto/Supervised.")).toBeUndefined();
     expect(grantedBy("Each mode has trigger words: mode full/auto/supervised.")).toBeUndefined();
     expect(grantedBy("Use mode full/auto as you like.")).toBeUndefined();
+    expect(grantedBy("Run the tests for full mode.")).toBeUndefined();
+    expect(grantedBy("Use full mode as an example in the docs.")).toBeUndefined();
+    expect(grantedBy("Switch the docs page to full mode.")).toBeUndefined();
   });
 
-  test("a request that describes every mode grants the one it asks for", () => {
+  test("a request that describes every mode grants the one it asks for, unless it names a mode in a doubt", () => {
     const request = "- full autonomy = the agent merges.\n- supervised mode: the most strict mode.\nThe agent always has a Mode: Full/Auto/Supervised last line.\nRun this task in auto mode.\nEach mode is a skill with trigger words: mode full/auto/supervised";
     expect(grantedBy(request)).toBe("auto");
     expect(grantedBy('2026-11-27 "Run this task in auto mode."')).toBe("auto");
+    expect(grantedBy(`${request}\n- supervised mode takes no decision on its own.`)).toBeUndefined();
   });
 
   test("a negated sentence, two asks for different modes, or no trigger grants nothing", () => {
@@ -45,7 +49,7 @@ describe("the words that grant a mode", () => {
     expect(grantedBy("Never mode full")).toBeUndefined();
     expect(grantedBy("Stop full mode")).toBeUndefined();
     expect(grantedBy("Full autonomy would be nice")).toBeUndefined();
-    expect(grantedBy("Mode full. No wait, run it in auto mode.")).toBe("full");
+    expect(grantedBy("Mode full. No wait, run it in auto mode.")).toBeUndefined();
     expect(grantedBy("Mode full. Mode auto.")).toBeUndefined();
     expect(grantedBy("full mode, but do not merge without full mode")).toBeUndefined();
   });
@@ -110,7 +114,7 @@ describe("where a mode comes from", () => {
 });
 
 describe("hedge mode", () => {
-  const word = (text: string, source: ThreadWord["source"] = "typed", where = "conductor"): ThreadWord => ({ thread: where, id: `w-${text}`, text, answered: source === "question" ? "Which mode for the grilling session?" : "", at: "2026-11-27T08:00:00.000Z", source });
+  const word = (text: string, source: ThreadWord["source"] = "typed", where = "conductor", answered = "Which mode should lane run in?"): ThreadWord => ({ thread: where, id: `w-${text}`, text, answered: source === "question" ? answered : "", at: "2026-11-27T08:00:00.000Z", source });
   const context = (words: ThreadWord[], threads: ShellThread[], printed: string[]): ModeContext => {
     const home = temp.make("mode-home-");
     return { home, cwd: home, env: settings({ "pull-requests.mode": "auto", "pull-requests.repoModes": "own/strict=supervised" }), print: (text) => printed.push(text), threadWords: async (id) => words.filter((one) => one.thread === id), threads: async () => threads, repository: () => "own/tools" };
@@ -141,6 +145,27 @@ describe("hedge mode", () => {
     expect(await modeCommand(["set", "supervised", "--thread", "conductor", "--words", '2026-11-27 "mode supervised"', "--for", "lane"], run)).toBe(0);
   });
 
+  test("a choice on a card counts only on a question that asks which mode, naming the lane it sets", async () => {
+    const docs = { ...word("mode full", "question", "conductor", "Which docs example should show the importer?"), id: "docs" };
+    const other = { ...word("mode full", "question", "conductor", "Which mode should the grilling session run in?"), id: "other" };
+    const right = { ...word("mode full", "question", "conductor", "Which mode should lane run in?"), id: "right" };
+    const run = context([docs, other, right], threads, []);
+    await expect(modeCommand(["set", "full", "--thread", "conductor", "--message", "docs", "--words", '2026-11-27 "mode full"', "--for", "lane"], run)).rejects.toThrow('does not ask which mode');
+    await expect(modeCommand(["set", "full", "--thread", "conductor", "--message", "other", "--words", '2026-11-27 "mode full"', "--for", "lane"], run)).rejects.toThrow("does not name thread lane");
+    expect(await modeCommand(["set", "full", "--thread", "conductor", "--message", "right", "--words", '2026-11-27 "mode full"', "--for", "lane"], run)).toBe(0);
+  });
+
+  test("a message that a newer grant in its own thread replaced never sets a lane, even one with an older grant of its own", async () => {
+    const lane = { ...word("Mode supervised.", "typed", "lane"), at: "2026-11-27T07:00:00.000Z" };
+    const early = { ...word("Mode full."), at: "2026-11-27T08:00:00.000Z" };
+    const late = { ...word("Mode supervised."), at: "2026-11-27T09:00:00.000Z" };
+    const run = context([lane, early, late], threads, []);
+    expect(await modeCommand(["set", "supervised", "--thread", "lane", "--words", '2026-11-27 "Mode supervised."'], run)).toBe(0);
+    expect(await modeCommand(["set", "full", "--thread", "conductor", "--words", '2026-11-27 "Mode full."'], run)).toBe(0);
+    expect(await modeCommand(["set", "supervised", "--thread", "conductor", "--words", '2026-11-27 "Mode supervised."'], run)).toBe(0);
+    await expect(modeCommand(["set", "full", "--thread", "conductor", "--words", '2026-11-27 "Mode full."', "--for", "lane"], run)).rejects.toThrow("newer than this message");
+  });
+
   test("an older message never replaces a newer grant, on the thread or on a lane it started", async () => {
     const early = { ...word("Mode full."), at: "2026-11-27T08:00:00.000Z" };
     const late = { ...word("Mode supervised."), at: "2026-11-27T09:00:00.000Z" };
@@ -149,6 +174,17 @@ describe("hedge mode", () => {
     expect(await modeCommand(["set", "supervised", "--thread", "conductor", "--words", '2026-11-27 "Mode supervised."'], run)).toBe(0);
     await expect(modeCommand(["set", "full", "--thread", "conductor", "--words", '2026-11-27 "Mode full."', "--for", "lane"], run)).rejects.toThrow("newer than this message");
     await expect(modeCommand(["set", "full", "--thread", "conductor", "--words", '2026-11-27 "Mode full."'], run)).rejects.toThrow("newer than this message");
+  });
+
+  test("show reads the repository from the checkout's GitHub origin, with or without a trailing slash", async () => {
+    for (const origin of ["https://github.com/own/strict/", "git@github.com:own/strict.git"]) {
+      const printed: string[] = [];
+      const { repository: _, ...run } = context([], threads, printed);
+      Bun.spawnSync(["git", "init", "-q", run.cwd]);
+      Bun.spawnSync(["git", "-C", run.cwd, "remote", "add", "origin", origin]);
+      await modeCommand(["show", "--thread", "side-fix"], run);
+      expect(printed.at(-1)).toStartWith("Mode: Supervised\nfrom: the default of own/strict");
+    }
   });
 
   test("show takes the repository of the checkout when --repo is left out", async () => {

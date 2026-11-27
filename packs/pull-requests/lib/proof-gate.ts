@@ -201,7 +201,7 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
     ? `judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why>, then grade the PR with merge-risk before you decide it: an agent never decides on an ungraded PR`
     : checked.grade.oneWay && !decidesAll(env, head.repository)
     ? "judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and ask the user; on ask an agent never decides on a one-way door"
-    : `judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and decide it with hedge decision record --mark 🤖 --class proof-gap --kind judge --pr ${refText(head)} --question <q> --answer <a> --rejected <option> --reason <why>${decidesAll(env, head.repository) ? "" : ", or ask the user"}`;
+    : `judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and decide it with hedge decision record --mark 🤖 --class proof-gap --kind judge --pr ${refText(head)} --question <q> --answer <a> --rejected <option> --reason <why>${decidesAll(env, head.repository) ? "" : " only when the user let you decide judge gaps; otherwise ask the user"}`;
   const onlyShape = shapeFailure !== undefined && outcome.lines.filter((line) => /^judge [a-z]+: fail\b/.test(line)).length === 1;
   const lines = [...outcome.lines, ...editBody, ...onlyShape ? [] : [hint]];
   return { code: 1, lines, covered: "", judge: verdict(lines), reason };

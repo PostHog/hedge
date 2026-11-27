@@ -17,14 +17,18 @@ const legacyAutonomy = "pull-requests.autonomy";
 
 const negation = /\b(not|no|never|don'?t|doesn'?t|won'?t|without|instead of|stop|leave|drop|end)\b/;
 const hypothetical = /\b(if|when|whenever|unless|would|could|should|might|maybe|once|after|before|until|later)\b/;
-const grantVerbs = "run|use|switch|go|work|continue|carry on|proceed|do|start|put|set|move|change|keep";
 const sentences = (text: string) => [...normalized(text).matchAll(/[^.!?;\n]+[.!?;\n]*/g)].map((match) => match[0].trim()).filter(Boolean);
-const named = (mode: Mode) => `(?:mode[\\s:=]+${mode}|${mode} mode)`;
-const grantForm = (mode: Mode) => new RegExp(`^(?:please |ok,? |okay,? |now,? )?(?:${named(mode)}(?!/)(?:,? please)?(?: \\(recommended\\))?|(?:${grantVerbs})\\b[^:"]*\\b${named(mode)}\\b(?!/)[^:"]*)[.!;\\n]*$`);
-const grantsIn = (sentence: string) => sentence.endsWith("?") || negation.test(sentence) || hypothetical.test(sentence) ? [] : modes.filter((mode) => grantForm(mode).test(sentence));
+const named = (mode: Mode) => `(?:mode[\\s:=]+${mode}|${mode} mode)(?!/)`;
+const work = "(?: (?:this|it|this task|this thread|the task|the work|everything|all of it))?";
+const ask = `(?:(?:run|do|work|continue|keep going|go|switch|switch over|move|change|put|set|use)${work}(?: (?:in|to|into|on|with))?(?: the)? )?`;
+const grantForm = (mode: Mode) => new RegExp(`^(?:please |ok,? |okay,? |now,? )?${ask}${named(mode)}(?: (?:for|on) (?:this|it|this task|this thread|the task|the work|everything))?(?:,? please)?(?: \\(recommended\\))?[.!]*$`);
+const mentions = (sentence: string) => modes.filter((mode) => new RegExp(`\\b${named(mode)}`).test(sentence));
+const unsure = (sentence: string) => sentence.endsWith("?") || negation.test(sentence) || hypothetical.test(sentence);
 
 export function grantedBy(text: string): Mode | undefined {
-  const granted = new Set(sentences(text.replace(/^\s*\d{4}-\d{2}-\d{2}\s+/, "")).flatMap(grantsIn));
+  const all = sentences(text.replace(/^\s*\d{4}-\d{2}-\d{2}\s+/, ""));
+  if (all.some((sentence) => mentions(sentence).length && unsure(sentence))) return undefined;
+  const granted = new Set(all.flatMap((sentence) => modes.filter((mode) => grantForm(mode).test(sentence))));
   return granted.size === 1 ? [...granted][0] : undefined;
 }
 

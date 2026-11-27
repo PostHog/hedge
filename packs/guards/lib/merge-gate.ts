@@ -534,7 +534,7 @@ export async function beforeDeadline(check: () => Promise<string | undefined>, d
   catch (error) { return `Hedge blocked this merge: the merge gate failed (${(error as Error).message}).`; }
 }
 
-export function realGateIO(home: string, env: Env): GateIO {
+export function realGateIO(home: string, env: Env, appliedSettings = env.HEDGE_SETTINGS): GateIO {
   const thread = env.T3CODE_THREAD_ID || undefined;
   let chain: Promise<Lineage> | undefined;
   const api = async (path: string) => {
@@ -564,7 +564,7 @@ export function realGateIO(home: string, env: Env): GateIO {
     },
     localGate: (repository, pr, commit) => lastGateResult(home, { repository, pr, commit }).catch(() => ({ passed: false, at: Infinity })),
     ledger: () => hubLedger(home, env).read(),
-    mode: async (repository, events) => resolveMode(env, events, await (chain ??= chainOf(thread, t3Threads(home))), repository).mode,
+    mode: async (repository, events) => resolveMode({ ...env, HEDGE_SETTINGS: appliedSettings }, events, await (chain ??= chainOf(thread, t3Threads(home))), repository).mode,
     thread,
   };
 }

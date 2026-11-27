@@ -20,9 +20,11 @@ that started it, the default of --repo in pull-requests.repoModes, or the profil
 lineage cannot be read in full, it shows supervised: a grant above the gap may say so.
 
 set records the user's grant. Only the user switches a mode: quote their whole message in thread --thread, typed in
-the T3 app or chosen on your question tool, with the date they wrote it. One sentence of it must grant the mode:
-"mode full" alone, or an ask such as "run this in full mode", without a "not", an "if" or a question mark. No
-sentence may grant another mode, and an older message never replaces a newer grant. --for applies it to a thread that thread --thread
+the T3 app or chosen on your question tool, with the date they wrote it. One sentence of it must be the mode alone, as
+"mode full", or a short ask to run the work in it, as "run this task in full mode". A message that also names a mode
+in a question, a condition or a "not" grants none, and so does one that asks for two modes. A choice on your question
+tool counts only on a question that starts with "Which mode" and, with --for, names that thread. An older message
+never replaces a newer grant. --for applies it to a thread that thread --thread
 started, such as a lane; it defaults to --thread. A thread that another thread started inherits its mode until a
 grant of its own. A thread that starts on its own, such as a side fix, takes the defaults.`;
 
@@ -47,7 +49,7 @@ const threadsOf = (context: ModeContext) => context.threads ?? t3Threads(context
 function checkoutRepository(context: ModeContext) {
   if (context.repository) return context.repository();
   const origin = runIn(context.cwd, context.env)(["git", "remote", "get-url", "origin"]);
-  return origin.code === 0 ? /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\s*$/.exec(origin.stdout)?.[1] : undefined;
+  return origin.code === 0 ? /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?\s*$/.exec(origin.stdout)?.[1] : undefined;
 }
 
 async function show(parsed: Parsed, context: ModeContext) {
@@ -68,17 +70,25 @@ async function set(parsed: Parsed, context: ModeContext) {
   const target = parsed.options.get("--for") ?? thread;
   const heard = await heardInThread(thread, words, parsed.options.get("--message"), context);
   const granted = grantedBy(heard.text) === grantedBy(words) ? grantedBy(words) : undefined;
-  if (granted !== mode) throw new Error(`The user's message "${heard.text}" does not grant mode ${mode}${granted ? `: it grants mode ${granted}` : ""}. Only a sentence that asks for one mode, without a "not", an "if" or a question mark, switches it; ask them with your question tool, with "mode ${mode}" as an option`);
+  if (heard.source === "question" && !/^which mode\b/i.test(heard.answered.trim())) {
+    throw new Error(`The user chose "${heard.text}" on a question that does not ask which mode a thread runs in. Ask them with your question tool, in a question that starts with "Which mode", naming the thread`);
+  }
+  if (granted !== mode) throw new Error(`The user's message "${heard.text}" does not grant mode ${mode}${granted ? `: it grants mode ${granted}` : ""}. Only "mode ${mode}" alone, or a short ask such as "run this task in ${mode} mode", switches it; ask them with your question tool, "Which mode should this thread run in?", with "mode ${mode}" as an option`);
   const chain = await chainOf(target, threadsOf(context));
   if (!sameThread(target, thread) && !chain.threads.some((link) => sameThread(link, thread))) {
     throw new Error(`Thread ${target} was not started by thread ${thread}, so the user's words there do not reach it. Ask in thread ${target}`);
   }
+  const title = (await threadsOf(context)().catch(() => [])).find((item) => sameThread(item.id, target))?.title;
+  if (!sameThread(target, thread) && heard.source === "question" && !heard.answered.includes(target) && !(title && heard.answered.toLowerCase().includes(title.toLowerCase()))) {
+    throw new Error(`The question the user answered does not name thread ${target}. Ask "Which mode should <its title or id> run in?" with your question tool`);
+  }
   const ledger = ledgerOf(context);
   const grant: ModeGrant = { type: "mode", mode, for: target, words, thread: heard.thread, message: heard.id, machine: thisMachine(context.env), at: answeredAt(heard) };
   const events = await ledger.read();
-  const newer = grantFor(events, chain.threads);
-  if (newer && newer.message !== grant.message && Date.parse(newer.at) > Date.parse(grant.at)) {
-    throw new Error(`Thread ${target} runs in mode ${newer.mode} on a grant of ${newer.at.slice(0, 10)} in thread ${newer.thread}, newer than this message. Only a newer message of the user's switches it; ask them with your question tool, with "mode ${mode}" as an option`);
+  const newer = [grantFor(events, chain.threads), ...events.filter((event): event is ModeGrant => event.type === "mode" && sameThread(event.thread, grant.thread))]
+    .find((other) => other && other.message !== grant.message && Date.parse(other.at) > Date.parse(grant.at));
+  if (newer) {
+    throw new Error(`Thread ${target} runs in mode ${newer.mode} on a grant of ${newer.at.slice(0, 10)} in thread ${newer.thread}, newer than this message. Only a newer message of the user's switches it; ask them with your question tool, "Which mode should this thread run in?", with "mode ${mode}" as an option`);
   }
   const same = events.find((event): event is ModeGrant => event.type === "mode" && event.message === grant.message && sameThread(event.thread, grant.thread) && sameThread(event.for, target));
   if (!same) await appendHeard(ledger, grant);

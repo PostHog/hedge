@@ -89,7 +89,7 @@ test("a gate pass with a gap the agent accepted holds the merge, own tooling inc
   mkdirSync(join(other, ".local/state/hedge"), { recursive: true });
   const github = { pull: async () => ({ head, base: "main", defaultBranch: "main", open: true }), pullFor: async () => undefined };
   const mergeOn = (exempt: string) => {
-    writeFileSync(join(other, ".local/state/hedge/settings.json"), JSON.stringify({ "guards.merge-gate-exempt": exempt }));
+    writeFileSync(join(other, ".local/state/hedge/settings.json"), JSON.stringify({ "guards.merge-gate-exempt": exempt, "pull-requests.autonomy": "end" }));
     writeFileSync(join(other, ".local/state/hedge/decisions.jsonl"), readFileSync(join(pr.home, ".local/state/hedge/decisions.jsonl"), "utf8"));
     return mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home: other, env: { HEDGE_SETTINGS: JSON.stringify({ "pull-requests.autonomy": "end" }) }, github });
   };
