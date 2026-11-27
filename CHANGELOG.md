@@ -25,8 +25,9 @@
   uncovered row, that the Known issues section names, so the callout can
   stay within its 6 bullets.
 - A saved gate pass now holds the whole description the judge read, as
-  GitHub renders it, without the receipt. Any other edit that changes how a
-  body with a callout renders makes
+  GitHub renders it, without the receipt, and the callout as written. Any
+  other edit that changes the callout, or how a body with a callout
+  renders, makes
   `hedge decision report` and `hedge proof receipt` stop using the pass, so
   run `hedge proof gate` again. After the upgrade, passes saved before it
   do not match, so open PRs run the gate once more.

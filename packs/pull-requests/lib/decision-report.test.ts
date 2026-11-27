@@ -270,7 +270,7 @@ test("the report keeps the judge's verdict through a receipt refresh, and drops 
   pr.pullRequestState({ body: testing(`\n<!-- hedge-proof-receipt head=${head} hash=01 -->\n| live-run | sent |\n<!-- /hedge-proof-receipt -->\n\n`) });
   expect((await reportOf(pr)).stillYours).toEqual(["- Merge example/product#42: its proofs pass, and it waits on your merge word."]);
 
-  for (const edited of [`${graded("non-critical")}\n## Known issues\n\n- A slow send retries twice.\n`, graded("non-critical").replace("🔵 **Merge risk: low** · two-way door", "🔴 **Merge risk: high** · one-way door")]) {
+  for (const edited of [`${graded("non-critical")}\n## Known issues\n\n- A slow send retries twice.\n`, graded("non-critical").replace("🔵 **Merge risk: low** · two-way door", "🔴 **Merge risk: high** · one-way door"), testing("").replace("two-way door", "two&#45;way door")]) {
     pr.pullRequestState({ body: edited });
     expect(await reportOf(pr)).toEqual(notGated(head.slice(0, 7)));
   }

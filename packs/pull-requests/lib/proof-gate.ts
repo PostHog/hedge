@@ -58,7 +58,7 @@ async function fingerprintOf(home: string, ref: PrRef, files: string, decisions:
   return createHash("sha256").update(JSON.stringify({ files, covering, standing: await listStanding(home) })).digest("hex");
 }
 
-const judgedBody = (body: string) => riskCalloutOf(body) === undefined ? "" : Bun.markdown.html(withoutReceipt(body));
+const judgedBody = (body: string) => JSON.stringify([riskCalloutOf(body) ?? "", riskCalloutOf(body) === undefined ? "" : Bun.markdown.html(withoutReceipt(body))]);
 
 const keyOf = (pull: PullRequest, landed: boolean, fingerprint: string): GateKey =>
   ({ head: pull.head, base: pull.base, baseSha: pull.baseSha, tier: tierOf(pull.body), body: createHash("sha256").update(judgedBody(pull.body)).digest("hex"), landed, fingerprint, endTable: true });
