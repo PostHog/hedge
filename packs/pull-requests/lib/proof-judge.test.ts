@@ -739,9 +739,12 @@ test("the gate fails a description with no picture, too many words or too many c
   expect((await pr.hedge("gate", "--landed")).output).toContain("body: the description has no picture.");
   expect(judge.prompts()).toHaveLength(0);
 
+  pr.pullRequestState({ body: unpictured, merged: true });
+  expect((await pr.hedge("gate", "--landed")).output).not.toContain("body:");
+  expect(judge.prompts()).toHaveLength(1);
+
   pr.pullRequestState({ body: graded("non-critical") });
   expect((await pr.hedge("gate")).code).toBe(0);
-  expect(judge.prompts()).toHaveLength(1);
 });
 
 test("the judge reads the PR body without its receipt block and the blank line after it, so a first receipt or a refresh reuses the cached verdict, while other body text and a block that holds the merge-risk callout stay", async () => {

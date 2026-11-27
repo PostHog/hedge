@@ -291,6 +291,20 @@ test("the report drops a gate pass once the description loses its picture or out
   expect(await reportOf(pr)).toEqual(notGated(head.slice(0, 7)));
 });
 
+test("the report drops a gate pass once a row leaves the Known issues section the judge read", async () => {
+  const pr = await checkout();
+  const head = await pr.commit("feature.txt", "greet new members\n");
+  const known = (rows: string) => `${graded("non-critical")}\n## Known issues\n\n${rows}`;
+  pr.pullRequestState({ body: known("- An uncovered retry on a slow send.\n") });
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  expect((await pr.hedge("gate")).code).toBe(0);
+  expect((await reportOf(pr)).stillYours).toEqual(["- Merge example/product#42: its proofs pass, and it waits on your merge word."]);
+
+  pr.pullRequestState({ body: known("") });
+  expect(await reportOf(pr)).toEqual(notGated(head.slice(0, 7)));
+});
+
 test("the report never offers the merge on an accepted gap whose condition the judge has not weighed", async () => {
   const pr = await checkout();
   const head = await pr.commit("feature.txt", "greet new members\n");

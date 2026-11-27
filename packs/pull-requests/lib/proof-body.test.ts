@@ -40,8 +40,8 @@ test("a picture that GitHub does not render fails: in a comment, in a code examp
 test("the word cap counts written words only, leaving out the receipt, code, template lines and comments", () => {
   const uncounted = `<!-- hedge-proof-receipt head=abc -->\n${filler(500)}\n<!-- /hedge-proof-receipt -->\n\`\`\`\n${filler(300)}\n\`\`\`\`\n- [x] ${filler(50)}\n<!-- ${filler(40)} -->\n`;
   const body = (written: number) => `No picture: copy.\n${filler(written)}\n${uncounted}${callout(["> - **Tier:** non-critical"])}`;
-  expect(bodyProblems(body(793))).toEqual([]);
-  expect(bodyProblems(body(794))).toEqual([overWords(801)]);
+  expect(bodyProblems(body(795))).toEqual([]);
+  expect(bodyProblems(body(796))).toEqual([overWords(801)]);
 });
 
 test("a fence that closes with a longer run, or sits inside a quote, still leaves its code out of the count", () => {
@@ -58,4 +58,19 @@ test("the callout holds six top-level bullets at most, however they are indented
   expect(bodyProblems(`No picture: copy.\n${callout([">", ...bullets(7, ">   - ")])}`)).toEqual([overBullets(7)]);
   expect(bodyProblems(`No picture: copy.\n${callout([...bullets(4), "## Notes", ...bullets(3)])}`)).toEqual([overBullets(7)]);
   expect(bodyProblems(`No picture: copy.\n${callout([...bullets(6), "- one outside the quote"])}`)).toEqual([overBullets(7)]);
+});
+
+test("the check follows GitHub's rendering at the edges: a quote ends its fence, a comment hides a fence marker, CRLF fences close, and a fenced Rollout heading ends nothing", () => {
+  expect(bodyProblems(`> \`\`\`\n> an example\n\n![after](https://example.com/after.png)\n${callout(bullets(3))}`)).toEqual([]);
+  expect(bodyProblems(`No picture: copy.\n<!--\n\`\`\`\n-->\n${filler(801)}\n${callout(bullets(3))}`)).toEqual([overWords(807)]);
+  expect(bodyProblems(`No picture: copy.\r\n\`\`\`\r\n${filler(900)}\r\n\`\`\`\r\n${callout(bullets(3))}`)).toEqual([]);
+  expect(bodyProblems(`No picture: copy.\n${callout(["> ```", "> ## Rollout", "> ```", ...bullets(7)])}`)).toEqual([overBullets(7)]);
+});
+
+test("an image reference without its definition renders as text, so it is no picture", () => {
+  expect(bodyProblems(`![After][after]\n\n${callout(bullets(3))}`)).toEqual([noPicture]);
+});
+
+test("a deeply nested quote without a picture still gets its answer", () => {
+  expect(bodyProblems(`${"> ".repeat(5000)}text\n${callout(bullets(3))}`)).toEqual([noPicture]);
 });
