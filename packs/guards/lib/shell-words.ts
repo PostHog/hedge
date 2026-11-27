@@ -11,6 +11,7 @@ export type Command = {
   argSubstitutions: string[][];
   stdin?: { body: string; substitutions: string[]; expands?: boolean };
   argExpands: boolean[];
+  fromExpansion: boolean;
   outputs: string[];
   writes: string[];
   redirects: string[];
@@ -29,7 +30,7 @@ export type Command = {
   chdir?: string;
 };
 
-type Context = { env: ReadonlyMap<string, string>; inLoop: boolean; scope?: Scope };
+type Context = { env: ReadonlyMap<string, string>; inLoop: boolean; scope?: Scope; expands?: boolean };
 type Word = { text: string; raw: string; bare: string; substitutions: string[]; processes: string[]; expands: boolean };
 type Heredoc = { delimiter: string; literal: boolean; stripTabs: boolean; body: string; substitutions: string[]; expands?: boolean };
 type Token = { word: Word } | { operator: string; at: number } | { heredoc: Heredoc } | { herestring: true };
@@ -490,7 +491,7 @@ export function parse(program: string, context: Context = { env: new Map(), inLo
     const rawArgs = kept.slice(index + 1).map((word) => word.raw);
     const rawPrefix = kept.slice(0, index).map((word) => word.raw);
     const prefix = kept.slice(0, index).map((word) => basename(word.text));
-    pipeline.push({ name, args, env: commandEnv, substitutions, leadingSubstitutions, argSubstitutions, argExpands, stdin, outputs, writes, redirects, bare, rawArgs, rawPrefix, prefix, keywords: stripped, processSubstitutions: words.flatMap((word) => word.processes), inLoop, tested, ...(after && { after, afterAt }), scope, chdir });
+    pipeline.push({ name, args, env: commandEnv, substitutions, leadingSubstitutions, argSubstitutions, argExpands, fromExpansion: context.expands === true, stdin, outputs, writes, redirects, bare, rawArgs, rawPrefix, prefix, keywords: stripped, processSubstitutions: words.flatMap((word) => word.processes), inLoop, tested, ...(after && { after, afterAt }), scope, chdir });
     words = [];
     stdin = undefined;
   };
@@ -576,19 +577,22 @@ function output(pipeline: Command[], index: number): string | undefined {
   return passes ? command.stdin?.body ?? output(pipeline, index - 1) : undefined;
 }
 
-function nestedPrograms(command: Command, piped?: string): { program: string; scope: Scope; substituted?: true }[] {
+const writesExpanded = (pipeline: Command[], index: number) => pipeline.slice(0, index).some((command) => command.fromExpansion || command.argExpands.includes(true) || command.stdin?.expands === true);
+
+function nestedPrograms(command: Command, piped?: string, pipedExpands = false): { program: string; scope: Scope; substituted?: true; expands?: boolean }[] {
   const input = shellInput(command);
   const child = { parent: command.scope, chdir: command.chdir };
   const stdin = command.stdin?.body ?? piped;
+  const stdinExpands = command.fromExpansion || (command.stdin ? command.stdin.expands === true : pipedExpands);
   return [
     ...command.substitutions.map((program) => ({ program, scope: { parent: command.scope }, substituted: true as const })),
-    ...(input && "program" in input ? [{ program: input.program, scope: child }] : []),
-    ...(input && "stdin" in input && stdin !== undefined ? [{ program: stdin, scope: child }] : []),
-    ...(command.name === "eval" ? [{ program: command.args.join(" "), scope: command.scope }] : []),
+    ...(input && "program" in input ? [{ program: input.program, scope: child, expands: command.fromExpansion || command.argExpands[input.index] === true }] : []),
+    ...(input && "stdin" in input && stdin !== undefined ? [{ program: stdin, scope: child, expands: stdinExpands }] : []),
+    ...(command.name === "eval" ? [{ program: command.args.join(" "), scope: command.scope, expands: command.fromExpansion || command.argExpands.includes(true) }] : []),
   ];
 }
 
-export const nestedProgramsAt = (pipeline: Command[], index: number) => nestedPrograms(pipeline[index], output(pipeline, index - 1));
+export const nestedProgramsAt = (pipeline: Command[], index: number) => nestedPrograms(pipeline[index], output(pipeline, index - 1), writesExpanded(pipeline, index));
 
 /** Every pipeline a command line runs, including those in `sh -c` programs, `$(...)` and backtick substitutions, `eval`,
  * heredocs fed to a shell, and `echo`, `printf` or `cat` text piped into one. A nested program comes before the command
@@ -596,7 +600,7 @@ export const nestedProgramsAt = (pipeline: Command[], index: number) => nestedPr
 export function pipelinesIn(program: string, context?: Context, depth = 0): Command[][] {
   if (depth > maxDepth) throw new Error(`it nests more than ${maxDepth} shell programs`);
   return parse(program, context).flatMap((pipeline) => [
-    ...pipeline.flatMap((command, index) => nestedPrograms(command, output(pipeline, index - 1)).flatMap(({ program: nested, scope }) => pipelinesIn(nested, { ...command, scope }, depth + 1))),
+    ...pipeline.flatMap((command, index) => nestedPrograms(command, output(pipeline, index - 1), writesExpanded(pipeline, index)).flatMap(({ program: nested, scope, expands }) => pipelinesIn(nested, { ...command, scope, expands }, depth + 1))),
     pipeline,
   ]);
 }
