@@ -221,10 +221,7 @@ export const todoLines = (findings: Finding[]) => findings.filter((finding) => f
 
 const waitsForCheck = (plan: Plan, entry: Plan["config"][number]) => entry.after !== undefined && !plan.human.some((step) => step.pack === entry.pack && step.id === entry.after);
 
-const droppedConfig = (entry: Plan["config"][number], code?: number): Plan["dropped"][number] => {
-  const item = `config ${entry.provider}:${entry.key}`;
-  return code === cannotTell ? { pack: entry.pack, item, reason: `check ${entry.after} cannot tell yet`, check: entry.after, held: true } : { pack: entry.pack, item, reason: `check ${entry.after} does not pass`, check: entry.after };
-};
+const droppedConfig = (entry: Plan["config"][number], code?: number): Plan["dropped"][number] => ({ pack: entry.pack, item: `config ${entry.provider}:${entry.key}`, reason: `check ${entry.after} ${code === cannotTell ? "cannot tell yet" : "does not pass"}`, check: entry.after, ...(code === cannotTell && { held: true }) });
 
 export type HumanStepsResult = { failing: Array<Owned<HumanStep>>; unchecked: Array<Owned<HumanStep>> };
 
