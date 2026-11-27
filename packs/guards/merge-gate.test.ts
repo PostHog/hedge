@@ -35,21 +35,21 @@ const mcp = (tool: string, input: Record<string, unknown>) => mergeIntent({ tool
 const target = (repository: string, pr: number) => expect.objectContaining({ repository, pr });
 
 describe("which calls enqueue or merge", () => {
-  test("a pipeline of many literal stages is read without stalling the hook", () => {
+  test("a merge after 40,000 literal pipeline stages still targets its PR", () => {
     expect(bash([...Array(40_000).fill("true"), "gh pr merge 7 --repo example/product"].join(" | "))).toEqual({ targets: [target("example/product", 7)] });
   });
 
-  test("a query file with a long name and no call is read without stalling the hook", () => {
+  test("a comment mutation after a 300,000-character name in a query file is still refused", () => {
     writeFileSync(join(workFiles, "long.graphql"), `${"x".repeat(300_000)}\nmutation($b: String!) { addComment(input: {subjectId: "x", body: $b}) { clientMutationId } }`);
     expect(bash("gh api graphql -F query=@long.graphql -f b=\"$B\"").refusal).toBe(graphqlReason);
   });
 
-  test("a run-time field with a long key is read without stalling the hook", () => {
+  test("a run-time body beside a field with a 128,000-character key is still refused", () => {
     expect(bash(`gh api -X PATCH repos/example/product/issues/comments/1 -f ${"x".repeat(128_000)}[]="$V" -f body="$B"`).refusal).toBe(unreadPayloadReason);
     expect(bash(`gh api -X PATCH repos/example/product/issues/comments/1 -f ${"x".repeat(128_000)}[body]="$B"`).refusal).toBe(unreadPayloadReason);
   });
 
-  test("a query file with an unclosed string of escaped quotes is read without stalling the hook", () => {
+  test("a comment mutation after an unclosed string of 100,000 escaped quotes is still refused", () => {
     writeFileSync(join(workFiles, "slow.graphql"), `"${'\\"'.repeat(100_000)}\nmutation($b: String!) { addComment(input: {subjectId: "x", body: $b}) { clientMutationId } }`);
     expect(bash("gh api graphql -F query=@slow.graphql -f b=\"$B\"").refusal).toBe(graphqlReason);
   });
