@@ -232,7 +232,6 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const inline = [...fields, ...fields.map((field) => field.replace(/^[^=]*=/, ""))];
   const fieldFiles = values(gh, "-F", "--field").flatMap((field) => field.match(/^[^=]*=@(.+)$/s)?.[1] ?? []);
   const sent = sentTexts(found, cwd, io, inline, [...values(gh, "--input"), ...fieldFiles]);
-  const body = values(gh, "--input").length ? sentTexts(found, cwd, io, [], values(gh, "--input")) : sent;
   const enqueues = sendsEnqueue(sent, raw);
   let endpoint = endpointOf(gh).replace(/[?#].*$/s, "").replace(/\/$/, "");
   if (endpoint === "graphql") return sent.piped || sent.unread || sent.texts.some((text) => mentionsEnqueue.test(text) || graphqlMerge.test(text)) || mentionsEnqueue.test(raw) ? { targets: [], refusal: graphqlReason } : { targets: [] };
@@ -244,11 +243,11 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   if (method === "GET") return { targets: [] };
   const comment = endpoint.match(/^repos\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)\/comments$/);
   const posted = (reads: boolean): MergeIntent => ({ targets: [{ repository: comment![1]!, pr: Number(comment![2]), via: `gh api issues/<n>/comments${reads ? "" : unreadVia}` }], ...reads ? {} : { unreadOnly: true as const } });
-  if (comment && method === "POST" && sent.piped) return posted(readsEnqueue(body, raw));
+  if (comment && method === "POST" && sent.piped) return posted(readsEnqueue(sent, raw));
   const merge = endpoint.match(/^repos\/([\w.-]+\/[\w.-]+)\/pulls\/(\d+)\/merge$/);
   if (merge) return { targets: [{ repository: merge[1]!, pr: Number(merge[2]), via: "gh api pulls/<n>/merge" }] };
   if (!enqueues) return { targets: [] };
-  if (comment && method === "POST") return posted(readsEnqueue(body, raw));
+  if (comment && method === "POST") return posted(readsEnqueue(sent, raw));
   return elsewhere(sent, raw);
 }
 

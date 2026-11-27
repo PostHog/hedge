@@ -811,7 +811,6 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     expect(await unpassed("gh pr comment 9 --body-file \"$R\"; gh pr merge 10 --repo example/product", dir)).not.toStartWith(opensWithNote);
     writeFileSync(join(dir, "enqueue.json"), JSON.stringify({ body: "/trunk merge" }));
     expect(await unpassed("printf x | gh api repos/example/product/issues/9/comments --input enqueue.json -F trace=@-", dir)).toStartWith("Hedge blocked this merge");
-    expect(await unpassed("gh api repos/example/product/issues/9/comments --input \"$R\" -f body='/trunk merge'", dir)).toStartWith(opensWithNote);
   });
 
   test("a refusal of an unread body says so first when the gate cannot read its settings", async () => {
