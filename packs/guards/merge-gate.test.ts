@@ -685,6 +685,31 @@ describe("a standing order of the person's", () => {
     expect(refusal?.hookSpecificOutput.permissionDecisionReason).toContain("ended on 2026-11-28: milestone reached.");
   });
 
+  test("a gate failure at the same head, written while the call reads a later PR, refuses the merge for the gate", async () => {
+    const home = homeIn({ "guards.person": "Robin" });
+    const ledger = join(home, ".local/state/hedge/decisions.jsonl");
+    writeFileSync(ledger, [gap, pass, gatePass(7, head), gatePass(6, lower), order()].map((event) => JSON.stringify(event)).join("\n") + "\n");
+    const failure = JSON.stringify(gatePass(9, head, false, "2026-11-16T09:00:00Z"));
+    const failMidCall = { pull: async (_repository: string, pr: number) => { if (pr === 7) appendFileSync(ledger, `${failure}\n`); return pulls[pr]; }, pullFor: async (_repository: string, branch: string) => branch === "layer-1" ? 6 : undefined };
+    const command = "gh pr merge 9 --repo example/product && gh pr merge 7 --repo example/product";
+    const refusal = await mergeGate({ tool_name: "Bash", tool_input: { command }, cwd: "/" }, { home, env: { T3CODE_THREAD_ID: conductor }, github: failMidCall, intent: io });
+    expect(refusal?.hookSpecificOutput.permissionDecisionReason).toContain("has not passed at the head of example/product#9");
+    expect(refusal?.hookSpecificOutput.permissionDecisionReason).toContain("never for a missing gate pass");
+  });
+
+  test("in a repository exempt from the gate pass, an order lifts the hold only at a head where the gate passed", async () => {
+    const exemptMerge = async (ledger: LedgerEvent[]) => {
+      const home = homeIn({ "guards.person": "Robin", "guards.merge-gate-exempt": "example/product" });
+      writeFileSync(join(home, ".local/state/hedge/decisions.jsonl"), ledger.map((event) => JSON.stringify(event)).join("\n") + "\n");
+      return (await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 9 --repo example/product" }, cwd: "/" }, { home, env: { T3CODE_THREAD_ID: conductor }, github, intent: io }))?.hookSpecificOutput.permissionDecisionReason;
+    };
+    const unpassed = await exemptMerge([gap, order()]);
+    expect(unpassed).toContain("an agent accepted proof gaps of example/product#9");
+    expect(unpassed).toContain(`Robin's standing order d-order of 2026-11-27 lifts this hold only at a head where \`hedge proof gate\` passed, also in a repository exempt from the gate pass: run it at example/product#9 at ${head.slice(0, 12)}.`);
+    expect(await exemptMerge([gap, gatePass(9, head, false), order()])).toContain("lifts this hold only at a head where");
+    expect(await exemptMerge([gap, pass, order()])).toBeUndefined();
+  });
+
   test("another live order of the same thread still covers the merge when the first ends while the call reads a later PR", async () => {
     const home = homeIn({ "guards.person": "Robin" });
     const ledger = join(home, ".local/state/hedge/decisions.jsonl");

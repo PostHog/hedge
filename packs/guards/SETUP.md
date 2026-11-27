@@ -37,7 +37,8 @@ answer on a merge card, and it counts only in the T3 thread that asked it, so
 that thread merges or enqueues the PR itself. A standing order of the person's,
 their "Merge on your own" answer on a question card recorded with
 `hedge decision record --kind standing-order`, is that word for every PR merged
-from that thread until it ends. It needs the gate pass all the same.
+from that thread until it ends. It needs a gate pass at the head all the same,
+also in a repository that `guards.merge-gate-exempt` lets skip the gate.
 
 When the person adds Claude allow rules that let agents request reviewers or
 post `/trunk merge` without the auto-mode review, list the same rules, one per

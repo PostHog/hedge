@@ -42,8 +42,9 @@ const linkText = (text: string) => text.replace(issueLink, (link, label: string,
 const namesMap = (question: string, map: string) => question.toLowerCase().includes(` for ${map.toLowerCase()} until `);
 export const standingOrderQuestionCap = 600;
 export const asksStandingOrder = (question: string, map: string, until: string | undefined) => {
+  if (question.length > standingOrderQuestionCap) return false;
   const plain = linkText(question);
-  return question.length <= standingOrderQuestionCap && namesMap(plain, map) && normalized(plain) === normalized(standingOrderQuestion(map, until));
+  return namesMap(plain, map) && normalized(plain) === normalized(standingOrderQuestion(map, until));
 };
 export const picksStandingOrder = (choice: string) => [standingOrderChoice, `${standingOrderChoice} (Recommended)`].map(normalized).includes(normalized(choice));
 const choseStandingOrder = (answer: string) => picksStandingOrder(/^\d{4}-\d{2}-\d{2} "(.*)"$/s.exec(answer)?.[1] ?? "");
