@@ -1,6 +1,5 @@
 import { bunScript } from "../../../src/runner/bun.ts";
 import { tierOf } from "./decision-ledger.ts";
-import { runGh, type Gh } from "./gh.ts";
 
 type Env = Record<string, string | undefined>;
 export type ReviewBotAction = "review" | "stamp" | "forecast";
@@ -46,19 +45,28 @@ export function handlerArgs(request: ReviewBotRequest): string[] {
   return [request.action, "--repo", request.repo, ...source(request), "--minutes", String(request.minutes), ...(request.deep ? ["--deep"] : [])];
 }
 
-export async function askReviewBot(request: ReviewBotRequest, env: Env = Bun.env, gh: Gh = runGh): Promise<number> {
+export async function askReviewBot(request: ReviewBotRequest, env: Env = Bun.env): Promise<number> {
   const handler = (JSON.parse(env.HEDGE_HANDLERS || "{}") as Record<string, string>)["review-bot"];
-  if (handler) return runHandler(handler, handlerArgs(await deepWhenCritical(request, gh)), env);
+  if (handler) return runHandler(handler, handlerArgs(await deepWhenCritical(request, env)), env);
   const fallback = fallbackText(request.action, env);
   console.log(`${noBot[request.action]} ${fallback.replaceAll("{repo}", request.repo).replaceAll("{pr}", String(request.pr ?? request.branch ?? request.paths))}`);
   return 2;
 }
 
-async function deepWhenCritical(request: ReviewBotRequest, gh: Gh): Promise<ReviewBotRequest> {
+const githubSeconds = 10;
+
+async function pullBody(repo: string, pr: number, env: Env): Promise<string> {
+  const child = Bun.spawn(["gh", "api", `repos/${repo}/pulls/${pr}`], { env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(githubSeconds * 1000) });
+  const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+  if (child.signalCode) throw new Error(`GitHub did not answer within ${githubSeconds} s.`);
+  if (code) throw new Error(`gh api failed: ${stderr.trim()}`);
+  return (JSON.parse(stdout) as { body: string | null }).body ?? "";
+}
+
+async function deepWhenCritical(request: ReviewBotRequest, env: Env): Promise<ReviewBotRequest> {
   if (request.action !== "review" || request.deep || request.pr === undefined) return request;
   try {
-    const { body } = JSON.parse(await gh(["api", `repos/${request.repo}/pulls/${request.pr}`])) as { body: string | null };
-    if (tierOf(body ?? "") !== "critical") return request;
+    if (tierOf(await pullBody(request.repo, request.pr, env)) !== "critical") return request;
     console.log("The merge-risk Tier is critical, so this asks for a Deep review.");
     return { ...request, deep: true };
   } catch (error) {

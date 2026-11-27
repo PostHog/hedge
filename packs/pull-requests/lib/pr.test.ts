@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, expect, jest, spyOn, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDirs } from "../../../src/testing/git.ts";
@@ -30,7 +30,7 @@ case "$*" in
   *PullRequestReviewThread*) reply="comments-$id-\${after:-first}" ;;
   "api graphql"*) reply="threads\${after:+-$after}" ;;
   "pr view"*) reply=pr ;;
-  "api repos/"*"/pulls/"*) reply=pull ;;
+  "api repos/"*"/pulls/"*) [ -f "${replies}/stall" ] && { echo $$ > "${replies}/stalled"; exec sleep 30; }; reply=pull ;;
   *) echo "unexpected gh call" >&2; exit 9 ;;
 esac
 [ -f "${replies}/$reply.json" ] || { echo "no $reply reply" >&2; exit 1; }
@@ -80,7 +80,9 @@ cat "${replies}/$reply.json"
     env.HEDGE_HANDLER_SUBCOMMANDS = JSON.stringify({ "pr-command": subcommands });
   };
   const packArgs = () => (existsSync(join(root, "pack-args.json")) ? JSON.parse(readFileSync(join(root, "pack-args.json"), "utf8")) : undefined);
-  return { home, env, reply, run, call, refusal, calls, reviewBot, botArgs, packCommands, packArgs };
+  const path = `${bin}:${process.env.PATH}`;
+  const stall = () => { writeFileSync(join(replies, "stall"), ""); Bun.spawnSync(["mkfifo", join(replies, "stalled")]); return join(replies, "stalled"); };
+  return { home, env, path, reply, run, call, refusal, calls, reviewBot, botArgs, packCommands, packArgs, stall };
 }
 
 const user = (login: string) => ({ __typename: "User", login });
@@ -379,6 +381,28 @@ test("review keeps Standard and says why when GitHub does not give the body", ()
   expect(result.out).toBe("Could not read the merge-risk Tier, so this asks for a Standard review: gh api failed: no pull reply\nbot says hi");
 });
 
+test("when GitHub does not answer within 10 s, review keeps Standard, says why, and kills gh", async () => {
+  const box = sandbox();
+  box.reviewBot(0);
+  const stalled = box.stall();
+  const path = process.env.PATH;
+  process.env.PATH = box.path;
+  jest.useFakeTimers();
+  try {
+    const result = box.call("review", "--repo", "acme/widgets", "--pr", "12");
+    const gh = Number(readFileSync(stalled, "utf8"));
+    jest.advanceTimersByTime(9_999);
+    expect(() => process.kill(gh, 0)).not.toThrow();
+    jest.advanceTimersByTime(1);
+    expect((await result).out).toBe("Could not read the merge-risk Tier, so this asks for a Standard review: GitHub did not answer within 10 s.");
+    expect(box.botArgs()).toEqual(["review", "--repo", "acme/widgets", "--pr", "12", "--minutes", "15"]);
+    expect(() => process.kill(gh, 0)).toThrow();
+  } finally {
+    jest.useRealTimers();
+    process.env.PATH = path;
+  }
+});
+
 test("an explicit --deep and a stamp read no PR body", () => {
   const box = sandbox();
   box.reviewBot(0);
@@ -520,7 +544,8 @@ test("stopping review stops the review-bot handler before review exits", async (
   const stopped = join(box.home, "stopped");
   const handler = join(box.home, "slow-bot.ts");
   writeFileSync(handler, `process.on("SIGTERM", async () => { await Bun.write(${JSON.stringify(stopped)}, "stopped"); process.exit(5); });\nconsole.log("ready");\nsetInterval(() => {}, 1000);\n`);
-  const child = Bun.spawn([process.execPath, command, "review", "--repo", "acme/widgets", "--pr", "12"], { env: { ...process.env, HOME: box.home, HEDGE_SETTINGS: "{}", HEDGE_HANDLERS: JSON.stringify({ "review-bot": handler }) }, stdout: "pipe" });
+  box.reply("pull", { body: "" });
+  const child = Bun.spawn([process.execPath, command, "review", "--repo", "acme/widgets", "--pr", "12"], { env: { ...process.env, HOME: box.home, PATH: box.path, HEDGE_SETTINGS: "{}", HEDGE_HANDLERS: JSON.stringify({ "review-bot": handler }) }, stdout: "pipe" });
   try {
     const reader = child.stdout.getReader();
     let seen = "";
