@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### The merge gate says when it could not read a comment
+
+- A comment whose body the merge-gate hook cannot read, such as a piped body
+  or a file named by a shell variable (`--body-file $R`), still counts as a
+  `/trunk merge` enqueue. Its refusal now starts by saying so, and tells the
+  agent to give the body by its literal file path or as literal text.
+  Before, it read like a refusal of a merge: an end-of-run report that names
+  a pending merge looked like the cause, and the comment was not posted.
+
 ### The gate checks the PR description, and a sanity pass comes sooner
 
 - `hedge proof gate` now checks a description that holds a merge-risk
@@ -11,10 +20,14 @@
   in a comment, in code, or in the receipt does not count. It also fails
   over 800 written words, and when the callout holds more than 6 top-level
   bullets with Switch-off and Tier. The word count leaves out the receipt,
-  code, diagrams, template lines, and comments. The check skips a PR only
-  once GitHub says it merged.
-- A saved gate pass holds the result of the description check. When the
-  description later gains a problem, `hedge decision report` and
+  code, diagrams, template lines, comments, and Markdown syntax, and
+  formatting adds no words. The check reads the body through Bun's
+  Markdown renderer, so it sees what GitHub renders. It skips a PR only
+  once GitHub says it merged. It catches a description that forgot a rule;
+  the judge still reads the whole description.
+- A saved gate pass holds the result of the description check and the
+  Known issues section the judge read. When the description later gains a
+  problem or loses a Known issues row, `hedge decision report` and
   `hedge proof receipt` stop using the pass. After the upgrade, passes saved
   before it do not match, so run `hedge proof gate` again on open PRs.
 - The judge's risk question accepts a changed row with an incident, or an
