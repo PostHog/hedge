@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { install, plan as planFiles } from "../files/install.ts";
 import { packName } from "../pack/manifest.ts";
 import { cannotTell, cannotTellSay, waitsForPerson } from "../pack/types.ts";
-import type { Action, CatalogEntry, Finding, HumanStep, Owned, PackCheck, Plan, Report } from "../pack/types.ts";
+import type { Action, CatalogEntry, Finding, HumanStep, Owned, PackCheck, Plan, Provider, Report } from "../pack/types.ts";
 import { engineCommand } from "./engine-command.ts";
 import { changeLedger, currentNames, ledgerKey, readLedger, renameLedger, undoVariable, type Ledger, type LedgerStep } from "./ledger.ts";
 import { hublessReason, listedPack } from "./resolve.ts";
-import { onRoute, wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
+import { onRoute, proxyRoute, wholeRoutes } from "../adapters/provider-config/proxy-route.ts";
 import { withLegacyNames } from "../legacy.ts";
 
 export type AdapterContext = { home: string; dryRun: boolean; adopt: string[]; adoptFrom?: string[] };
@@ -125,9 +125,9 @@ async function reconcile(plan: Plan, options: ApplyOptions): Promise<{ report: R
     const gateCodes = (entry: Plan["config"][number]) => checks.filter(([item]) => item.pack === entry.pack && item.id === entry.after).map(([, code]) => code);
     const passing = (entry: Plan["config"][number]) => gateCodes(entry).includes(0);
     const waiting = plan.config.filter((entry) => waitsForCheck(plan, entry));
-    const unsure = (provider: string) => {
-      const failing = waiting.filter((entry) => entry.provider === provider && onRoute(entry) && !passing(entry));
-      return failing.length > 0 && failing.every((entry) => gateCodes(entry).every((code) => code === cannotTell));
+    const unsure = (provider: Provider) => {
+      const parts = plan.config.filter((entry) => entry.provider === provider && onRoute(entry));
+      return parts.length === proxyRoute[provider]?.fields.length && parts.every((entry) => waiting.includes(entry) && gateCodes(entry).length > 0 && gateCodes(entry).every((code) => code === cannotTell));
     };
     const holds = (entry: Plan["config"][number]) => onRoute(entry) && unsure(entry.provider);
     const kept = plan.config.filter((entry) => !holds(entry) && (waiting.includes(entry) ? passing(entry) : gated.plan.config.includes(entry)));

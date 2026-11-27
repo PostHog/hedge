@@ -486,8 +486,21 @@ test("the check passes while the proxy answers the saved key, and keeps Claude C
   expect(printed).toEqual([`Claude Code reaches your own-account proxy at ${proxyUrl}.`]);
 });
 
+const cutAnswer = () => Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data: (socket) => void socket.end('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"data":[') } });
+
+test("connect retries a model list cut mid-answer like a proxy that does not answer, then changes nothing", async () => {
+  const cut = cutAnswer();
+  try {
+    const { machine, home } = connecting({}, { cutsBody: `http://127.0.0.1:${cut.port}` });
+    await expect(cliProxy("connect", machine)).rejects.toThrow(`The proxy at ${proxyUrl} does not answer. Nothing changed.`);
+    expect(existsSync(keyFile(home))).toBe(false);
+  } finally {
+    cut.stop(true);
+  }
+});
+
 test("the check cannot tell while the proxy does not answer or its connection drops mid-answer, and changes no file", async () => {
-  const cut = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data: (socket) => void socket.end('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"data":[') } });
+  const cut = cutAnswer();
   try {
     for (const proxy of [{ down: true }, { cutsBody: `http://127.0.0.1:${cut.port}` }]) {
       const { machine, home, printed } = client({}, proxy);

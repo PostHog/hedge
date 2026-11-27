@@ -499,9 +499,9 @@ describe("the Own-account balancing workflow", () => {
       expect((await check(shaped, { home, adapters: [providerConfigAdapter()], run: realCheck(home, both) })).ok).toBe(true);
     });
 
-    test("keeps the whole Claude route while one of its checks cannot tell and the other passes, and writes no half of it on a fresh machine", async () => {
+    test("keeps a Claude route split across two checks while both cannot tell, and writes no half of it on a fresh machine", async () => {
       const home = homeWith();
-      const split = (result: Plan): Plan => ({ ...result, config: result.config.map((entry) => (entry.key === "apiKeyHelper" ? { ...entry, after: "answers" } : entry)), checks: [...result.checks, { pack: "hub", id: "answers", run: ["true"], say: "Always passes." }] });
+      const split = (result: Plan): Plan => ({ ...result, config: result.config.map((entry) => (entry.key === "apiKeyHelper" ? { ...entry, after: "cli-proxy-codex" } : entry)) });
       const routed = await applied(home, both, 1, split);
       expect((await applied(home, "down", 1, split)).claude).toEqual(routed.claude);
       expect((await applied(homeWith(), "down", 1, split)).claude).toEqual({});

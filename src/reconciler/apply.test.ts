@@ -334,26 +334,28 @@ describe("a config entry that waits for a pack check", () => {
     expect(doctor.findings.map((finding) => finding.id)).toEqual(["check:helper-up"]);
   });
 
+  const exitsWith = (name: string) => ["sh", "-c", `exit "$(cat "$HOME/${name}")"`];
+  const codes = (home: string, values: Record<string, number>) => Object.entries(values).forEach(([name, code]) => writeFileSync(join(home, name), `${code}`));
+  const routed = { env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:8317" }, apiKeyHelper: keyHelper };
+
   test("a check that cannot tell holds only Hedge's proxy route as it is; other config that waits on such a check leaves, and that check keeps its own words", async () => {
     const home = temp.make("home-");
     const withModel = [...config, { provider: "claude" as const, key: "model", value: "opus", after: "model-up", pack: "base" }];
-    const both = [...checks, { id: "model-up", run: ["model-check"], say: "No model yet.", pack: "base" }];
-    let code = 0;
-    const options = { home, adapters: [providerConfigAdapter()], run: async (command: string[]) => (command[0]!.endsWith("-check") ? code : 0) };
-    await apply(plan({ files: [], checks: both, config: withModel }), options);
-    code = 3;
-    const unsure = await apply(plan({ files: [], checks: both, config: withModel }), options);
-    expect(settings(home)).toEqual({ env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:8317" }, apiKeyHelper: keyHelper });
+    const both = [{ ...checks[0]!, run: exitsWith("proxy") }, { id: "model-up", run: exitsWith("model"), say: "No model yet.", pack: "base" }];
+    codes(home, { proxy: 0, model: 0 });
+    await apply(plan({ files: [], checks: both, config: withModel }), { home, adapters: [providerConfigAdapter()] });
+    codes(home, { proxy: 3, model: 3 });
+    const unsure = await apply(plan({ files: [], checks: both, config: withModel }), { home, adapters: [providerConfigAdapter()] });
+    expect(settings(home)).toEqual(routed);
     expect(unsure.findings).toEqual([
-      { id: "check:proxy-up", pack: "base", say: "Hedge cannot tell yet whether proxy-up passes, so it keeps the proxy route that waits on it as it is. Run proxy-check to see why.", repair: "apply" },
+      { id: "check:proxy-up", pack: "base", say: `Hedge cannot tell yet whether proxy-up passes, so it keeps the proxy route that waits on it as it is. Run ${exitsWith("proxy").join(" ")} to see why.`, repair: "apply" },
       { id: "check:model-up", pack: "base", say: "No model yet.", repair: "apply" },
     ]);
   });
 
-  test("two checks with one id: either passing writes the route, and a refusal beside a cannot-tell takes an installed route off", async () => {
-    const twice = [{ ...checks[0]!, run: ["first-check"] }, { ...checks[0]!, run: ["second-check"] }];
-    const routed = { env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:8317" }, apiKeyHelper: keyHelper };
-    const applyWith = (home: string, first: number, second: number) => apply(plan({ files: [], checks: twice, config }), { home, adapters: [providerConfigAdapter()], run: async (command: string[]) => (command[0] === "first-check" ? first : command[0] === "second-check" ? second : 0) });
+  test("two checks with one id: either passing writes the route, both unsure hold it, and a refusal beside a cannot-tell takes it off", async () => {
+    const twice = [{ ...checks[0]!, run: exitsWith("first") }, { ...checks[0]!, run: exitsWith("second") }];
+    const applyWith = (home: string, first: number, second: number) => (codes(home, { first, second }), apply(plan({ files: [], checks: twice, config }), { home, adapters: [providerConfigAdapter()] }));
     for (const first of [1, 3]) {
       const home = temp.make("home-");
       await applyWith(home, first, 0);
@@ -361,19 +363,27 @@ describe("a config entry that waits for a pack check", () => {
     }
     const home = temp.make("home-");
     await applyWith(home, 0, 0);
+    await applyWith(home, 3, 3);
+    expect(settings(home)).toEqual(routed);
     await applyWith(home, 1, 3);
     expect(settings(home)).toEqual({});
   });
 
-  test("a route split across two checks leaves whole when one cannot tell and the other refuses", async () => {
-    const home = temp.make("home-");
+  test("a route whose parts wait on different checks leaves whole unless every one of them cannot tell, and a route part with no check never holds", async () => {
+    const both = [{ ...checks[0]!, run: exitsWith("proxy") }, { id: "helper-up", run: exitsWith("helper"), say: "The helper is down.", pack: "base" }];
+    const run = async (home: string, shape: Plan["config"], proxy: number, helper: number) => (codes(home, { proxy, helper }), apply(plan({ files: [], checks: both, config: shape }), { home, adapters: [providerConfigAdapter()] }));
     const split = [config[0]!, { ...config[1]!, after: "helper-up" }];
-    const both = [...checks, { id: "helper-up", run: ["helper-check"], say: "The helper is down.", pack: "base" }];
-    const codes = { "proxy-check": 0, "helper-check": 0 };
-    const options = { home, adapters: [providerConfigAdapter()], run: async (command: string[]) => codes[command[0] as keyof typeof codes] ?? 0 };
-    await apply(plan({ files: [], checks: both, config: split }), options);
-    Object.assign(codes, { "proxy-check": 3, "helper-check": 1 });
-    await apply(plan({ files: [], checks: both, config: split }), options);
+    for (const [helper, expected] of [[3, routed], [1, {}], [0, {}]] as const) {
+      const home = temp.make("home-");
+      await run(home, split, 0, 0);
+      await run(home, split, 3, helper);
+      expect(settings(home)).toEqual(expected);
+    }
+    const home = temp.make("home-");
+    const { after: _after, ...helper } = config[1]!;
+    const ungated = [config[0]!, helper];
+    await run(home, ungated, 0, 0);
+    await run(home, ungated, 3, 0);
     expect(settings(home)).toEqual({});
   });
 
