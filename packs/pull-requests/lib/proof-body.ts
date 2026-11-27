@@ -4,29 +4,59 @@ export const bodyWordCap = 800;
 export const calloutBulletCap = 6;
 
 const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
+const quotePrefix = /^(?: {0,3}>[ \t]?)*/;
 
-function take(text: string, pattern: RegExp): string {
-  return text.replace(pattern, "\n");
+function withoutFences(text: string, keep: (info: string) => boolean) {
+  const kept: string[] = [];
+  let open: { marker: string; length: number; keep: boolean } | undefined;
+  for (const line of text.split("\n")) {
+    const inner = line.replace(quotePrefix, "");
+    if (open) {
+      const close = new RegExp(`^ {0,3}${open.marker === "`" ? "`" : "~"}{${open.length},}[ \\t]*$`).test(inner);
+      if (open.keep) kept.push(line);
+      if (close) open = undefined;
+      continue;
+    }
+    const fence = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(inner);
+    if (fence && !(fence[1]!.startsWith("`") && fence[2]!.includes("`"))) {
+      open = { marker: fence[1]![0]!, length: fence[1]!.length, keep: keep(fence[2]!.trim()) };
+      if (open.keep) kept.push(line);
+      continue;
+    }
+    kept.push(line);
+  }
+  return kept.join("\n");
 }
 
-export function countedWords(body: string) {
-  const withoutReceipt = take(body, /<!-- (fleet|hedge)-proof-receipt\b[\s\S]*?<!-- \/(fleet|hedge)-proof-receipt -->/g);
-  const withoutCode = take(withoutReceipt, /^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[ \t]*$/gm);
-  const withoutTemplateLines = take(withoutCode, /^[ \t]*[-*] (\[[ xX]\] .*|.*<!-- release-status:.*)$/gm);
-  return words(take(withoutTemplateLines, /<!--[\s\S]*?-->/g));
+const withoutReceipt = (body: string) => body.replace(/<!-- (fleet|hedge)-proof-receipt\b[\s\S]*?<!-- \/(fleet|hedge)-proof-receipt -->/g, "\n");
+const withoutComments = (text: string) => text.replace(/<!--[\s\S]*?-->/g, "\n");
+
+function countedWords(body: string) {
+  const prose = withoutFences(withoutReceipt(body), () => false).replace(/^[ \t]*[-*] (\[[ xX]\] .*|.*<!-- release-status:.*)$/gm, "\n");
+  return words(withoutComments(prose));
 }
 
-const pictured = (body: string) =>
-  /^ {0,3}(`{3,}|~{3,})[ \t]*mermaid\b/m.test(body)
-  || /!\[[^\]]*\]\([^)]+\)/.test(body)
-  || /<(img|video)\b/i.test(body)
-  || /https:\/\/github\.com\/user-attachments\/assets\//.test(body)
-  || /No picture:/.test(body);
+const mermaid = (text: string) => /^ {0,3}(`{3,}|~{3,})[ \t]*mermaid\b/m.test(text.split("\n").map((line) => line.replace(quotePrefix, "")).join("\n"));
 
-export function calloutBullets(callout: string) {
+function pictured(body: string) {
+  const prose = withoutComments(withoutReceipt(body));
+  if (mermaid(withoutFences(prose, (info) => /^mermaid\b/.test(info)))) return true;
+  const visible = withoutFences(prose, () => false).replace(/(`+)[^`]*?\1/g, "");
+  return /!\[[^\]]*\](\([^)]+\)|\[[^\]]*\])/.test(visible)
+    || /<(img|video)\b/i.test(visible)
+    || /https:\/\/github\.com\/user-attachments\/assets\//.test(visible)
+    || /^(?:[ \t]*(?:>[ \t]?|[-*+][ \t]+))*(?:\*\*)?No picture:(?:\*\*)?[ \t]*\S/m.test(visible);
+}
+
+function calloutBullets(callout: string) {
   const lines = callout.split("\n");
-  const end = lines.findIndex((line) => /^#{1,6}\s/.test(line));
-  return (end === -1 ? lines : lines.slice(0, end)).filter((line) => /^(>[ \t]?)?[-*+][ \t]+\S/.test(line)).length;
+  const rollout = lines.findIndex((line) => /^(?:>[ \t]?)*#{1,6}[ \t]+Rollout\b/i.test(line));
+  const markers = (rollout === -1 ? lines : lines.slice(0, rollout)).flatMap((line) => {
+    const item = /^( *)[-*+][ \t]+\S/.exec(line.replace(/^(?: {0,3}>)+[ \t]?/, "").replace(/\t/g, "    "));
+    return item ? [item[1]!.length] : [];
+  });
+  const top = Math.min(...markers);
+  return markers.filter((indent) => indent - top < 2).length;
 }
 
 export function bodyProblems(body: string): string[] {

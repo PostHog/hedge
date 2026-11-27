@@ -7,12 +7,19 @@
 - `hedge proof gate` now checks a description that holds a merge-risk
   callout before it asks the judge. It fails when the description has no
   picture, which is a Mermaid block, an image, a video, an attachment link,
-  or a `No picture:` line. It also fails over 800 written words, and when
-  the callout holds more than 6 bullets with Switch-off and Tier. The word
-  count leaves out the receipt, code, diagrams, template lines, and
-  comments. A landed gate skips the check.
-- The judge's risk question accepts an uncovered row that the Known issues
-  section names, so the callout can stay within its 6 bullets.
+  or a `No picture:` line with a reason. A picture or a `No picture:` line
+  in a comment, in code, or in the receipt does not count. It also fails
+  over 800 written words, and when the callout holds more than 6 top-level
+  bullets with Switch-off and Tier. The word count leaves out the receipt,
+  code, diagrams, template lines, and comments. The check skips a PR only
+  once GitHub says it merged.
+- A saved gate pass holds the result of the description check. When the
+  description later gains a problem, `hedge decision report` and
+  `hedge proof receipt` stop using the pass. After the upgrade, passes saved
+  before it do not match, so run `hedge proof gate` again on open PRs.
+- The judge's risk question accepts a changed row with an incident, or an
+  uncovered row, that the Known issues section names, so the callout can
+  stay within its 6 bullets.
 - A sanity pass is due once the production lines at HEAD pass 1.5 times the
   lines at round 1, down from twice.
 

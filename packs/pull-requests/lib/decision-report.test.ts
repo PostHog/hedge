@@ -273,6 +273,24 @@ test("the report keeps the judge's verdict through a body edit outside the merge
   expect(await reportOf(pr)).toEqual(notGated(head.slice(0, 7)));
 });
 
+test("the report drops a gate pass once the description loses its picture or outgrows the word cap, and keeps it through a receipt refresh", async () => {
+  const pr = await checkout();
+  const head = await pr.commit("feature.txt", "greet new members\n");
+  pr.pullRequestState({ body: graded("non-critical") });
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  expect((await pr.hedge("gate")).code).toBe(0);
+
+  pr.pullRequestState({ body: `<!-- hedge-proof-receipt head=${head} hash=01 -->\n| live-run | sent |\n<!-- /hedge-proof-receipt -->\n${graded("non-critical")}` });
+  expect((await reportOf(pr)).stillYours).toEqual(["- Merge example/product#42: its proofs pass, and it waits on your merge word."]);
+
+  pr.pullRequestState({ body: graded("non-critical").replace("No picture: the diff shows it whole.", "") });
+  expect(await reportOf(pr)).toEqual(notGated(head.slice(0, 7)));
+
+  pr.pullRequestState({ body: `${graded("non-critical")}\n${Array.from({ length: 800 }, () => "word").join(" ")}\n` });
+  expect(await reportOf(pr)).toEqual(notGated(head.slice(0, 7)));
+});
+
 test("the report never offers the merge on an accepted gap whose condition the judge has not weighed", async () => {
   const pr = await checkout();
   const head = await pr.commit("feature.txt", "greet new members\n");

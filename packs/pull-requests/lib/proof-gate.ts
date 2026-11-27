@@ -28,7 +28,7 @@ export type FinalGate = { code: number; reason: string; lines: string[]; verdict
 
 type Checked = Awaited<ReturnType<typeof proofGate>>;
 type Judged = { code: number; lines: string[]; covered: string; judge: JudgeSummary; reason?: string };
-type GateKey = { head: string; base: string; baseSha: string; tier: string; callout: string; landed: boolean; fingerprint: string; endTable: true };
+type GateKey = { head: string; base: string; baseSha: string; tier: string; callout: string; body: string[]; landed: boolean; fingerprint: string; endTable: true };
 type Condition = Checked["conditions"][number];
 type SavedGate = { key: GateKey; gate: FinalGate; conditions: Condition[] };
 
@@ -59,8 +59,10 @@ async function fingerprintOf(home: string, ref: PrRef, files: string, decisions:
   return createHash("sha256").update(JSON.stringify({ files, covering, standing: await listStanding(home) })).digest("hex");
 }
 
+const describedProblems = (pull: PullRequest) => pull.state === "merged" ? [] : bodyProblems(pull.body ?? "");
+
 const keyOf = (pull: PullRequest, landed: boolean, fingerprint: string): GateKey =>
-  ({ head: pull.head, base: pull.base, baseSha: pull.baseSha, tier: tierOf(pull.body), callout: createHash("sha256").update(riskCalloutOf(pull.body) ?? "").digest("hex"), landed, fingerprint, endTable: true });
+  ({ head: pull.head, base: pull.base, baseSha: pull.baseSha, tier: tierOf(pull.body), callout: createHash("sha256").update(riskCalloutOf(pull.body) ?? "").digest("hex"), body: describedProblems(pull), landed, fingerprint, endTable: true });
 
 export async function finalGate(head: ProofIdentity, context: JudgingContext, { landed = false }: { landed?: boolean } = {}): Promise<FinalGate> {
   const { home, env, run, now, ssh } = context;
@@ -71,7 +73,7 @@ export async function finalGate(head: ProofIdentity, context: JudgingContext, { 
     landed, cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)), ci: () => ciOf(home, head, run, now?.() ?? new Date(), env),
     pushedHead, openBotFindings: botFindingsOf(head, run), ledger: hubLedger(home, env, ssh), now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env),
   });
-  const body = landed || pull === undefined ? [] : bodyProblems((pull as PullRequest).body ?? "");
+  const body = pull === undefined ? [] : describedProblems(pull as PullRequest);
   const judged: Judged = checked.code !== 0 ? { code: checked.code, lines: [], covered: "", judge: { state: "skipped", lines: [] }, reason: checked.failure }
     : body.length ? { code: 1, lines: body, covered: "", judge: { state: "skipped", lines: [] }, reason: body[0] }
     : await judgeHead(head, checked, context);

@@ -67,6 +67,16 @@ test("past 1.5 times the production lines of the first review, the next round wa
   ]);
 });
 
+test("the sanity pass starts just past 1.5 times the first round: 16 lines after 10 wait, 15 go on", async () => {
+  const pr = await checkout();
+  const reviewed = await firstRound(pr, ["- major | feature.ts:2 | the greeting drops the last name | anchor: greet 1"], ["1. fixed: the greeting keeps it"]);
+  await pr.commit("feature.ts", lines(16, "greet"));
+  await expect(pr.hedge("review-start", "--scope", "fixes", "--base", reviewed)).rejects.toThrow("Production lines grew from 10 at round 1 to 16 at HEAD, past 1.5 times the first.");
+
+  await pr.commit("feature.ts", lines(15, "greet"));
+  expect((await pr.hedge("review-start", "--scope", "fixes", "--base", reviewed)).code).toBe(0);
+});
+
 test("a sanity pass covers the lines it saw: a later head that grows again waits for a new one, and a cut back under 1.5 times the first needs none", async () => {
   const pr = await checkout();
   const reviewed = await firstRound(pr, ["- major | feature.ts:2 | the greeting drops the last name | anchor: greet 1"], ["1. fixed: the greeting keeps it"]);
