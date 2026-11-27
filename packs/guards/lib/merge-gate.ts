@@ -124,9 +124,7 @@ const home = (path: string) => path === "~" ? homedir() : path.startsWith("~/") 
 
 const builtAtRunTime = /[$`]/;
 const runTimeMark = "\u0000";
-const splitMark = "\u0001";
 const isRunTime = (value: string) => value.endsWith(runTimeMark);
-const anonymousRead = /^\s*(?:query\s*)?\{/;
 const ghPlaceholder = /\{(?:owner|repo|branch)\}|:(?:owner|repo|branch)\b/;
 const unreadByTrunk = /^repos\/[\w.-]+\/[\w.-]+\/(?:pulls\/(?:\d+\/comments(?:\/\d+\/replies)?|comments\/\d+)|stacks)$/;
 const graphqlCall = /(?<!\w)(?:(?<=(?:^|\})[\s,]*)(mutation|query|subscription)[\s,]+)?([A-Za-z_]\w*)[\s,]*\(/g;
@@ -176,8 +174,7 @@ function runTimeFields(fields: string[], typed: string[], graphql: boolean, body
   const queries = fields.filter((field) => key(field) === "query").map((field) => field.slice("query=".length)).map((query) => query.startsWith("@") ? readQuery(query.slice(1)) : query);
   const filled = typed.some((field) => key(field) === "query" && ghPlaceholder.test(field));
   const quiet = !filled && queries.length > 0 && queries.every((query) => query !== undefined && !postsText(query));
-  const shownRead = (field: string) => key(field) === "query" && !field.endsWith(splitMark + runTimeMark) && anonymousRead.test(field.slice("query=".length));
-  return built.some((field) => named(field, "query") && !shownRead(field)) || (built.length > 0 && !quiet);
+  return built.some((field) => named(field, "query")) || (built.length > 0 && !quiet);
 }
 
 function jsonStrings(text: string): string[] {
@@ -258,7 +255,7 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const args = expandAlias(written, io);
   if (!args) return { targets: [], refusal: shellAliasReason };
   const gh = parseGh(inOrder(args));
-  const marked = parseGh(inOrder(expandAlias(ghArguments({ ...found, args: found.args.map((arg, index) => found.argExpands[index] ? `${arg}${found.argSplits[index] ? splitMark : ""}${runTimeMark}` : arg) })!, io) ?? []));
+  const marked = parseGh(inOrder(expandAlias(ghArguments({ ...found, args: found.args.map((arg, index) => found.argExpands[index] ? `${arg}${runTimeMark}` : arg) })!, io) ?? []));
   const builtBody = () => values(marked, "-b", "--body", "-F", "--body-file").some(isRunTime);
   if ((gh.group === "pr" || gh.group === "issue") && gh.action === "comment") {
     const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"), builtBody());

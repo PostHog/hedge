@@ -242,6 +242,10 @@ describe("which calls enqueue or merge", () => {
     ["gh api graphql -f query={viewer{login$X}}", graphqlReason],
     ["gh api graphql -f query=\"{ viewer { login } }\"$X", graphqlReason],
     ["gh api graphql -f \"query={ viewer { login\"$X\" } }\"", graphqlReason],
+    ["gh api graphql -f \"query={ viewer { login } } $@\"", graphqlReason],
+    ["gh api graphql -f \"query={ viewer { login } } ${args[@]}\"", graphqlReason],
+    ["gh api graphql -f query=\"query{repository(owner:\\\"example\\\",name:\\\"product\\\"){pullRequest(number:$n){id}}}\"", graphqlReason],
+    ["gh api graphql -f query=\" { repository(owner: \\\"example\\\", name: \\\"product\\\") { pullRequest(number: $n) { id } } }\"", graphqlReason],
     ["gh api repos/example/product/pulls/7/comments/1/replies$S -f body=\"$B\"", unreadPayloadReason],
     ["printf x | xargs gh api repos/example/product/pulls/7/comments/1/replies -f body=", unreadPayloadReason],
     ["gh api graphql -f 'query=mutation($b: String!) { query addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
@@ -318,8 +322,6 @@ describe("which calls enqueue or merge", () => {
     ["make-body | gh api -X PATCH repos/example/product/pulls/7 --input -"],
     ["cat release.json | gh api repos/example/product/releases --input -"],
     ["jq -n '{ref:\"main\"}' | gh api -X POST repos/example/product/actions/workflows/ci.yml/dispatches --input -"],
-    ["gh api graphql -f query=\"query{repository(owner:\\\"example\\\",name:\\\"product\\\"){pullRequest(number:$n){id}}}\""],
-    ["gh api graphql -f query=\" { repository(owner: \\\"example\\\", name: \\\"product\\\") { pullRequest(number: $n) { id } } }\""],
   ])("a literal body, literal path or literal heredoc posts without a check: %s", (command) => {
     expect(bash(command)).toEqual({ targets: [] });
   });
@@ -1019,6 +1021,7 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     ["X=$(cat enqueue.md); gh api -X PATCH repos/example/product/issues/comments/1 -f body=\"$X\"", unreadPayloadReason],
     ["cat enqueue.md | gh pr review 9 --repo example/product --comment -F -", unreadPayloadReason],
     ["Q=$(cat merge.graphql); gh api graphql -f query=\"$Q\"", graphqlReason],
+    ["gh api graphql -f query=\"query{repository(owner:\\\"example\\\",name:\\\"product\\\"){pullRequest(number:$n){id}}}\"", graphqlReason],
   ])("a review, comment edit or GraphQL call built at run time from a real file is refused: %s", async (command, reason) => {
     expect(await unpassedNine()(command, runTimeDir())).toBe(reason);
   });
@@ -1033,7 +1036,6 @@ describe("the hook against GitHub, faked at the gh boundary, and real checkouts,
     ["gh api graphql -f query='mutation($t: ID!) { resolveReviewThread(input: {threadId: $t}) { thread { isResolved } } }' -f t=\"$T\""],
     ["gh api graphql -f query='query($n: Int!) { repository(owner: \"example\", name: \"product\") { pullRequest(number: $n) { id } } }' -F n=\"$N\""],
     ["A=$(cat enqueue.md); gh api repos/example/product/pulls/9/comments/1/replies -f body=\"$A\""],
-    ["gh api graphql -f query=\"query{repository(owner:\\\"example\\\",name:\\\"product\\\"){pullRequest(number:$n){id}}}\""],
   ])("a literal body, path, heredoc or GraphQL read posts through the hook: %s", async (command) => {
     expect(await unpassedNine()(command, runTimeDir())).toBeUndefined();
   });

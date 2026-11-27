@@ -11,7 +11,6 @@ export type Command = {
   argSubstitutions: string[][];
   stdin?: { body: string; substitutions: string[]; expands?: boolean };
   argExpands: boolean[];
-  argSplits: boolean[];
   fromExpansion: boolean;
   outputs: string[];
   writes: string[];
@@ -32,7 +31,7 @@ export type Command = {
 };
 
 type Context = { env: ReadonlyMap<string, string>; inLoop: boolean; scope?: Scope; expands?: boolean };
-type Word = { text: string; raw: string; bare: string; substitutions: string[]; processes: string[]; expands: boolean; splits?: boolean };
+type Word = { text: string; raw: string; bare: string; substitutions: string[]; processes: string[]; expands: boolean };
 type Heredoc = { delimiter: string; literal: boolean; stripTabs: boolean; body: string; substitutions: string[]; expands?: boolean };
 type Token = { word: Word } | { operator: string; at: number } | { heredoc: Heredoc } | { herestring: true };
 
@@ -368,9 +367,7 @@ function tokenize(text: string): Token[] {
       if ((char === "<" || char === ">") && word && !/^\d+$|[<>&]$/.test(word.raw)) endWord();
       const found = expansion(text, index, false);
       const end = found?.end ?? index;
-      const splits = found !== undefined || startsParameter(text, index);
-      append(text.slice(index, end + 1), text.slice(index, end + 1), found?.programs, found ? "_" : char, [], splits);
-      if (splits) word!.splits = true;
+      append(text.slice(index, end + 1), text.slice(index, end + 1), found?.programs, found ? "_" : char, [], found !== undefined || startsParameter(text, index));
       index = end + 1;
     }
   }
@@ -497,12 +494,11 @@ export function parse(program: string, context: Context = { env: new Map(), inLo
     const leadingSubstitutions = kept.slice(0, index + 1).flatMap((word) => word.substitutions);
     const argSubstitutions = kept.slice(index + 1).map((word) => word.substitutions);
     const argExpands = kept.slice(index + 1).map((word) => expandsHere(word.expands, word.raw));
-    const argSplits = kept.slice(index + 1).map((word) => word.splits === true);
     const bare = kept.slice(index).map((word) => word.bare);
     const rawArgs = kept.slice(index + 1).map((word) => word.raw);
     const rawPrefix = kept.slice(0, index).map((word) => word.raw);
     const prefix = kept.slice(0, index).map((word) => basename(word.text));
-    pipeline.push({ name, args, env: commandEnv, substitutions, leadingSubstitutions, argSubstitutions, argExpands, argSplits, fromExpansion: context.expands === true, stdin, outputs, writes, redirects, bare, rawArgs, rawPrefix, prefix, keywords: stripped, processSubstitutions: words.flatMap((word) => word.processes), inLoop, tested, ...(after && { after, afterAt }), scope, chdir });
+    pipeline.push({ name, args, env: commandEnv, substitutions, leadingSubstitutions, argSubstitutions, argExpands, fromExpansion: context.expands === true, stdin, outputs, writes, redirects, bare, rawArgs, rawPrefix, prefix, keywords: stripped, processSubstitutions: words.flatMap((word) => word.processes), inLoop, tested, ...(after && { after, afterAt }), scope, chdir });
     words = [];
     stdin = undefined;
   };
