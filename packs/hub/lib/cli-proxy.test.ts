@@ -490,7 +490,9 @@ const cutAnswer = (cuts = Infinity) => {
   let answered = 0;
   const whole = JSON.stringify({ data: [{ id: "claude-sonnet-5-5" }] });
   const answer = (body: string, length: number) => `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${length}\r\nConnection: close\r\n\r\n${body}`;
-  return Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data: (socket) => void socket.end(answered++ < cuts ? answer('{"data":[', 100) : answer(whole, whole.length)) } });
+  const refused = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno";
+  const keyed = (request: Buffer) => request.toString().toLowerCase().includes(`authorization: bearer ${clientKey}`);
+  return Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data: (socket, request) => void socket.end(!keyed(request) ? refused : answered++ < cuts ? answer('{"data":[', 100) : answer(whole, whole.length)) } });
 };
 
 test("connect retries a model list cut mid-answer like a proxy that does not answer: it connects once a whole list comes, and changes nothing while every answer is cut", async () => {
@@ -536,8 +538,8 @@ test("hedge apply while the proxy does not answer keeps the routes an earlier ap
     const silent = await apply();
     expect(readFileSync(settingsFile(home), "utf8")).toBe(settings);
     expect(readFileSync(codexFile(home), "utf8")).toBe(codex);
-    expect(silent.stdout).toContain("Hedge cannot tell yet whether cli-proxy-client passes, so it keeps the proxy route that waits on it as it is. Run hedge cli-proxy check to see why.");
-    expect(silent.stdout).toContain("Hedge cannot tell yet whether cli-proxy-codex passes, so it keeps the proxy route that waits on it as it is. Run hedge cli-proxy check codex to see why.");
+    expect(silent.stdout).toContain("Hedge cannot tell yet whether cli-proxy-client passes, so it keeps the proxy route that waits on it while that route is whole, and adds none. Run hedge cli-proxy check to see why.");
+    expect(silent.stdout).toContain("Hedge cannot tell yet whether cli-proxy-codex passes, so it keeps the proxy route that waits on it while that route is whole, and adds none. Run hedge cli-proxy check codex to see why.");
   }
   proxy.down = false;
   expect((await apply()).code).toBe(0);

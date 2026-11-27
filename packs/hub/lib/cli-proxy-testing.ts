@@ -26,7 +26,7 @@ export function fakeProxy(proxy: Proxy = {}) {
     if (proxy.down || proxy.stopped || url.origin !== proxyUrl) throw new TypeError("connection refused");
     if (url.pathname === "/v1/models" && proxy.silentModels) throw new TypeError("connection refused");
     if (url.pathname === "/v1/models" && proxy.modelList !== undefined) return new Response(proxy.modelList, { status: 200 });
-    if (url.pathname === "/v1/models" && proxy.cutsBody) return globalThis.fetch(`${proxy.cutsBody}/v1/models`);
+    if (url.pathname === "/v1/models" && proxy.cutsBody) return globalThis.fetch(`${proxy.cutsBody}/v1/models`, { headers: init?.headers });
     if (url.pathname === "/v1/models") return auth === `Bearer ${clientKey}` && !proxy.refuses ? Response.json({ data: (proxy.models ?? ["claude-sonnet-5-5"]).map((id) => ({ id })) }) : new Response("no", { status: 401 });
     if (url.pathname === "/v0/management/routing/strategy") return Response.json({ strategy: proxy.strategy ?? "fill-first" });
     if (url.pathname === "/v0/management/auth-files" && proxy.authFiles !== undefined) return Response.json(proxy.authFiles);

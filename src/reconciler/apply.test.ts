@@ -348,7 +348,7 @@ describe("a config entry that waits for a pack check", () => {
     const unsure = await apply(plan({ files: [], checks: both, config: withModel }), { home, adapters: [providerConfigAdapter()] });
     expect(settings(home)).toEqual(routed);
     expect(unsure.findings).toEqual([
-      { id: "check:proxy-up", pack: "base", say: `Hedge cannot tell yet whether proxy-up passes, so it keeps the proxy route that waits on it as it is. Run ${exitsWith("proxy").join(" ")} to see why.`, repair: "apply" },
+      { id: "check:proxy-up", pack: "base", say: `Hedge cannot tell yet whether proxy-up passes, so it keeps the proxy route that waits on it while that route is whole, and adds none. Run ${exitsWith("proxy").join(" ")} to see why.`, repair: "apply" },
       { id: "check:model-up", pack: "base", say: "No model yet.", repair: "apply" },
     ]);
   });
