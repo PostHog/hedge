@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Three autonomy modes replace the autonomy setting
+
+- A thread now runs in one of three modes: `supervised`, `auto`, or `full`.
+  Each is a skill of the Pull requests pack: `mode-supervised`, `mode-auto`,
+  and `mode-full`. Supervised asks the user before every decision. Auto
+  decides review rounds, proof gaps, and routine asks alone, and brings
+  each pull request to the user's merge card with an explainer. Full also
+  accepts gaps, stamps, and merges alone, with the council for hard calls,
+  and reports once at the end.
+- `hedge mode set <mode> --thread <id> --words '<date> "<message>"'`
+  records the user's grant. It reads the message in the T3 thread, and a
+  sentence of it must name the mode without a "not". `--for` gives it to a
+  thread that thread started. `hedge mode show` prints a thread's mode and
+  where it comes from.
+- A thread takes its mode from its own grant, else from the thread that
+  started it, else from the new `pull-requests.repoModes` for its
+  repository, else from the new `pull-requests.mode`. A side fix starts on
+  its own, so it takes the defaults. When `pull-requests.mode` is not set,
+  `pull-requests.autonomy` still decides: `ask` is supervised and `end` is
+  auto.
+- `hedge proof` and `hedge decision` follow the mode where they followed
+  `pull-requests.autonomy`: auto and full decide alone where `end` did.
+- The merge gate lets a thread in mode full merge a head with a gap an
+  agent accepted, on the agent's own decision. In every other mode, such a
+  head still waits for the user's merge card answer. A gate pass from while
+  the mode decided alone counts only while it still does.
+
 ### The merge gate says when it could not read a comment
 
 - A comment whose body the merge-gate hook cannot read, such as a piped body

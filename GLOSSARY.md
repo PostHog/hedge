@@ -112,9 +112,9 @@ _Avoid_: Decision type, category
 The `Tier:` line of a pull request's merge-risk callout at HEAD: critical or non-critical. A pull request without it is ungraded. The tier limits what an agent may decide alone.
 _Avoid_: Risk level, grade
 
-**Autonomy**:
-The setting `pull-requests.autonomy`: how often an agent asks the user about a review round or a proof gap. On `ask`, the default, `hedge proof` tells the agent to ask the user each time. On `end`, it tells the agent to decide alone as a 🤖 decision, and the user reads every such decision under Decisions in `hedge decision report`, beside the end table. That covers every review round, up to 3 reads past the review budget, and every proof gap, on critical pull requests and one-way doors too. Only an ungraded pull request, which the agent grades first, and a gap the user keeps owed stay with the user.
-_Avoid_: Trust level, mode
+**Mode**:
+How far an agent takes a thread's work on its own: `supervised`, `auto`, or `full`, each a skill of the Pull requests pack. Supervised asks the user before every decision. Auto decides review rounds, proof gaps, and routine asks alone as 🤖 decisions, and brings each pull request to the user's merge card. Full also accepts gaps, stamps, and merges alone, and reports once at the end. A thread takes its mode from the user's grant in it (`hedge mode set`), else from the thread that started it, else from `pull-requests.repoModes` for its repository, else from `pull-requests.mode`. Only the user's words grant a mode. A thread that starts on its own, such as a side fix, takes the defaults. The older setting `pull-requests.autonomy` stands for a mode when `pull-requests.mode` is not set: `ask` is supervised and `end` is auto.
+_Avoid_: Autonomy level, trust level
 
 **Acceptance**:
 A decision that lets the gate pass over a proof gap. The user's acceptance always counts; an agent's acceptance counts only while nothing lapses it.

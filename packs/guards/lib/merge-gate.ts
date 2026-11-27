@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fold, gateOverride, sameThread, live, mergeCardChoice, mergeCardCondition, namesHead, namesId, overrideChoice, hubLedger, prRef, type DecisionState, type Env, type LedgerEvent } from "../../pull-requests/lib/decision-ledger.ts";
 import { isTextList, lastGateResult, latestGateResult, type GateResult } from "../../pull-requests/lib/proof.ts";
-import { decidesAll } from "../../pull-requests/lib/proof-autonomy.ts";
+import { chainOf, resolveMode, t3Threads, type Mode } from "../../pull-requests/lib/mode.ts";
 import { normalized } from "../../pull-requests/lib/proof-answers.ts";
 import { endpointOf, fieldName, ghGroups, inOrder, parseGh, values, type Gh } from "./gh.ts";
 import { githubSlug } from "./git.ts";
@@ -396,7 +396,7 @@ export type GateIO = {
   isIssue: (repository: string, number: number) => Promise<boolean>;
   localGate: (repository: string, pr: number, commit: string) => Promise<GateResult | undefined>;
   ledger: () => Promise<LedgerEvent[]>;
-  decidesAll?: () => boolean;
+  mode?: (repository: string, events: LedgerEvent[]) => Promise<Mode>;
   thread?: string;
 };
 
@@ -471,7 +471,7 @@ const gateCommand = ({ repository, pr, head }: Layer) => `hedge proof gate --rep
 const overrideHint = (person: string) => `For an incident fix that cannot wait for the gate, ask ${person} with the question tool, naming the PR and its full head sha, with the options "${overrideChoice}" and "Keep the gate closed", and record the answer `
   + `with \`hedge decision record --mark 👤 --class merge --kind ${gateOverride} --pr <owner/repo#n> --condition '<full head sha>: <incident and why>'\`.`;
 
-const heldReason = (held: string[], person: string) => `Hedge blocked this merge: an agent accepted proof gaps of ${held.join("; ")} itself, so it merges only on ${person}'s word for that head, whatever else lets it merge: own tooling, a standing merge grant, or full send. `
+const heldReason = (held: string[], person: string) => `Hedge blocked this merge: an agent accepted proof gaps of ${held.join("; ")} itself, so it merges only on ${person}'s word for that head, whatever else lets it merge: own tooling or a standing merge grant. Only a thread that runs in mode full, which ${person} granted with \`hedge mode set full\`, merges it on its own decision. `
   + `Show it on a merge card: ask ${person} with the question tool, naming the PR, its full head sha, and each held decision as this message names it, such as \`d-1a2b3c4d for live-run/prod-shape\`, with the options "${mergeCardChoice}" and "Keep it open". When they choose "${mergeCardChoice}", record the answer with \`hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full 40-character head sha>: merge card'\`, then merge again. The answer lifts only the decisions its question named that way, only in the T3 thread that asked it, and a push leaves it behind; a gate pass at the new head that saw no such gap lifts the hold.`;
 
 const unreadReason = (repositories: string[]) => `Hedge blocked this merge: the decision ledger could not be read, so the merge gate cannot tell whether an agent accepted a proof gap in ${repositories.join(", ")} itself, and such a gap holds a merge until the person's word. Try again when the hub answers.`;
@@ -484,7 +484,10 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
   let hubError: string | undefined;
   const missing: string[] = [];
   const held: string[] = [];
-  const hold = (results: GateResult[], layer: Layer) => held.push(...heldLayer(decisions, layer, heldGaps(results, decisions, layer, io.thread)));
+  const modeOf = async (repository: string): Promise<Mode> => io.mode ? io.mode(repository, events ?? []) : "supervised";
+  const hold = async (results: GateResult[], layer: Layer) => {
+    if (await modeOf(layer.repository) !== "full") held.push(...heldLayer(decisions, layer, heldGaps(results, decisions, layer, io.thread)));
+  };
   const readLedger = async () => {
     if (events !== undefined || hubError !== undefined) return;
     try { events = await io.ledger(); decisions = fold(events); } catch (error) { hubError = (error as Error).message; }
@@ -498,7 +501,7 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
       for (const layer of await layersOf(target, io)) {
         await readLedger();
         const results = await resultsAt(layer);
-        if (overrideIn(decisions, layer) || latestPassed(results, io.decidesAll?.() ?? false)) { hold(results, layer); continue; }
+        if (overrideIn(decisions, layer) || latestPassed(results, await modeOf(layer.repository) !== "supervised")) { await hold(results, layer); continue; }
         const top = layer.pr === target.pr ? "" : ` (a lower layer of ${target.repository}#${target.pr})`;
         missing.push(`${layer.repository}#${layer.pr}${top} at ${layer.head.slice(0, 12)}: run \`${gateCommand(layer)}\``);
       }
@@ -507,7 +510,7 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
       await readLedger();
       if (hubError !== undefined) return unreadReason([...new Set((intent.exempt ?? []).map((one) => one.repository))]);
       if (!decisions.some((decision) => agentGap(decision) && inRepository(decision, target.repository))) continue;
-      for (const layer of await layersOf(target, io)) hold(await resultsAt(layer), layer);
+      for (const layer of await layersOf(target, io)) await hold(await resultsAt(layer), layer);
     }
   } catch (error) {
     return `Hedge blocked this merge: the merge gate could not check it (${(error as Error).message}). A merge needs a \`hedge proof gate\` pass at each PR's head on GitHub; try again when GitHub answers.`;
@@ -515,7 +518,7 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
   if (!missing.length && hubError !== undefined) return unreadReason([...new Set(intent.targets.map((target) => target.repository))]);
   if (!missing.length) return held.length ? heldReason(held, person) : undefined;
   const hub = hubError ? ` The decision ledger could not be read (${hubError}), so only this machine's gate records counted.` : "";
-  return `Hedge blocked this merge: \`hedge proof gate\` has not passed at the head of ${missing.join("; ")}. A missing proof store, a pass at an older head, or a pass that a later failed run at the same head replaced does not count, nor a pass from while pull-requests.autonomy was end once it is ask again.${hub} `
+  return `Hedge blocked this merge: \`hedge proof gate\` has not passed at the head of ${missing.join("; ")}. A missing proof store, a pass at an older head, or a pass that a later failed run at the same head replaced does not count, nor a pass from while the mode let the agent decide alone, auto or full, once it is supervised again.${hub} `
     + `Run the gate on each head until it exits 0, then enqueue again. ${overrideHint(person)}`;
 }
 
@@ -532,6 +535,8 @@ export async function beforeDeadline(check: () => Promise<string | undefined>, d
 }
 
 export function realGateIO(home: string, env: Env): GateIO {
+  const thread = env.T3CODE_THREAD_ID || undefined;
+  let chain: Promise<string[]> | undefined;
   const api = async (path: string) => {
     const child = Bun.spawn(["gh", "api", "-i", path], { stdout: "pipe", stderr: "pipe", timeout: 8_000, env: { ...process.env, ...env, GH_PAGER: "cat" } });
     const [stdout, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
@@ -559,7 +564,7 @@ export function realGateIO(home: string, env: Env): GateIO {
     },
     localGate: (repository, pr, commit) => lastGateResult(home, { repository, pr, commit }).catch(() => ({ passed: false, at: Infinity })),
     ledger: () => hubLedger(home, env).read(),
-    decidesAll: () => decidesAll(env),
-    thread: env.T3CODE_THREAD_ID || undefined,
+    mode: async (repository, events) => resolveMode(env, events, await (chain ??= chainOf(thread, t3Threads(home))), repository).mode,
+    thread,
   };
 }

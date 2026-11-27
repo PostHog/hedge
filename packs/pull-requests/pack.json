@@ -8,7 +8,7 @@
   "summary": "Every change passes proof, a second-model review and a QA swarm before it merges, and a nightly loop you turn on improves one area.",
   "day": "You ask for a fix, and later find a draft pull request with its tests, its proof, and a review from a second model.",
   "cost": "It needs GitHub, and setup signs you in. Each pull request spends extra usage on reviews. Expect at least one round, often two, and short final reads. The nightly loops run on an always-on devbox and spend your AI plan's usage each night, so they start off.",
-  "risk": "Ship words merge without asking again. Say them only for work you would merge yourself. The loops open draft pull requests without you in the room.",
+  "risk": "Ship words and mode full merge without asking again. Say them only for work you would merge yourself. The loops open draft pull requests without you in the room.",
   "instructions": "AGENTS.md",
   "guides": [
     {
@@ -21,6 +21,9 @@
     }
   ],
   "skills": [
+    "skills/mode-supervised",
+    "skills/mode-auto",
+    "skills/mode-full",
     "agent-skills:pull-requests/full-stop",
     "agent-skills:pull-requests/full-send",
     "agent-skills:pull-requests/stamp-pr",
@@ -65,8 +68,36 @@
       ]
     },
     {
+      "key": "pull-requests.mode",
+      "question": "Which autonomy mode should a thread start in? Supervised: the agent decides nothing alone and asks you. Auto: it decides review rounds, proof gaps and routine asks alone, and brings each pull request to your merge card. Full: it decides everything, merges, and reports once at the end. You switch a thread's mode yourself with the words \"mode supervised\", \"mode auto\" or \"mode full\". Leave it empty to follow pull-requests.autonomy.",
+      "type": "choice",
+      "optional": true,
+      "ask": "never",
+      "choices": [
+        {
+          "value": "supervised",
+          "label": "Supervised"
+        },
+        {
+          "value": "auto",
+          "label": "Auto"
+        },
+        {
+          "value": "full",
+          "label": "Full"
+        }
+      ]
+    },
+    {
+      "key": "pull-requests.repoModes",
+      "question": "Which repositories start their threads in another mode than pull-requests.mode, as owner/name=mode pairs separated by commas, such as you/tools=full? owner/* covers an owner's repositories. A mode you grant in a thread still wins.",
+      "type": "string",
+      "optional": true,
+      "ask": "never"
+    },
+    {
       "key": "pull-requests.autonomy",
-      "question": "When an agent may decide a review round or a skipped proof alone, should it ask you each time, or decide and show you one table at the end?",
+      "question": "The older form of pull-requests.mode: ask is mode supervised and end is mode auto. When an agent may decide a review round or a skipped proof alone, should it ask you each time, or decide and show you one table at the end?",
       "type": "choice",
       "default": "ask",
       "ask": "never",
@@ -224,13 +255,15 @@
         "gh"
       ],
       "settings": [
+        "pull-requests.mode",
+        "pull-requests.repoModes",
         "pull-requests.freeReviews",
         "pull-requests.reviewCeiling",
         "pull-requests.reviewTimeoutMinutes",
         "pull-requests.panelSlots",
         "pull-requests.triage"
       ],
-      "sentence": "Every fix or feature ends as a proven, reviewed draft pull request that you mark ready yourself."
+      "sentence": "Every fix or feature ends as a proven, reviewed pull request, taken as far as the thread's mode allows: supervised asks you before each decision, auto brings it to your merge card, and full merges it."
     },
     {
       "id": "pr-care",
@@ -345,6 +378,11 @@
       "eval",
       "review-start",
       "review-finish"
+    ],
+    "mode": [
+      "help",
+      "show",
+      "set"
     ],
     "decision": [
       "help",

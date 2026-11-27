@@ -3,6 +3,7 @@ import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Decision, LedgerEvent } from "../pull-requests/lib/decision-ledger.ts";
+import type { Mode } from "../pull-requests/lib/mode.ts";
 import { tempDirs } from "../../src/testing/git.ts";
 import { devbox, engineSource, resolveEngine, skillSources } from "../../src/testing/packs.ts";
 import { gateRunDirectory, startGateRun, writeJson } from "../pull-requests/lib/proof.ts";
@@ -500,15 +501,17 @@ describe("the gate pass each layer needs", () => {
     expect(await risk(one(9), gate({ ledger: [gatePass(9, head, false), gatePass(9, head)] }))).toContain("has not passed");
   });
 
-  test("a pass from while autonomy was end counts only while it is still end, wherever it was recorded", async () => {
+  test("a pass from while the mode decided alone counts only while it still does, wherever it was recorded", async () => {
     const onEnd: LedgerEvent = { ...gatePass(9, head), onEnd: true } as LedgerEvent;
-    const localOnEnd = (decidesAll: boolean): GateIO => ({ ...gate(), localGate: async () => ({ passed: true, at: localAt, onEnd: true }), decidesAll: () => decidesAll });
-    expect(await risk(one(9), { ...gate({ ledger: [onEnd] }), decidesAll: () => true })).toBeUndefined();
-    expect(await risk(one(9), localOnEnd(true))).toBeUndefined();
-    for (const io of [{ ...gate({ ledger: [onEnd] }), decidesAll: () => false }, gate({ ledger: [onEnd] }), localOnEnd(false)]) {
-      expect(await risk(one(9), io)).toContain("nor a pass from while pull-requests.autonomy was end once it is ask again");
+    const inMode = (mode: Mode) => async () => mode;
+    const localOnEnd = (mode: Mode): GateIO => ({ ...gate(), localGate: async () => ({ passed: true, at: localAt, onEnd: true }), mode: inMode(mode) });
+    expect(await risk(one(9), { ...gate({ ledger: [onEnd] }), mode: inMode("auto") })).toBeUndefined();
+    expect(await risk(one(9), { ...gate({ ledger: [onEnd] }), mode: inMode("full") })).toBeUndefined();
+    expect(await risk(one(9), localOnEnd("auto"))).toBeUndefined();
+    for (const io of [{ ...gate({ ledger: [onEnd] }), mode: inMode("supervised") }, gate({ ledger: [onEnd] }), localOnEnd("supervised")]) {
+      expect(await risk(one(9), io)).toContain("nor a pass from while the mode let the agent decide alone, auto or full, once it is supervised again");
     }
-    expect(await risk(one(9), { ...gate({ ledger: [onEnd, gatePass(9, head, true, "2026-11-16T09:00:00Z")] }), decidesAll: () => false })).toBeUndefined();
+    expect(await risk(one(9), { ...gate({ ledger: [onEnd, gatePass(9, head, true, "2026-11-16T09:00:00Z")] }), mode: inMode("supervised") })).toBeUndefined();
   });
 
   test("the top layer of a stack needs every open layer below it to pass at its own head", async () => {
@@ -660,6 +663,16 @@ describe("the PreToolUse hook", () => {
     const merge = (ledger: LedgerEvent[]) => mergeGate(call("gh pr merge 9 --repo own/tooling"), { home: homeWith({ "guards.merge-gate-exempt": "own/*" }), env: {}, gate: gate({ ledger }), intent: io });
     expect(await merge([gap])).toBeDefined();
     expect(await merge([gap, incident])).toBeUndefined();
+  });
+
+  test("a thread in mode full merges a head with a gap an agent accepted on its own decision, and only in mode full", async () => {
+    const gap: LedgerEvent = { type: "decide", decision: { id: "d-agent", at: "2026-11-16T08:00:00Z", class: "proof-gap", mark: "🤖", question: "Accept the live-run gap? example/product#9: no sandbox", answer: "Accept the gap", rejected: "Keep the gap open", reason: "x", scope: { prs: ["example/product#9"], kinds: ["live-run"] }, effect: "accept", where: { thread: "t", machine: "hub" } } };
+    const passed: LedgerEvent = { type: "gate", repository: "example/product", pr: 9, commit: head, passed: true, machine: "box-2", at: "2026-11-16T09:00:00Z", agentGaps: ["d-agent"], seenGaps: ["d-agent"] };
+    const merge = (mode: Mode, exempt = "") => mergeGate(call("gh pr merge 9 --repo example/product"), { home: homeWith({ "guards.merge-gate-exempt": exempt }), env: {}, gate: { ...gate({ ledger: [gap, passed] }), mode: async () => mode }, intent: io });
+    expect(await merge("full")).toBeUndefined();
+    expect(await merge("full", "example/*")).toBeUndefined();
+    for (const mode of ["auto", "supervised"] as const) expect((await merge(mode))?.hookSpecificOutput.permissionDecisionReason).toContain("an agent accepted proof gaps of example/product#9");
+    expect((await mergeGate(call("gh pr merge 9 --repo example/product"), { home: homeWith({}), env: {}, gate: { ...gate(), mode: async () => "full" as const }, intent: io }))?.hookSpecificOutput.permissionDecisionReason).toContain("has not passed");
   });
 
   test("in an exempt repository, a ledger the hook cannot read refuses the merge, since a gap an agent accepted may hold it", async () => {
