@@ -126,6 +126,7 @@ const builtAtRunTime = /[$`]/;
 const runTimeMark = "\u0000";
 const isRunTime = (value: string) => value.endsWith(runTimeMark);
 const anonymousRead = /^\s*(?:query\s*)?\{/;
+const ghPlaceholder = /\{(?:owner|repo|branch)\}/;
 const unreadByTrunk = /^repos\/[\w.-]+\/[\w.-]+\/(?:pulls\/(?:\d+\/comments(?:\/\d+\/replies)?|comments\/\d+)|stacks)$/;
 const graphqlCall = /(?<!\w)(?:(?<=(?:^|\})[\s,]*)(mutation|query|subscription)[\s,]+)?([A-Za-z_]\w*)[\s,]*\(/g;
 const postingField = (name: string) => (/^(?:add|update|submit)/.test(name) && /Comment|Review/.test(name)) || /^update(?:PullRequest|Issue)$/.test(name);
@@ -172,7 +173,7 @@ function runTimeFields(fields: string[], graphql: boolean, bodyFromInput: boolea
   if (bodyFromInput) return false;
   if (!graphql) return built.some((field) => named(field, "body"));
   const queries = fields.filter((field) => key(field) === "query").map((field) => field.slice("query=".length)).map((query) => query.startsWith("@") ? readQuery(query.slice(1)) : query);
-  const quiet = queries.length > 0 && queries.every((query) => query !== undefined && !postsText(query));
+  const quiet = queries.length > 0 && queries.every((query) => query !== undefined && !ghPlaceholder.test(query) && !postsText(query));
   const shownRead = (field: string) => key(field) === "query" && anonymousRead.test(field.slice("query=".length));
   return built.some((field) => named(field, "query") && !shownRead(field)) || (built.length > 0 && !quiet);
 }

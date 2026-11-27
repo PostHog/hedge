@@ -238,6 +238,7 @@ describe("which calls enqueue or merge", () => {
     ["gh api -X PATCH repos/example/product/pulls/7 --input \"$F\"", unreadPayloadReason],
     ["gh api graphql -f query='{ viewer { login } }' -f \"$KEY=x{ a }\"", graphqlReason],
     ["gh api graphql -f Query='{ viewer { login } }' -f b=\"$B\"", graphqlReason],
+    ["gh api graphql -F query='mutation($b: String!) { {repo}(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
     ["gh api repos/example/product/pulls/7/comments/1/replies$S -f body=\"$B\"", unreadPayloadReason],
     ["printf x | xargs gh api repos/example/product/pulls/7/comments/1/replies -f body=", unreadPayloadReason],
     ["gh api graphql -f 'query=mutation($b: String!) { query addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
