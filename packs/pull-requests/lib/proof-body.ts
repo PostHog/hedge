@@ -3,46 +3,72 @@ import { riskCalloutOf } from "./decision-ledger.ts";
 export const bodyWordCap = 800;
 export const calloutBulletCap = 6;
 
-const receipt = /<!-- (fleet|hedge)-proof-receipt\b[\s\S]*?<!-- \/(fleet|hedge)-proof-receipt -->/g;
+const pictureMark = "\u0001";
+const codeOpen = "\u0002";
+const codeClose = "\u0003";
+const rawOpen = "\u0004";
+const rawClose = "\u0005";
+const rawChunk = new RegExp(`${rawOpen}([^${rawClose}]*)${rawClose}`, "g");
 const templateLine = /^[ \t]*[-*] (\[[ xX]\] .*|.*<!-- release-status:.*)$/gm;
-const preformatted = /<pre\b[\s\S]*?<\/pre>/g;
+const receiptMarker = /^<!-- \/?(fleet|hedge)-proof-receipt\b/;
+const media = /^<(img|video)\b/i;
 
-const inline = /<\/?(a|b|code|del|em|i|s|span|strong|sub|sup)\b[^>]*>/g;
+type Shape = { text: string; visible: string; topLevelItems: number };
 
-const rendered = (markdown: string) => Bun.markdown.html(markdown).replace(receipt, "\n").replace(/<!--[\s\S]*?-->/g, "\n");
-
-function writtenWords(html: string) {
-  const text = html.replace(preformatted, "\n").replace(inline, "").replace(/<[^>]*>/g, " ").replace(/&[#\w]+;/g, "&");
-  return text.split(/\s+/).filter((word) => /[\p{L}\p{N}]/u.test(word)).length;
+function shapeOf(markdown: string): Shape {
+  let inReceipt = false;
+  let closingsAhead = markdown.match(/<!-- \/(fleet|hedge)-proof-receipt -->/g)?.length ?? 0;
+  let afterRollout = false;
+  let topLevelItems = 0;
+  const kept = (text: string) => inReceipt ? "" : text;
+  const block = (children: string) => kept(`${children}\n\n`);
+  const rendered = Bun.markdown.render(markdown, {
+    text: (written: string) => /^<[\s\S]*>$/.test(written) ? `${rawOpen}${written}${rawClose}` : kept(written),
+    html: (children: string) => {
+      const raw = children.replace(rawChunk, "$1").trim();
+      if (receiptMarker.test(raw)) {
+        const closing = raw.startsWith("<!-- /");
+        if (closing) closingsAhead -= 1;
+        inReceipt = !closing && closingsAhead > 0;
+        return "\n\n";
+      }
+      return kept(`${media.test(raw) ? pictureMark : ""}\n\n`);
+    },
+    codespan: (children: string) => kept(`${codeOpen}${children.replace(rawChunk, "$1")}${codeClose}`),
+    code: (_children: string, meta?: { language?: string }) => kept(/^mermaid\b/.test(meta?.language ?? "") ? `${pictureMark}\n\n` : "\n\n"),
+    image: () => kept(pictureMark),
+    heading: (children: string) => {
+      if (!inReceipt && /^Rollout\b/i.test(children.trim())) afterRollout = true;
+      return block(children);
+    },
+    listItem: (children: string, meta?: { depth?: number }) => {
+      if (!inReceipt && !afterRollout && meta?.depth === 0) topLevelItems += 1;
+      return kept(`${children}\n`);
+    },
+    paragraph: block,
+    th: (children: string) => kept(` ${children} `),
+    td: (children: string) => kept(` ${children} `),
+    tr: (children: string) => kept(`${children}\n`),
+    hr: () => "\n\n",
+  });
+  const text = rendered.replace(rawChunk, (_chunk, raw: string) => media.test(raw) ? pictureMark : " ");
+  const visible = text.replace(new RegExp(`${codeOpen}[^${codeClose}]*${codeClose}`, "g"), " ");
+  return { text: text.replaceAll(codeOpen, "").replaceAll(codeClose, "").replaceAll(pictureMark, " "), visible, topLevelItems };
 }
 
-function pictured(html: string) {
-  if (/<pre><code class="language-mermaid"/.test(html)) return true;
-  const visible = html.replace(preformatted, "\n").replace(/<code>[\s\S]*?<\/code>/g, "");
-  return /<(img|video)\b/i.test(visible)
-    || /(^|[\s>"])https:\/\/github\.com\/user-attachments\/assets\/[\w-]+/m.test(visible)
-    || /<(p|li)>No picture:[ \t]*[^<\s]/.test(visible.replace(inline, ""));
-}
+const writtenWords = (text: string) => text.split(/\s+/).filter((word) => /[\p{L}\p{N}]/u.test(word)).length;
 
-function topLevelItems(html: string) {
-  const shown = html.replace(inline, "");
-  const rollout = shown.search(/<h[1-6]>Rollout\b/i);
-  let depth = 0;
-  let items = 0;
-  for (const [, close, tag] of (rollout === -1 ? shown : shown.slice(0, rollout)).matchAll(/<(\/?)(ul|ol|li)\b/g)) {
-    if (tag !== "li") depth += close ? -1 : 1;
-    else if (!close && depth === 1) items += 1;
-  }
-  return items;
-}
+const pictured = ({ visible }: Shape) => visible.includes(pictureMark)
+  || /(^|\s)https:\/\/github\.com\/user-attachments\/assets\/[\w-]+/m.test(visible)
+  || /^[ \t]*No picture:[ \t]*\S/m.test(visible);
 
 export function bodyProblems(body: string): string[] {
   const callout = riskCalloutOf(body);
   if (callout === undefined) return [];
-  const words = writtenWords(rendered(body.replace(templateLine, "\n")));
-  const bullets = topLevelItems(rendered(callout));
+  const words = writtenWords(shapeOf(body.replace(templateLine, "\n")).text);
+  const bullets = shapeOf(callout).topLevelItems;
   return [
-    ...pictured(rendered(body)) ? [] : ["body: the description has no picture. Fill the picture slot of pr-description's Changes section: a Mermaid diagram, a screenshot or video, or a `No picture: <why>.` line"],
+    ...pictured(shapeOf(body)) ? [] : ["body: the description has no picture. Fill the picture slot of pr-description's Changes section: a Mermaid diagram, a screenshot or video, or a `No picture: <why>.` line"],
     ...words > bodyWordCap ? [`body: the description holds ${words} written words, over the ${bodyWordCap}-word cap of pr-description. The receipt, code, diagrams, template lines and comments are not counted. Fold it as pr-description's word budget says`] : [],
     ...bullets > calloutBulletCap ? [`body: the merge-risk callout has ${bullets} bullets, over the cap of ${calloutBulletCap} with Switch-off and Tier. Move the other uncovered rows to Known issues`] : [],
   ];

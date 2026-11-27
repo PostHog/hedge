@@ -70,6 +70,10 @@ test("the check follows GitHub's rendering at the edges: a quote ends its fence,
   expect(bodyProblems(`No picture: copy.\n${callout(["> ```", "> ## Rollout", "> ```", ...bullets(7)])}`)).toEqual([overBullets(7)]);
 });
 
+test("an opening receipt marker with no closing one hides nothing", () => {
+  expect(bodyProblems(`<!-- hedge-proof-receipt head=abc -->\nan unclosed block\n\nNo picture: copy.\n${callout(bullets(3))}`)).toEqual([]);
+});
+
 test("an image reference without its definition renders as text, so it is no picture", () => {
   expect(bodyProblems(`![After][after]\n\n${callout(bullets(3))}`)).toEqual([noPicture]);
 });
