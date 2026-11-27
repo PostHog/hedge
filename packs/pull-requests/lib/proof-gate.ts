@@ -180,6 +180,7 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
     const open = weighedGap && { ...weighedGap, acceptance: undefined, line: `not accepted (the judge budget is spent, so no judge checks the condition of ${spentUnchecked.map(conditionName).join(" or ")})` };
     return { code: 1, lines, covered: "", judge: verdict(lines, open && judgeGapProof(head.commit, open)), reason: line };
   }
+  if (outcome.spent && known.shape !== undefined) return { code: 1, lines: outcome.lines, covered: "", judge: verdict(outcome.lines), reason };
   const gap = weighedGap && withBrokenConditions(weighedGap, outcome.broken);
   const unchecked = outcome.held ? [...new Set(known.conditions.map(({ id }) => id))] : [];
   if (gap?.acceptance && unchecked.length) {

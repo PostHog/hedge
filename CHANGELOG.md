@@ -30,7 +30,9 @@
   shape question on that run, so a spent budget, an unreadable answer, a
   judge outage, or a prompt the secret guard holds never skips it. A gate
   that fails only on the shape question says to edit the body, not to
-  record a judge gap. Rollout lines are not callout bullets.
+  record a judge gap, and a spent budget on such a PR says that only the
+  user can raise pull-requests.reviewCeiling. The arbiter reads no shape
+  reason. Rollout lines are not callout bullets.
 - The judge's risk question accepts a changed row with an incident, or an
   uncovered row, that the Known issues section names, so the callout can
   stay within its 6 bullets.

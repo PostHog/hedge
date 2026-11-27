@@ -195,7 +195,7 @@ const shapeSection = (body: string, shown: boolean) => `
 Hedge counts ${roughWords(withoutReceipt(body))} words in the body outside fenced code and comments. The count is rough: it includes checklist template lines and link targets, so the written words can be fewer.${shown ? " The body is the one shown above for the risk question." : `\n\n${untrusted("PR body", withoutReceipt(body))}`}
 `;
 
-const fence = /^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[`~]*[ \t]*$/gm;
+const fence = /^ {0,3}(`{3,})[^`\n]*\n[\s\S]*?^ {0,3}\1`*[ \t]*$|^ {0,3}(~{3,})[^\n]*\n[\s\S]*?^ {0,3}\2~*[ \t]*$/gm;
 const roughWords = (body: string) => body.replace(fence, " ").split(/<!--[\s\S]*?-->/).join(" ").split(/\s+/).filter((word) => /[\p{L}\p{N}]/u.test(word)).length;
 
 function parseVerdict(text: string, asked: QuestionName[]): Verdict | undefined {
@@ -235,10 +235,12 @@ const failureReasons = (verdict: Verdict) => [
 
 export type JudgeRecord = { commit: string; model: string; verdict: Verdict; passed: boolean; escalation?: string; judgedAt: string };
 export type JudgeDeps = { ask: (request: ModelRequest) => Promise<ModelAnswer>; model: string; arbiter: Arbiter; directory: string; commit: string; now: Date; failLimit: number; decidesAll?: boolean; serialize: <T>(step: () => Promise<T>) => Promise<T> };
-export type JudgeOutcome = { state: "pass" | "fail" | "unavailable"; lines: string[]; model: string; broken: string[]; held?: true; unchecked?: string[] };
+export type JudgeOutcome = { state: "pass" | "fail" | "unavailable"; lines: string[]; model: string; broken: string[]; held?: true; unchecked?: string[]; spent?: true };
 
 const freeJudgeFails = 2;
-const judgeBudgetSpent = (failed: number, unchecked: string[]) => `judge: budget spent: the judge failed ${failed} times on this PR, as often as pull-requests.reviewCeiling allows, so hedge runs it no more.${unchecked.length ? "" : " End it with a judge gap on HEAD: record hedge proof gap --kind judge --reason <why HEAD holds now>, and have a decision accept it as the judge gap line says"}`;
+const judgeBudgetSpent = (failed: number, unchecked: string[], shape: boolean) => `judge: budget spent: the judge failed ${failed} times on this PR, as often as pull-requests.reviewCeiling allows, so hedge runs it no more.${unchecked.length ? ""
+  : shape ? " No judge gap passes an open PR with a merge-risk callout while no judge checks its shape question. Only the user can raise pull-requests.reviewCeiling, so the judge runs again"
+  : " End it with a judge gap on HEAD: record hedge proof gap --kind judge --reason <why HEAD holds now>, and have a decision accept it as the judge gap line says"}`;
 const arbiterInstructions = `You decide if an agent may keep trying to pass a judge, or must ask the user. Below are the reasons a judge failed one pull request on each run, oldest first.
 
 Answer ESCALATE only when the same failure comes back after the author answered it, or a later verdict contradicts an earlier one. In all other cases answer CONTINUE.
@@ -268,7 +270,7 @@ export async function judge(input: JudgeInput, deps: JudgeDeps): Promise<JudgeOu
   });
   if ("spent" in record) {
     const unchecked = [...new Set((input.conditions ?? []).map(({ id }) => id))];
-    return { state: "fail", lines: [judgeBudgetSpent(record.spent, unchecked)], model: deps.model, broken: [], unchecked };
+    return { state: "fail", lines: [judgeBudgetSpent(record.spent, unchecked, input.shape !== undefined)], model: deps.model, broken: [], unchecked, spent: true };
   }
   if ("cause" in record) return { state: "unavailable", lines: [`judge: unavailable (${record.cause})`], model: deps.model, broken: [], ...record.held ? { held: true } : {} };
   const escalation = !record.escalation ? []
@@ -292,7 +294,7 @@ async function askJudge(prompt: string, images: string[], readable: string[], cw
   if (record.passed || !spendsBudget(record)) return record;
   const earlier = await failedRecords(deps.directory);
   if (earlier.length < freeJudgeFails) return record;
-  const history = [...earlier, record].map((failed, index) => `## Run ${index + 1}, ${failed.commit}\n\n${failureReasons(failed.verdict).join("\n")}`);
+  const history = [...earlier, record].map((failed, index) => `## Run ${index + 1}, ${failed.commit}\n\n${failureReasons({ ...failed.verdict, shape: undefined }).join("\n")}`);
   const decision = await deps.arbiter([arbiterInstructions, ...history].join("\n\n"));
   if (decision.verdict === "continue") return record;
   return { ...record, escalation: decision.verdict === "escalate" ? decision.reason : `the arbiter gave no verdict (${decision.reason})` };

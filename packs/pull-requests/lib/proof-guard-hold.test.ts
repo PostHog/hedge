@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { renderSection } from "./proof-receipt.ts";
 import { renderPage } from "./proof-receipt-page.ts";
 import type { ProofSummary } from "./proof.ts";
-import { acceptGap, cleanFixtures, checkout, fakeModel, reviewHead, verdict, type Checkout } from "./proof-testing.ts";
+import { acceptGap, cleanFixtures, checkout, fakeModel, graded, reviewHead, verdict, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
 
@@ -136,6 +136,21 @@ test("an accepted judge gap still passes a conditional gap when the judge is una
   expect(gate.output).toContain("judge: unavailable (empty answer)");
   expect(gate.code).toBe(0);
   expect(judge.prompts()).toHaveLength(1);
+});
+
+test("an accepted judge gap does not pass an open PR with a callout whose body the secret guard holds, even without the merge-risk skill", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  const judge = fakeModel(pr, "JUDGE", verdict());
+  pr.pullRequestState({ body: `Removed ${token} from the log.\n\n${graded("non-critical")}` });
+  await pr.hedge("gap", "--kind", "judge", "--reason", "The judge cannot read the body");
+  pr.chooseGap("judge", "The judge cannot read the body");
+  await acceptGap(pr, "judge");
+  const gate = await pr.hedge("gate");
+  expect([gate.code, gate.output.includes("judge: unavailable (the secret guard matches this prompt: GitHub token)"), gate.output.includes("judge gap: a judge gap passes the gate only once the judge passes the shape question on this body")]).toEqual([1, true, true]);
+  expect([judge.prompts().length, leaked(pr, gate.output, token)]).toEqual([0, false]);
 });
 
 test("an accepted judge gap still passes a gate whose held judge had no condition to check", async () => {
