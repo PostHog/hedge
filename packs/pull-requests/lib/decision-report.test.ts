@@ -276,6 +276,22 @@ test("the report keeps the judge's verdict through a receipt refresh, and drops 
   }
 });
 
+test("the report keys a gate pass on the body as GitHub renders it: a blank line that changes nothing keeps it, and one that turns a picture into code drops it", async () => {
+  const pr = await checkout();
+  const head = await pr.commit("feature.txt", "greet new members\n");
+  const pictured = "Text.\n    ![shot](https://example.com/a.png)\n";
+  pr.pullRequestState({ body: `${pictured}## Notes\n\nNone.\n${graded("non-critical")}` });
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  expect((await pr.hedge("gate")).code).toBe(0);
+
+  pr.pullRequestState({ body: `${pictured}\n\n## Notes\n\n\nNone.\n${graded("non-critical")}` });
+  expect((await reportOf(pr)).stillYours).toEqual(["- Merge example/product#42: its proofs pass, and it waits on your merge word."]);
+
+  pr.pullRequestState({ body: `${pictured.replace("\n    ", "\n\n    ")}## Notes\n\nNone.\n${graded("non-critical")}` });
+  expect(await reportOf(pr)).toEqual(notGated(head.slice(0, 7)));
+});
+
 test("the report keeps a gate pass through any body edit when the body holds no merge-risk callout, since the judge never read it", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "greet new members\n");

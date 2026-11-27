@@ -15,7 +15,7 @@ export type JudgeInput = {
   rubric: string; references: string[]; risk?: RiskCheck;
   conditions?: { id: string; kind: string; condition: string }[]; criticalPaths?: string; testOnly?: boolean;
 };
-export type RiskCheck = { rubric: string; body: string };
+export type RiskCheck = { rubric: string; body: string; merged?: boolean };
 
 const ratings = ["high", "medium", "low"] as const;
 type Question = { verdict: "pass" | "fail"; reason: string; citations: string[] };
@@ -185,9 +185,9 @@ ${risk.rubric}
 
 ## PR body, with its merge-risk callout
 
-Hedge counts ${roughWords(withoutReceipt(risk.body))} words in the body outside fenced code and comments. The count is rough: it includes checklist template lines and link targets, so the written words can be fewer.
+${risk.merged ? "GitHub reports this PR merged, so pass the rules of pr-description's shape: the body was written before it merged." : `Hedge counts ${roughWords(withoutReceipt(risk.body))} words in the body outside fenced code and comments. The count is rough: it includes checklist template lines and link targets, so the written words can be fewer.`}
 
-${untrusted("PR body", capped(withoutReceipt(risk.body), evidenceCap))}
+${untrusted("PR body", withoutReceipt(risk.body))}
 `;
 
 const fence = /^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[^\n]*$/gm;

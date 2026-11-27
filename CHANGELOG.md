@@ -19,12 +19,14 @@
   line with a reason), more than 800 written words, or a callout with more
   than 6 top-level bullets, Switch-off and Tier included. Hedge gives the
   judge a rough word count of the body outside the receipt, fenced code
-  and comments. A body without a merge-risk callout is not checked.
+  and comments. The judge reads the body whole. A body without a
+  merge-risk callout, or a PR that GitHub reports merged, is not checked.
 - The judge's risk question accepts a changed row with an incident, or an
   uncovered row, that the Known issues section names, so the callout can
   stay within its 6 bullets.
-- A saved gate pass now holds the whole description the judge read, without
-  the receipt. Any other edit of a body with a callout makes
+- A saved gate pass now holds the whole description the judge read, as
+  GitHub renders it, without the receipt. Any other edit that changes how a
+  body with a callout renders makes
   `hedge decision report` and `hedge proof receipt` stop using the pass, so
   run `hedge proof gate` again. After the upgrade, passes saved before it
   do not match, so open PRs run the gate once more.

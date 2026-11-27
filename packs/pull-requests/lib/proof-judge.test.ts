@@ -644,6 +644,25 @@ test("the risk question holds pr-description's body rules, and hedge gives the j
   expect(prompt).toContain("Hedge counts 17 words in the body outside fenced code and comments.");
 });
 
+test("the judge reads a long body whole, and passes the shape rules once GitHub reports the PR merged", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  installRiskSkill(pr);
+  const judge = fakeModel(pr, "JUDGE", verdict({ risk: { verdict: "pass", reason: "One text file changes: low, two-way", citations: [] } }));
+  const body = `\`\`\`\n${"x".repeat(30_000)}\n\`\`\`\n\nNo picture: the tail of a long body.\n\n${graded("non-critical")}`;
+  pr.pullRequestState({ body });
+  await pr.hedge("gate");
+  expect(judge.prompts().at(-1)).toContain("No picture: the tail of a long body.");
+  expect(judge.prompts().at(-1)).not.toContain("GitHub reports this PR merged");
+
+  pr.pullRequestState({ body: graded("non-critical"), merged: true });
+  await pr.hedge("gate", "--landed");
+  expect(judge.prompts().at(-1)).toContain("GitHub reports this PR merged, so pass the rules of pr-description's shape");
+  expect(judge.prompts().at(-1)).not.toContain("Hedge counts");
+});
+
 test("the judge reads the body the gate first read and saved its pass for, even when the body changes during the gate", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "greet new members\n");
