@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fold, gateOverride, sameThread, live, mergeCardChoice, mergeCardCondition, namesHead, namesId, overrideChoice, hubLedger, prRef, type DecisionState, type Env, type LedgerEvent } from "../../pull-requests/lib/decision-ledger.ts";
 import { isTextList, lastGateResult, latestGateResult, type GateResult } from "../../pull-requests/lib/proof.ts";
-import { chainOf, resolveMode, t3Threads, type Mode } from "../../pull-requests/lib/mode.ts";
+import { chainOf, resolveMode, t3Threads, type Lineage, type Mode } from "../../pull-requests/lib/mode.ts";
 import { normalized } from "../../pull-requests/lib/proof-answers.ts";
 import { endpointOf, fieldName, ghGroups, inOrder, parseGh, values, type Gh } from "./gh.ts";
 import { githubSlug } from "./git.ts";
@@ -536,7 +536,7 @@ export async function beforeDeadline(check: () => Promise<string | undefined>, d
 
 export function realGateIO(home: string, env: Env): GateIO {
   const thread = env.T3CODE_THREAD_ID || undefined;
-  let chain: Promise<string[]> | undefined;
+  let chain: Promise<Lineage> | undefined;
   const api = async (path: string) => {
     const child = Bun.spawn(["gh", "api", "-i", path], { stdout: "pipe", stderr: "pipe", timeout: 8_000, env: { ...process.env, ...env, GH_PAGER: "cat" } });
     const [stdout, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);

@@ -20,7 +20,7 @@ Build the work as `full-stop` says, with these changes:
 - Ask before each review round past the first, each proof gap, each design choice, and each hold or park. `hedge proof` tells you to ask the user; record their answer with `hedge decision record --mark 👤` or `--mark 👍`.
 - Keep each pull request a draft. Mark it ready, ask for a stamp, or merge only on the user's word for that pull request.
 
-When the user lets you decide a part, such as "decide the review rounds yourself", decide only that part, and only for that task. When they set another mode for a sub task, record it with `hedge mode set <mode> --for <the sub task's thread>`, and that sub task follows its own mode.
+When the user lets you decide a part, such as "decide the review rounds yourself", decide only that part, and only for that task. `hedge decision record --mark 🤖` still accepts such a decision where the `Tier:` line lets it, as `standing-rules.md` says; it never decides for you which parts the user let go. When they set another mode for a sub task, record it with `hedge mode set <mode> --for <the sub task's thread>`, and that sub task follows its own mode.
 
 ## Last line
 

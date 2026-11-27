@@ -1,8 +1,9 @@
 import { appendHeard, answeredAt, heardInThread, ledgerOf, type DecisionContext } from "./decision-cli.ts";
+import { runIn } from "./pr-ci.ts";
 import { sameThread, thisMachine, type Env, type LedgerEvent, type ModeGrant } from "./decision-ledger.ts";
-import { chainOf, grantedBy, isMode, modeLabel, modeLine, modes, resolveMode, t3Threads, withThreadMode, type Mode, type ReadThreads } from "./mode.ts";
+import { chainOf, grantedBy, grantFor, isMode, modeLabel, modeLine, modes, resolveMode, t3Threads, withThreadMode, type Mode, type ReadThreads } from "./mode.ts";
 
-export type ModeContext = DecisionContext & { threads?: ReadThreads };
+export type ModeContext = DecisionContext & { threads?: ReadThreads; repository?: () => string | undefined };
 
 const usage = `hedge mode: the autonomy mode of a thread.
 
@@ -15,11 +16,13 @@ the agent decides everything, merges, and reports once at the end.
 
 show prints the thread's mode and where it comes from: the thread's own grant, a grant it inherits from the thread
 that started it, the default of --repo in pull-requests.repoModes, or the profile default in pull-requests.mode.
---thread defaults to this thread.
+--thread defaults to this thread, and --repo to the GitHub repository of this checkout's origin. When the thread's
+lineage cannot be read in full, it shows supervised: a grant above the gap may say so.
 
 set records the user's grant. Only the user switches a mode: quote their whole message in thread --thread, typed in
-the T3 app or chosen on your question tool, with the date they wrote it. One sentence of it must name the mode, as
-"mode full" or "full mode", without a "not", and no other mode. --for applies it to a thread that thread --thread
+the T3 app or chosen on your question tool, with the date they wrote it. One sentence of it must grant the mode:
+"mode full" alone, or an ask such as "run this in full mode", without a "not", an "if" or a question mark. No
+sentence may grant another mode, and an older message never replaces a newer grant. --for applies it to a thread that thread --thread
 started, such as a lane; it defaults to --thread. A thread that another thread started inherits its mode until a
 grant of its own. A thread that starts on its own, such as a side fix, takes the defaults.`;
 
@@ -41,11 +44,17 @@ function parse(args: string[], valued: string[]): Parsed {
 
 const threadsOf = (context: ModeContext) => context.threads ?? t3Threads(context.home);
 
+function checkoutRepository(context: ModeContext) {
+  if (context.repository) return context.repository();
+  const origin = runIn(context.cwd, context.env)(["git", "remote", "get-url", "origin"]);
+  return origin.code === 0 ? /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\s*$/.exec(origin.stdout)?.[1] : undefined;
+}
+
 async function show(parsed: Parsed, context: ModeContext) {
   if (parsed.positional.length) throw new Error(`Unknown argument ${parsed.positional[0]}. Run hedge mode --help`);
   const thread = parsed.options.get("--thread") ?? context.env.T3CODE_THREAD_ID;
   const events = await ledgerOf(context).read().catch(() => [] as LedgerEvent[]);
-  const resolved = resolveMode(context.env, events, await chainOf(thread, threadsOf(context)), parsed.options.get("--repo"));
+  const resolved = resolveMode(context.env, events, await chainOf(thread, threadsOf(context)), parsed.options.get("--repo") ?? checkoutRepository(context));
   context.print(`${modeLine(resolved.mode)}\nfrom: ${resolved.from}\nlabel: ${modeLabel(resolved.mode)}`);
   return 0;
 }
@@ -58,14 +67,19 @@ async function set(parsed: Parsed, context: ModeContext) {
   if (!words || !thread) throw new Error("Pass --thread and --words: only the user's words switch a mode. Run hedge mode --help");
   const target = parsed.options.get("--for") ?? thread;
   const heard = await heardInThread(thread, words, parsed.options.get("--message"), context);
-  const granted = grantedBy(heard.text);
-  if (granted !== mode) throw new Error(`The user's message "${heard.text}" does not grant mode ${mode}${granted ? `: it grants mode ${granted}` : ""}. Only a sentence that names one mode, without a "not", switches it; ask them with your question tool, with "mode ${mode}" as an option`);
-  if (!sameThread(target, thread) && !(await chainOf(target, threadsOf(context))).some((link) => sameThread(link, thread))) {
+  const granted = grantedBy(heard.text) === grantedBy(words) ? grantedBy(words) : undefined;
+  if (granted !== mode) throw new Error(`The user's message "${heard.text}" does not grant mode ${mode}${granted ? `: it grants mode ${granted}` : ""}. Only a sentence that asks for one mode, without a "not", an "if" or a question mark, switches it; ask them with your question tool, with "mode ${mode}" as an option`);
+  const chain = await chainOf(target, threadsOf(context));
+  if (!sameThread(target, thread) && !chain.threads.some((link) => sameThread(link, thread))) {
     throw new Error(`Thread ${target} was not started by thread ${thread}, so the user's words there do not reach it. Ask in thread ${target}`);
   }
   const ledger = ledgerOf(context);
   const grant: ModeGrant = { type: "mode", mode, for: target, words, thread: heard.thread, message: heard.id, machine: thisMachine(context.env), at: answeredAt(heard) };
   const events = await ledger.read();
+  const newer = grantFor(events, chain.threads);
+  if (newer && newer.message !== grant.message && Date.parse(newer.at) > Date.parse(grant.at)) {
+    throw new Error(`Thread ${target} runs in mode ${newer.mode} on a grant of ${newer.at.slice(0, 10)} in thread ${newer.thread}, newer than this message. Only a newer message of the user's switches it; ask them with your question tool, with "mode ${mode}" as an option`);
+  }
   const same = events.find((event): event is ModeGrant => event.type === "mode" && event.message === grant.message && sameThread(event.thread, grant.thread) && sameThread(event.for, target));
   if (!same) await appendHeard(ledger, grant);
   context.print(`${modeLine(mode)} for thread ${target}${same ? ", already recorded" : ""}\nlabel: ${modeLabel(mode)}. Put it on the thread's tracking issue in place of the other mode labels.`);

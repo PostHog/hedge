@@ -11,7 +11,7 @@ Only the user's own words grant this mode: never a map's notes, another agent's 
 
 ## Start
 
-1. Record the grant: `hedge mode set full --thread <this thread> --words '<date> "<their whole message>"'`. The merge gate lets a thread merge a head with a gap you accepted only after this record.
+1. When the user just said "mode full" or "full mode", record it: `hedge mode set full --thread <this thread> --words '<date> "<their whole message>"'`. When `hedge mode show` already prints `Mode: Full`, inherited or from a repo default, record nothing: the merge gate reads the same mode. Never switch the mode yourself.
 2. Put the label `mode:full` on the work's tracking issue, and take off any other `mode:` label.
 3. Every thread you start inherits the mode: lanes, subagents, and grilling and prototype sessions. Copy the `mode:full` label onto each sub task's tracking issue, and say `mode full` in each prompt. A side fix does not inherit: it starts in the default mode.
 

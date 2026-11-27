@@ -16,14 +16,16 @@ export const threadModeKey = "pull-requests.threadMode";
 const legacyAutonomy = "pull-requests.autonomy";
 
 const negation = /\b(not|no|never|don'?t|doesn'?t|won'?t|without|instead of|stop|leave|drop|end)\b/;
-const sentences = (text: string) => normalized(text).split(/[.!?;\n]+/).map((sentence) => sentence.trim()).filter(Boolean);
-const triggers = (sentence: string) => modes.filter((mode) => new RegExp(`\\bmode[\\s:=]+${mode}\\b|\\b${mode} mode\\b`).test(sentence));
+const hypothetical = /\b(if|when|whenever|unless|would|could|should|might|maybe|once|after|before|until|later)\b/;
+const grantVerbs = "run|use|switch|go|work|continue|carry on|proceed|do|start|put|set|move|change|keep";
+const sentences = (text: string) => [...normalized(text).matchAll(/[^.!?;\n]+[.!?;\n]*/g)].map((match) => match[0].trim()).filter(Boolean);
+const named = (mode: Mode) => `(?:mode[\\s:=]+${mode}|${mode} mode)`;
+const grantForm = (mode: Mode) => new RegExp(`^(?:please |ok,? |okay,? |now,? )?(?:${named(mode)}(?!/)(?:,? please)?(?: \\(recommended\\))?|(?:${grantVerbs})\\b[^:"]*\\b${named(mode)}\\b(?!/)[^:"]*)[.!;\\n]*$`);
+const grantsIn = (sentence: string) => sentence.endsWith("?") || negation.test(sentence) || hypothetical.test(sentence) ? [] : modes.filter((mode) => grantForm(mode).test(sentence));
 
 export function grantedBy(text: string): Mode | undefined {
-  const named = new Set(sentences(text).flatMap(triggers));
-  if (named.size !== 1) return undefined;
-  const [mode] = named as Set<Mode>;
-  return sentences(text).some((sentence) => triggers(sentence).includes(mode) && !negation.test(sentence)) ? mode : undefined;
+  const granted = new Set(sentences(text.replace(/^\s*\d{4}-\d{2}-\d{2}\s+/, "")).flatMap(grantsIn));
+  return granted.size === 1 ? [...granted][0] : undefined;
 }
 
 function parsedMode(value: string, from: string): Mode {
@@ -55,19 +57,23 @@ export function configuredMode(env: Env, repository?: string): ResolvedMode {
 
 export const decidesAlone = (env: Env, repository?: string) => configuredMode(env, repository).mode !== "supervised";
 
-export function lineage(threads: ShellThread[], thread: string): string[] {
+export type Lineage = { threads: string[]; complete: boolean };
+
+export function lineage(threads: ShellThread[], thread: string): Lineage {
   const chain: string[] = [];
   let current: ShellThread | undefined = matchThread(threads, thread, (item) => item.id);
-  if (!current) return [thread];
-  while (current && !chain.includes(current.id)) {
+  if (!current) return { threads: [thread], complete: false };
+  while (current) {
+    if (chain.includes(current.id)) return { threads: chain, complete: false };
     chain.push(current.id);
     const parent: string | null | undefined = current.lineage?.parentThreadId;
-    current = parent ? matchThread(threads, parent, (item) => item.id) : undefined;
+    if (!parent) return { threads: chain, complete: true };
+    current = matchThread(threads, parent, (item) => item.id);
   }
-  return chain;
+  return { threads: chain, complete: false };
 }
 
-const isGrant = (event: LedgerEvent): event is ModeGrant => event.type === "mode";
+const isGrant = (event: LedgerEvent): event is ModeGrant => event.type === "mode" && grantedBy(event.words) === event.mode;
 
 export function grantFor(events: LedgerEvent[], chain: string[]): (ModeGrant & { inherited: boolean }) | undefined {
   const grants = events.filter(isGrant);
@@ -78,9 +84,12 @@ export function grantFor(events: LedgerEvent[], chain: string[]): (ModeGrant & {
   return undefined;
 }
 
-export function resolveMode(env: Env, events: LedgerEvent[], chain: string[], repository?: string): ResolvedMode {
-  const grant = grantFor(events, chain);
-  if (!grant) return configuredMode({ ...env, HEDGE_SETTINGS: withoutThreadMode(env) }, repository);
+export function resolveMode(env: Env, events: LedgerEvent[], chain: Lineage, repository?: string): ResolvedMode {
+  const grant = grantFor(events, chain.threads);
+  if (!grant) {
+    const configured = configuredMode({ ...env, HEDGE_SETTINGS: withoutThreadMode(env) }, repository);
+    return chain.complete || configured.mode !== "full" ? configured : { mode: "auto", from: `${configured.from}, held at auto: the thread's lineage could not be read in full, so a grant on a thread above it may be missing` };
+  }
   const said = `${grant.at.slice(0, 10)} in thread ${grant.thread}`;
   return { mode: grant.mode, from: grant.inherited ? `inherited from thread ${grant.for}, granted ${said}` : `granted ${said}` };
 }
@@ -91,10 +100,17 @@ function withoutThreadMode(env: Env) {
   return JSON.stringify(rest);
 }
 
-export function withThreadMode(env: Env, events: LedgerEvent[], chain: string[]): Env {
-  const grant = grantFor(events, chain);
-  const settings = { ...JSON.parse(withoutThreadMode(env) ?? "{}") as Record<string, unknown>, ...grant ? { [threadModeKey]: grant.mode } : {} };
-  return { ...env, HEDGE_SETTINGS: JSON.stringify(settings) };
+const heldAtAuto = (settings: Record<string, unknown>) => ({
+  ...settings,
+  ...String(settings["pull-requests.mode"]).trim().toLowerCase() === "full" ? { "pull-requests.mode": "auto" } : {},
+  ...typeof settings["pull-requests.repoModes"] === "string" ? { "pull-requests.repoModes": settings["pull-requests.repoModes"].replace(/=\s*full\b/gi, "=auto") } : {},
+});
+
+export function withThreadMode(env: Env, events: LedgerEvent[], chain: Lineage): Env {
+  const grant = grantFor(events, chain.threads);
+  const settings = JSON.parse(withoutThreadMode(env) ?? "{}") as Record<string, unknown>;
+  const scoped = grant ? { ...settings, [threadModeKey]: grant.mode } : chain.complete ? settings : heldAtAuto(settings);
+  return { ...env, HEDGE_SETTINGS: JSON.stringify(scoped) };
 }
 
 export type ReadThreads = () => Promise<ShellThread[]>;
@@ -104,7 +120,7 @@ const t3CallMs = 3_000;
 export const t3Threads = (home: string): ReadThreads => () =>
   withT3Session((client) => client.getShell<{ threads: ShellThread[] }>(), { home, ttl: "1m", timeoutMs: t3CallMs, runCli: t3CliRunner({ timeoutMs: t3CallMs }) }).then((shell) => shell.threads);
 
-export async function chainOf(thread: string | undefined, threads: ReadThreads): Promise<string[]> {
-  if (!thread) return [];
-  try { return lineage(await threads(), thread); } catch { return [thread]; }
+export async function chainOf(thread: string | undefined, threads: ReadThreads): Promise<Lineage> {
+  if (!thread) return { threads: [], complete: true };
+  try { return lineage(await threads(), thread); } catch { return { threads: [thread], complete: false }; }
 }
