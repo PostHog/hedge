@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import type { Run } from "./pr-ci.ts";
 import { entries, isScreenshot, saveProof, type ProofIdentity } from "./proof.ts";
 
 export type GitHub = (path: string, body?: unknown, method?: string) => Promise<unknown>;
@@ -19,6 +20,51 @@ export async function publishedUrl(saved: string) {
     if (typeof url === "string") return url;
   }
   return undefined;
+}
+
+const attachedRecord = (saved: string) => `${saved}.pr-attachment${publishedSuffix}`;
+const attachLimit = 50;
+const firstLine = (text: string) => text.trim().split("\n")[0] ?? "";
+const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+async function savedScreenshot(home: string, identity: ProofIdentity, source: string) {
+  if (!isScreenshot(source, await readFile(source))) throw new Error("Publish only screenshots with invented test data");
+  return saveProof(home, identity, source);
+}
+
+function attachedUrls(body: string, saved: string[]) {
+  return new Map(saved.flatMap((path) => {
+    const url = new RegExp(`!\\[${escaped(basename(path))}\\]\\((https://\\S+?)\\)`).exec(body)?.[1];
+    return url ? [[path, url] as const] : [];
+  }));
+}
+
+async function attachBatch(identity: ProofIdentity, saved: string[], gh: Run) {
+  const posted = gh(["gh", "pr", "comment", String(identity.pr), "--repo", identity.repository, "--body", `Proof screenshots of \`${identity.commit.slice(0, 7)}\``, ...saved.flatMap((path) => ["--attach", `${path}#${basename(path)}`])]);
+  const comment = /\/pull\/\d+#issuecomment-(\d+)/.exec(posted.stdout)?.[1];
+  if (!comment) throw new Error(`gh could not attach the screenshots to ${identity.repository}#${identity.pr}: ${firstLine(posted.stderr) || "gh named no comment"}. When gh cannot attach to this PR, publish to a public repository of your own with --asset-repo <owner/fork>`);
+  const read = gh(["gh", "api", `repos/${identity.repository}/issues/comments/${comment}`]);
+  if (read.code !== 0) throw new Error(`Cannot read back the comment gh posted on ${identity.repository}#${identity.pr}: ${firstLine(read.stderr)}. Run hedge proof publish again`);
+  const urls = attachedUrls((JSON.parse(read.stdout) as { body?: string }).body ?? "", saved);
+  for (const [path, url] of urls) await writeFile(attachedRecord(path), JSON.stringify({ ...identity, comment: Number(comment), url }) + "\n", { mode: 0o600 });
+  const failed = saved.filter((path) => !urls.has(path));
+  if (failed.length) throw new Error(`gh did not attach ${failed.map((path) => basename(path)).join(", ")}: ${firstLine(posted.stderr) || "no link in its comment"}. Run hedge proof publish again with the same screenshots`);
+  return urls;
+}
+
+export async function attachProofs(home: string, identity: ProofIdentity, sources: string[], gh: Run): Promise<string[]> {
+  const saved: string[] = [];
+  for (const source of sources) saved.push(await savedScreenshot(home, identity, source));
+  const urls = new Map<string, string>();
+  for (const path of saved) {
+    const url = (await cached(attachedRecord(path)))?.url;
+    if (typeof url === "string") urls.set(path, url);
+  }
+  const missing = [...new Set(saved)].filter((path) => !urls.has(path));
+  for (let start = 0; start < missing.length; start += attachLimit) {
+    for (const [path, url] of await attachBatch(identity, missing.slice(start, start + attachLimit), gh)) urls.set(path, url);
+  }
+  return saved.map((path) => urls.get(path)!);
 }
 
 export async function publishProof(home: string, identity: ProofIdentity, source: string, repository: string, github: GitHub, recheck = false): Promise<string> {

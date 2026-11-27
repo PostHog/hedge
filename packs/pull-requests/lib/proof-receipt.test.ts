@@ -842,3 +842,48 @@ test("a receipt that Hedge wrote before the rename is replaced by the next one, 
   expect(block(body)).toContain(`head=${head}`);
   expect(body.replace(block(body), "")).toBe(template.replace("- [x] I ticked this box\n\n", "- [x] I ticked this box\n\n\n\n"));
 });
+
+const attachments = (pr: Checkout) => pr.githubCalls().filter((call) => call.startsWith("pr comment "));
+const asset = /^https:\/\/github\.com\/user-attachments\/assets\/[0-9a-f]{32}$/;
+
+test("publish without an asset repository attaches the screenshot to the PR with gh, and the receipt links it without a warning", async () => {
+  const { pr, older } = await provedPr();
+  expect((await pr.hedge("gate")).code).toBe(0);
+  const warned = await pr.hedge("receipt");
+  expect(warned.output).toContain(`has no published URL. Run hedge proof publish --commit ${older} <the screenshot> to attach it to the PR with gh`);
+  const body = pr.githubBody();
+
+  const published = await pr.hedge("publish", "--commit", older, "walk.png");
+
+  expect(published.code).toBe(0);
+  expect(published.output).toMatch(asset);
+  expect(pr.githubBody()).toBe(body);
+  const written = await pr.hedge("receipt");
+  expect(written.output).not.toContain("warning: screenshot");
+  expect(readFileSync(join(pr.pullRequest, "display", "receipt.md"), "utf8")).toContain(`[The sender settings page after the save](${published.output})`);
+  expect((await pr.hedge("publish", "--commit", older, "walk.png")).output).toBe(published.output);
+  expect(attachments(pr)).toHaveLength(1);
+});
+
+test("a screenshot gh cannot attach gets no link, and publish names the asset repository route or the one to attach again", async () => {
+  const { pr, older, file } = await provedPr();
+  file("second.png", png("second"));
+  pr.githubFault("attach-error", "attaching files requires write access to the repository\n");
+  await expect(pr.hedge("publish", "--commit", older, "walk.png")).rejects.toThrow("gh could not attach the screenshots to example/product#42: attaching files requires write access to the repository. When gh cannot attach to this PR, publish to a public repository of your own with --asset-repo <owner/fork>");
+
+  pr.githubFault("attach-error", undefined);
+  const dropped = `${new Bun.CryptoHasher("sha256").update(png("second")).digest("hex")}.png`;
+  pr.githubFault("attach-drop", dropped);
+  await expect(pr.hedge("publish", "--commit", older, "walk.png", "second.png")).rejects.toThrow(`gh did not attach ${dropped}: upload failed for`);
+  pr.githubFault("attach-drop", undefined);
+  const again = await pr.hedge("publish", "--commit", older, "walk.png", "second.png");
+
+  expect(again.output.split("\n")).toEqual([expect.stringMatching(asset), expect.stringMatching(asset)]);
+  expect(attachments(pr).at(-1)!.split("--attach ").slice(1)).toEqual([expect.stringContaining(`${dropped}#${dropped}`)]);
+});
+
+test("publish refuses a log before gh attaches anything", async () => {
+  const { pr, file } = await provedPr();
+  await expect(pr.hedge("publish", file("run.txt.png", "Authorization: Bearer invented-token"))).rejects.toThrow("Publish only screenshots with invented test data");
+  expect(attachments(pr)).toEqual([]);
+});
