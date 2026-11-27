@@ -25,8 +25,8 @@ export const otherEndpointReason = `Hedge blocked this call: it writes \`/trunk 
 export const unreadPayloadReason = "Hedge blocked this call: the merge gate cannot read the file it sends, such as one that this command writes before the call or a path it cannot open, so it cannot tell whether the call posts `/trunk merge`. Write the file in one call, then send it with a call of its own.";
 export const splitStringReason = "Hedge blocked this command: `env -S` runs a command line that the merge gate cannot read. Write the gh, trunk, or curl command out as its own words.";
 export const shellAliasReason = "Hedge blocked this command: it runs a gh alias that the merge gate cannot read, a shell alias or one with arguments. Write the gh command out.";
-const pipedVia = " (piped body)";
-const pipedNote = " A piped body cannot be read, so the gate counts it as an enqueue. If the comment does not post `/trunk merge`, send it with `--body`, a heredoc, or a file instead.";
+const unreadVia = " (unread body)";
+export const unreadBodyNote = "The merge gate could not read the body of this comment, such as a piped body or a file named by a shell variable, so it checks the comment as a `/trunk merge` enqueue. If the comment does not post `/trunk merge`, give the body by its literal file path or as literal text, and it posts without this check.";
 const unnamedReason = (what: string) => `Hedge blocked this command: it ${what} without naming the PR, so the merge gate cannot check it. Name the PR by number and repository: ${oneShape}.`;
 
 /** Parses guards.merge-gate-exempt: owner/repo or owner/* entries, separated by commas or spaces. */
@@ -213,7 +213,9 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
     const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"));
     if (!sent.piped && !sendsEnqueue(sent, raw)) return { targets: [] };
     const named = namedPr(gh, found, cwd, io);
-    return named ? { targets: [{ ...named, via: `gh ${gh.group} comment${sent.piped ? pipedVia : ""}` }] } : { targets: [], refusal: unnamedReason("posts `/trunk merge`") };
+    const reads = readsEnqueue(sent, raw);
+    if (!named) return { targets: [], refusal: reads ? unnamedReason("posts `/trunk merge`") : `${unreadBodyNote} ${unnamedReason("posts a comment")}` };
+    return { targets: [{ ...named, via: `gh ${gh.group} comment${reads ? "" : unreadVia}` }] };
   }
   if (gh.group === "pr" && gh.action === "review") {
     const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"));
@@ -239,11 +241,11 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const method = (values(gh, "-X", "--method").at(-1) ?? (fields.length || values(gh, "--input").length ? "POST" : "GET")).toUpperCase();
   if (method === "GET") return { targets: [] };
   const comment = endpoint.match(/^repos\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)\/comments$/);
-  if (comment && method === "POST" && sent.piped) return { targets: [{ repository: comment[1]!, pr: Number(comment[2]), via: `gh api issues/<n>/comments${pipedVia}` }] };
+  if (comment && method === "POST" && sent.piped) return { targets: [{ repository: comment[1]!, pr: Number(comment[2]), via: `gh api issues/<n>/comments${unreadVia}` }] };
   const merge = endpoint.match(/^repos\/([\w.-]+\/[\w.-]+)\/pulls\/(\d+)\/merge$/);
   if (merge) return { targets: [{ repository: merge[1]!, pr: Number(merge[2]), via: "gh api pulls/<n>/merge" }] };
   if (!enqueues) return { targets: [] };
-  if (comment && method === "POST") return { targets: [{ repository: comment[1]!, pr: Number(comment[2]), via: "gh api issues/<n>/comments" }] };
+  if (comment && method === "POST") return { targets: [{ repository: comment[1]!, pr: Number(comment[2]), via: `gh api issues/<n>/comments${readsEnqueue(sent, raw) ? "" : unreadVia}` }] };
   return elsewhere(sent, raw);
 }
 
@@ -458,8 +460,13 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
   if (!missing.length) return held.length ? heldReason(held, person) : undefined;
   const hub = hubError ? ` The decision ledger could not be read (${hubError}), so only this machine's gate records counted.` : "";
   return `Hedge blocked this merge: \`hedge proof gate\` has not passed at the head of ${missing.join("; ")}. A missing proof store, a pass at an older head, or a pass that a later failed run at the same head replaced does not count, nor a pass from while pull-requests.autonomy was end once it is ask again.${hub} `
-    + `Run the gate on each head until it exits 0, then enqueue again. ${overrideHint(person)}${intent.targets.some((target) => target.via.endsWith(pipedVia)) ? pipedNote : ""}`;
+    + `Run the gate on each head until it exits 0, then enqueue again. ${overrideHint(person)}`;
 }
+
+export const unreadBody = (intent: MergeIntent) => {
+  const targets = [...intent.targets, ...intent.exempt ?? []];
+  return !intent.refusal && targets.length > 0 && targets.every((target) => target.via.endsWith(unreadVia));
+};
 
 export const mergeGateDeadlineMs = 15_000;
 const after = (ms: number) => new Promise<void>((done) => { setTimeout(done, ms).unref(); });
