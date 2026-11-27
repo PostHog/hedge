@@ -136,7 +136,7 @@ test("resumes a thread that lost its connection to the proxy once the proxy answ
 test("never retries a connection-shaped stop that is a usage limit or a refusal, and still retries a 5xx whose text names a 4xx", async () => {
   const box = await machine([
     outageThread("login", { lastErrorClass: "provider_error", lastErrorCode: null, lastError: "not logged in: run /login to add an API key" }),
-    outageThread("auth", { lastErrorClass: "transport_error", lastErrorCode: "authentication_failed", lastError: "Claude API authentication failed." }),
+    outageThread("auth", { lastErrorClass: "transport_error", lastErrorCode: "authentication_failed", lastError: "Connection error." }),
     outageThread("key", { lastErrorClass: "transport_error", lastErrorCode: "unknown", lastError: "Connection error: 401 Invalid API key" }),
     outageThread("ssl", { lastErrorClass: "provider_error", lastErrorCode: "api_error", lastError: "API Error: Unable to connect to API: SSL certificate has expired" }),
     outageThread("quota", { ...codex, lastErrorClass: "usage_limit", lastErrorCode: "responseStreamDisconnected", lastError: "exceeded retry limit, last status: 429 Too Many Requests" }),
