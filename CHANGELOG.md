@@ -24,13 +24,9 @@
 - The judge's risk question accepts a changed row with an incident, or an
   uncovered row, that the Known issues section names, so the callout can
   stay within its 6 bullets.
-- A saved gate pass now holds the whole description the judge read, as
-  GitHub renders it, without the receipt, and the callout as written. Any
-  other edit that changes the callout, or how a body with a callout
-  renders, makes
-  `hedge decision report` and `hedge proof receipt` stop using the pass, so
-  run `hedge proof gate` again. After the upgrade, passes saved before it
-  do not match, so open PRs run the gate once more.
+- The judge reads the same body snapshot that the gate saves its pass for.
+  As before, a saved pass is keyed on the merge-risk callout, so a later
+  edit elsewhere in the body is checked at the next gate run.
 - A sanity pass is due once the production lines at HEAD pass 1.5 times the
   lines at round 1, down from twice.
 

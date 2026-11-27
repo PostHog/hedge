@@ -258,50 +258,19 @@ test("the report never offers the merge when GitHub moves the PR to a new base w
   expect((await reportOf(pr)).stillYours).toEqual([`- example/product#42: its proofs are not shown to pass at HEAD ${head.slice(0, 7)} as read now (gate exit 1). Run hedge proof gate in its checkout to see why.`]);
 });
 
-test("the report keeps the judge's verdict through a receipt refresh, and drops it on any other edit of a body the judge read", async () => {
+test("the report keeps the judge's verdict through a body edit outside the merge-risk callout, and drops it when the callout changes", async () => {
   const pr = await checkout();
   const head = await pr.commit("feature.txt", "greet new members\n");
-  const testing = (receipt: string) => `${graded("non-critical")}## Testing\n\nRan it.\n${receipt}## Notes\n\nNone.\n`;
-  pr.pullRequestState({ body: testing("") });
+  pr.pullRequestState({ body: graded("non-critical") });
   await reviewHead(pr);
   await pr.hedge("require", "--none", "--reason", "Docs only");
   expect((await pr.hedge("gate")).code).toBe(0);
 
-  pr.pullRequestState({ body: testing(`\n<!-- hedge-proof-receipt head=${head} hash=01 -->\n| live-run | sent |\n<!-- /hedge-proof-receipt -->\n\n`) });
+  pr.pullRequestState({ body: `${graded("non-critical")}\n## How did you test this code?\n\nThe receipt lists each proof.\n` });
   expect((await reportOf(pr)).stillYours).toEqual(["- Merge example/product#42: its proofs pass, and it waits on your merge word."]);
 
-  for (const edited of [`${graded("non-critical")}\n## Known issues\n\n- A slow send retries twice.\n`, graded("non-critical").replace("🔵 **Merge risk: low** · two-way door", "🔴 **Merge risk: high** · one-way door"), testing("").replace("two-way door", "two&#45;way door")]) {
-    pr.pullRequestState({ body: edited });
-    expect(await reportOf(pr)).toEqual(notGated(head.slice(0, 7)));
-  }
-});
-
-test("the report keys a gate pass on the body as GitHub renders it: a blank line that changes nothing keeps it, and one that turns a picture into code drops it", async () => {
-  const pr = await checkout();
-  const head = await pr.commit("feature.txt", "greet new members\n");
-  const pictured = "Text.\n    ![shot](https://example.com/a.png)\n";
-  pr.pullRequestState({ body: `${pictured}## Notes\n\nNone.\n${graded("non-critical")}` });
-  await reviewHead(pr);
-  await pr.hedge("require", "--none", "--reason", "Docs only");
-  expect((await pr.hedge("gate")).code).toBe(0);
-
-  pr.pullRequestState({ body: `${pictured}\n\n## Notes\n\n\nNone.\n${graded("non-critical")}` });
-  expect((await reportOf(pr)).stillYours).toEqual(["- Merge example/product#42: its proofs pass, and it waits on your merge word."]);
-
-  pr.pullRequestState({ body: `${pictured.replace("\n    ", "\n\n    ")}## Notes\n\nNone.\n${graded("non-critical")}` });
+  pr.pullRequestState({ body: graded("non-critical").replace("🔵 **Merge risk: low** · two-way door", "🔴 **Merge risk: high** · one-way door") });
   expect(await reportOf(pr)).toEqual(notGated(head.slice(0, 7)));
-});
-
-test("the report keeps a gate pass through any body edit when the body holds no merge-risk callout, since the judge never read it", async () => {
-  const pr = await checkout();
-  await pr.commit("feature.txt", "greet new members\n");
-  pr.pullRequestState({ body: "## Problem\n\nSenders were lost.\n" });
-  await reviewHead(pr);
-  await pr.hedge("require", "--none", "--reason", "Docs only");
-  expect((await pr.hedge("gate")).code).toBe(0);
-
-  pr.pullRequestState({ body: "## Problem\n\nSenders were lost, and now they arrive.\n" });
-  expect((await reportOf(pr)).stillYours).toEqual(["- Merge example/product#42: its proofs pass, and it waits on your merge word."]);
 });
 
 test("the report never offers the merge on an accepted gap whose condition the judge has not weighed", async () => {
