@@ -374,7 +374,7 @@ export function verdict(changes: { proof?: Question; owed?: Question; review?: Q
   const pass = (reason: string): Question => ({ verdict: "pass", reason, citations: [] });
   return JSON.stringify({
     proof: pass("The evidence shows HEAD working"), owed: pass("The owed kinds fit the diff"), review: pass("Every finding is answered"),
-    ...changes.risk ? { shape: pass("The body keeps the shape of pr-description") } : {},
+    shape: pass("The body keeps the shape of pr-description"),
     quality: { reason: "The code follows the rubric", citations: [], findings: [] }, ...changes,
   });
 }

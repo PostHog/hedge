@@ -161,7 +161,8 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
   const today = now?.() ?? new Date();
   const weighedGap = await judgeGap(home, head, today, checked.decisions, checked.tier, decidesAll(env));
   const known = {
-    risk: riskRubric === undefined ? undefined : { rubric: riskRubric, body: snapshot?.body ?? pullRequestDetails(head, run).body, merged: snapshot?.state === "merged" },
+    risk: riskRubric === undefined ? undefined : { rubric: riskRubric, body: snapshot?.body ?? pullRequestDetails(head, run).body },
+    shape: snapshot && snapshot.state !== "merged" && riskCalloutOf(snapshot.body) !== undefined ? snapshot.body : undefined,
     commit: head.commit, crossFamily: otherFamily(row, author), ci: checked.ci, owed: checked.owed!, ledger: checked.lines,
     evidence: checked.evidence, reviews: await reviewRecords(home, head), rubric: await readRubric(home), references: skillReferences(home),
     conditions: [...checked.conditions, ...weighedGap?.condition ? [weighedGap.condition] : []], criticalPaths: await readCriticalPaths(home, head.repository, env),
@@ -184,6 +185,12 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
     const line = `not accepted (the secret guard held the judge prompt, so no judge checked the condition of ${unchecked.map(conditionName).join(" and ")})`;
     const lines = [...outcome.lines, `judge gap: ${line}: ${gap.reason}. ${endUnchecked(unchecked)}`];
     return { code: 3, lines, covered: "", judge: verdict(lines, judgeGapProof(head.commit, { ...gap, acceptance: undefined, line })), reason: `judge gap: ${line}` };
+  }
+  const shapeFailure = outcome.lines.find((line) => line.startsWith("judge shape: fail"));
+  if (gap?.acceptance && shapeFailure) {
+    const line = "judge gap: a judge gap never waives the shape question. Edit the PR body to fix it, then run the gate again";
+    const lines = [...outcome.lines, line];
+    return { code: 1, lines, covered: "", judge: verdict(lines), reason: shapeFailure };
   }
   if (gap?.acceptance) {
     const lines = [...outcome.lines, `judge gap: ${gap.acceptance.line}: ${gap.reason}`];
