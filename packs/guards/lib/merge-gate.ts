@@ -529,8 +529,11 @@ const after = (ms: number) => new Promise<void>((done) => { setTimeout(done, ms)
 const deadlineReason = "Hedge blocked this merge: the merge gate could not read GitHub and the decision ledger in time. Try again; a merge needs a `hedge proof gate` pass at each PR's head.";
 
 /** The check's answer, or a refusal when it fails or runs past the deadline: the hook must answer before its host's timeout lets the call through. */
-export async function beforeDeadline(check: () => Promise<string | undefined>, deadline: Promise<void> = after(mergeGateDeadlineMs)): Promise<string | undefined> {
-  try { return await Promise.race([check(), deadline.then(() => deadlineReason)]); }
+export async function beforeDeadline(check: () => Promise<string | undefined>, deadline: Promise<void> = after(mergeGateDeadlineMs), now = Date.now, endsAt = now() + mergeGateDeadlineMs): Promise<string | undefined> {
+  try {
+    const answer = await Promise.race([check(), deadline.then(() => deadlineReason)]);
+    return now() > endsAt ? deadlineReason : answer;
+  }
   catch (error) { return `Hedge blocked this merge: the merge gate failed (${(error as Error).message}).`; }
 }
 

@@ -1176,6 +1176,19 @@ describe("the merge gate checks a full grant against the user's card answer in T
     expect({ sessions, reads }).toEqual({ sessions: 1, reads: 1 });
   });
 
+  test("a stale copy of a heard card is dropped, and the heard grant still counts", async () => {
+    const events = [row("full", "m1", t1), row("full", "m1", t2)];
+    expect(await modeAt({ "pull-requests.autonomy": "end" }, events, [answer("full", "m1", t1)])).toBe("full");
+  });
+
+  test("a check that ends after the deadline, such as one a blocking T3 command held up, denies the merge", async () => {
+    let clock = 0;
+    const blocked = async () => { clock = 16_000; return undefined; };
+    expect(await beforeDeadline(blocked, new Promise(() => {}), () => clock, 15_000)).toContain("could not read GitHub and the decision ledger in time");
+    clock = 0;
+    expect(await beforeDeadline(async () => undefined, new Promise(() => {}), () => clock, 15_000)).toBeUndefined();
+  });
+
   test("a T3 read that hangs is cut off by the merge deadline", async () => {
     let release = () => {};
     const deadline = new Promise<void>((resolve) => { release = resolve; });

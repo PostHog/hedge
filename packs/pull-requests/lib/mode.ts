@@ -109,7 +109,7 @@ export function fullHeldAtAuto(text: string | undefined): string {
 const strictness = (mode: Mode) => modes.indexOf(mode);
 export const stricter = (a: Mode, b: Mode) => strictness(a) <= strictness(b) ? a : b;
 
-const sameGrant = (a: ModeGrant, b: ModeGrant) => a.message === b.message && sameThread(a.thread, b.thread) && sameThread(a.for, b.for);
+const sameGrant = (a: ModeGrant, b: ModeGrant) => a.message === b.message && Date.parse(a.at) === Date.parse(b.at) && sameThread(a.thread, b.thread) && sameThread(a.for, b.for);
 
 const askedAbove = (grant: ModeGrant, chain: Lineage) => {
   const from = chain.threads.findIndex((link) => sameThread(link, grant.for));
