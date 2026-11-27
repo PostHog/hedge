@@ -427,7 +427,7 @@ command instead for every kind, panel and critical PRs included, unless the PR i
   },
   sanity: {
     usage: "sanity --verdict cut|justified --reason <why>",
-    summary: `Record the sanity pass at HEAD. Once the production lines pass twice the lines of the first review round, hedge
+    summary: `Record the sanity pass at HEAD. Once the production lines pass 1.5 times the lines of the first review round, hedge
 proof review starts no other round until a sanity pass covers them. A fresh bloat judge reads the Problem section and
 the diffs at round 1 and at HEAD, and hedge proof review prints the share of the lines it would cut and its hunks. Cut
 those hunks back to base behaviour and record --verdict cut, or record --verdict justified with the reason the growth

@@ -22,6 +22,8 @@ const releaseOnce = (go: string) => {
   return release;
 };
 
+const idOf = (output: string) => /\[(d-[0-9a-f]+)\]/.exec(output)![1]!;
+
 test("the user's accepted gap settles its kind even when the judge rejects that kind's evidence, and an unaccepted gap still yields to it", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "new\n");
@@ -626,6 +628,149 @@ test("with the merge-risk skill installed, the judge grades the callout against 
   expect((await gateAfterResponse(pr, "Nothing to answer.\n")).output).toContain("judge: unavailable (unparseable answer");
 });
 
+test("the shape question holds pr-description's body rules, and a gate that fails only on it says to edit the body", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  installRiskSkill(pr);
+  const judge = fakeModel(pr, "JUDGE", verdict({ risk: { verdict: "pass", reason: "One text file changes: low, two-way", citations: [] }, shape: { verdict: "fail", reason: "no picture", citations: [] } }));
+  pr.pullRequestState({ body: `A queue now retries.\n\n${graded("non-critical")}` });
+  const gate = await pr.hedge("gate");
+  expect([gate.code, gate.output.includes("judge shape: fail: no picture"), gate.output.includes("judge shape: edit the PR body to fix it"), gate.output.includes("record hedge proof gap --kind judge")]).toEqual([1, true, true, false]);
+  const prompt = judge.prompts().at(-1)!;
+  expect(prompt).toContain("5. shape: Does the PR body keep the shape of pr-description? Fail it, and name the rule, when it shows no picture where GitHub renders it, which is a Mermaid diagram, an image, a video, an uploaded attachment, or a `No picture: <why>` line; when it holds more than 800 written words");
+  expect(prompt).toContain("or when the callout holds more than 6 top-level bullets, Switch-off and Tier included. Rollout lines, such as Stages, Decided and Watch, are not callout bullets.");
+  expect(prompt).toContain("Leave the picture, the word cap and the callout's bullet count to the shape question.");
+});
+
+test("a judge run that fails only the shape question spends no judge budget, so a corrected body is always read", async () => {
+  const pr = await checkout();
+  pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.reviewCeiling": 1 });
+  pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo CONTINUE";
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  installRiskSkill(pr);
+  const risk = { verdict: "pass" as const, reason: "One text file changes: low, two-way", citations: [] };
+  const judge = fakeModel(pr, "JUDGE", verdict({ risk, shape: { verdict: "fail", reason: "no picture", citations: [] } }));
+  for (const draft of ["first", "second"]) {
+    pr.pullRequestState({ body: `The ${draft} draft.\n\n${graded("non-critical")}` });
+    expect((await pr.hedge("gate")).output).toContain("judge shape: fail: no picture");
+  }
+  judge.answer(verdict({ risk }));
+  pr.pullRequestState({ body: `No picture: the diff shows it whole.\n\n${graded("non-critical")}` });
+  expect((await pr.hedge("gate")).code).toBe(0);
+
+  judge.answer(verdict({ risk: { ...risk, verdict: "fail" } }));
+  pr.pullRequestState({ body: `No picture: a wrong grade.\n\n${graded("non-critical")}` });
+  await pr.hedge("gate");
+  pr.pullRequestState({ body: `No picture: a later edit.\n\n${graded("non-critical")}` });
+  expect((await pr.hedge("gate")).output).toContain("judge: budget spent: the judge failed 1 times on this PR");
+});
+
+test("the judge reads a long body whole, and asks no shape question once GitHub reports the PR merged", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  installRiskSkill(pr);
+  const judge = fakeModel(pr, "JUDGE", verdict({ risk: { verdict: "pass", reason: "One text file changes: low, two-way", citations: [] } }));
+  const body = `\`\`\`\n${"x".repeat(30_000)}\n\`\`\`\n\nNo picture: the tail of a long body.\n\n${graded("non-critical")}`;
+  pr.pullRequestState({ body });
+  await pr.hedge("gate");
+  expect(judge.prompts().at(-1)).toContain("No picture: the tail of a long body.");
+  expect(judge.prompts().at(-1)).not.toContain("GitHub reports this PR merged");
+
+  pr.pullRequestState({ body: graded("non-critical"), merged: true });
+  judge.answer(verdict({ risk: { verdict: "pass", reason: "One text file changes: low, two-way", citations: [] }, shape: { verdict: "fail", reason: "no picture", citations: [] } }));
+  const landed = await pr.hedge("gate", "--landed");
+  expect(judge.prompts().at(-1)).toContain("Answer five questions:");
+  expect(judge.prompts().at(-1)).not.toContain("shape: Does the PR body keep the shape");
+  expect([landed.code, landed.output.includes("judge shape")]).toEqual([0, false]);
+});
+
+test("a shape-only failure never goes to the arbiter, so it is never escalated as a judge dispute", async () => {
+  const pr = await checkout();
+  pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo 'ESCALATE: the same failure came back'";
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  const judge = fakeModel(pr, "JUDGE", verdict({ proof: { verdict: "fail", reason: "the evidence misses the greeting", citations: [] } }));
+  for (const draft of ["first", "second"]) {
+    pr.pullRequestState({ body: `The ${draft} draft.\n\n${graded("non-critical")}` });
+    await pr.hedge("gate");
+  }
+  judge.answer(verdict({ shape: { verdict: "fail", reason: "no picture", citations: [] } }));
+  pr.pullRequestState({ body: `The third draft.\n\n${graded("non-critical")}` });
+  const gate = await pr.hedge("gate");
+  expect([gate.output.includes("judge shape: fail: no picture"), gate.output.includes("escalate")]).toEqual([true, false]);
+});
+
+test("the arbiter reads no shape reason, so a shape failure that comes back beside new failures is never escalated", async () => {
+  const pr = await checkout();
+  const histories = join(pr.home, "arbiter-history");
+  pr.env.HEDGE_REVIEW_ARBITER = `cat > "${histories}"; echo CONTINUE`;
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  const shape = { verdict: "fail" as const, reason: "no picture", citations: [] };
+  const judge = fakeModel(pr, "JUDGE", verdict({ proof: { verdict: "fail", reason: "the evidence misses the greeting", citations: [] }, shape }));
+  pr.pullRequestState({ body: `The first draft.\n\n${graded("non-critical")}` });
+  await pr.hedge("gate");
+  judge.answer(verdict({ owed: { verdict: "fail", reason: "the diff owes a live run", citations: [] }, shape }));
+  pr.pullRequestState({ body: `The second draft.\n\n${graded("non-critical")}` });
+  await pr.hedge("gate");
+  judge.answer(verdict({ review: { verdict: "fail", reason: "a finding has no answer", citations: [] }, shape }));
+  pr.pullRequestState({ body: `The third draft.\n\n${graded("non-critical")}` });
+  await pr.hedge("gate");
+  const history = readFileSync(histories, "utf8");
+  expect([history.includes("a finding has no answer"), history.includes("no picture")]).toEqual([true, false]);
+});
+
+test("the shape question needs no merge-risk skill", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  const judge = fakeModel(pr, "JUDGE", verdict({ shape: { verdict: "fail", reason: "no picture", citations: [] } }));
+  pr.pullRequestState({ body: `A queue now retries.\n\n${graded("non-critical")}` });
+  const unskilled = await pr.hedge("gate");
+  expect([unskilled.code, unskilled.output.includes("judge shape: fail: no picture"), unskilled.output.includes("judge risk: not asked")]).toEqual([1, true, true]);
+  expect(judge.prompts().at(-1)).toContain("4. shape: Does the PR body keep the shape of pr-description?");
+});
+
+test("an accepted judge gap waives a shape failure like any other, a pending one still says to edit the body, and a shape citation never breaks a gap's condition", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  const judge = fakeModel(pr, "JUDGE", verdict({ shape: { verdict: "fail", reason: "no picture", citations: [] } }));
+  pr.pullRequestState({ body: `A queue now retries.\n\n${graded("non-critical")}` });
+  await pr.hedge("gap", "--kind", "judge", "--reason", "The judge misreads the copy");
+  const pending = await pr.hedge("gate");
+  expect([pending.code, pending.output.includes("judge shape: edit the PR body to fix it")]).toEqual([3, true]);
+  pr.chooseGap("judge", "The judge misreads the copy");
+  const judgeId = idOf((await acceptGap(pr, "judge", "--condition", "feature.txt holds copy only")).output);
+  judge.answer(verdict({ shape: { verdict: "fail", reason: `a callout bullet names decision ${judgeId}`, citations: [judgeId] } }));
+  pr.pullRequestState({ body: `A queue now retries again.\n\n${graded("non-critical")}` });
+  const waived = await pr.hedge("gate");
+  expect([waived.code, waived.output.includes("judge shape: fail"), waived.output.includes("broken")]).toEqual([0, true, false]);
+});
+
+test("the judge reads the body the gate first read and saved its pass for, even when the body changes during the gate", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  installRiskSkill(pr);
+  const judge = fakeModel(pr, "JUDGE", verdict({ risk: { verdict: "pass", reason: "One text file changes: low, two-way", citations: [] } }));
+  pr.pullRequestState({ body: `No picture: the read the gate saved.\n\n${graded("non-critical")}` });
+  pr.whileGithubReadsPull(`printf '%s' '${JSON.stringify(`An edit during the gate.\n\n${graded("non-critical")}`)}' > "$(dirname "$0")/body"`);
+  expect((await pr.hedge("gate")).code).toBe(0);
+  expect([judge.prompts().at(-1)!.includes("the read the gate saved"), judge.prompts().at(-1)!.includes("An edit during the gate")]).toEqual([true, false]);
+});
+
 test("judge failures cached before the merge-risk skill was installed still count for the arbiter", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "greet new members\n");
@@ -746,7 +891,6 @@ test("the judge reads the PR body without its receipt block and the blank line a
 
   pr.pullRequestState({ body: `## Testing\n\n<!-- hedge-proof-receipt head=${"d".repeat(40)} hash=04 -->\n${graded("non-critical")}<!-- /hedge-proof-receipt -->\n` });
   expect((await pr.hedge("gate")).code).toBe(0);
-  expect(judge.prompts()).toHaveLength(3);
   expect(judge.prompts()[2]).toContain("**Tier:** non-critical");
 
   for (const [open, close] of [["<!--merge-risk-->", "<!--/merge-risk-->"], ["<!--  merge-risk  -->", "<!--  /merge-risk  -->"]]) {

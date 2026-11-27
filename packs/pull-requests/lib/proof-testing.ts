@@ -402,10 +402,11 @@ export const clean = "FINDINGS:\n(none)\nCOVERED: feature.txt\n";
 export type Question = { verdict: "pass" | "fail"; reason: string; citations: string[] };
 export type Quality = { reason: string; citations: string[]; findings: { rating: "high" | "medium" | "low"; problem: string; citation: string }[] };
 
-export function verdict(changes: { proof?: Question; owed?: Question; review?: Question; risk?: Question; quality?: Quality } = {}) {
+export function verdict(changes: { proof?: Question; owed?: Question; review?: Question; risk?: Question; shape?: Question; quality?: Quality } = {}) {
   const pass = (reason: string): Question => ({ verdict: "pass", reason, citations: [] });
   return JSON.stringify({
     proof: pass("The evidence shows HEAD working"), owed: pass("The owed kinds fit the diff"), review: pass("Every finding is answered"),
+    shape: pass("The body keeps the shape of pr-description"),
     quality: { reason: "The code follows the rubric", citations: [], findings: [] }, ...changes,
   });
 }

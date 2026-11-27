@@ -11,6 +11,35 @@
   Before, it read like a refusal of a merge: an end-of-run report that names
   a pending merge looked like the cause, and the comment was not posted.
 
+### The judge checks the PR description, and a sanity pass comes sooner
+
+- The judge asks a new shape question about every PR description that
+  holds a merge-risk callout, with or without the merge-risk skill. It
+  fails a description with no picture where GitHub renders it (a Mermaid
+  diagram, an image, a video, an uploaded attachment, or a `No picture:`
+  line with a reason), more than 800 written words, or a callout with more
+  than 6 top-level bullets, Switch-off and Tier included. Rollout lines are
+  not callout bullets. The judge reads the body whole. A body without a
+  callout, or a PR that GitHub reports merged, gets no shape question.
+- A judge run that fails only the shape question spends no judge budget
+  and never goes to the arbiter, so a corrected description is always
+  read. A gate that fails only on it says to edit the body. An accepted
+  judge gap waives the shape question as it waives the other questions.
+- The risk question leaves the body rules to the shape question.
+- The decision report and the receipt reuse no gate pass saved before
+  this release, so each open PR gets one gate run with the shape
+  question. The merge guard still takes a gate pass by commit.
+- A shape failure never counts as breaking an accepted gap's condition,
+  and a gate with a pending judge gap still says to edit the body.
+- The judge's risk question accepts a changed row with an incident, or an
+  uncovered row, that the Known issues section names, so the callout can
+  stay within its 6 bullets.
+- The judge reads the same body snapshot that the gate saves its pass for.
+  As before, a saved pass is keyed on the merge-risk callout, so a later
+  edit elsewhere in the body is checked at the next gate run.
+- A sanity pass is due once the production lines at HEAD pass 1.5 times the
+  lines at round 1, down from twice.
+
 ### An override refused for an older answer also says why the newer one failed
 
 - When `hedge proof review --override '<date> "<words>"'` finds that an older

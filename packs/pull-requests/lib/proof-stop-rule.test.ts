@@ -46,13 +46,13 @@ test("a fixed blocker or major in production code that the PR introduced buys th
   expect((await pr.hedge("review-start", "--scope", "fixes", "--base", reviewed)).code).toBe(0);
 });
 
-test("past twice the production lines of the first review, the next round waits for a sanity pass at HEAD, which the end table shows", async () => {
+test("past 1.5 times the production lines of the first review, the next round waits for a sanity pass at HEAD, which the end table shows", async () => {
   const pr = await checkout();
   const reviewed = await firstRound(pr, ["- major | feature.ts:2 | the greeting drops the last name | anchor: greet 1"], ["1. fixed: the greeting keeps it"]);
   await pr.commit("feature.ts", lines(21, "greet"));
 
   await expect(pr.hedge("review-start", "--scope", "fixes", "--base", reviewed)).rejects.toThrow(
-    "Production lines grew from 10 at round 1 to 21 at HEAD, past twice the first. A fresh judge, bloat-judge-under-test, reads 0% of HEAD's production lines as more than the problem needs and names no hunk. Before another round, cut the PR back to base behaviour, or justify the growth: hedge proof sanity --verdict cut|justified --reason '<why>'");
+    "Production lines grew from 10 at round 1 to 21 at HEAD, past 1.5 times the first. A fresh judge, bloat-judge-under-test, reads 0% of HEAD's production lines as more than the problem needs and names no hunk. Before another round, cut the PR back to base behaviour, or justify the growth: hedge proof sanity --verdict cut|justified --reason '<why>'");
   expect((await pr.hedge("sanity", "--verdict", "justified", "--reason", "The fix needs its own parser")).code).toBe(0);
   expect((await pr.hedge("review-start", "--scope", "fixes", "--base", reviewed)).code).toBe(0);
 
@@ -67,7 +67,17 @@ test("past twice the production lines of the first review, the next round waits 
   ]);
 });
 
-test("a sanity pass covers the lines it saw: a later head that grows again waits for a new one, and a cut back under twice the first needs none", async () => {
+test("the sanity pass starts just past 1.5 times the first round: 16 lines after 10 wait, 15 go on", async () => {
+  const pr = await checkout();
+  const reviewed = await firstRound(pr, ["- major | feature.ts:2 | the greeting drops the last name | anchor: greet 1"], ["1. fixed: the greeting keeps it"]);
+  await pr.commit("feature.ts", lines(16, "greet"));
+  await expect(pr.hedge("review-start", "--scope", "fixes", "--base", reviewed)).rejects.toThrow("Production lines grew from 10 at round 1 to 16 at HEAD, past 1.5 times the first.");
+
+  await pr.commit("feature.ts", lines(15, "greet"));
+  expect((await pr.hedge("review-start", "--scope", "fixes", "--base", reviewed)).code).toBe(0);
+});
+
+test("a sanity pass covers the lines it saw: a later head that grows again waits for a new one, and a cut back under 1.5 times the first needs none", async () => {
   const pr = await checkout();
   const reviewed = await firstRound(pr, ["- major | feature.ts:2 | the greeting drops the last name | anchor: greet 1"], ["1. fixed: the greeting keeps it"]);
   await pr.commit("feature.ts", lines(21, "greet"));
@@ -206,7 +216,7 @@ test("a pipe inside code in a finding stays in its field, so a docs file buys no
   expect((await code.hedge("review-start", "--scope", "fixes", "--base", codeReviewed)).code).toBe(0);
 });
 
-test("past twice the first lines with GitHub's base commit missing here, the next round waits for the fetch, not a skipped sanity pass", async () => {
+test("past 1.5 times the first lines with GitHub's base commit missing here, the next round waits for the fetch, not a skipped sanity pass", async () => {
   const pr = await checkout();
   const reviewed = await firstRound(pr, ["- major | feature.ts:2 | the greeting drops the last name | anchor: greet 1"], ["1. fixed: the greeting keeps it"]);
   await pr.commit("feature.ts", lines(21, "greet"));
@@ -239,7 +249,7 @@ test("past round 1's count with HEAD's count unknown, the next round waits for a
   pr.pullRequestState({ baseSha: "main" });
 
   await expect(pr.hedge("review-start", "--scope", "fixes", "--base", reviewed)).rejects.toThrow(
-    "Hedge cannot count the production lines at HEAD, so it cannot tell whether they grew past twice the 10 of round 1. Before another round, read the growth since round 1 by hand, then cut it back to base behaviour or justify it: hedge proof sanity --verdict cut|justified --reason '<why>'");
+    "Hedge cannot count the production lines at HEAD, so it cannot tell whether they grew past 1.5 times the 10 of round 1. Before another round, read the growth since round 1 by hand, then cut it back to base behaviour or justify it: hedge proof sanity --verdict cut|justified --reason '<why>'");
   expect((await pr.hedge("sanity", "--verdict", "justified", "--reason", "The fix needs its own parser")).code).toBe(0);
   expect((await pr.hedge("review-start", "--scope", "fixes", "--base", reviewed)).code).toBe(0);
 });
@@ -275,7 +285,7 @@ test("a round-one count git could not read waits for a sanity pass at HEAD befor
   await pr.commit("feature.ts", lines(11, "greet"));
 
   await expect(pr.hedge("review-start", "--scope", "fixes", "--base", reviewed)).rejects.toThrow(
-    "Hedge cannot count the production lines at round 1, so it cannot tell whether they grew past twice those of round 1. Before another round, read the growth since round 1 by hand");
+    "Hedge cannot count the production lines at round 1, so it cannot tell whether they grew past 1.5 times those of round 1. Before another round, read the growth since round 1 by hand");
   expect((await pr.hedge("sanity", "--verdict", "justified", "--reason", "The renames move code and add none")).code).toBe(0);
   expect((await pr.hedge("review-start", "--scope", "fixes", "--base", reviewed)).code).toBe(0);
 });
