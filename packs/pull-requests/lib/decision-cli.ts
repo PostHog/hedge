@@ -531,7 +531,7 @@ async function list(parsed: Parsed, context: DecisionContext, ledger: Ledger) {
   const ref = parsed.options.has("--pr") ? prRef(parsed.options.get("--pr")!) : undefined;
   const decisionClass = parsed.options.has("--class") ? askClass(parsed.options.get("--class")!) : undefined;
   const shown = fold(await reachHub(() => ledger.read())).filter((decision) =>
-    (!ref || covers(decision, ref)) && (!decisionClass || decision.class === decisionClass) && (!parsed.flags.has("--live") || live(decision)));
+    (!ref || covers(decision, ref)) && (!decisionClass || decision.class === decisionClass) && (!parsed.flags.has("--live") || (live(decision) && (decision.scope.kinds?.includes(standingOrder) !== true || (context.now?.() ?? new Date()).getTime() < standingOrderEnd(decision.scope.condition)))));
   if (!shown.length) context.print("No decisions.");
   for (const decision of shown) context.print(decisionLine(decision));
   return 0;

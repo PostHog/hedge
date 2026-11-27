@@ -113,6 +113,10 @@ test("a standing order is the user's \"Merge on your own\" on a card that names 
   await expect(order("--mark", "👤", "--condition", "until 2026-12-10")).rejects.toThrow("already recorded");
   pr.choose("Merge on your own (Recommended)", question());
   expect((await order("--mark", "👤")).code).toBe(0);
+  const listed = async () => (await pr.decide("list", "--class", "merge", "--live")).output.split("\n").filter((line) => line.startsWith("- ")).length;
+  expect(await listed()).toBe(2);
+  pr.clock.now = new Date("2026-12-11T00:00:00Z");
+  expect(await listed()).toBe(1);
 });
 
 test("a gate run that throws after a pass at the same head is shared, so another machine's merge gate refuses the merge", async () => {
