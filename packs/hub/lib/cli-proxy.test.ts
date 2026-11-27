@@ -520,6 +520,13 @@ test("hedge apply while the proxy does not answer keeps the routes an earlier ap
   proxy.down = false;
   expect((await apply()).code).toBe(0);
   expect(readFileSync(settingsFile(home), "utf8")).toBe(settings);
+  proxy.down = true;
+  await apply();
+  proxy.down = false;
+  proxy.models = [];
+  await apply();
+  expect(readJson(settingsFile(home))).toEqual({});
+  expect(readCodex(home)).toEqual({});
 
   const freshProxy: Proxy = { models: ["claude-sonnet-5-5", "gpt-6.1-sol"] };
   const fresh = connecting({ plan: "both" }, freshProxy);

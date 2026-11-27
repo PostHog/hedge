@@ -499,25 +499,32 @@ describe("the Own-account balancing workflow", () => {
       expect((await check(shaped, { home, adapters: [providerConfigAdapter()], run: realCheck(home, both) })).ok).toBe(true);
     });
 
-    test("keeps the whole Claude route while one of its checks cannot tell and the other passes", async () => {
+    test("keeps the whole Claude route while one of its checks cannot tell and the other passes, and writes no half of it on a fresh machine", async () => {
       const home = homeWith();
       const split = (result: Plan): Plan => ({ ...result, config: result.config.map((entry) => (entry.key === "apiKeyHelper" ? { ...entry, after: "answers" } : entry)), checks: [...result.checks, { pack: "hub", id: "answers", run: ["true"], say: "Always passes." }] });
       const routed = await applied(home, both, 1, split);
       expect((await applied(home, "down", 1, split)).claude).toEqual(routed.claude);
+      expect((await applied(homeWith(), "down", 1, split)).claude).toEqual({});
     });
 
-    const gateway = (result: Plan): Plan => ({ ...result, config: [...result.config, { pack: "profile", provider: "claude", key: "env.ANTHROPIC_BASE_URL", value: "https://gateway.example.com" }] });
+    const throughGateway = async (home: string, models: string[] | "down", gateway: boolean) => {
+      const overrides = { config: gateway ? [{ provider: "claude" as const, key: "env.ANTHROPIC_BASE_URL", value: "https://gateway.example.com" }] : [] };
+      const resolved = plan({ ...balancing, plan: "both", overrides }, devbox);
+      const shaped: Plan = { ...resolved, config: resolved.config.filter((entry) => entry.workflow === "own-account-balancing" || entry.pack === "profile"), checks: resolved.checks.filter((item) => item.pack === "hub"), steps: [], jobs: [], human: [] };
+      await apply(shaped, { home, adapters: [providerConfigAdapter()], run: realCheck(home, models) });
+      return JSON.parse(readFileSync(join(home, ".claude/settings.json"), "utf8"));
+    };
 
     test("a profile gateway in place of one part of the route still takes the whole route off while the proxy does not answer", async () => {
       const home = homeWith();
-      await applied(home, both, 1);
-      expect((await applied(home, "down", 1, gateway)).claude).toEqual({ env: { ANTHROPIC_BASE_URL: "https://gateway.example.com" } });
+      await throughGateway(home, both, false);
+      expect(await throughGateway(home, "down", true)).toEqual({ env: { ANTHROPIC_BASE_URL: "https://gateway.example.com" } });
     });
 
     test("while the proxy does not answer, a gateway the profile no longer sets leaves, and Hedge puts no route in its place", async () => {
       const home = homeWith();
-      await applied(home, both, 1, gateway);
-      expect((await applied(home, "down", 1)).claude).toEqual({});
+      await throughGateway(home, both, true);
+      expect(await throughGateway(home, "down", false)).toEqual({});
     });
 
     test("while the proxy does not answer, a route whose base URL you removed loses its key helper too", async () => {

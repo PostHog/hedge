@@ -86,7 +86,7 @@ export type HumanStep = Scope & {
   left?: string[];
 };
 
-/** The exit code of a check that means it cannot tell yet, such as before the step's human step passes. An undo reads it, and so does apply for a check that Hedge's proxy route waits on: it keeps that route as an earlier apply wrote it. When Hedge decides whether to run a step, 3 fails like any other code. */
+/** The exit code of a check that means it cannot tell yet, such as before the step's human step passes. When Hedge decides whether to run a step, 3 fails like any other code. */
 export const cannotTell = 3;
 
 export const cannotTellSay = (item: Pick<PackCheck, "id" | "run">) => `Hedge cannot tell yet whether ${item.id} passes, so it keeps the proxy route that waits on it as it is. Run ${item.run.join(" ")} to see why.`;

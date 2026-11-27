@@ -125,10 +125,14 @@ async function reconcile(plan: Plan, options: ApplyOptions): Promise<{ report: R
     const gateCodes = (entry: Plan["config"][number]) => checks.filter(([item]) => item.pack === entry.pack && item.id === entry.after).map(([, code]) => code);
     const passing = (entry: Plan["config"][number]) => gateCodes(entry).includes(0);
     const waiting = plan.config.filter((entry) => waitsForCheck(plan, entry));
-    const holds = (entry: Plan["config"][number]) => onRoute(entry) && !passing(entry) && gateCodes(entry).includes(cannotTell);
+    const unsure = (provider: string) => {
+      const failing = waiting.filter((entry) => entry.provider === provider && onRoute(entry) && !passing(entry));
+      return failing.length > 0 && failing.every((entry) => gateCodes(entry).every((code) => code === cannotTell));
+    };
+    const holds = (entry: Plan["config"][number]) => onRoute(entry) && unsure(entry.provider);
     const kept = plan.config.filter((entry) => !holds(entry) && (waiting.includes(entry) ? passing(entry) : gated.plan.config.includes(entry)));
     const routes = wholeRoutes(kept, plan.config.filter((entry) => !kept.includes(entry) && !holds(entry)));
-    const configured = { ...gated.plan, config: routes.config, dropped: [...gated.plan.dropped, ...waiting.filter((entry) => !passing(entry)).map((entry) => droppedConfig(entry, holds(entry))), ...routes.dropped] };
+    const configured = { ...gated.plan, config: routes.config, dropped: [...gated.plan.dropped, ...plan.config.filter(holds).map((entry) => droppedConfig(entry, true)), ...waiting.filter((entry) => !passing(entry) && !holds(entry)).map((entry) => droppedConfig(entry)), ...routes.dropped] };
     for (const adapter of afterSteps) {
       const result = await adapter.apply(configured, context);
       report.actions.push(...result.actions);

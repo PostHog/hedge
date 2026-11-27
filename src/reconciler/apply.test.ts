@@ -350,13 +350,31 @@ describe("a config entry that waits for a pack check", () => {
     ]);
   });
 
-  test("is written while any of two checks with its id passes, even when the other cannot tell", async () => {
-    const home = temp.make("home-");
+  test("two checks with one id: either passing writes the route, and a refusal beside a cannot-tell takes an installed route off", async () => {
     const twice = [{ ...checks[0]!, run: ["first-check"] }, { ...checks[0]!, run: ["second-check"] }];
+    const routed = { env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:8317" }, apiKeyHelper: keyHelper };
+    const applyWith = (home: string, first: number, second: number) => apply(plan({ files: [], checks: twice, config }), { home, adapters: [providerConfigAdapter()], run: async (command: string[]) => (command[0] === "first-check" ? first : command[0] === "second-check" ? second : 0) });
     for (const first of [1, 3]) {
-      await apply(plan({ files: [], checks: twice, config }), { home, adapters: [providerConfigAdapter()], run: async (command: string[]) => (command[0] === "first-check" ? first : 0) });
-      expect(settings(home)).toEqual({ env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:8317" }, apiKeyHelper: keyHelper });
+      const home = temp.make("home-");
+      await applyWith(home, first, 0);
+      expect(settings(home)).toEqual(routed);
     }
+    const home = temp.make("home-");
+    await applyWith(home, 0, 0);
+    await applyWith(home, 1, 3);
+    expect(settings(home)).toEqual({});
+  });
+
+  test("a route split across two checks leaves whole when one cannot tell and the other refuses", async () => {
+    const home = temp.make("home-");
+    const split = [config[0]!, { ...config[1]!, after: "helper-up" }];
+    const both = [...checks, { id: "helper-up", run: ["helper-check"], say: "The helper is down.", pack: "base" }];
+    const codes = { "proxy-check": 0, "helper-check": 0 };
+    const options = { home, adapters: [providerConfigAdapter()], run: async (command: string[]) => codes[command[0] as keyof typeof codes] ?? 0 };
+    await apply(plan({ files: [], checks: both, config: split }), options);
+    Object.assign(codes, { "proxy-check": 3, "helper-check": 1 });
+    await apply(plan({ files: [], checks: both, config: split }), options);
+    expect(settings(home)).toEqual({});
   });
 
   const stepping = (codes: { before: number; after: number }) => {
