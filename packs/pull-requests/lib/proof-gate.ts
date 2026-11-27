@@ -15,6 +15,7 @@ import { gitCommitReader, quietCommitIn, testOnlyRange } from "./proof-delta.ts"
 import { isCommitSha, measureGrowth, type Growth } from "./proof-end-table.ts";
 import { autonomyOf, decidesAll } from "./proof-autonomy.ts";
 import { heldNames, mergeCardLine, readTimeline } from "./proof-merge-card.ts";
+import { bodyProblems } from "./proof-body.ts";
 import { readSanity } from "./proof-sanity.ts";
 import { inputsDigest, readBloat } from "./proof-bloat.ts";
 import { judge, readCriticalPaths, type JudgeInput } from "./proof-judge.ts";
@@ -70,7 +71,10 @@ export async function finalGate(head: ProofIdentity, context: JudgingContext, { 
     landed, cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)), ci: () => ciOf(home, head, run, now?.() ?? new Date(), env),
     pushedHead, openBotFindings: botFindingsOf(head, run), ledger: hubLedger(home, env, ssh), now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env),
   });
-  const judged: Judged = checked.code === 0 ? await judgeHead(head, checked, context) : { code: checked.code, lines: [], covered: "", judge: { state: "skipped", lines: [] }, reason: checked.failure };
+  const body = landed || pull === undefined ? [] : bodyProblems((pull as PullRequest).body ?? "");
+  const judged: Judged = checked.code !== 0 ? { code: checked.code, lines: [], covered: "", judge: { state: "skipped", lines: [] }, reason: checked.failure }
+    : body.length ? { code: 1, lines: body, covered: "", judge: { state: "skipped", lines: [] }, reason: body[0] }
+    : await judgeHead(head, checked, context);
   const shown = pull === undefined ? undefined : receiptMarker((pull as PullRequest).body);
   const stale = shown && shown.head !== head.commit ? [`receipt: the PR body shows the receipt of ${shown.head.slice(0, 7)}, not HEAD ${head.commit.slice(0, 7)}. Refresh it with hedge proof receipt`] : [];
   const growth = await grownBy(home, head, run, pull);

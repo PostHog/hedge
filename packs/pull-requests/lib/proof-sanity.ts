@@ -7,6 +7,7 @@ import { isCommitSha, measureGrowth } from "./proof-end-table.ts";
 import { guardField } from "./proof-receipt.ts";
 import { pullRequestDirectory, readJson, writeJson, type ProofIdentity } from "./proof.ts";
 
+export const growthLimit = 1.5;
 export const sanityVerdicts = ["cut", "justified"] as const;
 export type SanityPass = { commit: string; verdict: (typeof sanityVerdicts)[number]; reason: string; production: number | null; recordedAt: string };
 
@@ -53,11 +54,11 @@ export async function requireSanity(home: string, head: ProofIdentity, run: Run,
   const last = (await readSanity(home, head)).at(-1);
   if (first === undefined || final === undefined) {
     if (last?.commit === head.commit && (final === undefined || (last.production ?? -1) >= final)) return;
-    const unknown = first === undefined ? "at round 1, so it cannot tell whether they grew past twice those of round 1" : `at HEAD, so it cannot tell whether they grew past twice the ${first} of round 1`;
+    const unknown = first === undefined ? `at round 1, so it cannot tell whether they grew past ${growthLimit} times those of round 1` : `at HEAD, so it cannot tell whether they grew past ${growthLimit} times the ${first} of round 1`;
     throw new Error(`Hedge cannot count the production lines ${unknown}. Before another round, read the growth since round 1 by hand, then cut it back to base behaviour or justify it: hedge proof sanity --verdict cut|justified --reason '<why>'`);
   }
-  if (final <= 2 * first) return;
+  if (final <= growthLimit * first) return;
   if ((last?.production ?? -1) >= final) return;
   const score = await scoreBloat(home, head, run, { first: growth.first!, final: growth.final!, body }, judge);
-  throw new Error(`Production lines grew from ${first} at round 1 to ${final} at HEAD, past twice the first. ${bloatSentence(score)}`);
+  throw new Error(`Production lines grew from ${first} at round 1 to ${final} at HEAD, past ${growthLimit} times the first. ${bloatSentence(score)}`);
 }

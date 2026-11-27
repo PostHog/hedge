@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### The gate checks the PR description, and a sanity pass comes sooner
+
+- `hedge proof gate` now checks a description that holds a merge-risk
+  callout before it asks the judge. It fails when the description has no
+  picture, which is a Mermaid block, an image, a video, an attachment link,
+  or a `No picture:` line. It also fails over 800 written words, and when
+  the callout holds more than 6 bullets with Switch-off and Tier. The word
+  count leaves out the receipt, code, diagrams, template lines, and
+  comments. A landed gate skips the check.
+- The judge's risk question accepts an uncovered row that the Known issues
+  section names, so the callout can stay within its 6 bullets.
+- A sanity pass is due once the production lines at HEAD pass 1.5 times the
+  lines at round 1, down from twice.
+
 ### An override refused for an older answer also says why the newer one failed
 
 - When `hedge proof review --override '<date> "<words>"'` finds that an older

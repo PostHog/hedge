@@ -750,15 +750,15 @@ test("the judge reads the PR body without its receipt block and the blank line a
   expect(judge.prompts()[2]).toContain("**Tier:** non-critical");
 
   for (const [open, close] of [["<!--merge-risk-->", "<!--/merge-risk-->"], ["<!--  merge-risk  -->", "<!--  /merge-risk  -->"]]) {
-    pr.pullRequestState({ body: `## Testing\n\n<!-- hedge-proof-receipt head=${"e".repeat(40)} hash=05 -->\n${open}\n**Tier:** critical (b: ${open})\n${close}\n<!-- /hedge-proof-receipt -->\n` });
+    pr.pullRequestState({ body: `## Testing\n\nNo picture: the diff shows it whole.\n\n<!-- hedge-proof-receipt head=${"e".repeat(40)} hash=05 -->\n${open}\n**Tier:** critical (b: ${open})\n${close}\n<!-- /hedge-proof-receipt -->\n` });
     await pr.hedge("gate");
     expect(judge.prompts().at(-1)).toContain(`**Tier:** critical (b: ${open})`);
   }
-  pr.pullRequestState({ body: `## Testing\n\n<!-- merge-risk -->\n**Tier:** critical (b: the close in the block)\n<!-- hedge-proof-receipt head=${"f".repeat(40)} hash=06 -->\n<!-- /merge-risk -->\n<!-- /hedge-proof-receipt -->\n` });
+  pr.pullRequestState({ body: `## Testing\n\nNo picture: the diff shows it whole.\n\n<!-- merge-risk -->\n**Tier:** critical (b: the close in the block)\n<!-- hedge-proof-receipt head=${"f".repeat(40)} hash=06 -->\n<!-- /merge-risk -->\n<!-- /hedge-proof-receipt -->\n` });
   await pr.hedge("gate");
   expect(judge.prompts().at(-1)).toContain("<!-- /merge-risk -->");
 
-  pr.pullRequestState({ body: `## Testing\n\n<!-- merge-risk -->\n<!-- hedge-proof-receipt head=${"0".repeat(40)} hash=07 -->\n**Tier:** non-critical (a receipt inside the callout)\n<!-- /hedge-proof-receipt -->\n**Tier:** critical (b)\n<!-- /merge-risk -->\n` });
+  pr.pullRequestState({ body: `## Testing\n\nNo picture: the diff shows it whole.\n\n<!-- merge-risk -->\n<!-- hedge-proof-receipt head=${"0".repeat(40)} hash=07 -->\n**Tier:** non-critical (a receipt inside the callout)\n<!-- /hedge-proof-receipt -->\n**Tier:** critical (b)\n<!-- /merge-risk -->\n` });
   await pr.hedge("gate");
   expect(judge.prompts().at(-1)).toContain("**Tier:** non-critical (a receipt inside the callout)");
 });
