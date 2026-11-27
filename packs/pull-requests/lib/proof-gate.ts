@@ -72,7 +72,7 @@ export async function finalGate(head: ProofIdentity, context: JudgingContext, { 
     landed, cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)), ci: () => ciOf(home, head, run, now?.() ?? new Date(), env),
     pushedHead, openBotFindings: botFindingsOf(head, run), ledger: hubLedger(home, env, ssh), now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env),
   });
-  const judged: Judged = checked.code === 0 ? await judgeHead(head, checked, context) : { code: checked.code, lines: [], covered: "", judge: { state: "skipped", lines: [] }, reason: checked.failure };
+  const judged: Judged = checked.code === 0 ? await judgeHead(head, checked, context, (pull as PullRequest | undefined)?.body) : { code: checked.code, lines: [], covered: "", judge: { state: "skipped", lines: [] }, reason: checked.failure };
   const shown = pull === undefined ? undefined : receiptMarker((pull as PullRequest).body);
   const stale = shown && shown.head !== head.commit ? [`receipt: the PR body shows the receipt of ${shown.head.slice(0, 7)}, not HEAD ${head.commit.slice(0, 7)}. Refresh it with hedge proof receipt`] : [];
   const growth = await grownBy(home, head, run, pull);
@@ -155,7 +155,7 @@ async function savedGate(home: string, ref: PrRef, pull: PullRequest, ledger: Le
   return JSON.stringify(saved.key) === JSON.stringify(key) ? saved : undefined;
 }
 
-async function judgeHead(head: ProofIdentity, checked: Checked, context: JudgingContext): Promise<Judged> {
+async function judgeHead(head: ProofIdentity, checked: Checked, context: JudgingContext, body?: string): Promise<Judged> {
   const { home, env, run, now } = context;
   const author = await authorOf(home, head);
   const row = reviewerRow(author, env);
@@ -163,7 +163,7 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
   const today = now?.() ?? new Date();
   const weighedGap = await judgeGap(home, head, today, checked.decisions, checked.tier, decidesAll(env));
   const known = {
-    risk: riskRubric === undefined ? undefined : { rubric: riskRubric, body: pullRequestDetails(head, run).body },
+    risk: riskRubric === undefined ? undefined : { rubric: riskRubric, body: body ?? pullRequestDetails(head, run).body },
     commit: head.commit, crossFamily: otherFamily(row, author), ci: checked.ci, owed: checked.owed!, ledger: checked.lines,
     evidence: checked.evidence, reviews: await reviewRecords(home, head), rubric: await readRubric(home), references: skillReferences(home),
     conditions: [...checked.conditions, ...weighedGap?.condition ? [weighedGap.condition] : []], criticalPaths: await readCriticalPaths(home, head.repository, env),

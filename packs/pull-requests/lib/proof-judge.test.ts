@@ -644,6 +644,19 @@ test("the risk question holds pr-description's body rules, and hedge gives the j
   expect(prompt).toContain("Hedge counts 17 words in the body outside fenced code and comments.");
 });
 
+test("the judge reads the body the gate first read and saved its pass for, even when the body changes during the gate", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  installRiskSkill(pr);
+  const judge = fakeModel(pr, "JUDGE", verdict({ risk: { verdict: "pass", reason: "One text file changes: low, two-way", citations: [] } }));
+  pr.pullRequestState({ body: `No picture: the read the gate saved.\n\n${graded("non-critical")}` });
+  pr.whileGithubReadsPull(`printf '%s' '${JSON.stringify(`An edit during the gate.\n\n${graded("non-critical")}`)}' > "$(dirname "$0")/body"`);
+  expect((await pr.hedge("gate")).code).toBe(0);
+  expect([judge.prompts().at(-1)!.includes("the read the gate saved"), judge.prompts().at(-1)!.includes("An edit during the gate")]).toEqual([true, false]);
+});
+
 test("judge failures cached before the merge-risk skill was installed still count for the arbiter", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "greet new members\n");
