@@ -5,7 +5,7 @@ import { readPullRequest, runIn } from "./pr-ci.ts";
 import { gapKind, refuseInstructionQuote, usedAnswer } from "./proof.ts";
 import { decidesAll } from "./proof-autonomy.ts";
 import {
-  agentRefusal, answerUse, sameThread, askClasses, gateOverride, mergeCardChoice, mergeCardCondition, namesHead, overrideChoice, brakeDays, brakeOf, covers, decisionLine, fold, hubLedger, HubUnreachable, isUsers, liftCounted, live, messageKey, namesKind, namesPr, panelRefusal, prRef, refText, asksStandingOrder, choseStandingOrder, isStandingOrderEntry, standingOrder, standingOrderChoice, standingOrderDate, standingOrderEnd, standingOrderQuestion, standingOrderRuns, thisMachine, tierOf,
+  agentRefusal, answerUse, sameThread, askClasses, gateOverride, mergeCardChoice, mergeCardCondition, namesHead, overrideChoice, brakeDays, brakeOf, covers, decisionLine, fold, hubLedger, HubUnreachable, isUsers, liftCounted, live, messageKey, namesKind, namesPr, panelRefusal, prRef, refText, asksStandingOrder, isStandingOrderEntry, picksStandingOrder, standingOrder, standingOrderQuestionCap, standingOrderChoice, standingOrderDate, standingOrderEnd, standingOrderQuestion, standingOrderRuns, thisMachine, tierOf,
   type AnswerUse, type AskClass, type Decision, type DecisionState, type Env, type Ledger, type LedgerEvent, type Lift, type PrRef, type Reversal, type Ssh, type UsersMark,
 } from "./decision-ledger.ts";
 
@@ -145,7 +145,8 @@ const scopeOf = ({ prs, kinds, condition }: Scope): Decision["scope"] => ({ prs:
 function checkScope({ class: decisionClass, prs, kinds }: Scope) {
   if (!prs.length) throw new Error("--pr is required. Run hedge decision --help");
   if (decisionClass === "merge" && kinds?.length) {
-    if (kinds.length > 1 || ![gateOverride, standingOrder].includes(kinds[0]!)) throw new Error(`A merge decision takes only --kind ${gateOverride} or --kind ${standingOrder}`);
+    const named = [...new Set(kinds)];
+    if (named.length > 1 || ![gateOverride, standingOrder].includes(named[0]!)) throw new Error(`A merge decision takes only --kind ${gateOverride} or --kind ${standingOrder}`);
     return;
   }
   if (decisionClass === "proof-gap" && !kinds?.length) throw new Error("A proof-gap decision needs --kind with each gap kind it decides");
@@ -218,8 +219,8 @@ function fitsStandingOrder(scope: Scope): ((heard: HeardAnswer) => void) | undef
   const map = refText(scope.prs[0]!);
   const until = standingOrderDate(scope.condition);
   return (heard) => {
-    if (!choseStandingOrder(heard.words)) throw new Error(`The user chose "${heard.words}", not "${standingOrderChoice}". No standing order is recorded`);
-    if (!asksStandingOrder(heard.answered, map, until)) throw new Error(`A standing order's question is exactly "${standingOrderQuestion(map, until)}", the map optionally as a Markdown link, and the user answered another. Ask them again with that question, and put no terms in the option's description: Hedge cannot read it. The question: ${heard.answered}`);
+    if (!picksStandingOrder(heard.words)) throw new Error(`The user chose "${heard.words}", not "${standingOrderChoice}". No standing order is recorded`);
+    if (!asksStandingOrder(heard.answered, map, until)) throw new Error(`A standing order's question is exactly "${standingOrderQuestion(map, until)}", the map optionally as a Markdown link to its GitHub issue, in at most ${standingOrderQuestionCap} characters, and the user answered another. Ask them again with that question, and put no terms in the option's description: Hedge cannot read it. The question: ${heard.answered}`);
   };
 }
 

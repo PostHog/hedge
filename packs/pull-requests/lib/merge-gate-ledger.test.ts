@@ -61,6 +61,7 @@ test("a gate override is the user's 👤 answer for one PR at one full head, wit
   await expect(override("--mark", "👤", "--condition", "abc123: incident fix now")).rejects.toThrow("full 40-character head sha");
   await expect(override("--mark", "👤", "--pr", "example/product#41", "--condition", `${head}: incident fix now`)).rejects.toThrow("one --pr");
   await expect(pr.decide("record", "--mark", "👤", "--class", "merge", "--kind", "ci", "--pr", "example/product#42")).rejects.toThrow("only --kind gate-override");
+  await expect(override("--kind", "gate-override", "--mark", "👤", "--condition", "abc123: incident fix now")).rejects.toThrow("full 40-character head sha");
   expect(ledgerDecisions(pr)).toEqual([]);
 
   pr.choose("Keep the gate closed", `Merge example/product#42 at ${head} without a gate pass (gate-override)? The incident cannot wait.`);
@@ -126,8 +127,12 @@ test("a standing order is the user's \"Merge on your own\" on a card that names 
 
   pr.choose("Merge on your own", question().replace("example/maps#7", "[example/maps#7](https://github.com/example/maps/issues/7)"));
   expect((await order("--mark", "👤")).code).toBe(0);
-  pr.choose("Merge on your own", question().replace("example/maps#7", "[example/maps#8](https://github.com/example/maps/issues/7)"));
+  pr.choose("Merge on your own", question().replace("example/maps#7", "[example/maps#7](https://github.com/example/maps/issues/8)"));
   await expect(order("--mark", "👤")).rejects.toThrow("and the user answered another");
+  pr.choose("Merge on your own", question().replace(": may", `:${" ".repeat(600)} may`));
+  await expect(order("--mark", "👤")).rejects.toThrow("in at most 600 characters");
+  pr.choose("2026-10-25 Merge on your own", question());
+  await expect(order("--mark", "👤")).rejects.toThrow('not "Merge on your own"');
 });
 
 test("a gate run that throws after a pass at the same head is shared, so another machine's merge gate refuses the merge", async () => {

@@ -36,9 +36,13 @@ export const standingOrder = "standing-order";
 export const standingOrderChoice = "Merge on your own";
 export const standingOrderQuestion = (map: string, until: string | undefined) =>
   `Standing order (${standingOrder}) for ${map} until ${until ?? "its milestone"}: may this T3 thread merge every PR it merges on your word, gaps an agent accepted included?`;
-const linkText = (text: string) => text.replace(/\[([^\]]*)\]\([^)\s]*\)/g, "$1");
-export const asksStandingOrder = (question: string, map: string, until: string | undefined) => normalized(linkText(question)) === normalized(standingOrderQuestion(map, until));
-export const choseStandingOrder = (answer: string) => [standingOrderChoice, `${standingOrderChoice} (Recommended)`].map(normalized).includes(normalized(answer.replace(/^\d{4}-\d{2}-\d{2}\s+/, "")));
+const issueLink = /\[([^\]]*)\]\(https:\/\/github\.com\/([^/\s()]+)\/([^/\s()]+)\/issues\/(\d+)\)/g;
+const linkText = (text: string) => text.replace(issueLink, (link, label: string, owner: string, repo: string, number: string) => normalized(label) === normalized(`${owner}/${repo}#${number}`) ? label : link);
+export const standingOrderQuestionCap = 600;
+export const asksStandingOrder = (question: string, map: string, until: string | undefined) =>
+  question.length <= standingOrderQuestionCap && normalized(linkText(question)) === normalized(standingOrderQuestion(map, until));
+export const picksStandingOrder = (choice: string) => [standingOrderChoice, `${standingOrderChoice} (Recommended)`].map(normalized).includes(normalized(choice));
+const choseStandingOrder = (answer: string) => picksStandingOrder(/^\d{4}-\d{2}-\d{2} "(.*)"$/s.exec(answer)?.[1] ?? "");
 export const isStandingOrderEntry = (decision: DecisionState) => decision.class === "merge" && decision.scope.kinds?.includes(standingOrder) === true
   && (decision.reversed?.mark ?? decision.mark) === "👤" && choseStandingOrder(decision.reversed?.answer ?? decision.answer)
   && decision.scope.prs.length === 1 && asksStandingOrder(decision.question, decision.scope.prs[0]!, standingOrderDate(decision.scope.condition));

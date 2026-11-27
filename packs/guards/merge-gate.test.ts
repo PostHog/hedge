@@ -665,6 +665,20 @@ describe("a standing order of the person's", () => {
     expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.answer = '2026-11-27 "Merge on your own (Recommended)"'; })])).toBeUndefined();
     expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "[example/maps#7](https://github.com/example/maps/issues/7)"); })])).toBeUndefined();
     expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "[example/maps#8](https://github.com/example/maps/issues/7)"); })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace("example/maps#7", "[example/maps#7](https://github.com/example/maps/issues/8)"); })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.answer = '2026-11-27 "2026-11-27 Merge on your own"'; })])).toContain("an agent accepted proof gaps");
+    expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.question = decision.question.replace(": may", `:${" ".repeat(600)} may`); })])).toContain("an agent accepted proof gaps");
+  });
+
+  test("an order voided while the call reads a later PR holds the merge", async () => {
+    const home = homeIn({ "guards.person": "Robin" });
+    const ledger = join(home, ".local/state/hedge/decisions.jsonl");
+    writeFileSync(ledger, [gap, pass, gatePass(7, head), gatePass(6, lower), order()].map((event) => JSON.stringify(event)).join("\n") + "\n");
+    const milestone = JSON.stringify({ type: "void", id: "d-order", reason: "milestone reached", at: "2026-11-28T09:00:00Z" });
+    const voidMidCall = { pull: async (_repository: string, pr: number) => { if (pr === 7) appendFileSync(ledger, `${milestone}\n`); return pulls[pr]; }, pullFor: async (_repository: string, branch: string) => branch === "layer-1" ? 6 : undefined };
+    const command = "gh pr merge 9 --repo example/product && gh pr merge 7 --repo example/product";
+    const refusal = await mergeGate({ tool_name: "Bash", tool_input: { command }, cwd: "/" }, { home, env: { T3CODE_THREAD_ID: conductor }, github: voidMidCall, intent: io });
+    expect(refusal?.hookSpecificOutput.permissionDecisionReason).toContain("ended on 2026-11-28: milestone reached.");
   });
 });
 
