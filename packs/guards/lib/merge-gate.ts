@@ -567,7 +567,9 @@ export function realGateIO(home: string, env: Env, appliedSettings = env.HEDGE_S
     mode: async (repository, events) => {
       const lineage = await (chain ??= chainOf(thread, t3Threads(home)));
       const applied = resolveMode({ ...env, HEDGE_SETTINGS: appliedSettings }, events, lineage, repository).mode;
-      return processSettings === undefined || processSettings === appliedSettings ? applied : stricter(applied, resolveMode({ ...env, HEDGE_SETTINGS: fullHeldAtAuto(processSettings) }, events, lineage, repository).mode);
+      if (processSettings === undefined) return applied;
+      const fromProcess = (settings: string) => { try { return resolveMode({ ...env, HEDGE_SETTINGS: settings }, events, lineage, repository).mode; } catch { return "supervised" as const; } };
+      return fromProcess(processSettings) === applied ? applied : stricter(applied, fromProcess(fullHeldAtAuto(processSettings)));
     },
     thread,
   };

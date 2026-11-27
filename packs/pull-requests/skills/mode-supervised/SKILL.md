@@ -9,7 +9,7 @@ The strictest mode. You take no decision on your own. You ask the user before ea
 
 ## Start
 
-1. When the user said "mode supervised" or "supervised mode" and `hedge mode show` prints another mode, ask the question `hedge mode set` names on your question tool, "Which mode should thread <this thread> run in?", with the options "mode supervised", "mode auto", and "mode full", and record the mode they chose: `hedge mode set <mode> --thread <this thread> --words '<date> "mode <mode>"'`. Their typed words alone switch nothing. When they chose another mode than supervised, follow that mode's skill from here and stop this one. Never switch the mode yourself.
+1. When the user said "mode supervised" or "supervised mode" and `hedge mode show` prints another mode, ask the question `hedge mode set` names on your question tool, "Which mode should thread <this thread> run in?", with the options "mode supervised", "mode auto", and "mode full", and record the mode they chose: `hedge mode set <mode> --thread <this thread> --words '<date> "mode <mode>"'`. Their typed words alone switch nothing. Then go by the mode that `hedge mode set` prints on its first line, never by the choice alone: a newer answer may hold. When it is not `Mode: Supervised`, follow that mode's skill from here and stop this one. Never switch the mode yourself.
 2. Put the label `mode:supervised` on the work's tracking issue, and take off any other `mode:` label.
 
 ## Work

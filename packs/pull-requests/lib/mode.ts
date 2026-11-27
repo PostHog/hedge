@@ -105,7 +105,7 @@ export function fullHeldAtAuto(text: string | undefined): string {
 const strictness = (mode: Mode) => modes.indexOf(mode);
 export const stricter = (a: Mode, b: Mode) => strictness(a) <= strictness(b) ? a : b;
 
-export const askedFor = (question: string) => /^which mode should thread (\S+) run in\?/i.exec(question.trim())?.[1];
+export const askedFor = (question: string) => /^which mode should thread (\S+) run in\?/i.exec(question.replace(/[`*"“”‘’']/g, "").trim())?.[1];
 
 const heldAtAuto = (settings: Record<string, unknown>) => ({
   ...settings,

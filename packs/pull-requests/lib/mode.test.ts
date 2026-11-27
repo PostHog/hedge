@@ -167,8 +167,9 @@ describe("hedge mode", () => {
   });
 
   test("a card names its thread in either T3 id form", async () => {
-    const run = context([card("mode full", "Which mode should thread lane run in?", "bare")], [thread("conductor"), thread("t3:lane", "conductor")], []);
+    const run = context([card("mode full", "Which mode should thread lane run in?", "bare"), card("mode full", "Which mode should thread `t3:lane` run in?", "code")], [thread("conductor"), thread("t3:lane", "conductor")], []);
     expect(await set(run, "full", "mode full", "bare", "conductor", "t3:lane")).toBe(0);
+    expect(await set(run, "full", "mode full", "code", "conductor", "lane")).toBe(0);
   });
 
   test("show reads the repository from the checkout's GitHub origin, with or without a trailing slash", async () => {
