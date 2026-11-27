@@ -134,8 +134,9 @@ test("a Merge answer is the merge word of the thread that asked: it tells that t
   const { pr, head, id } = await agentAcceptedGap();
   expect((await pr.hedge("gate")).code).toBe(0);
   const github = { pull: async () => ({ head, base: "main", defaultBranch: "main", open: true }), pullFor: async () => undefined };
+  const topLevel = ["mcp:thread-1", "mcp:conductor-thread"].map((id) => ({ id, title: id, projectId: "p", status: "idle" }));
   const enqueueFrom = async (thread: string) => (await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr comment 42 --repo example/product --body '/trunk merge'" }, cwd: "/" },
-    { home: pr.home, env: { HEDGE_SETTINGS: pr.env.HEDGE_SETTINGS, T3CODE_THREAD_ID: thread }, github }))?.hookSpecificOutput.permissionDecisionReason;
+    { home: pr.home, env: { HEDGE_SETTINGS: pr.env.HEDGE_SETTINGS, T3CODE_THREAD_ID: thread }, github, reads: { threads: async () => topLevel } }))?.hookSpecificOutput.permissionDecisionReason;
   const recordMerge = async (question: string, ...thread: string[]) => {
     pr.choose("Merge", question);
     const recorded = await pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${head}: merge card`, ...thread);
