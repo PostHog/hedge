@@ -125,10 +125,35 @@ const home = (path: string) => path === "~" ? homedir() : path.startsWith("~/") 
 const builtAtRunTime = /[$`]/;
 const runTimeMark = "\u0000";
 const isRunTime = (value: string) => value.endsWith(runTimeMark);
-const graphqlText = /"""[\s\S]*?"""|"(?:\\.|[^"\\\n])*"|#[^\n]*/g;
 const anonymousRead = /^\s*(?:query\s*)?\{/;
 const trunkReads = /^repos\/[\w.-]+\/[\w.-]+\/(?:issues\/(?:\d+|\d+\/comments|comments\/\d+)|pulls\/\d+(?:\/reviews(?:\/\d+(?:\/events)?)?)?)$/;
-const graphqlPost = /\b(?:(?:add|update|submit)\w*(?:Comment|Review)\w*|update(?:PullRequest|Issue))\b/i;
+const graphqlCall = /(?:(?<=(?:^|\})[\s,]*)(mutation|query|subscription)[\s,]+)?([A-Za-z_]\w*)[\s,]*\(/g;
+const postingField = (name: string) => (/^(?:add|update|submit)/.test(name) && /Comment|Review/.test(name)) || /^update(?:PullRequest|Issue)$/.test(name);
+const lineEnd = (char: string | undefined) => char === "\n" || char === "\r";
+
+function graphqlCode(query: string): string {
+  let code = "";
+  let index = 0;
+  while (index < query.length) {
+    if (query[index] === "#") {
+      while (index < query.length && !lineEnd(query[index])) index++;
+      code += " ";
+    } else if (query.startsWith('"""', index)) {
+      index += 3;
+      while (index < query.length && !query.startsWith('"""', index)) index += query.startsWith('\\"""', index) ? 4 : 1;
+      index += 3;
+      code += " ";
+    } else if (query[index] === '"') {
+      index++;
+      while (index < query.length && query[index] !== '"' && !lineEnd(query[index])) index += query[index] === "\\" && !lineEnd(query[index + 1]) ? 2 : 1;
+      if (query[index] === '"') index++;
+      code += " ";
+    } else code += query[index++];
+  }
+  return code;
+}
+
+const postsText = (query: string) => [...graphqlCode(query).matchAll(graphqlCall)].some(([, keyword, name]) => !keyword && postingField(name!));
 const readAt = (found: Command, cwd: string | undefined, io: IntentIO, path: string) => io.readText(resolve(cwd ?? ".", found.chdir ?? ".", home(path)));
 
 function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline: string[], files: string[], built: boolean) {
@@ -147,7 +172,7 @@ function runTimeFields(fields: string[], graphql: boolean, bodyFromInput: boolea
   if (bodyFromInput) return false;
   if (!graphql) return built.some((field) => named(field, "body"));
   const queries = fields.filter((field) => key(field).toLowerCase() === "query").map((field) => field.slice("query=".length)).map((query) => query.startsWith("@") ? readQuery(query.slice(1)) : query);
-  const quiet = queries.length > 0 && queries.every((query) => query !== undefined && !graphqlPost.test(query.replace(graphqlText, "")));
+  const quiet = queries.length > 0 && queries.every((query) => query !== undefined && !postsText(query));
   const shownRead = (field: string) => anonymousRead.test(field.slice("query=".length));
   return built.some((field) => named(field, "query") && !shownRead(field)) || (built.length > 0 && !quiet);
 }
@@ -231,7 +256,7 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   if (!args) return { targets: [], refusal: shellAliasReason };
   const gh = parseGh(inOrder(args));
   const marked = parseGh(inOrder(expandAlias(ghArguments({ ...found, args: found.args.map((arg, index) => found.argExpands[index] ? `${arg}${runTimeMark}` : arg) })!, io) ?? []));
-  const builtBody = () => values(marked, "-b", "--body").some(isRunTime);
+  const builtBody = () => values(marked, "-b", "--body", "-F", "--body-file").some(isRunTime);
   if ((gh.group === "pr" || gh.group === "issue") && gh.action === "comment") {
     const sent = sentTexts(found, cwd, io, values(gh, "-b", "--body"), values(gh, "-F", "--body-file"), builtBody());
     if (!sendsEnqueue(sent, raw)) return { targets: [] };
@@ -262,8 +287,8 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
     endpoint = endpoint.replace(/\{owner\}|:owner/, owner ?? "").replace(/\{repo\}|:repo/, repo ?? "");
   }
   const method = (values(gh, "-X", "--method").at(-1) ?? (fields.length || values(gh, "--input").length ? "POST" : "GET")).toUpperCase();
-  if (method === "GET" && !found.argExpands.includes(true) && found.name !== "xargs") return { targets: [] };
-  const opaque = trunkReads.test(endpoint) || isRunTime(endpointOf(marked)) || found.fromExpansion || found.name === "xargs";
+  if (method === "GET" && found.name !== "xargs" && !(found.fromExpansion && found.argExpands.includes(true))) return { targets: [] };
+  const opaque = trunkReads.test(endpoint) || /\{\w+\}|:\w/.test(endpoint) || isRunTime(endpointOf(marked)) || found.fromExpansion || found.name === "xargs";
   const scoped = opaque ? sent : { ...sent, unread: sent.missing, built: false, piped: false };
   const comment = endpoint.match(/^repos\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)\/comments$/);
   const posted = (reads: boolean): MergeIntent => ({ targets: [{ repository: comment![1]!, pr: Number(comment![2]), via: `gh api issues/<n>/comments${reads ? "" : unreadVia}` }], ...reads ? {} : { unreadOnly: true as const } });
