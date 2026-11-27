@@ -126,8 +126,8 @@ const builtAtRunTime = /[$`]/;
 const runTimeMark = "\u0000";
 const isRunTime = (value: string) => value.endsWith(runTimeMark);
 const anonymousRead = /^\s*(?:query\s*)?\{/;
-const trunkReads = /^repos\/[\w.-]+\/[\w.-]+\/(?:issues\/(?:\d+|\d+\/comments|comments\/\d+)|pulls\/\d+(?:\/reviews(?:\/\d+(?:\/events)?)?)?)$/;
-const graphqlCall = /(?:(?<=(?:^|\})[\s,]*)(mutation|query|subscription)[\s,]+)?([A-Za-z_]\w*)[\s,]*\(/g;
+const unreadByTrunk = /^repos\/[\w.-]+\/[\w.-]+\/(?:pulls\/(?:\d+\/comments(?:\/\d+\/replies)?|comments\/\d+)|stacks)$/;
+const graphqlCall = /(?<!\w)(?:(?<=(?:^|\})[\s,]*)(mutation|query|subscription)[\s,]+)?([A-Za-z_]\w*)[\s,]*\(/g;
 const postingField = (name: string) => (/^(?:add|update|submit)/.test(name) && /Comment|Review/.test(name)) || /^update(?:PullRequest|Issue)$/.test(name);
 const lineEnd = (char: string | undefined) => char === "\n" || char === "\r";
 
@@ -288,7 +288,7 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   }
   const method = (values(gh, "-X", "--method").at(-1) ?? (fields.length || values(gh, "--input").length ? "POST" : "GET")).toUpperCase();
   if (method === "GET" && found.name !== "xargs" && !(found.fromExpansion && found.argExpands.includes(true))) return { targets: [] };
-  const opaque = trunkReads.test(endpoint) || /\{\w+\}|:\w/.test(endpoint) || isRunTime(endpointOf(marked)) || found.fromExpansion || found.name === "xargs";
+  const opaque = !unreadByTrunk.test(endpoint) || isRunTime(endpointOf(marked)) || found.fromExpansion || found.name === "xargs";
   const scoped = opaque ? sent : { ...sent, unread: sent.missing, built: false, piped: false };
   const comment = endpoint.match(/^repos\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)\/comments$/);
   const posted = (reads: boolean): MergeIntent => ({ targets: [{ repository: comment![1]!, pr: Number(comment![2]), via: `gh api issues/<n>/comments${reads ? "" : unreadVia}` }], ...reads ? {} : { unreadOnly: true as const } });

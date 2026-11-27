@@ -35,6 +35,11 @@ const mcp = (tool: string, input: Record<string, unknown>) => mergeIntent({ tool
 const target = (repository: string, pr: number) => expect.objectContaining({ repository, pr });
 
 describe("which calls enqueue or merge", () => {
+  test("a query file with a long name and no call is read in one pass", () => {
+    writeFileSync(join(workFiles, "long.graphql"), `${"x".repeat(300_000)}\nmutation($b: String!) { addComment(input: {subjectId: "x", body: $b}) { clientMutationId } }`);
+    expect(bash("gh api graphql -F query=@long.graphql -f b=\"$B\"").refusal).toBe(graphqlReason);
+  });
+
   test("a query file with an unclosed string of escaped quotes is read in one pass", () => {
     writeFileSync(join(workFiles, "slow.graphql"), `"${'\\"'.repeat(100_000)}\nmutation($b: String!) { addComment(input: {subjectId: "x", body: $b}) { clientMutationId } }`);
     expect(bash("gh api graphql -F query=@slow.graphql -f b=\"$B\"").refusal).toBe(graphqlReason);
@@ -218,6 +223,9 @@ describe("which calls enqueue or merge", () => {
     ["gh api -X PATCH repos/example/product/issues/7 -f body=\"$B\"", unreadPayloadReason],
     ["gh api repos/example/product/pulls/7/reviews/1/events -f event=COMMENT -f body=\"$B\"", unreadPayloadReason],
     ["gh api repos/{owner}/{repo}/issues/{branch}/comments -f body=\"$B\"", unreadPayloadReason],
+    ["gh api repos/example/product/issues/%37/comments -f body=\"$B\"", unreadPayloadReason],
+    ["gh api repos/example/product/pulls/7/comments/1/replies/../../../../../issues/7/comments -f body=\"$B\"", unreadPayloadReason],
+    ["gh api repos/example/product/commits/abc/comments -f body=\"$B\"", unreadPayloadReason],
     ["gh api graphql -f 'query=mutation($b: String!) { query addComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
     ["gh api graphql -f query=$'mutation($b: String!) { # c\\raddComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
     ["gh api graphql -f query=$'mutation($b: String!) { resolveReviewThread(input: {threadId: \"x\\\\\\naddComment(input: {subjectId: \"x\", body: $b}) { clientMutationId } }' -f b=\"$B\"", graphqlReason],
