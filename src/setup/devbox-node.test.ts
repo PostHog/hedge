@@ -391,6 +391,21 @@ describe("hedge devbox add leaves the node a Coder CLI at ~/.local/bin/coder, wh
     expect(sshConfig(home)).toBe(coderSshConfig("https://coder.example.com"));
   });
 
+  onLinux("but gives up on a Coder CLI whose version does not answer within a minute, and leaves nothing at ~/.local/bin/coder", async () => {
+    const { home, io, add } = await signedUp();
+    keepsOwnSsh(home);
+    const box = fakeMachine(home, {}, { agentCoder: "stalls" });
+    const adding = add(box);
+    const [stuck] = await Promise.race([box.stuckVersion(), adding.then(() => [])]);
+    expect(stuck).toBeNumber();
+    await box.passTime(59_999);
+    expect(processRunning(stuck!)).toBe(true);
+    await box.passTime(1);
+    expect(await adding).toBe(1);
+    expect([processRunning(stuck!), readdirSync(dirname(stableCli(home))), sshConfig(home)]).toEqual([false, [], ownSshConfig]);
+    expect(lastLine(io.output())).toBe(`hedge: Hedge could not put the Coder CLI on the PATH of ${node} at ~/.local/bin/coder, where T3 Code and cron jobs find it: no Coder CLI on its PATH copied and ran. Install the Coder CLI at ~/.local/bin/coder on ${node} from your Coder deployment, then run hedge devbox add ${node} again.`);
+  });
+
   test("but fails, names the next step, and leaves the SSH config as it is, when it cannot make ~/.local/bin", async () => {
     const { home, io, add } = await signedUp();
     keepsOwnSsh(home);

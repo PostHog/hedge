@@ -256,14 +256,15 @@ async function signInBox(host: string, box: Machine, context: DevboxContext, ses
 
 const cliInTheWay = 89;
 const stableCoderPath = "~/.local/bin/coder";
+const versionLimitSeconds = 60;
 
 const stableCoderScript = (address?: string) => {
-  const kept = `b="$HOME/.local/bin"; kept() { if [ -e "$b/coder" ] || [ -L "$b/coder" ]; then [ -f "$b/coder" ] && [ -x "$b/coder" ] && [ -s "$b/coder" ] && "$b/coder" version >/dev/null 2>&1 && exit 0; exit ${cliInTheWay}; fi; }; kept`;
+  const kept = `b="$HOME/.local/bin"; runs() { timeout -s KILL ${versionLimitSeconds} "$1" version >/dev/null 2>&1; }; kept() { if [ -e "$b/coder" ] || [ -L "$b/coder" ]; then [ -f "$b/coder" ] && [ -x "$b/coder" ] && [ -s "$b/coder" ] && runs "$b/coder" && exit 0; exit ${cliInTheWay}; fi; }; kept`;
   const published = `{ ln "$p" "$b/coder" 2>/dev/null; rm -f "$p"; kept; echo "Hedge could not write ${stableCoderPath}" >&2; exit 1; }`;
-  const copied = `mkdir -p "$b" && p=$(mktemp "$b/.coder.XXXXXX") || exit 1; c=$(command -v coder) && cp "$c" "$p" && [ -s "$p" ] && chmod +x "$p" && "$p" version >/dev/null 2>&1 && ${published}`;
+  const copied = `mkdir -p "$b" && p=$(mktemp "$b/.coder.XXXXXX") || exit 1; c=$(command -v coder) && cp "$c" "$p" && [ -s "$p" ] && chmod +x "$p" && runs "$p" && ${published}`;
   const downloaded = address === undefined
     ? `rm -f "$p"; echo "no Coder CLI on its PATH copied and ran" >&2; exit 1`
-    : `c= a=; case $(uname -m) in x86_64) a=amd64;; aarch64|arm64) a=arm64;; esac; [ -n "$a" ] && c=$(curl -q --proto =https --max-redirs 0 -fsS --max-time 300 -w '%{http_code}' -o "$p" ${quote(`${address}/bin/coder-linux-`)}"$a") && [ "$c" = 200 ] && [ -s "$p" ] && chmod +x "$p" && "$p" version >/dev/null && ${published}; rm -f "$p"; if [ -n "$a" ]; then echo "the download answered HTTP $c and gave no Coder CLI" >&2; else echo "Coder has no CLI for $(uname -m)" >&2; fi; exit 1`;
+    : `c= a=; case $(uname -m) in x86_64) a=amd64;; aarch64|arm64) a=arm64;; esac; [ -n "$a" ] && c=$(curl -q --proto =https --max-redirs 0 -fsS --max-time 300 -w '%{http_code}' -o "$p" ${quote(`${address}/bin/coder-linux-`)}"$a") && [ "$c" = 200 ] && [ -s "$p" ] && chmod +x "$p" && runs "$p" && ${published}; rm -f "$p"; if [ -n "$a" ]; then echo "the download answered HTTP $c and gave no Coder CLI" >&2; else echo "Coder has no CLI for $(uname -m)" >&2; fi; exit 1`;
   return `${kept}; ${copied}; ${downloaded}`;
 };
 
