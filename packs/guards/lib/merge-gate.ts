@@ -501,65 +501,47 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
   let events: LedgerEvent[] | undefined;
   let decisions: DecisionState[] = [];
   let hubError: string | undefined;
-  const checked: { layer: Layer; top: string; gated: boolean }[] = [];
+  const missing: string[] = [];
+  const held: string[] = [];
   const now = () => io.now?.() ?? Date.now();
-  const order = (state: DecisionState[]) => state.find((decision) => orderCovers(decision, io.thread, now()));
+  const order = () => decisions.find((decision) => orderCovers(decision, io.thread, now()));
+  const hold = (results: GateResult[], layer: Layer) => held.push(...heldLayer(decisions, layer, heldGaps(results, decisions, layer, io.thread)));
   const readLedger = async () => {
     if (events !== undefined || hubError !== undefined) return;
     try { events = await io.ledger(); decisions = fold(events); } catch (error) { hubError = (error as Error).message; }
   };
-  const judge = async (snapshot: LedgerEvent[] | undefined, state: DecisionState[]) => {
-    const missing: string[] = [];
-    const held: string[] = [];
-    const unpassed: string[] = [];
-    for (const { layer, top, gated } of checked) {
-      const local = await io.localGate(layer.repository, layer.pr, layer.head);
-      const results = [...local ? [local] : [], ...snapshot ? sharedResults(snapshot, layer) : []];
-      const passed = latestPassed(results, io.decidesAll?.() ?? false);
-      if (gated && !passed && !overrideIn(state, layer)) { missing.push(`${layer.repository}#${layer.pr}${top} at ${layer.head.slice(0, 12)}: run \`${gateCommand(layer)}\``); continue; }
-      const gaps = heldLayer(state, layer, heldGaps(results, state, layer, io.thread));
-      held.push(...gaps);
-      if (gaps.length && !passed) unpassed.push(`${layer.repository}#${layer.pr} at ${layer.head.slice(0, 12)}`);
-    }
-    return { missing, held, unpassed };
+  const resultsAt = async (layer: Layer) => {
+    const local = await io.localGate(layer.repository, layer.pr, layer.head);
+    return [...local ? [local] : [], ...events ? sharedResults(events, layer) : []];
   };
-  const unchecked = (error: unknown) => `Hedge blocked this merge: the merge gate could not check it (${(error as Error).message}). A merge needs a \`hedge proof gate\` pass at each PR's head on GitHub; try again when GitHub answers.`;
-  const everyRepository = () => [...new Set([...intent.targets, ...intent.exempt ?? []].map((target) => target.repository))];
-  let verdict: Awaited<ReturnType<typeof judge>>;
   try {
     for (const target of intent.targets) {
       for (const layer of await layersOf(target, io)) {
         await readLedger();
-        checked.push({ layer, top: layer.pr === target.pr ? "" : ` (a lower layer of ${target.repository}#${target.pr})`, gated: true });
+        const results = await resultsAt(layer);
+        if (overrideIn(decisions, layer) || latestPassed(results, io.decidesAll?.() ?? false)) { hold(results, layer); continue; }
+        const top = layer.pr === target.pr ? "" : ` (a lower layer of ${target.repository}#${target.pr})`;
+        missing.push(`${layer.repository}#${layer.pr}${top} at ${layer.head.slice(0, 12)}: run \`${gateCommand(layer)}\``);
       }
     }
     for (const target of intent.exempt ?? []) {
       await readLedger();
       if (hubError !== undefined) return unreadReason([...new Set((intent.exempt ?? []).map((one) => one.repository))]);
       if (!decisions.some((decision) => agentGap(decision) && inRepository(decision, target.repository))) continue;
-      for (const layer of await layersOf(target, io)) checked.push({ layer, top: "", gated: false });
+      for (const layer of await layersOf(target, io)) hold(await resultsAt(layer), layer);
     }
-    verdict = await judge(events, decisions);
   } catch (error) {
-    return unchecked(error);
+    return `Hedge blocked this merge: the merge gate could not check it (${(error as Error).message}). A merge needs a \`hedge proof gate\` pass at each PR's head on GitHub; try again when GitHub answers.`;
   }
-  if (!verdict.missing.length && hubError !== undefined) return unreadReason([...new Set(intent.targets.map((target) => target.repository))]);
-  const lifts = (state: DecisionState[]) => !verdict.missing.length && verdict.held.length > 0 && !verdict.unpassed.length && order(state) !== undefined;
-  if (lifts(decisions)) {
-    let fresh: LedgerEvent[];
-    try { fresh = await io.ledger(); } catch { return unreadReason(everyRepository()); }
-    decisions = fold(fresh);
-    try { verdict = await judge(fresh, decisions); } catch (error) { return unchecked(error); }
-    if (!verdict.missing.length && (!verdict.held.length || lifts(decisions))) return undefined;
+  if (!missing.length && hubError !== undefined) return unreadReason([...new Set(intent.targets.map((target) => target.repository))]);
+  const standing = held.length ? order() : undefined;
+  if (!missing.length && standing) {
+    try { decisions = fold(await io.ledger()); } catch { return unreadReason([...new Set([...intent.targets, ...intent.exempt ?? []].map((target) => target.repository))]); }
+    if (order()) return undefined;
   }
-  const { missing, held, unpassed } = verdict;
-  const covering = order(decisions);
-  if (!missing.length) {
-    if (!held.length) return undefined;
-    const why = covering && unpassed.length ? ` ${person}'s standing order ${orderName(covering)} lifts this hold only at a head where \`hedge proof gate\` passed, also in a repository exempt from the gate pass: run it at ${unpassed.join("; ")}.` : uncoveredWhy(decisions, io.thread, now());
-    return heldReason(held, person) + why;
-  }
+  if (!missing.length) return held.length ? heldReason(held, person) + uncoveredWhy(decisions, io.thread, now()) : undefined;
   const hub = hubError ? ` The decision ledger could not be read (${hubError}), so only this machine's gate records counted.` : "";
+  const covering = order();
   const ordered = covering ? ` ${person}'s standing order ${orderName(covering)} is their merge word for gaps an agent accepted, never for a missing gate pass.` : "";
   return `Hedge blocked this merge: \`hedge proof gate\` has not passed at the head of ${missing.join("; ")}. A missing proof store, a pass at an older head, or a pass that a later failed run at the same head replaced does not count, nor a pass from while pull-requests.autonomy was end once it is ask again.${hub}${ordered} `
     + `Run the gate on each head until it exits 0, then enqueue again. ${overrideHint(person)}`;
