@@ -241,7 +241,7 @@ async function signInBox(host: string, box: Machine, context: DevboxContext, ses
   const placed = await stableCoder(box, address);
   if (placed.code === cliInTheWay) throw new Error(stableCoderMissing(host, placed));
   if (placed.code !== 0) throw new Error(`Hedge could not install the Coder CLI on ${host} from ${address}: ${placed.output.trim()}`);
-  if (sameCoderUser(session, await coderSession(box))) return configSsh(host, box);
+  if ((await box.exec(["sh", "-c", `${signInState(address)} :`])).code === 0 && sameCoderUser(session, await coderSession(box))) return configSsh(host, box);
   const name = `hedge-${Date.now().toString(36)}`;
   const token = await here.exec(["coder", "tokens", "create", "--name", name]);
   if (token.code !== 0 || !token.output.trim()) throw new Error(`Coder made no token for ${host}: ${token.output.trim()}`);
@@ -260,7 +260,7 @@ const versionLimitSeconds = 60;
 
 const stableCoderScript = (address?: string) => {
   const kept = `b="$HOME/.local/bin"; runs() { timeout -s KILL ${versionLimitSeconds} "$1" version >/dev/null 2>&1; }; kept() { if [ -e "$b/coder" ] || [ -L "$b/coder" ]; then [ -f "$b/coder" ] && [ -x "$b/coder" ] && [ -s "$b/coder" ] && runs "$b/coder" && exit 0; exit ${cliInTheWay}; fi; }; kept`;
-  const published = `{ ln "$p" "$b/coder" 2>/dev/null; rm -f "$p"; kept; echo "Hedge could not write ${stableCoderPath}" >&2; exit 1; }`;
+  const published = `{ ln "$p" "$b/coder" 2>/dev/null; rm -f "$p" "$b/coder/\${p##*/}" 2>/dev/null; kept; echo "Hedge could not write ${stableCoderPath}" >&2; exit 1; }`;
   const copied = `mkdir -p "$b" && p=$(mktemp "$b/.coder.XXXXXX") || exit 1; c=$(command -v coder) && cp "$c" "$p" && [ -s "$p" ] && chmod +x "$p" && runs "$p" && ${published}`;
   const downloaded = address === undefined
     ? `rm -f "$p"; echo "no Coder CLI on its PATH copied and ran" >&2; exit 1`

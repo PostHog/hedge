@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { isolateGit, spawnGit, tempDirs } from "../testing/git.ts";
 import { profilePath } from "./profile.ts";
 import { overSsh } from "./devbox.ts";
-import { agentCoderPath, boxHome, coderSshConfig, coderToken, fakeMachine, machineFile, ownCoder, personCoderToken, processRunning, setUpToAdd, stopFakeProcesses, throughSsh, until } from "./testing.ts";
+import { agentCoderPath, boxHome, coderSshConfig, coderToken, fakeMachine, machineFile, ownCoder, personCoderToken, servedCoderPath, processRunning, setUpToAdd, stopFakeProcesses, throughSsh, until } from "./testing.ts";
 
 isolateGit();
 const temp = tempDirs();
@@ -361,8 +361,7 @@ describe("hedge devbox add leaves the node a Coder CLI at ~/.local/bin/coder, wh
   ] as const)("when Hedge signs the node in, from this machine's Coder address, when the Coder CLI on its PATH %s", async (_, agentCoder) => {
     const { home, add } = await signedUp();
     expect(await add(fakeMachine(home, { "box:coder": 1 }, { agentCoder }))).toBe(0);
-    expect(readFileSync(stableCli(home), "utf8")).not.toBe(agentCli(home));
-    expect(readFileSync(stableCli(home), "utf8")).toStartWith("#!/bin/sh\n");
+    expect(readFileSync(stableCli(home), "utf8")).toBe(readFileSync(servedCoderPath(home), "utf8"));
     expect(sshConfig(home)).toBe(coderSshConfig("https://coder.example.com"));
   });
 
@@ -378,16 +377,16 @@ describe("hedge devbox add leaves the node a Coder CLI at ~/.local/bin/coder, wh
   test("and keeps a Coder CLI the person put there, though another one is on its PATH", async () => {
     const { home, add } = await signedUp();
     mkdirSync(dirname(stableCli(home)), { recursive: true });
-    writeFileSync(stableCli(home), ownCoder(home), { mode: 0o755 });
+    writeFileSync(stableCli(home), ownCoder, { mode: 0o755 });
     expect(await add(fakeMachine(home))).toBe(0);
-    expect([readFileSync(stableCli(home), "utf8"), readdirSync(dirname(stableCli(home)))]).toEqual([ownCoder(home), ["coder"]]);
+    expect([readFileSync(stableCli(home), "utf8"), readdirSync(dirname(stableCli(home)))]).toEqual([ownCoder, ["coder"]]);
     expect(sshConfig(home)).toBe(coderSshConfig("https://coder.example.com"));
   });
 
   test("and keeps a Coder CLI the person puts there while Hedge copies its own", async () => {
     const { home, add } = await signedUp();
     expect(await add(fakeMachine(home, {}, { agentCoder: "raced" }))).toBe(0);
-    expect([readFileSync(stableCli(home), "utf8"), readdirSync(dirname(stableCli(home)))]).toEqual([ownCoder(home), ["coder"]]);
+    expect([readFileSync(stableCli(home), "utf8"), readdirSync(dirname(stableCli(home)))]).toEqual([ownCoder, ["coder"]]);
     expect(sshConfig(home)).toBe(coderSshConfig("https://coder.example.com"));
   });
 
@@ -404,6 +403,30 @@ describe("hedge devbox add leaves the node a Coder CLI at ~/.local/bin/coder, wh
     expect(await adding).toBe(1);
     expect([processRunning(stuck!), readdirSync(dirname(stableCli(home))), sshConfig(home)]).toEqual([false, [], ownSshConfig]);
     expect(lastLine(io.output())).toBe(`hedge: Hedge could not put the Coder CLI on the PATH of ${node} at ~/.local/bin/coder, where T3 Code and cron jobs find it: no Coder CLI on its PATH copied and ran. Install the Coder CLI at ~/.local/bin/coder on ${node} from your Coder deployment, then run hedge devbox add ${node} again.`);
+  });
+
+  test("and makes no token, and reads no session, when a session FIFO appears while it installs the Coder CLI", async () => {
+    const { home, io, add } = await signedUp();
+    signInOnBox(home, { url: "https://coder.example.com" });
+    keepsOwnSsh(home);
+    const box = fakeMachine(home, { "box:coder": 1 }, { agentCoder: "none" });
+    const exec = box.machine.exec;
+    box.machine.exec = async (command, run) => {
+      const answer = await exec(command, run);
+      if (command.join(" ").includes("/bin/coder-linux-")) Bun.spawnSync(["mkfifo", coderFile(home, "session")]);
+      return answer;
+    };
+    expect(await add(box)).toBe(1);
+    expect([box.coderTokens(), sshConfig(home)]).toEqual([[], ownSshConfig]);
+    expect(lastLine(io.output())).toBe(`hedge: Hedge could not sign ${node} in to Coder, because it is signed in another way now.`);
+  });
+
+  test("but fails, leaves it as it is, and says to move it aside, when a folder appears at ~/.local/bin/coder while Hedge copies its own", async () => {
+    const { home, io, add } = await signedUp();
+    keepsOwnSsh(home);
+    expect(await add(fakeMachine(home, {}, { agentCoder: "racedFolder" }))).toBe(1);
+    expect([readdirSync(dirname(stableCli(home))), readdirSync(stableCli(home)), sshConfig(home)]).toEqual([["coder"], [], ownSshConfig]);
+    expect(lastLine(io.output())).toBe(`hedge: ${inTheWay}`);
   });
 
   test("but fails, names the next step, and leaves the SSH config as it is, when it cannot make ~/.local/bin", async () => {
