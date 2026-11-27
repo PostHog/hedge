@@ -41,7 +41,7 @@ const verdictSchema = (asked: QuestionName[]) => ({
   properties: { ...Object.fromEntries(asked.map((name) => [name, questionSchema])), quality: qualitySchema },
 });
 
-const riskQuestion = "risk: Does the merge-risk callout's grade and door follow from what the diff measurably changes? Derive them yourself first with the merge-risk rubric, from the diff and the counted evidence, then compare. Fail when the callout's grade or door differs from yours, when a changed row with an incident, or an uncovered row, appears neither in the callout nor under Known issues, or when it rests on a hypothetical bug on a row a proof covers, on reach that counts traffic whose outcome does not change, on harm the base already caused, or on a grade carried forward from an earlier panel, lens, body, or thread. A claim in the body that a proof exists counts only when the evidence holds it. When the repository keeps a critical-path list, fail a Tier line that does not say critical while the diff touches a path on the list, and name the path; when hedge marks the diff test-only, a path that only its test files match does not count. Name the grade and door you derive in the reason. With no callout in the body, pass.";
+const riskQuestion = "risk: Does the merge-risk callout's grade and door follow from what the diff measurably changes? Derive them yourself first with the merge-risk rubric, from the diff and the counted evidence, then compare. Fail when the callout's grade or door differs from yours, when a changed row with an incident, or an uncovered row, appears neither in the callout nor under Known issues, or when it rests on a hypothetical bug on a row a proof covers, on reach that counts traffic whose outcome does not change, on harm the base already caused, or on a grade carried forward from an earlier panel, lens, body, or thread. A claim in the body that a proof exists counts only when the evidence holds it. When the repository keeps a critical-path list, fail a Tier line that does not say critical while the diff touches a path on the list, and name the path; when hedge marks the diff test-only, a path that only its test files match does not count. Also fail a body that breaks the shape of pr-description, and name the rule: it shows no picture where GitHub renders it, which is a Mermaid diagram, an image, a video, an uploaded attachment, or a `No picture: <why>` line; it holds more than 800 written words, leaving out code, diagrams, checklist template lines, and comments; or the callout holds more than 6 top-level bullets, Switch-off and Tier included. Name the grade and door you derive in the reason. With no callout in the body, pass.";
 const qualityQuestion = "quality: List each problem of the diff against the rubric and rate it. high: a bug, data loss, a security hole, missing tests for changed behavior, or a plain breach of the rubric that a reviewer would block on. medium: a real design or test weakness. low: a nit.";
 
 const verifiedRule = ` A kind marked "Provenance verified by code" ran under the Hedge runner, exit 0, on a clean tree, and hedge checked in code its commit and its carry to HEAD: never fail it as typed by hand, as evidence of an earlier commit, or for how it was captured. Judge only whether it shows the behavior this diff changes.`;
@@ -185,8 +185,13 @@ ${risk.rubric}
 
 ## PR body, with its merge-risk callout
 
+Hedge counts ${roughWords(withoutReceipt(risk.body))} words in the body outside fenced code and comments. The count is rough: it includes checklist template lines and link targets, so the written words can be fewer.
+
 ${untrusted("PR body", capped(withoutReceipt(risk.body), evidenceCap))}
 `;
+
+const fence = /^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[^\n]*$/gm;
+const roughWords = (body: string) => body.replace(fence, " ").split(/<!--[\s\S]*?-->/).join(" ").split(/\s+/).filter((word) => /[\p{L}\p{N}]/u.test(word)).length;
 
 function parseVerdict(text: string, asked: QuestionName[]): Verdict | undefined {
   try {

@@ -626,6 +626,24 @@ test("with the merge-risk skill installed, the judge grades the callout against 
   expect((await gateAfterResponse(pr, "Nothing to answer.\n")).output).toContain("judge: unavailable (unparseable answer");
 });
 
+test("the risk question holds pr-description's body rules, and hedge gives the judge a word count without the receipt, fenced code and comments", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  installRiskSkill(pr);
+  const judge = fakeModel(pr, "JUDGE", verdict({ risk: { verdict: "fail", reason: "body: no picture", citations: [] } }));
+  const words = (count: number) => Array.from({ length: count }, () => "word").join(" ");
+  const uncounted = `<!-- hedge-proof-receipt head=${"a".repeat(40)} hash=01 -->\n${words(50)}\n<!-- /hedge-proof-receipt -->\n\n\`\`\`\n${words(40)}\n\`\`\`\n<!-- ${words(30)} -->\n`;
+  pr.pullRequestState({ body: `${uncounted}${words(7)} - **\n\n${graded("non-critical")}` });
+  const gate = await pr.hedge("gate");
+  expect([gate.code, gate.output.includes("judge risk: fail: body: no picture")]).toEqual([1, true]);
+  const prompt = judge.prompts().at(-1)!;
+  expect(prompt).toContain("it shows no picture where GitHub renders it, which is a Mermaid diagram, an image, a video, an uploaded attachment, or a `No picture: <why>` line; it holds more than 800 written words");
+  expect(prompt).toContain("or the callout holds more than 6 top-level bullets, Switch-off and Tier included.");
+  expect(prompt).toContain("Hedge counts 17 words in the body outside fenced code and comments.");
+});
+
 test("judge failures cached before the merge-risk skill was installed still count for the arbiter", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "greet new members\n");
@@ -721,32 +739,6 @@ test("review-finish refuses a reviewer name that could close the judge's untrust
   expect((await pr.hedge("review-finish", "--round", "1", "--reviewer", "claude-opus-5-5[1m]", "findings.md")).code).toBe(0);
 });
 
-test("the gate fails a description with no picture, too many words or too many callout bullets before it asks the judge, and --landed skips that check only once GitHub says the PR merged", async () => {
-  const pr = await checkout();
-  await pr.commit("feature.txt", "greet new members\n");
-  await reviewHead(pr);
-  await pr.hedge("require", "--none", "--reason", "Docs only");
-  const judge = fakeModel(pr, "JUDGE", verdict());
-  const unpictured = graded("non-critical").replace("No picture: the diff shows it whole.\n\n", "");
-  const sevenBullets = graded("non-critical").replace("> - **Tier:** non-critical", Array.from({ length: 7 }, (_, index) => `> - row ${index + 1}`).join("\n"));
-  const wordy = `${graded("non-critical")}\n${Array.from({ length: 800 }, () => "word").join(" ")}\n`;
-  for (const [body, problem] of [[unpictured, "body: the description has no picture."], [sevenBullets, "body: the merge-risk callout has 7 bullets, over the cap of 6"], [wordy, "body: the description holds 8"]] as const) {
-    pr.pullRequestState({ body });
-    const gate = await pr.hedge("gate");
-    expect([gate.code, gate.output.includes(problem)]).toEqual([1, true]);
-  }
-  pr.pullRequestState({ body: unpictured });
-  expect((await pr.hedge("gate", "--landed")).output).toContain("body: the description has no picture.");
-  expect(judge.prompts()).toHaveLength(0);
-
-  pr.pullRequestState({ body: unpictured, merged: true });
-  expect((await pr.hedge("gate", "--landed")).output).not.toContain("body:");
-  expect(judge.prompts()).toHaveLength(1);
-
-  pr.pullRequestState({ body: graded("non-critical") });
-  expect((await pr.hedge("gate")).code).toBe(0);
-});
-
 test("the judge reads the PR body without its receipt block and the blank line after it, so a first receipt or a refresh reuses the cached verdict, while other body text and a block that holds the merge-risk callout stay", async () => {
   const pr = await checkout();
   await pr.commit("feature.txt", "greet new members\n");
@@ -770,21 +762,21 @@ test("the judge reads the PR body without its receipt block and the blank line a
   expect(judge.prompts()).toHaveLength(2);
   expect(judge.prompts()[1]).toContain("an unclosed block");
 
-  pr.pullRequestState({ body: `## Testing\n\nNo picture: the diff shows it whole.\n\n<!-- hedge-proof-receipt head=${"d".repeat(40)} hash=04 -->\n${graded("non-critical")}<!-- /hedge-proof-receipt -->\n` });
+  pr.pullRequestState({ body: `## Testing\n\n<!-- hedge-proof-receipt head=${"d".repeat(40)} hash=04 -->\n${graded("non-critical")}<!-- /hedge-proof-receipt -->\n` });
   expect((await pr.hedge("gate")).code).toBe(0);
   expect(judge.prompts()).toHaveLength(3);
   expect(judge.prompts()[2]).toContain("**Tier:** non-critical");
 
   for (const [open, close] of [["<!--merge-risk-->", "<!--/merge-risk-->"], ["<!--  merge-risk  -->", "<!--  /merge-risk  -->"]]) {
-    pr.pullRequestState({ body: `## Testing\n\nNo picture: the diff shows it whole.\n\n<!-- hedge-proof-receipt head=${"e".repeat(40)} hash=05 -->\n${open}\n**Tier:** critical (b: ${open})\n${close}\n<!-- /hedge-proof-receipt -->\n` });
+    pr.pullRequestState({ body: `## Testing\n\n<!-- hedge-proof-receipt head=${"e".repeat(40)} hash=05 -->\n${open}\n**Tier:** critical (b: ${open})\n${close}\n<!-- /hedge-proof-receipt -->\n` });
     await pr.hedge("gate");
     expect(judge.prompts().at(-1)).toContain(`**Tier:** critical (b: ${open})`);
   }
-  pr.pullRequestState({ body: `## Testing\n\nNo picture: the diff shows it whole.\n\n<!-- merge-risk -->\n**Tier:** critical (b: the close in the block)\n<!-- hedge-proof-receipt head=${"f".repeat(40)} hash=06 -->\n<!-- /merge-risk -->\n<!-- /hedge-proof-receipt -->\n` });
+  pr.pullRequestState({ body: `## Testing\n\n<!-- merge-risk -->\n**Tier:** critical (b: the close in the block)\n<!-- hedge-proof-receipt head=${"f".repeat(40)} hash=06 -->\n<!-- /merge-risk -->\n<!-- /hedge-proof-receipt -->\n` });
   await pr.hedge("gate");
   expect(judge.prompts().at(-1)).toContain("<!-- /merge-risk -->");
 
-  pr.pullRequestState({ body: `## Testing\n\nNo picture: the diff shows it whole.\n\n<!-- merge-risk -->\n<!-- hedge-proof-receipt head=${"0".repeat(40)} hash=07 -->\n**Tier:** non-critical (a receipt inside the callout)\n<!-- /hedge-proof-receipt -->\n**Tier:** critical (b)\n<!-- /merge-risk -->\n` });
+  pr.pullRequestState({ body: `## Testing\n\n<!-- merge-risk -->\n<!-- hedge-proof-receipt head=${"0".repeat(40)} hash=07 -->\n**Tier:** non-critical (a receipt inside the callout)\n<!-- /hedge-proof-receipt -->\n**Tier:** critical (b)\n<!-- /merge-risk -->\n` });
   await pr.hedge("gate");
   expect(judge.prompts().at(-1)).toContain("**Tier:** non-critical (a receipt inside the callout)");
 });

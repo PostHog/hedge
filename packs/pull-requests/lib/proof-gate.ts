@@ -7,7 +7,7 @@ import { covers, hubLedger, refText, riskCalloutOf, tierOf, type Env, type Ledge
 import { ciOf, readPullRequest, type PullRequest, type Run } from "./pr-ci.ts";
 import { ghThrough } from "./gh.ts";
 import { openBotFindings } from "./pr-threads.ts";
-import { askGap, authorOf, knownIssuesSection, ciRunningCode, conditionName, isStandingCondition, judgeDirectory, judgeGap, judgeGapProof, listStanding, parseVerdict, prDirectory, proofGate, pullRequestDirectory, readDecisions, readJson, receiptOf, reviewRecords, withBrokenConditions, writeJson, type Arbiter, type Decisions, type JudgeSummary, type ProofIdentity, type ProofSummary, type PushedHead } from "./proof.ts";
+import { askGap, authorOf, ciRunningCode, conditionName, isStandingCondition, judgeDirectory, judgeGap, judgeGapProof, listStanding, parseVerdict, prDirectory, proofGate, pullRequestDirectory, readDecisions, readJson, receiptOf, reviewRecords, withBrokenConditions, writeJson, type Arbiter, type Decisions, type JudgeSummary, type ProofIdentity, type ProofSummary, type PushedHead } from "./proof.ts";
 import { displayEntry } from "./proof-display.ts";
 import { receiptMarker, withoutReceipt } from "./proof-receipt.ts";
 import { baseRefs, cleanBaseMerge, devPullOf, diffOf, mergeBase, pullRequestDetails, remotesOf, topLevel } from "./proof-checkout.ts";
@@ -15,7 +15,6 @@ import { gitCommitReader, quietCommitIn, testOnlyRange } from "./proof-delta.ts"
 import { isCommitSha, measureGrowth, type Growth } from "./proof-end-table.ts";
 import { autonomyOf, decidesAll } from "./proof-autonomy.ts";
 import { heldNames, mergeCardLine, readTimeline } from "./proof-merge-card.ts";
-import { bodyProblems } from "./proof-body.ts";
 import { readSanity } from "./proof-sanity.ts";
 import { inputsDigest, readBloat } from "./proof-bloat.ts";
 import { judge, readCriticalPaths, type JudgeInput } from "./proof-judge.ts";
@@ -28,7 +27,7 @@ export type FinalGate = { code: number; reason: string; lines: string[]; verdict
 
 type Checked = Awaited<ReturnType<typeof proofGate>>;
 type Judged = { code: number; lines: string[]; covered: string; judge: JudgeSummary; reason?: string };
-type GateKey = { head: string; base: string; baseSha: string; tier: string; callout: string; knownIssues: string; body: string[]; landed: boolean; fingerprint: string; endTable: true };
+type GateKey = { head: string; base: string; baseSha: string; tier: string; body: string; landed: boolean; fingerprint: string; endTable: true };
 type Condition = Checked["conditions"][number];
 type SavedGate = { key: GateKey; gate: FinalGate; conditions: Condition[] };
 
@@ -59,10 +58,10 @@ async function fingerprintOf(home: string, ref: PrRef, files: string, decisions:
   return createHash("sha256").update(JSON.stringify({ files, covering, standing: await listStanding(home) })).digest("hex");
 }
 
-const describedProblems = (pull: PullRequest) => pull.state === "merged" ? [] : bodyProblems(pull.body ?? "");
+const judgedBody = (body: string) => riskCalloutOf(body) === undefined ? "" : withoutReceipt(body).replace(/\n(?:[ \t\r]*\n)+/g, "\n").trim();
 
 const keyOf = (pull: PullRequest, landed: boolean, fingerprint: string): GateKey =>
-  ({ head: pull.head, base: pull.base, baseSha: pull.baseSha, tier: tierOf(pull.body), callout: createHash("sha256").update(riskCalloutOf(pull.body) ?? "").digest("hex"), knownIssues: createHash("sha256").update(knownIssuesSection(withoutReceipt(pull.body ?? "")).trim()).digest("hex"), body: describedProblems(pull), landed, fingerprint, endTable: true });
+  ({ head: pull.head, base: pull.base, baseSha: pull.baseSha, tier: tierOf(pull.body), body: createHash("sha256").update(judgedBody(pull.body)).digest("hex"), landed, fingerprint, endTable: true });
 
 export async function finalGate(head: ProofIdentity, context: JudgingContext, { landed = false }: { landed?: boolean } = {}): Promise<FinalGate> {
   const { home, env, run, now, ssh } = context;
@@ -73,10 +72,7 @@ export async function finalGate(head: ProofIdentity, context: JudgingContext, { 
     landed, cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)), ci: () => ciOf(home, head, run, now?.() ?? new Date(), env),
     pushedHead, openBotFindings: botFindingsOf(head, run), ledger: hubLedger(home, env, ssh), now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env),
   });
-  const body = pull === undefined ? [] : describedProblems(pull as PullRequest);
-  const judged: Judged = checked.code !== 0 ? { code: checked.code, lines: [], covered: "", judge: { state: "skipped", lines: [] }, reason: checked.failure }
-    : body.length ? { code: 1, lines: body, covered: "", judge: { state: "skipped", lines: [] }, reason: body[0] }
-    : await judgeHead(head, checked, context);
+  const judged: Judged = checked.code === 0 ? await judgeHead(head, checked, context) : { code: checked.code, lines: [], covered: "", judge: { state: "skipped", lines: [] }, reason: checked.failure };
   const shown = pull === undefined ? undefined : receiptMarker((pull as PullRequest).body);
   const stale = shown && shown.head !== head.commit ? [`receipt: the PR body shows the receipt of ${shown.head.slice(0, 7)}, not HEAD ${head.commit.slice(0, 7)}. Refresh it with hedge proof receipt`] : [];
   const growth = await grownBy(home, head, run, pull);

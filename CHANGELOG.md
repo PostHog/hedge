@@ -11,28 +11,23 @@
   Before, it read like a refusal of a merge: an end-of-run report that names
   a pending merge looked like the cause, and the comment was not posted.
 
-### The gate checks the PR description, and a sanity pass comes sooner
+### The judge checks the PR description, and a sanity pass comes sooner
 
-- `hedge proof gate` now checks a description that holds a merge-risk
-  callout before it asks the judge. It fails when the description has no
-  picture, which is a Mermaid block, an image, a video, an attachment link,
-  or a `No picture:` line with a reason. A picture or a `No picture:` line
-  in a comment, in code, or in the receipt does not count. It also fails
-  over 800 written words, and when the callout holds more than 6 top-level
-  bullets with Switch-off and Tier. The word count leaves out the receipt,
-  code, diagrams, template lines, comments, and Markdown syntax, and
-  formatting adds no words. The check reads the body through Bun's
-  Markdown renderer, so it sees what GitHub renders. It skips a PR only
-  once GitHub says it merged. It catches a description that forgot a rule;
-  the judge still reads the whole description.
-- A saved gate pass holds the result of the description check and the
-  Known issues section the judge read. When the description later gains a
-  problem or loses a Known issues row, `hedge decision report` and
-  `hedge proof receipt` stop using the pass. After the upgrade, passes saved
-  before it do not match, so run `hedge proof gate` again on open PRs.
+- The judge's risk question now also fails a description that breaks the
+  shape of pr-description: no picture where GitHub renders it (a Mermaid
+  diagram, an image, a video, an uploaded attachment, or a `No picture:`
+  line with a reason), more than 800 written words, or a callout with more
+  than 6 top-level bullets, Switch-off and Tier included. Hedge gives the
+  judge a rough word count of the body outside the receipt, fenced code
+  and comments. A body without a merge-risk callout is not checked.
 - The judge's risk question accepts a changed row with an incident, or an
   uncovered row, that the Known issues section names, so the callout can
   stay within its 6 bullets.
+- A saved gate pass now holds the whole description the judge read, without
+  the receipt. Any other edit of a body with a callout makes
+  `hedge decision report` and `hedge proof receipt` stop using the pass, so
+  run `hedge proof gate` again. After the upgrade, passes saved before it
+  do not match, so open PRs run the gate once more.
 - A sanity pass is due once the production lines at HEAD pass 1.5 times the
   lines at round 1, down from twice.
 

@@ -6,7 +6,7 @@ import { acceptGap, answerFixed, checkout, cleanFixtures, fakeModel, graded, hub
 afterEach(cleanFixtures);
 
 const png = (seed: string) => Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), Buffer.from(seed)]);
-const template = `## Problem\n\nSenders were lost.\n\nNo picture: the diff shows it whole.\n\n## Testing\n\nTest rationale: the send path and the settings page.\n\n- [x] I ticked this box\n\n${graded("non-critical", "medium").replace("No picture: the diff shows it whole.\n\n", "")}`;
+const template = `## Problem\n\nSenders were lost.\n\n## Testing\n\nTest rationale: the send path and the settings page.\n\n- [x] I ticked this box\n\n${graded("non-critical", "medium")}`;
 const block = (body: string) => /<!-- hedge-proof-receipt head=[0-9a-f]{40} hash=[0-9a-f]+ -->\n[\s\S]*?\n<!-- \/hedge-proof-receipt -->/.exec(body)?.[0] ?? "";
 const patches = (pr: Checkout) => pr.githubCalls().filter((call) => call.includes("--method PATCH")).length;
 

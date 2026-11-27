@@ -48,10 +48,10 @@ test("the merge card line names each held decision once, with every kind it acce
 });
 
 test("the merge card takes the door from the grade line, and a draft has no ready time yet", async () => {
-  const { pr } = await agentAcceptedGap(`No picture: the diff shows it whole.\n<!-- merge-risk -->\n> [!CAUTION]\n> 🔴 **Merge risk: high** · one-way door: the stored senders change shape\n> - **Tier:** non-critical\n<!-- /merge-risk -->\n`);
+  const { pr } = await agentAcceptedGap(`<!-- merge-risk -->\n> [!CAUTION]\n> 🔴 **Merge risk: high** · one-way door: the stored senders change shape\n> - **Tier:** non-critical\n<!-- /merge-risk -->\n`);
   pr.pullRequestState({ draft: true });
   expect((await pr.hedge("gate")).output).toMatch(/^merge card: example\/product#42: high, one-way door · .* · still a draft$/m);
-  pr.pullRequestState({ body: `No picture: the diff shows it whole.\n<!-- merge-risk -->\n> [!WARNING]\n> 🟡 **Merge risk: medium** · two-way door\n> - No one-way door: the stored senders keep their shape\n> - **Tier:** non-critical\n<!-- /merge-risk -->\n${knownIssues}` });
+  pr.pullRequestState({ body: `<!-- merge-risk -->\n> [!WARNING]\n> 🟡 **Merge risk: medium** · two-way door\n> - No one-way door: the stored senders keep their shape\n> - **Tier:** non-critical\n<!-- /merge-risk -->\n${knownIssues}` });
   expect((await pr.hedge("gate")).output).toMatch(/^merge card: example\/product#42: medium, two-way door · /m);
 });
 
