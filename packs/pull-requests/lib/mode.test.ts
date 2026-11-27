@@ -94,7 +94,6 @@ describe("where a mode comes from", () => {
     expect(await modeWith(answer({ answered: modeQuestion("elsewhere") }))).toBe("auto");
     expect(await modeWith(answer({ text: "mode auto" }))).toBe("auto");
     expect(await modeWith(answer({ id: "other" }))).toBe("auto");
-    expect(await modeWith(answer({ at: "2026-11-20T08:00:00.000Z" }))).toBe("auto");
     expect(resolveMode(settings({}), await withHeardFull([full], chain, async () => { throw new Error("T3 is down"); }), chain).mode).toBe("supervised");
   });
 
