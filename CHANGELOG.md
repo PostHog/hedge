@@ -13,14 +13,16 @@
 
 ### The judge checks the PR description, and a sanity pass comes sooner
 
-- The judge's risk question now also fails a description that breaks the
-  shape of pr-description: no picture where GitHub renders it (a Mermaid
+- The judge asks a new shape question when it asks the risk question. It
+  fails a description that breaks the shape of pr-description: no picture where GitHub renders it (a Mermaid
   diagram, an image, a video, an uploaded attachment, or a `No picture:`
   line with a reason), more than 800 written words, or a callout with more
   than 6 top-level bullets, Switch-off and Tier included. Hedge gives the
   judge a rough word count of the body outside the receipt, fenced code
   and comments. The judge reads the body whole. A body without a
   merge-risk callout, or a PR that GitHub reports merged, is not checked.
+  A judge run that fails only the shape question spends no judge budget,
+  so a corrected description is always read.
 - The judge's risk question accepts a changed row with an incident, or an
   uncovered row, that the Known issues section names, so the callout can
   stay within its 6 bullets.
