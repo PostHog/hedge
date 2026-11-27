@@ -71,6 +71,7 @@ test("commits that change only test files carry the final read, and a final read
   const pr = await checkout();
   pr.pullRequestState({ body: graded("non-critical", "medium") });
   await pr.commit("feature.ts", "export const greet = (name: string) => `hi ${name}`;\n");
+  await pr.commit("README.md", "Run `bun test feature.test.ts` before a release.\n");
   const reviewed = await reviewHead(pr);
   await pr.hedge("require", "--none", "--reason", "fixture");
   const firstTest = await pr.commit("feature.test.ts", "expect(greet(\"a\")).toBe(\"hi a\");\n");
@@ -92,6 +93,24 @@ test("commits that change only test files carry the final read, and a final read
   expect((await pr.hedge("gate")).output).toContain(`review: final read carried from ${reviewed.slice(0, 7)}: test-only delta`);
   expect(JSON.parse(readFileSync(join(pr.pullRequest, "carried", `${helperOnly}.json`), "utf8"))).toMatchObject({ commit: helperOnly, from: reviewed });
   expect((await pr.hedge("review-start", "--scope", "final", "--base", reviewed, "--standing", "The test pins a rule the code must keep.")).code).toBe(0);
+});
+
+test("a test carries when code names it only inside a longer word, in another language, or in docs, and not when code imports it", async () => {
+  const gateAfterTyping = async (code: string) => {
+    const pr = await checkout();
+    mkdirSync(join(pr.repository, "api/test"), { recursive: true });
+    await pr.commit("api/test/test_hog_function.py", "def test_create() -> None:\n    assert True\n");
+    await pr.commit("ingest.rs", "fn test_hog_function() {}\n");
+    await pr.commit("README.md", "Run `test_hog_function` before a release.\n");
+    await pr.commit("app.py", code);
+    const reviewed = await reviewHead(pr);
+    await pr.hedge("require", "--none", "--reason", "fixture");
+    await pr.commit("api/test/test_hog_function.py", "def test_create() -> None:\n    assert 1 == 1\n");
+    return (await pr.hedge("gate")).output.replace(reviewed.slice(0, 7), "<reviewed>");
+  };
+
+  expect(await gateAfterTyping("latest_hog_function_error = None\n")).toContain("review: final read carried from <reviewed>: test-only delta");
+  expect(await gateAfterTyping("from api.test.test_hog_function import test_create\n")).toContain("review: HEAD not reviewed, last review covered <reviewed>");
 });
 
 test("a comment, a test folder, a code change beside a test, a test that code imports, a strange name, a mode change, a symlink, or a hidden submodule needs a new review", async () => {
