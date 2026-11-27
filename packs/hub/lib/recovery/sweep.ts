@@ -9,6 +9,10 @@ const providerOf: Record<string, Provider> = { claudeAgent: "claude", codex: "co
 export const maxOutageTries = 4;
 const firstOutageWaitMs = 5 * 60_000;
 const outageError = /\bapi_error_5\d\d\b|\b(?:500|502|503|504|529)\b|auth_unavailable|provider_unavailable|overloaded|high demand/i;
+const connectionCode = /^(?:responseStreamDisconnected|responseStreamConnectionFailed|httpConnectionFailed|provider\.connection_error|claude_request_unanswered)$/;
+const connectionError = /connection error|unable to connect to api(?!:)|connection (?:refused|reset|closed)|\bECONN(?:REFUSED|RESET|ABORTED)\b|\bETIMEDOUT\b|\bEPIPE\b|socket hang up|request timed out|stream disconnected|error sending request|fetch failed/i;
+const claudeConnectionResult = /^API Error: (?:Connection error|Request timed out|Unable to connect to API(?!:))/;
+const refusal = /authentication_failed|\b40[13]\b|unauthori[sz]ed|forbidden|invalid (?:x-)?api.key|login required|billing_error|account_on_hold|oauth_org_not_allowed|verification_required|cloud_credential_error/i;
 
 type Sweep = { client: Pick<T3Client, "call">; context: RecoverContext; availability: () => Promise<Availability>; failed: boolean };
 
@@ -97,13 +101,23 @@ export function stoppedOnLimit(thread: StoppedThread, now: number, byId?: Map<st
 
 export function stoppedByOutage(thread: StoppedThread, now: number, byId?: Map<string, StoppedThread>): boolean {
   if (!stoppedByError(thread, now, byId) || (thread.lastErrorClass !== "provider_error" && thread.lastErrorClass !== "transport_error")) return false;
-  return outageError.test(`${thread.lastErrorCode ?? ""} ${thread.lastError ?? ""}`) && !usageLimited(thread);
+  if (usageLimited(thread)) return false;
+  const text = errorText(thread);
+  return outageError.test(text) || (lostConnection(thread) && !refusal.test(text));
 }
+
+function lostConnection(thread: StoppedThread): boolean {
+  const error = (thread.lastError ?? "").trim();
+  if (thread.lastErrorClass === "provider_error") return claudeConnectionResult.test(error);
+  return connectionCode.test(thread.lastErrorCode ?? "") || connectionError.test(error);
+}
+
+const errorText = (thread: StoppedThread) => `${thread.lastErrorCode ?? ""} ${thread.lastError ?? ""}`;
 
 export function usageLimited(thread: StoppedThread): boolean {
   if (thread.lastErrorClass === "usage_limit") return true;
   if (thread.lastErrorClass !== "provider_error" && thread.lastErrorClass !== "transport_error") return false;
-  return isQuotaError(`${thread.lastErrorCode ?? ""} ${thread.lastError ?? ""}`);
+  return isQuotaError(errorText(thread));
 }
 
 const maxParentDepth = 64;
