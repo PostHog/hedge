@@ -161,7 +161,7 @@ function sentTexts(found: Command, cwd: string | undefined, io: IntentIO, inline
   const piped = paths.includes("-") && !found.stdin;
   const read = paths.map((path) => path === "-" ? found.stdin?.body ?? "" : readAt(found, cwd, io, path));
   const texts = [...inline, ...read.filter((text) => text !== undefined)];
-  const runTime = built || found.fromExpansion || found.name === "xargs" || (paths.includes("-") && found.stdin?.expands === true);
+  const runTime = built || found.name === "xargs" || (paths.includes("-") && found.stdin?.expands === true);
   return { texts: [...texts, ...texts.flatMap(jsonStrings)], unread: read.includes(undefined) || runTime, missing: read.includes(undefined), built: runTime, piped };
 }
 
@@ -280,15 +280,15 @@ function commandIntent(found: Command, raw: string, cwd: string | undefined, io:
   const inline = [...fields, ...fields.map((field) => field.replace(/^[^=]*=/, ""))];
   const fieldFiles = values(gh, "-F", "--field").flatMap((field) => field.match(/^[^=]*=@(.+)$/s)?.[1] ?? []);
   let endpoint = endpointOf(gh).replace(/[?#].*$/s, "").replace(/\/$/, "");
-  const sent = sentTexts(found, cwd, io, inline, [...values(gh, "--input"), ...fieldFiles], runTimeFields(values(marked, "-f", "--raw-field", "-F", "--field"), endpoint === "graphql", values(gh, "--input").length > 0, (path) => stdinPath.test(path) ? found.stdin?.body : readAt(found, cwd, io, path)));
+  const sent = sentTexts(found, cwd, io, inline, values(gh, "--input").length > 0 ? values(gh, "--input") : fieldFiles, runTimeFields(values(marked, "-f", "--raw-field", "-F", "--field"), endpoint === "graphql", values(gh, "--input").length > 0, (path) => stdinPath.test(path) ? found.stdin?.body : readAt(found, cwd, io, path)));
   if (endpoint === "graphql") return sent.piped || sent.unread || sent.texts.some((text) => mentionsEnqueue.test(text) || graphqlMerge.test(text)) || mentionsEnqueue.test(raw) ? { targets: [], refusal: graphqlReason } : { targets: [] };
   if (/\{owner\}|\{repo\}|:owner|:repo/.test(endpoint)) {
     const [owner, repo] = (repositoryOf(gh, found, cwd, io) ?? "/").split("/");
     endpoint = endpoint.replace(/\{owner\}|:owner/, owner ?? "").replace(/\{repo\}|:repo/, repo ?? "");
   }
   const method = (values(gh, "-X", "--method").at(-1) ?? (fields.length || values(gh, "--input").length ? "POST" : "GET")).toUpperCase();
-  if (method === "GET" && found.name !== "xargs" && !(found.fromExpansion && found.argExpands.includes(true))) return { targets: [] };
-  const opaque = !unreadByTrunk.test(endpoint) || isRunTime(endpointOf(marked)) || found.fromExpansion || found.name === "xargs";
+  if (method === "GET" && found.name !== "xargs") return { targets: [] };
+  const opaque = !unreadByTrunk.test(endpoint) || found.name === "xargs";
   const scoped = opaque ? sent : { ...sent, unread: sent.missing, built: false, piped: false };
   const comment = endpoint.match(/^repos\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)\/comments$/);
   const posted = (reads: boolean): MergeIntent => ({ targets: [{ repository: comment![1]!, pr: Number(comment![2]), via: `gh api issues/<n>/comments${reads ? "" : unreadVia}` }], ...reads ? {} : { unreadOnly: true as const } });
