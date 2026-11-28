@@ -915,6 +915,11 @@ describe("the Git guard", () => {
     expect(denied.refusal).toContain("force-pushes 6 branches at once");
   });
 
+  const stackOf = (dir: string, branches: [string, boolean][]) => writeFileSync(join(dir, ".git/gh-stack"), JSON.stringify({
+    stacks: [{ branches: branches.map(([branch, merged]) => ({ branch, pullRequest: { merged } })) }, { branches: [{ branch: "elsewhere", pullRequest: { merged: false } }] }],
+  }));
+  const sixOpen: [string, boolean][] = [["feature", false], ["s2", false], ["s3", false], ["s4", false], ["s5", false], ["s6", false], ["s0", true]];
+
   describe("in a repository with many refs outside its branches", () => {
     const refBudget = 1_000;
 
@@ -975,7 +980,9 @@ describe("the Git guard", () => {
 
     test.each([
       ["a later wildcard from another namespace", "git push origin 'refs/tags/*:refs/tags/*' 'refs/remotes/origin/*:refs/heads/*'"],
+      ["an earlier wildcard from another namespace", "git push origin 'refs/remotes/origin/*:refs/heads/*' 'refs/tags/*:refs/tags/*'"],
       ["a wildcard from a namespace the configured push names", "git -c remote.origin.push='refs/tags/*:refs/tags/*' -c remote.origin.push='refs/remotes/origin/*:refs/heads/*' push origin"],
+      ["a wildcard from the first namespace the configured push names", "git -c remote.origin.push='refs/remotes/origin/*:refs/heads/*' -c remote.origin.push='refs/tags/*:refs/tags/*' push origin"],
     ])("still refuses %s that lands on main", async (_, command) => {
       const dir = await repoWithPrefetchedRefs("feature");
       await spawnGit(dir, "tag", "v1");
@@ -984,12 +991,15 @@ describe("the Git guard", () => {
       const denied = await preToolUse(home, "claude", bash(command, dir), { guardAsProcess: true, env: gitThatTimesOutPastBudget() });
       expect(denied.refusal).toContain("pushes to `main` of acme/app");
     });
-  });
 
-  const stackOf = (dir: string, branches: [string, boolean][]) => writeFileSync(join(dir, ".git/gh-stack"), JSON.stringify({
-    stacks: [{ branches: branches.map(([branch, merged]) => ({ branch, pullRequest: { merged } })) }, { branches: [{ branch: "elsewhere", pullRequest: { merged: false } }] }],
-  }));
-  const sixOpen: [string, boolean][] = [["feature", false], ["s2", false], ["s3", false], ["s4", false], ["s5", false], ["s6", false], ["s0", true]];
+    test("still counts the open branches of a gh stack push", async () => {
+      const dir = await repoWithPrefetchedRefs("feature");
+      stackOf(dir, sixOpen);
+      const home = homeWith(withGuards(), { "guards.person": "Robin" });
+      const denied = await preToolUse(home, "claude", bash("gh stack push", dir), { guardAsProcess: true, env: gitThatTimesOutPastBudget() });
+      expect(denied.refusal).toContain("force-pushes 6 branches at once");
+    });
+  });
 
   test.each([
     "gh stack push",
