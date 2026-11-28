@@ -1,0 +1,331 @@
+{
+ "rows": [
+  {
+   "modules": [
+    {
+     "id": "mac",
+     "name": "T3 Code app on the Mac",
+     "external": true,
+     "note": "reaches each box through T3 Connect",
+     "seam": []
+    },
+    {
+     "id": "setup",
+     "name": "Setup",
+     "note": "on the hub",
+     "used": 12,
+     "seam": [
+      "setup",
+      "devboxSteps",
+      "hubSteps"
+     ],
+     "chips": [
+      {
+       "id": "setup-add",
+       "text": "first node: boxes.create(name)",
+       "change": "added"
+      },
+      {
+       "id": "setup-coder",
+       "text": "coder whoami, tokens, login: to Coder adapter",
+       "change": "removed"
+      }
+     ]
+    },
+    {
+     "id": "cmd",
+     "name": "hedge box",
+     "note": "packs/hub/commands",
+     "used": 1,
+     "seam": [
+      "spawn",
+      "start",
+      "release",
+      "list",
+      "sweep"
+     ]
+    },
+    {
+     "id": "wt",
+     "name": "Worktree boxes",
+     "note": "follow-up",
+     "change": "added",
+     "followUp": true,
+     "seam": [
+      "start",
+      "run",
+      "sweep"
+     ],
+     "chips": [
+      {
+       "text": "Mutagen mirror"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "modules": [
+    {
+     "id": "boxes",
+     "name": "Boxes",
+     "todayName": "Hub pack: box, pool, box-lock, links",
+     "note": "engine module",
+     "change": "added",
+     "flex": 2.4,
+     "used": 14,
+     "seam": [
+      "create(name)",
+      "wake",
+      "release",
+      "sweep",
+      "list",
+      "exec"
+     ],
+     "chips": [
+      {
+       "id": "b-pool",
+       "text": "pool and claims, by box id"
+      },
+      {
+       "id": "b-lock",
+       "text": "box lock"
+      },
+      {
+       "id": "b-life",
+       "text": "lifecycle, idle sweep, keep awake"
+      },
+      {
+       "id": "b-ssh",
+       "text": "19 coder.ssh calls",
+       "change": "removed"
+      }
+     ]
+    },
+    {
+     "id": "peers",
+     "name": "Hub pack: links",
+     "note": "stays in the Hub pack",
+     "used": 2,
+     "seam": [
+      "link",
+      "handover",
+      "forwards"
+     ],
+     "todayName": "Peers"
+    }
+   ]
+  },
+  {
+   "gap": 60,
+   "modules": [
+    {
+     "id": "backend",
+     "name": "Box backend",
+     "note": "one per profile, box-backend handler",
+     "change": "added",
+     "flex": 2.4,
+     "seam": [
+      "list",
+      "create",
+      "start",
+      "stop?",
+      "delete?",
+      "keepAwake?",
+      "exec",
+      "forwardCommand"
+     ],
+     "chips": [
+      {
+       "id": "fork-a",
+       "text": "adapter is a pack: export backend(settings)",
+       "change": "added"
+      }
+     ]
+    },
+    {
+     "id": "proc",
+     "name": "Process",
+     "note": "shared helpers",
+     "change": "added",
+     "seam": [
+      "capture",
+      "Env",
+      "Result"
+     ]
+    }
+   ]
+  },
+  {
+   "gap": 60,
+   "modules": [
+    {
+     "id": "coder",
+     "name": "Coder adapter",
+     "todayName": "Coder client",
+     "note": "coder.ts",
+     "change": "changed",
+     "used": 10,
+     "flex": 1.3,
+     "seam": [
+      "list",
+      "create",
+      "start",
+      "stop",
+      "delete",
+      "keepAwake",
+      "exec",
+      "forwardCommand"
+     ],
+     "chips": [
+      {
+       "text": "session, scoped tokens"
+      },
+      {
+       "text": "template, source workspace"
+      },
+      {
+       "id": "c-cap",
+       "text": "capture, Env, Result: used by 13 files, move to Process",
+       "change": "removed"
+      }
+     ]
+    },
+    {
+     "id": "team",
+     "name": "Team backend",
+     "note": "a team's own devbox tool",
+     "change": "added",
+     "followUp": true,
+     "seam": [
+      "create",
+      "start",
+      "exec"
+     ],
+     "chips": [
+      {
+       "text": "replaces a team pack's Mac steps"
+      }
+     ]
+    },
+    {
+     "id": "later",
+     "name": "Vercel Sandbox, ECS",
+     "change": "added",
+     "followUp": true,
+     "seam": [
+      "create",
+      "exec"
+     ]
+    }
+   ]
+  }
+ ],
+ "wires": [
+  {
+   "from": "setup-add",
+   "to": "boxes-seam",
+   "change": "added",
+   "toAt": 0.15,
+   "label": "",
+   "labelAt": 0.5
+  },
+  {
+   "from": "cmd",
+   "to": "boxes-seam",
+   "toAt": 0.55,
+   "label": ""
+  },
+  {
+   "from": "wt",
+   "to": "boxes-seam",
+   "followUp": true,
+   "change": "added",
+   "toAt": 0.97,
+   "label": ""
+  },
+  {
+   "from": "boxes",
+   "to": "backend-seam",
+   "change": "added",
+   "fromAt": 0.3,
+   "toAt": 0.3,
+   "label": ""
+  },
+  {
+   "from": "backend",
+   "to": "coder-seam",
+   "change": "added",
+   "fromAt": 0.2,
+   "toAt": 0.5,
+   "label": ""
+  },
+  {
+   "from": "backend",
+   "to": "team-seam",
+   "followUp": true,
+   "change": "added",
+   "fromAt": 0.6,
+   "label": ""
+  },
+  {
+   "from": "peers",
+   "to": "boxes",
+   "fromSide": "left",
+   "toSide": "right",
+   "label": "",
+   "bend": 20
+  }
+ ],
+ "untouched": [
+  {
+   "name": "Hub pack: cli-proxy",
+   "seam": [
+    "proxy",
+    "balance"
+   ],
+   "used": 4
+  },
+  {
+   "name": "Hub pack: disk watch, sweep",
+   "seam": [
+    "watch",
+    "sweep"
+   ],
+   "used": 1
+  },
+  {
+   "name": "Hub pack: Dream",
+   "seam": [
+    "collect",
+    "digest"
+   ],
+   "used": 2
+  },
+  {
+   "name": "Hub pack: secret store",
+   "seam": [
+    "get",
+    "drop",
+    "sweep"
+   ]
+  },
+  {
+   "name": "MCP gateway pack",
+   "seam": [
+    "gateway"
+   ],
+   "used": 1
+  },
+  {
+   "name": "Reconciler",
+   "seam": [
+    "resolve",
+    "apply",
+    "check"
+   ],
+   "used": 10,
+   "note": "loses role mac, os darwin"
+  }
+ ]
+}

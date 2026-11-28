@@ -1,0 +1,339 @@
+{
+ "rows": [
+  {
+   "modules": [
+    {
+     "id": "person",
+     "name": "Person",
+     "external": true,
+     "note": "runs one command, signs in",
+     "seam": []
+    },
+    {
+     "id": "mac",
+     "name": "T3 Code app on the Mac",
+     "external": true,
+     "note": "control plane only",
+     "seam": []
+    },
+    {
+     "id": "coderx",
+     "name": "Coder",
+     "external": true,
+     "note": "today's backend",
+     "seam": []
+    },
+    {
+     "id": "others",
+     "name": "Vercel Sandbox, ECS, a team's devbox tool",
+     "external": true,
+     "note": "bring your own",
+     "change": "added",
+     "seam": []
+    }
+   ]
+  },
+  {
+   "modules": [
+    {
+     "id": "get",
+     "name": "get.sh",
+     "note": "bootstrap, 285 lines",
+     "seam": [
+      "linux_gh",
+      "direct_bun",
+      "t3_cli",
+      "fetch_engine",
+      {
+       "name": "mac_tools",
+       "change": "removed"
+      },
+      {
+       "name": "install_homebrew",
+       "change": "removed"
+      },
+      {
+       "name": "login_path .zprofile",
+       "change": "removed"
+      }
+     ]
+    },
+    {
+     "id": "setup",
+     "name": "Setup",
+     "note": "src/setup",
+     "used": 12,
+     "flex": 1.3,
+     "seam": [
+      "setup",
+      "devboxSteps",
+      "hubSteps",
+      "pairing",
+      {
+       "name": "balanceThreads (Mac)",
+       "change": "removed"
+      },
+      {
+       "name": "\"Set up this Mac\"",
+       "change": "removed"
+      }
+     ]
+    },
+    {
+     "id": "docs",
+     "name": "Docs and site",
+     "note": "README, SETUP.md, page/",
+     "used": 14,
+     "seam": [
+      "README",
+      "SETUP.md",
+      "page model",
+      {
+       "name": "docs/mac-path.md",
+       "change": "removed"
+      }
+     ],
+     "change": "changed"
+    }
+   ]
+  },
+  {
+   "modules": [
+    {
+     "id": "recon",
+     "name": "Reconciler",
+     "note": "resolve, apply",
+     "used": 10,
+     "seam": [
+      "resolve",
+      "apply",
+      "check",
+      {
+       "name": "role mac \u2192 os darwin",
+       "change": "removed"
+      }
+     ]
+    },
+    {
+     "id": "adapters",
+     "name": "Adapters",
+     "note": "jobs, identity, t3",
+     "used": 6,
+     "seam": [
+      "jobsAdapter: systemd, cron",
+      "identity: ssh, coder",
+      "t3: service",
+      {
+       "name": "launchd",
+       "change": "removed"
+      },
+      {
+       "name": "1Password signer, Mac path",
+       "change": "removed"
+      },
+      {
+       "name": "T3 desktop settings",
+       "change": "removed"
+      }
+     ]
+    },
+    {
+     "id": "boxes",
+     "name": "Hub pack: boxes",
+     "todayName": "Hub pack: box, pool, box-lock",
+     "note": "box pool on the hub",
+     "used": 14,
+     "flex": 1.2,
+     "seam": [
+      "spawn",
+      "startBox",
+      "release",
+      "sweep",
+      "refreshPool"
+     ],
+     "change": "changed"
+    },
+    {
+     "id": "links",
+     "name": "Links and tunnels",
+     "note": "links, tunnels, peers",
+     "used": 24,
+     "seam": [
+      "startUnit",
+      "handOver",
+      "writeOnBox",
+      {
+       "name": "hubTunnel (Mac launchd)",
+       "change": "removed"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "gap": 64,
+   "modules": [
+    {
+     "id": "seam",
+     "name": "Box backend",
+     "note": "one per profile; Coder first",
+     "change": "added",
+     "flex": 2,
+     "seam": [
+      "list",
+      "create",
+      "start",
+      "stop?",
+      "delete?",
+      "keepAwake?",
+      "exec",
+      "forwardCommand"
+     ]
+    },
+    {
+     "id": "coder",
+     "name": "Coder client",
+     "note": "coder.ts: REST and coder ssh",
+     "used": 10,
+     "seam": [
+      "create",
+      "start",
+      "stop",
+      "remove",
+      "extend",
+      "ssh",
+      "binary, env",
+      "grant"
+     ],
+     "change": "changed"
+    }
+   ]
+  }
+ ],
+ "wires": [
+  {
+   "from": "person",
+   "to": "get-seam",
+   "label": "curl | sh",
+   "labelAt": 0.5
+  },
+  {
+   "from": "mac",
+   "to": "setup-seam",
+   "label": "T3 Connect",
+   "labelAt": 0.5,
+   "change": "changed"
+  },
+  {
+   "from": "get",
+   "to": "setup-seam",
+   "fromSide": "right",
+   "toSide": "left",
+   "label": "",
+   "bend": 30
+  },
+  {
+   "from": "setup",
+   "to": "recon-seam",
+   "label": "apply",
+   "fromAt": 0.3
+  },
+  {
+   "from": "setup",
+   "to": "coderx",
+   "kind": "leak",
+   "label": "coder CLI: 6 ops, 3 files",
+   "fromSide": "right",
+   "toSide": "bottom",
+   "fromAt": 0.3,
+   "toAt": 0.3,
+   "labelAt": 0.6
+  },
+  {
+   "from": "boxes",
+   "to": "seam-seam",
+   "change": "added",
+   "label": "",
+   "fromAt": 0.3,
+   "toAt": 0.75
+  },
+  {
+   "from": "boxes",
+   "to": "coder-seam",
+   "change": "removed",
+   "label": "19 coder.ssh calls",
+   "fromAt": 0.85,
+   "toAt": 0.15,
+   "labelAt": 0.35
+  },
+  {
+   "from": "links",
+   "to": "coder-seam",
+   "kind": "leak",
+   "label": "binary, env: 2 symbols",
+   "toAt": 0.7,
+   "labelAt": 0.6
+  },
+  {
+   "from": "seam",
+   "to": "coder-seam",
+   "fromSide": "right",
+   "toSide": "left",
+   "change": "added",
+   "label": "",
+   "bend": 30
+  }
+ ],
+ "untouched": [
+  {
+   "name": "Hub pack: cli-proxy",
+   "seam": [
+    "proxy",
+    "balance"
+   ],
+   "used": 4
+  },
+  {
+   "name": "Hub pack: disk watch, sweep",
+   "seam": [
+    "watch",
+    "sweep"
+   ],
+   "used": 1
+  },
+  {
+   "name": "Hub pack: Dream",
+   "seam": [
+    "collect",
+    "digest"
+   ],
+   "used": 2
+  },
+  {
+   "name": "MCP gateway pack",
+   "seam": [
+    "gateway"
+   ],
+   "used": 1
+  },
+  {
+   "name": "Agent content packs",
+   "seam": [
+    "orchestration",
+    "pull-requests",
+    "memory",
+    "slack",
+    "guards"
+   ],
+   "note": "skills, guides, hooks"
+  },
+  {
+   "name": "Profile",
+   "seam": [
+    "loadProfile",
+    "placedMachine"
+   ],
+   "used": 12
+  }
+ ]
+}
