@@ -1,7 +1,7 @@
 import { appendHeard, answeredAt, heardInThread, ledgerOf, type DecisionContext } from "./decision-cli.ts";
 import { runIn } from "./pr-ci.ts";
 import { sameThread, thisMachine, type Env, type LedgerEvent, type ModeGrant } from "./decision-ledger.ts";
-import { askedFor, chainOf, grantedBy, grantFor, isMode, modeChoices, modeLabel, modeLine, modeQuestion, modes, resolveMode, t3Threads, withThreadMode, type Mode, type ReadThreads } from "./mode.ts";
+import { askedFor, chainOf, unreadLedger, grantedBy, grantFor, isMode, modeChoices, modeLabel, modeLine, modeQuestion, modes, resolveMode, t3Threads, withThreadMode, type Mode, type ReadThreads } from "./mode.ts";
 
 export type ModeContext = DecisionContext & { threads?: ReadThreads; repository?: () => string | undefined };
 
@@ -17,7 +17,8 @@ the agent decides everything, merges, and reports once at the end.
 show prints the thread's mode and where it comes from: the thread's own grant, a grant it inherits from the thread
 that started it, the default of --repo in pull-requests.repoModes, or the profile default in pull-requests.mode.
 --thread defaults to this thread, and --repo to the GitHub repository of this checkout's origin. When the thread's
-lineage cannot be read in full, only the thread's own grant counts; without one, the thread runs supervised.
+lineage cannot be read in full, only the thread's own grant counts; without one, the thread runs supervised. While
+the decision ledger cannot be read, the thread runs supervised.
 
 set records the user's answer. Only the user switches a mode, and only on your question tool: ask
 "Which mode should thread <id> run in?" with the options "mode supervised", "mode auto", and "mode full", where <id>
@@ -54,8 +55,8 @@ function checkoutRepository(context: ModeContext) {
 async function show(parsed: Parsed, context: ModeContext) {
   if (parsed.positional.length) throw new Error(`Unknown argument ${parsed.positional[0]}. Run hedge mode --help`);
   const thread = parsed.options.get("--thread") ?? context.env.T3CODE_THREAD_ID;
-  const events = await ledgerOf(context).read().catch(() => [] as LedgerEvent[]);
-  const resolved = resolveMode(context.env, events, await chainOf(thread, threadsOf(context)), parsed.options.get("--repo") ?? checkoutRepository(context));
+  const events = await ledgerOf(context).read().catch(() => undefined);
+  const resolved = events ? resolveMode(context.env, events, await chainOf(thread, threadsOf(context)), parsed.options.get("--repo") ?? checkoutRepository(context)) : unreadLedger;
   context.print(`${modeLine(resolved.mode)}\nfrom: ${resolved.from}\nlabel: ${modeLabel(resolved.mode)}`);
   return 0;
 }
@@ -103,8 +104,8 @@ export async function modeCommand(args: string[], context: ModeContext): Promise
 export async function threadModeEnv(home: string, env: Env, threads: ReadThreads = t3Threads(home)): Promise<Env> {
   const thread = env.T3CODE_THREAD_ID;
   if (!env.HEDGE_SETTINGS) return env;
-  const events = thread ? await ledgerOf({ home, env }).read().catch(() => [] as LedgerEvent[]) : [];
-  return withThreadMode(env, events, await chainOf(thread, threads));
+  const events = thread ? await ledgerOf({ home, env }).read().catch(() => undefined) : [];
+  return events ? withThreadMode(env, events, await chainOf(thread, threads)) : withThreadMode(env, [], { threads: [], complete: false });
 }
 
 export type { Mode };

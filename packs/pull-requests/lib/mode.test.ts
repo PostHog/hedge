@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ShellThread } from "../../base/lib/t3/index.ts";
 import { tempDirs } from "../../../src/testing/git.ts";
@@ -196,6 +196,14 @@ describe("hedge mode", () => {
     }
   });
 
+  test("show prints supervised while the decision ledger cannot be read, whatever the repository's default", async () => {
+    const printed: string[] = [];
+    const run = context([], threads, printed);
+    mkdirSync(join(run.home, ".local/state/hedge/decisions.jsonl"), { recursive: true });
+    await modeCommand(["show", "--thread", "lane", "--repo", "own/tools"], run);
+    expect(printed.at(-1)).toBe("Mode: Supervised\nfrom: the decision ledger could not be read, so the thread has no grant to go by\nlabel: mode:supervised");
+  });
+
   test("show takes --repo over the checkout's repository", async () => {
     const printed: string[] = [];
     const run = { ...context([], threads, printed), repository: () => "own/strict" };
@@ -207,5 +215,12 @@ describe("hedge mode", () => {
 test("the proof and decision commands drop a thread mode the environment brings in, with or without a thread", async () => {
   const home = temp.make("mode-env-");
   const env = await threadModeEnv(home, settings({ "pull-requests.mode": "supervised", "pull-requests.threadMode": "full" }), async () => []);
+  expect(configuredMode(env).mode).toBe("supervised");
+});
+
+test("the proof and decision commands run supervised while the decision ledger cannot be read", async () => {
+  const home = temp.make("mode-env-");
+  mkdirSync(join(home, ".local/state/hedge/decisions.jsonl"), { recursive: true });
+  const env = await threadModeEnv(home, { ...settings({ "pull-requests.mode": "auto" }), T3CODE_THREAD_ID: "lane" }, async () => [thread("lane")]);
   expect(configuredMode(env).mode).toBe("supervised");
 });

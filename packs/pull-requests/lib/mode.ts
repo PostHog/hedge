@@ -9,6 +9,8 @@ export const modes = ["supervised", "auto", "full"] as const;
 export type Mode = (typeof modes)[number];
 export type ResolvedMode = { mode: Mode; from: string };
 
+export const unreadLedger: ResolvedMode = { mode: "supervised", from: "the decision ledger could not be read, so the thread has no grant to go by" };
+
 export const isMode = (value: unknown): value is Mode => (modes as readonly unknown[]).includes(value);
 export const modeName = (mode: Mode) => `${mode[0]!.toUpperCase()}${mode.slice(1)}`;
 export const modeLine = (mode: Mode) => `Mode: ${modeName(mode)}`;
