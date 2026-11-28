@@ -11,7 +11,7 @@ The workflow that the mode skills, `full-stop`, `full-send`, and `stamp-pr` foll
 
 Run `qa-swarm` in place of step 3 when I ask for it, when I ask for `full-send`, or when the diff touches a danger area of the `merge-risk` skill.
 
-Ask me about review rounds and proof gaps as the thread's mode says. In mode supervised, ask me each time. In mode auto or full, decide every round and gap alone as `hedge proof` prints, on critical pull requests and one-way doors too, run up to 3 reads past the review budget when they are worth it, and send me `hedge decision report` when the work is done: its Decisions list and its end table. Ask me nothing about a round or a gap. In mode auto, ask me at once only for what `mode-auto` keeps for me; in mode full, for nothing, as `mode-full` says.
+Ask me about review rounds and proof gaps as the thread's mode says. In mode supervised, ask me each time. In mode auto or full, decide every round and gap alone as `hedge proof` prints, on critical pull requests and one-way doors too, run reads past the review budget when they are worth it (3 on your own, then each one the review arbiter lets run; when it lets none run, revert, cut, or list the findings as `hedge proof` prints, and never ask me for an override read), and send me `hedge decision report` when the work is done: its Decisions list and its end table. Ask me nothing about a round or a gap. In mode auto, ask me at once only for what `mode-auto` keeps for me; in mode full, for nothing, as `mode-full` says.
 
 Show me a comment before you post it as `pull-requests.commentApproval` says: `people` for comments that a person reads, `all` for every comment, `none` for no comment. This setting replaces the approval rule of `leaving-pr-comments`.
 

@@ -53,7 +53,8 @@ type Subcommand = {
 
 const overrideHelp = `--override takes the user's answer to the question that review-start prints when the arbiter escalates or gives no
 verdict. At the review budget hedge asks nothing. In mode auto or full (hedge mode show), --agent runs up to 3 more
-reads past the budget; after them, and in mode supervised, only the user's --override runs another review or final read,
+reads past the budget, and after them each further read that the review arbiter lets run. In mode supervised only the
+user's --override runs another review or final read past the budget,
 except a final read of a HEAD whose commits since the last read are only clean base merges and quiet commits past what
 the gate carries and change files of the PR. Ask it with your question tool, with the options "Run one more round" and "Stop
 here". Only their choice of "Run one more round" there counts, quoted with the date they gave it, for example
@@ -61,8 +62,8 @@ here". Only their choice of "Run one more round" there counts, quoted with the d
 one (T3CODE_THREAD_ID). A typed message, a refusal, or a general rule, such as "ship everything autonomously", does
 not answer a round. The question names the PR, and an answer to the question of another PR does not count. The
 answer lands in the decision ledger as a 👤 review decision; one answer records one decision and starts one round.
---agent takes your own reason for a round that the arbiter escalates, or, in mode auto or full, for one of the 3 reads past the review
-budget. It lands in the ledger as a 🤖 review decision, refused on a PR whose merge-risk callout has no Tier line at HEAD.
+--agent takes your own reason for a round that the arbiter escalates, or, in mode auto or full, for a read past the review
+budget: 3 run on your reason alone, and each one after them runs only when the arbiter answers CONTINUE. It lands in the ledger as a 🤖 review decision, refused on a PR whose merge-risk callout has no Tier line at HEAD.
 In mode auto or full, an escalation tells you to decide the round with --agent, one-way doors and
 critical PRs included, unless the PR is ungraded. --standing is its old name. The round keeps the decision and the arbiter's verdict. List decisions with hedge decision list.
 A round starts only once its decision is in the ledger. A round that holds a decision stays reserved until the
@@ -86,7 +87,8 @@ final reads of the babysit phase count apart. Only a review that leads to fixes 
 counts when the gate asks for an answer to one of its findings, so one with only minor and nit findings spends nothing,
 and an unfinished one counts. The default budget is the panel, the fixes read, and the last read. On a PR of the Read
 tier the ceiling is two reviews that count: its one read and one final read of its fixes. At the ceiling no review or
-final read runs without the user's --override, or, on end, the agent's --agent for one of its 3 reads past the budget. A production fix of the PR after the last read is then reverted, and the finding
+final read runs without the user's --override, or, on end, the agent's --agent: one of its 3 reads past the budget, and
+after them a read the arbiter lets run. A production fix of the PR after the last read is then reverted, and the finding
 it fixed is listed under Known issues; the gate carries the revert. One final read still runs at the ceiling: of a
 HEAD whose commits since the last read are only clean base merges and quiet commits, past what the gate carries, that change files of the PR. Below
 the ceiling, and on end past it, --agent still reads a carried HEAD. The arbiter is the lookup model of your AI plan;
@@ -266,7 +268,7 @@ with the merge time and the time it was saved.`,
     summary: `Without --lens, --scope full runs the panel of the PR's review tier, which hedge picks from the merge-risk grade
 of the PR description and the authored production lines of the diff: lines outside tests, docs, lockfiles, and
 generated files. Read: grade low or no grade, and under 50 authored lines; one combined Correctness and Risk lens on the
-other family, and one final read of its fixes that counts; at that ceiling, only the user's --override runs another read, except a final read of a HEAD whose commits since the last read are only clean base merges and quiet commits past what the gate carries and change files of the PR. Pair:
+other family, and one final read of its fixes that counts; at that ceiling, only the user's --override runs another read, or in mode auto or full the agent's --agent, except a final read of a HEAD whose commits since the last read are only clean base merges and quiet commits past what the gate carries and change files of the PR. Pair:
 any other grade but high, or a grade hedge cannot read; the lenses correctness:other, risk:other, and fresh-eyes:same.
 Panel: grade high; the lenses fresh-eyes, correctness, risk, design, and anti-overengineering. --lens adds lenses to the tier's set, such as security, ui, systems, or a
 Team perspective; it never removes one. The output and hedge proof show name the tier and why. An unfinished panel

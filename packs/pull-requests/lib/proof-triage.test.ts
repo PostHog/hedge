@@ -207,7 +207,8 @@ test("on end, the agent's own reason runs up to three reads past a spent treated
   expect((await again()).code).toBe(0);
   for (const answered of ["final-2", "final-3"]) expect((await readAgain(pr, answered, "--agent", "The last fix changed the greeting.")).code).toBe(0);
 
-  await expect(readAgain(pr, "final-4", "--agent", "The last fix changed the greeting.")).rejects.toThrow("The agent's 3 reads past the budget are spent too: ask the user nothing about another read");
+  pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo 'ESCALATE: The final reads keep finding the same greeting bug.'";
+  await expect(readAgain(pr, "final-4", "--agent", "The last fix changed the greeting.")).rejects.toThrow("The agent's 3 reads past the budget are spent too, and the review arbiter lets no other run: The final reads keep finding the same greeting bug.");
 
   const babysat = (answered: string, ...args: string[]) => readAgain(pr, answered, "--phase", "babysit", ...args);
   expect((await pr.hedge("review", "--scope", "final", "--phase", "babysit", "--base", await latestReviewed(pr))).code).toBe(0);
@@ -229,6 +230,7 @@ test("on end, a read past the budget that finds nothing still takes one of the a
   };
 
   for (const line of [1, 2, 3]) expect((await quietRead(line)).code).toBe(0);
+  pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo 'ESCALATE: The greeting fix returns each read.'";
   await expect(quietRead(4)).rejects.toThrow("The agent's 3 reads past the budget are spent too");
 });
 
