@@ -278,7 +278,7 @@ export type Tier = "critical" | "non-critical" | "ungraded";
 
 export const riskCalloutOf = (body: string) => /<!--\s*merge-risk\s*-->([\s\S]*?)<!--\s*\/merge-risk\s*-->/.exec(body)?.[1];
 
-const rollbackCostHigh = /^[\s>]*\**\s*Rollback cost\s*\**\s*:\s*\**\s*(?:⚠️\s*)?\**\s*high\b/im;
+const rollbackCostHigh = /^[\s>*-]*Rollback cost\s*\**\s*:[^\w\n]*high\b/im;
 const oneWayDoorBullet = /^[\s>]*[-*]\s*\**one-way door\**\s*:/im;
 
 export function isOneWayDoor(callout: string) {

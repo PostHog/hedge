@@ -658,7 +658,7 @@ test("the shape question holds pr-description's body rules, and a gate that fail
   expect([gate.code, gate.output.includes("judge shape: fail: no picture"), gate.output.includes("judge shape: edit the PR body to fix it"), gate.output.includes("record hedge proof gap --kind judge")]).toEqual([1, true, true, false]);
   const prompt = judge.prompts().at(-1)!;
   expect(prompt).toContain("5. shape: Does the PR body keep the shape of pr-description? Fail it, and name the rule, when it shows no picture where GitHub renders it, which is a Mermaid diagram, an image, a video, an uploaded attachment, or a `No picture: <why>` line; when it holds more than 800 written words");
-  expect(prompt).toContain("or when the merge-risk block lacks one of its five categories or its Tier line, or a category holds more than two gap bullets. Rollout lines, such as Switch-off, Stages, Decided and Watch, are not gap bullets.");
+  expect(prompt).toContain("or when the merge-risk block lacks one of its five categories or its Tier line, or a category holds more than two gap bullets. Rollout lines, such as Switch-off, Stages, Decided and Watch, and the Verification bullet that starts with Safe because or Unproven, are not gap bullets.");
   expect(prompt).toContain("Leave the picture, the word cap and the block's shape to the shape question.");
 });
 
