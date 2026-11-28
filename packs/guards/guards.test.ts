@@ -922,8 +922,8 @@ describe("the Git guard", () => {
       const bin = temp.make("slow-git-");
       writeFileSync(join(bin, "git"), [
         "#!/bin/sh",
-        `case " $* " in *" for-each-ref "*) ;; *) exec ${Bun.which("git")} "$@" ;; esac`,
-        `listed=$(${Bun.which("git")} "$@") || exit $?`,
+        `case " $* " in *" for-each-ref "*) ;; *) exec '${Bun.which("git")}' "$@" ;; esac`,
+        `listed=$('${Bun.which("git")}' "$@") || exit $?`,
         `[ "$(printf '%s\\n' "$listed" | wc -l)" -le ${refBudget} ] || exit 124`,
         `[ -z "$listed" ] || printf '%s\\n' "$listed"`,
       ].join("\n"), { mode: 0o755 });
@@ -971,6 +971,18 @@ describe("the Git guard", () => {
       const home = homeWith(withGuards(), { "guards.person": "Robin" });
       const denied = await preToolUse(home, "claude", bash(command, dir), { guardAsProcess: true, env: gitThatTimesOutPastBudget() });
       expect(denied.refusal).toContain(why);
+    });
+
+    test.each([
+      ["a later wildcard from another namespace", "git push origin 'refs/tags/*:refs/tags/*' 'refs/remotes/origin/*:refs/heads/*'"],
+      ["a wildcard from a namespace the configured push names", "git -c remote.origin.push='refs/tags/*:refs/tags/*' -c remote.origin.push='refs/remotes/origin/*:refs/heads/*' push origin"],
+    ])("still refuses %s that lands on main", async (_, command) => {
+      const dir = await repoWithPrefetchedRefs("feature");
+      await spawnGit(dir, "tag", "v1");
+      await spawnGit(dir, "update-ref", "refs/remotes/origin/main", "HEAD");
+      const home = homeWith(withGuards(), { "guards.person": "Robin" });
+      const denied = await preToolUse(home, "claude", bash(command, dir), { guardAsProcess: true, env: gitThatTimesOutPastBudget() });
+      expect(denied.refusal).toContain("pushes to `main` of acme/app");
     });
   });
 

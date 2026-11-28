@@ -5,7 +5,7 @@ import { withDirectories } from "./directories.ts";
 import { shortCluster } from "./kill.ts";
 import { type Command, commandsIn } from "./shell-words.ts";
 
-export type Repo = { config: (key: string) => string | undefined; values: (key: string) => string[]; branch?: string; branches: () => string[]; refs: (prefix: string) => string[]; agents?: string; stack?: number };
+export type Repo = { config: (key: string) => string | undefined; values: (key: string) => string[]; branch?: string; branches: () => string[]; refs: (prefixes: string[]) => string[]; agents?: string; stack?: number };
 export type ReadRepo = (dir: string, selectors: string[]) => Repo | undefined;
 
 export const largestForcePush = 5;
@@ -79,18 +79,14 @@ export const readRepo: ReadRepo = (dir, selectors) => {
   const agents = top && join(top, "AGENTS.md");
   const branch = git(["symbolic-ref", "-q", "--short", "HEAD"], false)?.trim() || undefined;
   const commonDir = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], false)?.trim();
-  const listed = new Map<string, string[]>();
-  const refs = (prefix: string) => {
-    if (!listed.has(prefix)) listed.set(prefix, git(["for-each-ref", "--format=%(refname)", prefix])!.split("\n").filter(Boolean));
-    return listed.get(prefix)!;
-  };
+  const refs = (prefixes: string[]) => git(["for-each-ref", "--format=%(refname)", ...prefixes])!.split("\n").filter(Boolean);
   let branches: string[] | undefined;
   return {
     values: (key) => values.get(configKey(key)) ?? [],
     config: (key) => values.get(configKey(key))?.at(-1),
     branch,
     refs,
-    branches: () => (branches ??= refs("refs/heads/").map(branchName)),
+    branches: () => (branches ??= refs(["refs/heads/"]).map(branchName)),
     agents: agents && existsSync(agents) ? readFileSync(agents, "utf8") : undefined,
     stack: commonDir && branch ? stackSize(join(commonDir, "gh-stack"), branch) : undefined,
   };
@@ -457,12 +453,20 @@ function remoteOf(push: Push, repo: Repo): { name?: string; urls: string[] } {
 
 const globPattern = (glob: string) => new RegExp(`^${glob.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace("*", "(.*)")}$`);
 
-function expandWildcard(spec: string, repo: Repo): Target[] {
-  const [source, destination = source] = spec.split(":");
-  const glob = source.startsWith("refs/") ? source : `refs/heads/${source}`;
-  const pattern = globPattern(glob);
-  const prefix = glob.slice(0, glob.lastIndexOf("/", glob.search(/[*\uFFFD]/)) + 1);
-  return repo.refs(prefix).flatMap((ref) => {
+const sourceGlob = (spec: string) => {
+  const source = spec.split(":")[0];
+  return source.startsWith("refs/") ? source : `refs/heads/${source}`;
+};
+
+const listedDirectory = (spec: string) => {
+  const glob = sourceGlob(spec);
+  return glob.slice(0, glob.lastIndexOf("/", glob.search(/[*\uFFFD]/)) + 1);
+};
+
+function expandWildcard(spec: string, refs: string[]): Target[] {
+  const destination = spec.split(":")[1] ?? spec;
+  const pattern = globPattern(sourceGlob(spec));
+  return refs.flatMap((ref) => {
     const match = ref.match(pattern);
     return match ? [{ name: branchName(destination.replace("*", match[1])), upstream: false }] : [];
   });
@@ -480,17 +484,18 @@ function targets(push: Push, repo: Repo, remote: string | undefined): Target[] {
   const every = () => repo.branches().map((name) => ({ name, upstream: false }));
   if (push.all || mirrors(repo, remote)) return every();
   if (push.tags && push.refspecs.length === 0) return [];
-  const resolveSpec = (spec: string): Target[] => {
-    const bare = spec.replace(/^\+/, "");
+  const specs = configuredSpecs(push, repo, remote).map((spec) => spec.replace(/^\+/, ""));
+  let wildcardRefs: string[] | undefined;
+  const refsForWildcards = () => (wildcardRefs ??= repo.refs([...new Set(specs.filter((spec) => spec.includes("*")).map(listedDirectory))]));
+  const resolveSpec = (bare: string): Target[] => {
     if (bare === ":") return every();
-    if (bare.includes("*")) return expandWildcard(bare, repo);
+    if (bare.includes("*")) return expandWildcard(bare, refsForWildcards());
     if (bare.includes(":")) return [{ name: branchName(bare.slice(bare.indexOf(":") + 1)), upstream: false }];
     if (bare === "HEAD" || bare === "@") return repo.branch ? [{ name: repo.branch, upstream: false }] : [];
     const local = branchName(bare);
     const upstream = !push.deletes && pushDefault === "upstream" && repo.branches().includes(local) ? upstreamOf(local) : undefined;
     return [{ name: branchName(upstream ?? local), upstream: upstream !== undefined }];
   };
-  const specs = configuredSpecs(push, repo, remote);
   if (specs.length > 0) return specs.flatMap(resolveSpec);
   const branch = repo.branch;
   if (!branch || pushDefault === "nothing") return [];
