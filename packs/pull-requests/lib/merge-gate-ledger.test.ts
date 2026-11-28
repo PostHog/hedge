@@ -176,7 +176,7 @@ test("a gate pass from while autonomy was end lets a merge through only while it
     writeFileSync(ledgerFile(pr.home), "");
     for (const home of [pr.home, other]) {
       expect(await mergeOn(home, "end")).toBeUndefined();
-      expect((await mergeOn(home, "ask"))?.hookSpecificOutput.permissionDecisionReason).toContain("nor a pass from while pull-requests.autonomy was end once it is ask again");
+      expect((await mergeOn(home, "ask"))?.hookSpecificOutput.permissionDecisionReason).toContain("nor a pass from while the mode let the agent decide alone, auto or full, once it is supervised again");
     }
   } finally { rmSync(other, { recursive: true, force: true }); }
 });

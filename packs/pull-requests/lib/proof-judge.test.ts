@@ -133,7 +133,9 @@ test("on a graded PR the agent's own judge decision accepts a judge gap on HEAD,
   expect((await pr.hedge("gate")).output).toContain("judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why>, then grade the PR with merge-risk before you decide it: an agent never decides on an ungraded PR");
   await expect(decide()).rejects.toThrow("example/product#42 is ungraded");
   pr.pullRequestState({ body: graded("critical") });
-  expect((await pr.hedge("gate")).output).toContain("decide it with hedge decision record --mark 🤖 --class proof-gap --kind judge --pr example/product#42");
+  const supervised = (await pr.hedge("gate")).output;
+  expect(supervised).toContain("decide it with hedge decision record --mark 🤖 --class proof-gap --kind judge --pr example/product#42");
+  expect(supervised).toContain("only when the user let you decide judge gaps; otherwise ask the user");
   const early = /\[(d-[0-9a-f]+)\]/.exec((await decide()).output)![1];
 
   pr.clock.now = new Date("2026-10-25T13:00:00Z");

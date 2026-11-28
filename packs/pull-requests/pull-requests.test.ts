@@ -27,7 +27,7 @@ describe("the Pull requests pack", () => {
 
   test("links each pull-request skill, and tdd from the pinned third-party source, for Claude and for other agents", () => {
     const links = withPack().files.filter((file) => "source" in file && file.target.startsWith(".claude/skills/")).map((file) => file.target.split("/").pop());
-    expect(links).toEqual(expect.arrayContaining(["full-stop", "full-send", "stamp-pr", "babysit-pr", "pr-description", "qa-swarm", "merge-risk", "rollout", "tdd"]));
+    expect(links).toEqual(expect.arrayContaining(["mode-supervised", "mode-auto", "mode-full", "full-stop", "full-send", "stamp-pr", "babysit-pr", "pr-description", "qa-swarm", "merge-risk", "rollout", "tdd"]));
     expect(withPack().files.filter((file) => file.target.startsWith(".agents/skills/"))).toHaveLength(links.length);
   });
 

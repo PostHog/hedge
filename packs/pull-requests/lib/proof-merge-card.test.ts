@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mergeGate } from "../../guards/hooks/merge-gate.ts";
+import { givenReader } from "./mode.ts";
 import { checkout, cleanFixtures, graded, reviewHead, settings, type Checkout } from "./proof-testing.ts";
 
 afterEach(cleanFixtures);
@@ -89,7 +90,7 @@ test("a gate pass with a gap the agent accepted holds the merge, own tooling inc
   mkdirSync(join(other, ".local/state/hedge"), { recursive: true });
   const github = { pull: async () => ({ head, base: "main", defaultBranch: "main", open: true }), pullFor: async () => undefined };
   const mergeOn = (exempt: string) => {
-    writeFileSync(join(other, ".local/state/hedge/settings.json"), JSON.stringify({ "guards.merge-gate-exempt": exempt }));
+    writeFileSync(join(other, ".local/state/hedge/settings.json"), JSON.stringify({ "guards.merge-gate-exempt": exempt, "pull-requests.autonomy": "end" }));
     writeFileSync(join(other, ".local/state/hedge/decisions.jsonl"), readFileSync(join(pr.home, ".local/state/hedge/decisions.jsonl"), "utf8"));
     return mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home: other, env: { HEDGE_SETTINGS: JSON.stringify({ "pull-requests.autonomy": "end" }) }, github });
   };
@@ -103,6 +104,18 @@ test("a gate pass with a gap the agent accepted holds the merge, own tooling inc
       expect(refusal).toMatch(new RegExp(`an agent accepted proof gaps of example/product#42 at ${head.slice(0, 12)} \\(🤖 d-[0-9a-f]+ for prod-shape\\) itself`));
       expect(refusal).toContain("hedge decision record --mark 👤 --class merge --pr <owner/repo#n>");
     }
+    const full = { HEDGE_SETTINGS: JSON.stringify({ "pull-requests.mode": "full", "pull-requests.repoModes": "example/product=full" }) };
+    const mergeWith = (home: string) => mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home, env: full, github });
+    expect((await mergeWith(other))?.hookSpecificOutput.permissionDecisionReason).toContain("an agent accepted proof gaps of example/product#42");
+    const bare = join(tmpdir(), `merge-card-bare-${process.pid}-${Date.now()}`);
+    mkdirSync(join(bare, ".local/state/hedge"), { recursive: true });
+    writeFileSync(join(bare, ".local/state/hedge/decisions.jsonl"), readFileSync(join(pr.home, ".local/state/hedge/decisions.jsonl"), "utf8"));
+    try {
+      expect((await mergeWith(bare))?.hookSpecificOutput.permissionDecisionReason).toContain("an agent accepted proof gaps of example/product#42");
+      const unreadable = await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --repo example/product" }, cwd: "/" }, { home: bare, env: { HEDGE_SETTINGS: "{" }, github });
+      expect(unreadable?.hookSpecificOutput.permissionDecision).toBe("deny");
+    }
+    finally { rmSync(bare, { recursive: true, force: true }); }
     await expect(mergeWord(head, "Keep it open")).rejects.toThrow('The user chose "Keep it open", not "Merge"');
     await expect(mergeWord(head, "Merge", "Merge example/product#42?")).rejects.toThrow(`does not name the head ${head}`);
     await expect(mergeWord(head.toUpperCase(), "Keep it open")).rejects.toThrow("A merge card answer needs --condition '<full 40-character lowercase head sha>: merge card'");
@@ -122,8 +135,9 @@ test("a Merge answer is the merge word of the thread that asked: it tells that t
   const { pr, head, id } = await agentAcceptedGap();
   expect((await pr.hedge("gate")).code).toBe(0);
   const github = { pull: async () => ({ head, base: "main", defaultBranch: "main", open: true }), pullFor: async () => undefined };
+  const topLevel = ["mcp:thread-1", "mcp:conductor-thread"].map((id) => ({ id, title: id, projectId: "p", status: "idle" }));
   const enqueueFrom = async (thread: string) => (await mergeGate({ tool_name: "Bash", tool_input: { command: "gh pr comment 42 --repo example/product --body '/trunk merge'" }, cwd: "/" },
-    { home: pr.home, env: { HEDGE_SETTINGS: pr.env.HEDGE_SETTINGS, T3CODE_THREAD_ID: thread }, github }))?.hookSpecificOutput.permissionDecisionReason;
+    { home: pr.home, env: { HEDGE_SETTINGS: pr.env.HEDGE_SETTINGS, T3CODE_THREAD_ID: thread }, github, reader: givenReader({ threads: async () => topLevel, words: async () => [] }) }))?.hookSpecificOutput.permissionDecisionReason;
   const recordMerge = async (question: string, ...thread: string[]) => {
     pr.choose("Merge", question);
     const recorded = await pr.decide("record", "--mark", "👤", "--class", "merge", "--pr", "example/product#42", "--condition", `${head}: merge card`, ...thread);

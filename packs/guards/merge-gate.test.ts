@@ -3,13 +3,16 @@ import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Decision, LedgerEvent } from "../pull-requests/lib/decision-ledger.ts";
+import { givenReader, modeQuestion, type Mode, type T3Reader } from "../pull-requests/lib/mode.ts";
+import type { ModeGrant } from "../pull-requests/lib/decision-ledger.ts";
+import type { ThreadWord } from "../pull-requests/lib/proof-answers.ts";
 import { tempDirs } from "../../src/testing/git.ts";
 import { devbox, engineSource, resolveEngine, skillSources } from "../../src/testing/packs.ts";
 import { gateRunDirectory, startGateRun, writeJson } from "../pull-requests/lib/proof.ts";
 import { git } from "../../src/testing/git.ts";
 import { mergeGate } from "./hooks/merge-gate.ts";
 import {
-  beforeDeadline, cliReason, exemptList, ghAliases, ghBaseRepo, graphqlReason, mergeGateDeadlineMs, readPayload, realIntentIO, mergeGateRisk, mergeIntent, otherEndpointReason, rawReason, shellAliasReason, splitStringReason, unreadPayloadReason,
+  beforeDeadline, cliReason, realGateIO, exemptList, ghAliases, ghBaseRepo, graphqlReason, mergeGateDeadlineMs, readPayload, realIntentIO, mergeGateRisk, mergeIntent, otherEndpointReason, rawReason, shellAliasReason, splitStringReason, unreadPayloadReason,
   type GateIO, type IntentIO, type MergeIntent, type Pull,
 } from "./lib/merge-gate.ts";
 
@@ -500,15 +503,17 @@ describe("the gate pass each layer needs", () => {
     expect(await risk(one(9), gate({ ledger: [gatePass(9, head, false), gatePass(9, head)] }))).toContain("has not passed");
   });
 
-  test("a pass from while autonomy was end counts only while it is still end, wherever it was recorded", async () => {
+  test("a pass from while the mode decided alone counts only while it still does, wherever it was recorded", async () => {
     const onEnd: LedgerEvent = { ...gatePass(9, head), onEnd: true } as LedgerEvent;
-    const localOnEnd = (decidesAll: boolean): GateIO => ({ ...gate(), localGate: async () => ({ passed: true, at: localAt, onEnd: true }), decidesAll: () => decidesAll });
-    expect(await risk(one(9), { ...gate({ ledger: [onEnd] }), decidesAll: () => true })).toBeUndefined();
-    expect(await risk(one(9), localOnEnd(true))).toBeUndefined();
-    for (const io of [{ ...gate({ ledger: [onEnd] }), decidesAll: () => false }, gate({ ledger: [onEnd] }), localOnEnd(false)]) {
-      expect(await risk(one(9), io)).toContain("nor a pass from while pull-requests.autonomy was end once it is ask again");
+    const inMode = (mode: Mode) => async () => mode;
+    const localOnEnd = (mode: Mode): GateIO => ({ ...gate(), localGate: async () => ({ passed: true, at: localAt, onEnd: true }), mode: inMode(mode) });
+    expect(await risk(one(9), { ...gate({ ledger: [onEnd] }), mode: inMode("auto") })).toBeUndefined();
+    expect(await risk(one(9), { ...gate({ ledger: [onEnd] }), mode: inMode("full") })).toBeUndefined();
+    expect(await risk(one(9), localOnEnd("auto"))).toBeUndefined();
+    for (const io of [{ ...gate({ ledger: [onEnd] }), mode: inMode("supervised") }, gate({ ledger: [onEnd] }), localOnEnd("supervised")]) {
+      expect(await risk(one(9), io)).toContain("nor a pass from while the mode let the agent decide alone, auto or full, once it is supervised again");
     }
-    expect(await risk(one(9), { ...gate({ ledger: [onEnd, gatePass(9, head, true, "2026-11-16T09:00:00Z")] }), decidesAll: () => false })).toBeUndefined();
+    expect(await risk(one(9), { ...gate({ ledger: [onEnd, gatePass(9, head, true, "2026-11-16T09:00:00Z")] }), mode: inMode("supervised") })).toBeUndefined();
   });
 
   test("the top layer of a stack needs every open layer below it to pass at its own head", async () => {
@@ -657,6 +662,21 @@ describe("a standing order of the person's", () => {
     expect(await mergeFrom(conductor, stacked, { now: () => time, github: lateGithub, command: both })).toContain("an agent accepted proof gaps of example/product#9");
   });
 
+  test("an order lifts the hold only while the fresh ledger read shows the gate and mode rows the gate decided by", async () => {
+    const onEnd = { ...pass, onEnd: true } as LedgerEvent;
+    const supervised: LedgerEvent = { type: "mode", mode: "supervised", for: conductor, words: '2026-11-28 "mode supervised"', thread: conductor, message: "m-sup", machine: "hub", at: "2026-11-28T00:00:00Z" };
+    const reads = (...ledgers: LedgerEvent[][]): GateIO => {
+      let read = 0;
+      return { ...gate(), ledger: async () => ledgers[Math.min(read++, ledgers.length - 1)]!, mode: async (_repository, events) => events.some((event) => event.type === "mode") ? "supervised" : "auto", thread: conductor, now: () => Date.parse("2026-11-28T01:00:00Z") };
+    };
+    const before = [gap, onEnd, order()];
+    expect(await risk(one(9), reads(before, before))).toBeUndefined();
+    const refusal = await risk(one(9), reads(before, [...before, supervised]));
+    expect(refusal).toContain("the gate results or a thread's mode changed while the merge gate read the ledger");
+    const failed = gatePass(9, head, false, "2026-11-28T00:30:00Z");
+    expect(await risk(one(9), reads(before, [...before, failed]))).toContain("the gate results or a thread's mode changed while the merge gate read the ledger");
+  });
+
   test("a ledger entry counts as an order only with the person's choice on the exact standing-order question", async () => {
     const reworded = (change: (decision: Decision) => void) => { const one = order(); if (one.type === "decide") change(one.decision); return one; };
     expect(await mergeFrom(conductor, [gap, pass, reworded((decision) => { decision.answer = '2026-11-27 "Keep asking me"'; })])).toContain("an agent accepted proof gaps");
@@ -783,6 +803,16 @@ describe("the PreToolUse hook", () => {
     const merge = (ledger: LedgerEvent[]) => mergeGate(call("gh pr merge 9 --repo own/tooling"), { home: homeWith({ "guards.merge-gate-exempt": "own/*" }), env: {}, gate: gate({ ledger }), intent: io });
     expect(await merge([gap])).toBeDefined();
     expect(await merge([gap, incident])).toBeUndefined();
+  });
+
+  test("a thread in mode full merges a head with a gap an agent accepted on its own decision, and only in mode full", async () => {
+    const gap: LedgerEvent = { type: "decide", decision: { id: "d-agent", at: "2026-11-16T08:00:00Z", class: "proof-gap", mark: "🤖", question: "Accept the live-run gap? example/product#9: no sandbox", answer: "Accept the gap", rejected: "Keep the gap open", reason: "x", scope: { prs: ["example/product#9"], kinds: ["live-run"] }, effect: "accept", where: { thread: "t", machine: "hub" } } };
+    const passed: LedgerEvent = { type: "gate", repository: "example/product", pr: 9, commit: head, passed: true, machine: "box-2", at: "2026-11-16T09:00:00Z", agentGaps: ["d-agent"], seenGaps: ["d-agent"] };
+    const merge = (mode: Mode, exempt = "") => mergeGate(call("gh pr merge 9 --repo example/product"), { home: homeWith({ "guards.merge-gate-exempt": exempt }), env: {}, gate: { ...gate({ ledger: [gap, passed] }), mode: async () => mode }, intent: io });
+    expect(await merge("full")).toBeUndefined();
+    expect(await merge("full", "example/*")).toBeUndefined();
+    for (const mode of ["auto", "supervised"] as const) expect((await merge(mode))?.hookSpecificOutput.permissionDecisionReason).toContain("an agent accepted proof gaps of example/product#9");
+    expect((await mergeGate(call("gh pr merge 9 --repo example/product"), { home: homeWith({}), env: {}, gate: { ...gate(), mode: async () => "full" as const }, intent: io }))?.hookSpecificOutput.permissionDecisionReason).toContain("has not passed");
   });
 
   test("in an exempt repository, a ledger the hook cannot read refuses the merge, since a gap an agent accepted may hold it", async () => {
@@ -1217,4 +1247,91 @@ test("a payload swapped for a FIFO after the reader checked it is read from the 
 test("the merge-gate risk names the deadline the hook keeps", () => {
   const pack = JSON.parse(readFileSync(join(import.meta.dir, "pack.json"), "utf8")) as { workflows: { id: string; risk: string }[] };
   expect(pack.workflows.find((workflow) => workflow.id === "merge-gate")?.risk).toContain(`up to ${mergeGateDeadlineMs / 1000} seconds`);
+});
+
+test("the hook reads the mode from the applied settings, never from a mode its own process brings in", async () => {
+  const home = temp.make("gate-mode-");
+  const brought = { HEDGE_SETTINGS: JSON.stringify({ "pull-requests.mode": "full", "pull-requests.repoModes": "own/tools=full" }) };
+  expect(await realGateIO(home, brought, JSON.stringify({ "pull-requests.autonomy": "ask" })).mode!("own/tools", [])).toBe("supervised");
+  expect(await realGateIO(home, brought, JSON.stringify({ "pull-requests.autonomy": "end" })).mode!("own/tools", [])).toBe("auto");
+  expect(await realGateIO(home, {}, JSON.stringify({ "pull-requests.autonomy": "end" }), JSON.stringify({ "pull-requests.autonomy": "ask" })).mode!("own/tools", [])).toBe("supervised");
+  expect(await realGateIO(home, {}, JSON.stringify({ "pull-requests.autonomy": "end" }), "{").mode!("own/tools", [])).toBe("supervised");
+  const full = { "pull-requests.mode": "full", "pull-requests.autonomy": "end" };
+  expect(await realGateIO(home, {}, JSON.stringify(full, null, 2), JSON.stringify(full)).mode!("own/tools", [])).toBe("full");
+});
+
+describe("the merge gate checks a full grant against the user's card answer in T3", () => {
+  const shell = (id: string, parent?: string) => ({ id, title: id, projectId: "p", status: "idle", ...parent ? { lineage: { parentThreadId: parent } } : {} });
+  const threads = [shell("conductor"), shell("lane", "conductor"), shell("elsewhere")];
+  const row = (mode: Mode, message: string, at: string, thread = "conductor", target = "conductor"): ModeGrant => ({ type: "mode", mode, for: target, words: `2026-11-27 "mode ${mode}"`, thread, message, machine: "box", at });
+  const answer = (choice: Mode, id: string, at: string, thread = "conductor", target = "conductor"): ThreadWord => ({ thread, id, text: `mode ${choice}`, answered: modeQuestion(target), at, source: "question" });
+  const t1 = "2026-11-27T08:00:00.000Z";
+  const t2 = "2026-11-27T09:00:00.000Z";
+  const t3 = "2026-11-27T10:00:00.000Z";
+  const modeAt = (applied: Record<string, unknown>, events: LedgerEvent[], answers: ThreadWord[], reader?: T3Reader, at = "lane") =>
+    realGateIO(temp.make("gate-heard-"), { T3CODE_THREAD_ID: at }, JSON.stringify(applied), undefined,
+      reader ?? givenReader({ threads: async () => threads, words: async (thread) => answers.filter((word) => word.thread === thread) })).mode!("own/tools", events);
+
+  test("a heard full grant counts, inherited by the lane", async () => {
+    expect(await modeAt({ "pull-requests.autonomy": "ask" }, [row("full", "m1", t1)], [answer("full", "m1", t1)])).toBe("full");
+  });
+
+  test("an unheard full row is dropped alone: a supervised row for the same card still holds", async () => {
+    const events = [row("supervised", "m1", t1), row("full", "m1", t2)];
+    const heard = [answer("supervised", "m1", t1)];
+    expect(await modeAt({ "pull-requests.mode": "full" }, events, heard)).toBe("supervised");
+    expect(await modeAt({ "pull-requests.autonomy": "end" }, events, heard)).toBe("supervised");
+  });
+
+  test("a full row counts only at the time of its answer, so a later answer of supervised wins", async () => {
+    const events = [row("full", "m1", t3), row("supervised", "m2", t2)];
+    expect(await modeAt({ "pull-requests.mode": "full" }, events, [answer("full", "m1", t1), answer("supervised", "m2", t2)])).toBe("supervised");
+  });
+
+  test("a card asked outside the lane's lineage grants it nothing", async () => {
+    const events = [row("full", "m1", t1, "elsewhere", "lane")];
+    expect(await modeAt({ "pull-requests.autonomy": "end" }, events, [answer("full", "m1", t1, "elsewhere", "lane")])).toBe("auto");
+  });
+
+  test("a lineage T3 gives only in part counts the thread's own grant alone", async () => {
+    const partial = givenReader({ threads: async () => [shell("lane", "conductor"), shell("conductor", "gone")], words: async () => [] });
+    expect(await modeAt({ "pull-requests.autonomy": "end" }, [row("auto", "m1", t1)], [], partial)).toBe("supervised");
+    expect(await modeAt({ "pull-requests.autonomy": "end" }, [row("auto", "m1", t1, "conductor", "lane")], [], partial)).toBe("auto");
+  });
+
+  test("when T3 fails, no full row counts and the thread runs supervised", async () => {
+    const down: T3Reader = async () => { throw new Error("T3 is down"); };
+    expect(await modeAt({ "pull-requests.mode": "full" }, [row("full", "m1", t1)], [], down)).toBe("supervised");
+  });
+
+  test("one hook call reads T3 once, for every repository it asks about", async () => {
+    let sessions = 0;
+    let reads = 0;
+    const counting: T3Reader = (run) => { sessions++; return run({ threads: async () => threads, words: async () => { reads++; return [answer("full", "m1", t1)]; } }); };
+    const io = realGateIO(temp.make("gate-once-"), { T3CODE_THREAD_ID: "lane" }, JSON.stringify({ "pull-requests.autonomy": "end" }), undefined, counting);
+    const events = [row("full", "m1", t1)];
+    expect([await io.mode!("own/tools", events), await io.mode!("own/other", events)]).toEqual(["full", "full"]);
+    expect({ sessions, reads }).toEqual({ sessions: 1, reads: 1 });
+  });
+
+  test("a stale copy of a heard card is dropped, and the heard grant still counts", async () => {
+    const events = [row("full", "m1", t1), row("full", "m1", t2)];
+    expect(await modeAt({ "pull-requests.autonomy": "end" }, events, [answer("full", "m1", t1)])).toBe("full");
+  });
+
+  test("a check that ends after the deadline, such as one a blocking T3 command held up, denies the merge", async () => {
+    let clock = 0;
+    const blocked = async () => { clock = 16_000; return undefined; };
+    expect(await beforeDeadline(blocked, new Promise(() => {}), () => clock, 15_000)).toContain("could not read GitHub and the decision ledger in time");
+    clock = 0;
+    expect(await beforeDeadline(async () => undefined, new Promise(() => {}), () => clock, 15_000)).toBeUndefined();
+  });
+
+  test("a T3 read that hangs is cut off by the merge deadline", async () => {
+    let release = () => {};
+    const deadline = new Promise<void>((resolve) => { release = resolve; });
+    const hanging: T3Reader = () => { release(); return new Promise(() => {}); };
+    const io = realGateIO(temp.make("gate-hang-"), { T3CODE_THREAD_ID: "lane" }, JSON.stringify({ "pull-requests.autonomy": "end" }), undefined, hanging);
+    expect(await beforeDeadline(async () => `mode ${await io.mode!("own/tools", [])}`, deadline)).toContain("could not read GitHub and the decision ledger in time");
+  });
 });

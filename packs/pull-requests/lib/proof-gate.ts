@@ -69,7 +69,7 @@ export async function finalGate(head: ProofIdentity, context: JudgingContext, { 
   const files = await proofFiles(home, head);
   const checked = await proofGate(home, head, {
     landed, cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)), ci: () => ciOf(home, head, run, now?.() ?? new Date(), env),
-    pushedHead, openBotFindings: botFindingsOf(head, run), ledger: hubLedger(home, env, ssh), now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env),
+    pushedHead, openBotFindings: botFindingsOf(head, run), ledger: hubLedger(home, env, ssh), now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env, head.repository),
   });
   const judged: Judged = checked.code === 0 ? await judgeHead(head, checked, context, pull as PullRequest | undefined) : { code: checked.code, lines: [], covered: "", judge: { state: "skipped", lines: [] }, reason: checked.failure };
   const shown = pull === undefined ? undefined : receiptMarker((pull as PullRequest).body);
@@ -129,7 +129,7 @@ export async function currentSummary(ref: PrRef, pull: PullRequest, ledger: Ledg
     landed: pull.state === "merged", cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)),
     ci: () => ciOf(home, head, run, now?.() ?? new Date(), env),
     pushedHead: pushedHeadOf(head, run, (read) => { readAsSaved &&= JSON.stringify(keyOf(read, saved.key.landed, saved.key.fingerprint)) === JSON.stringify(saved.key); }), openBotFindings: botFindingsOf(head, run),
-    ledger, now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env),
+    ledger, now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env, head.repository),
   });
   const judged = readAsSaved && JSON.stringify(live.conditions) === JSON.stringify(saved.conditions) && live.proofSummary.ci.line === saved.gate.summary.ci.line && JSON.stringify(live.proofSummary.ci.checks) === JSON.stringify(saved.gate.summary.ci.checks);
   const receipt = await receiptOf(home, ref);
@@ -142,7 +142,7 @@ export async function receiptSummary(head: ProofIdentity, pull: PullRequest, led
   const { home, env, run, now } = context;
   const live = await proofGate(home, head, {
     landed: pull.state === "merged", cleanBaseMerge: cleanBaseMerge(head, run), quietCommit: quietCommitIn(run, () => baseRefs(head, run)),
-    ci: () => ciOf(home, head, run, now?.() ?? new Date(), env), pushedHead: pushedHeadOf(head, run), openBotFindings: botFindingsOf(head, run), ledger, now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env),
+    ci: () => ciOf(home, head, run, now?.() ?? new Date(), env), pushedHead: pushedHeadOf(head, run), openBotFindings: botFindingsOf(head, run), ledger, now: now?.(), devPull: devPullOf(run), decidesAll: decidesAll(env, head.repository),
   });
   return { summary: { ...live.proofSummary, code: live.code, judge: { state: "skipped", lines: [] } }, gated: false };
 }
@@ -160,7 +160,7 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
   const row = reviewerRow(author, env);
   const riskRubric = await readRiskRubric(home);
   const today = now?.() ?? new Date();
-  const weighedGap = await judgeGap(home, head, today, checked.decisions, checked.tier, decidesAll(env));
+  const weighedGap = await judgeGap(home, head, today, checked.decisions, checked.tier, decidesAll(env, head.repository));
   const known = {
     risk: riskRubric === undefined ? undefined : { rubric: riskRubric, body: snapshot?.body ?? pullRequestDetails(head, run).body },
     shape: snapshot && snapshot.state !== "merged" && riskCalloutOf(snapshot.body) !== undefined ? snapshot.body : undefined,
@@ -194,14 +194,14 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
     return { code: 0, lines, covered: `${outcome.state} accepted by ${gap.acceptance.by}`, judge: verdict(lines, judgeGapProof(head.commit, gap)) };
   }
   if (gap) {
-    const lines = [...outcome.lines, ...editBody, `judge gap: ${gap.line}: ${gap.reason}. ${gap.broken ? endBroken(gap.broken) : askGap(head, "judge", gap.reason, gap.kept ? "ask" : autonomyOf(context.env, () => checked.grade, "proof-gap", ["judge"]))}`];
+    const lines = [...outcome.lines, ...editBody, `judge gap: ${gap.line}: ${gap.reason}. ${gap.broken ? endBroken(gap.broken) : askGap(head, "judge", gap.reason, gap.kept ? "ask" : autonomyOf(context.env, () => checked.grade, "proof-gap", ["judge"], head.repository))}`];
     return { code: 3, lines, covered: "", judge: verdict(lines, judgeGapProof(head.commit, gap)), reason: `judge gap: ${gap.line}: ${gap.reason}` };
   }
   const hint = checked.tier === "ungraded"
     ? `judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why>, then grade the PR with merge-risk before you decide it: an agent never decides on an ungraded PR`
-    : checked.grade.oneWay && !decidesAll(env)
+    : checked.grade.oneWay && !decidesAll(env, head.repository)
     ? "judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and ask the user; on ask an agent never decides on a one-way door"
-    : `judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and decide it with hedge decision record --mark 🤖 --class proof-gap --kind judge --pr ${refText(head)} --question <q> --answer <a> --rejected <option> --reason <why>${decidesAll(env) ? "" : ", or ask the user"}`;
+    : `judge gap: when the judge is wrong, record hedge proof gap --kind judge --reason <why> and decide it with hedge decision record --mark 🤖 --class proof-gap --kind judge --pr ${refText(head)} --question <q> --answer <a> --rejected <option> --reason <why>${decidesAll(env, head.repository) ? "" : " only when the user let you decide judge gaps; otherwise ask the user"}`;
   const onlyShape = shapeFailure !== undefined && outcome.lines.filter((line) => /^judge [a-z]+: fail\b/.test(line)).length === 1;
   const lines = [...outcome.lines, ...editBody, ...onlyShape ? [] : [hint]];
   return { code: 1, lines, covered: "", judge: verdict(lines), reason };
@@ -214,7 +214,7 @@ async function judgeDiff(head: ProofIdentity, known: Omit<JudgeInput, "cwd" | "f
   const testOnly = testOnlyRange(gitCommitReader(run, () => baseRefs(head, run)), from, known.commit);
   return judge({ ...known, cwd: topLevel(run) ?? cwd, from, diff: diffOf(from, known.commit, run), testOnly }, {
     ask: (request) => askModel("judge", row, request, env, reviewLimit(env)), model: modelLabel("judge", row, env), arbiter: arbiterOf(context),
-    directory, commit: known.commit, now: now?.() ?? new Date(), failLimit: numberSetting("pull-requests.reviewCeiling", env), decidesAll: decidesAll(env),
+    directory, commit: known.commit, now: now?.() ?? new Date(), failLimit: numberSetting("pull-requests.reviewCeiling", env), decidesAll: decidesAll(env, head.repository),
     serialize: async (step) => { await mkdir(directory, { recursive: true, mode: 0o700 }); return withRoundLock(directory, await lock(), step); },
   });
 }
