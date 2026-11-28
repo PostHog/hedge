@@ -257,7 +257,11 @@ const fixesUnread = ({ ceiling }: ReviewLimits, latest: string) => stopWith(`The
 
 export const agentExtraReads = 3;
 
-const pastBudget = (stop: Stop, left: number) => `${stop.lead} Decide yourself whether one more read is worth it: run this command again with --agent '<your reason>'. You may run ${left} more read${left === 1 ? "" : "s"} past the budget this way; then hedge stops the review loop. It lands in the ledger as a 🤖 review decision, and ${endTableNote}. Ask the user nothing about it. When no read is worth it: ${stop.agentNext}`;
+const readsLeft = (left: number) => left > 0
+  ? `You may run ${left} more read${left === 1 ? "" : "s"} past the budget this way; after them, each read runs only when the review arbiter finds the loop converging.`
+  : `Your ${agentExtraReads} reads past the budget are spent, so this read runs only when the review arbiter finds the loop converging.`;
+const pastBudget = (stop: Stop, left: number) => `${stop.lead} Decide yourself whether one more read is worth it: run this command again with --agent '<your reason>'. ${readsLeft(left)} It lands in the ledger as a 🤖 review decision, and ${endTableNote}. Ask the user nothing about it. When no read is worth it: ${stop.agentNext}`;
+const arbiterRefused = (stop: Stop, verdict: ArbiterVerdict) => `${stop.lead} The agent's ${agentExtraReads} reads past the budget are spent too, and the review arbiter lets no other run: ${verdict.verdict === "escalate" ? verdict.reason : `it gave no verdict: ${verdict.reason}`}. Ask the user nothing about another read. ${stop.agentNext}`;
 
 type Budget = { stop?: Stop; pastBudget: number };
 type Permitted = { arbiter?: ArbiterVerdict; pastBudget?: true };
@@ -268,9 +272,11 @@ async function permitReview(home: string, identity: ProofIdentity, due: boolean,
   if (budget.stop) {
     const left = agentExtraReads - budget.pastBudget;
     if (decides !== "end") throw new Error(budget.stop.text);
-    if (left <= 0) throw new Error(`${budget.stop.text}. The agent's ${agentExtraReads} reads past the budget are spent too: ask the user nothing about another read.`);
     if (!decision) throw new Error(pastBudget(budget.stop, left));
-    return { pastBudget: true };
+    if (left > 0) return { pastBudget: true };
+    const verdict = await arbiter(await arbiterPrompt(home, identity));
+    if (verdict.verdict !== "continue") throw new Error(arbiterRefused(budget.stop, verdict));
+    return { arbiter: verdict, pastBudget: true };
   }
   if (!due) return {};
   const verdict = await arbiter(await arbiterPrompt(home, identity));

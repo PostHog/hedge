@@ -71,7 +71,7 @@ test("on ask, an escalated round asks the user as before", async () => {
   await expect(pr.hedge(...third)).rejects.toThrow("Ask the user with your question tool");
 });
 
-test("on end, fixes rounds and final reads past the budget share the agent's three reads, and then the budget holds", async () => {
+test("on end, fixes rounds and final reads past the budget share the agent's three reads, and then the arbiter decides each read", async () => {
   const pr = await checkout();
   pr.env.HEDGE_SETTINGS = JSON.stringify({ ...settings, "pull-requests.reviewCeiling": 2, "pull-requests.autonomy": "end" });
   pr.pullRequestState({ body: graded("non-critical", "medium") });
@@ -91,10 +91,17 @@ test("on end, fixes rounds and final reads past the budget share the agent's thr
   await pr.commit("feature.txt", "fix final\n");
   expect((await pr.hedge("review-start", "--scope", "final", "--base", reviewed, "--agent", "The last fix changed the greeting.")).code).toBe(0);
   await finishRound(pr, "final-1");
-  await expect(fixesRound(5, "--agent", "The last fix changed the greeting.")).rejects.toThrow("The agent's 3 reads past the budget are spent too");
+  pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo 'ESCALATE: Round 4 brings back the finding round 2 fixed.'";
+  const refused = await fixesRound(5, "--agent", "The last fix changed the greeting.").then(() => "", (error: Error) => error.message);
+  expect(refused).toContain("The agent's 3 reads past the budget are spent too, and the review arbiter lets no other run: Round 4 brings back the finding round 2 fixed.");
+  expect(refused).toContain("Ask the user nothing about another read.");
+  expect(refused).not.toContain("--override");
 
-  pr.choose("Run one more round", "Run one more review round? example/product#42: the review budget is spent.");
-  expect((await pr.hedge("review-start", "--scope", "fixes", "--base", reviewed, "--override", `2026-10-25 "Run one more round"`)).code).toBe(0);
+  const unasked = await pr.hedge("review-start", "--scope", "fixes", "--base", reviewed).then(() => "", (error: Error) => error.message);
+  expect(unasked).toContain("Your 3 reads past the budget are spent, so this read runs only when the review arbiter finds the loop converging.");
+
+  pr.env.HEDGE_REVIEW_ARBITER = "cat >/dev/null; echo CONTINUE";
+  expect((await pr.hedge("review-start", "--scope", "fixes", "--base", reviewed, "--agent", "The arbiter sees the loop converging.")).code).toBe(0);
   await finishRound(pr, "5");
   await pr.hedge("gate");
   expect((await pr.decide("report", "--pr", "example/product#42")).output).toContain("| example/product#42 | 5 rounds, 1 final read, 4 past the budget |");
