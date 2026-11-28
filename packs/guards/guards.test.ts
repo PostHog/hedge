@@ -915,6 +915,55 @@ describe("the Git guard", () => {
     expect(denied.refusal).toContain("force-pushes 6 branches at once");
   });
 
+  describe("in a repository with many refs outside its branches", () => {
+    const refBudget = 1_000;
+
+    function gitThatTimesOutPastBudget() {
+      const bin = temp.make("slow-git-");
+      writeFileSync(join(bin, "git"), [
+        "#!/bin/sh",
+        `case " $* " in *" for-each-ref "*) ;; *) exec ${Bun.which("git")} "$@" ;; esac`,
+        `listed=$(${Bun.which("git")} "$@") || exit $?`,
+        `[ "$(printf '%s\\n' "$listed" | wc -l)" -le ${refBudget} ] || exit 124`,
+        `[ -z "$listed" ] || printf '%s\\n' "$listed"`,
+      ].join("\n"), { mode: 0o755 });
+      return { PATH: `${bin}:${process.env.PATH}` };
+    }
+
+    async function repoWithPrefetchedRefs(branch: string, branches: string[] = []) {
+      const dir = await repo(branch);
+      for (const each of branches) await spawnGit(dir, "branch", each);
+      const head = (await spawnGit(dir, "rev-parse", "HEAD")).trim();
+      const creates = Array.from({ length: refBudget * 2 }, (_, index) => `create refs/prefetch/remotes/origin/topic-${index} ${head}\n`).join("");
+      const child = Bun.spawn(["git", "update-ref", "--stdin"], { cwd: dir, stdin: new Blob([creates]) });
+      expect(await child.exited).toBe(0);
+      return dir;
+    }
+
+    test.each([
+      ["a push of the branch", "git push -u origin feature"],
+      ["a bare push", "git push"],
+      ["a push of HEAD", "git push origin HEAD"],
+    ])("allows %s without listing the other refs", async (_, command) => {
+      const dir = await repoWithPrefetchedRefs("feature");
+      const home = homeWith(withGuards(), { "guards.person": "Robin" });
+      const allowed = await preToolUse(home, "claude", bash(command, dir), { guardAsProcess: true, env: gitThatTimesOutPastBudget() });
+      expect(allowed.refusal).toBeUndefined();
+    });
+
+    test.each([
+      ["a push to main", "main", "git push origin main", "pushes to `main` of acme/app"],
+      ["a wildcard push that lands on main", "main", "git push --force-with-lease origin 'refs/heads/*:refs/heads/*'", "pushes to `main` of acme/app"],
+      ["a push of every branch with a lease", "feature", "git push --all --force-with-lease origin", "force-pushes 6 branches at once"],
+      ["a leased wildcard push of six branches", "feature", "git push --force-with-lease origin 'refs/heads/*:refs/heads/*'", "force-pushes 6 branches at once"],
+    ])("still refuses %s", async (_, branch, command, why) => {
+      const dir = await repoWithPrefetchedRefs(branch, ["b1", "b2", "b3", "b4", "b5"]);
+      const home = homeWith(withGuards(), { "guards.person": "Robin" });
+      const denied = await preToolUse(home, "claude", bash(command, dir), { guardAsProcess: true, env: gitThatTimesOutPastBudget() });
+      expect(denied.refusal).toContain(why);
+    });
+  });
+
   const stackOf = (dir: string, branches: [string, boolean][]) => writeFileSync(join(dir, ".git/gh-stack"), JSON.stringify({
     stacks: [{ branches: branches.map(([branch, merged]) => ({ branch, pullRequest: { merged } })) }, { branches: [{ branch: "elsewhere", pullRequest: { merged: false } }] }],
   }));
