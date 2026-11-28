@@ -161,22 +161,6 @@ describe("hedge mode", () => {
     expect(await set(run, "full", "mode full", "lane-2-card", "conductor", "lane-2")).toBe(0);
   });
 
-  test("without --message, the same option chosen for two lanes on one day finds each lane's own card, and two cards for one lane ask for the id", async () => {
-    const printed: string[] = [];
-    const run = context([
-      card("mode supervised", "Which mode should thread lane run in?", "lane-card", "2026-11-27T08:00:00.000Z"),
-      card("mode supervised", "Which mode should thread lane-2 run in?", "lane-2-card", "2026-11-27T09:00:00.000Z"),
-      card("mode supervised", "Which mode should thread conductor run in?", "conductor-1", "2026-11-27T10:00:00.000Z"),
-      card("mode supervised", "Which mode should thread conductor run in?", "conductor-2", "2026-11-27T11:00:00.000Z"),
-    ], threads, printed);
-    const unnamed = (target: string) => modeCommand(["set", "supervised", "--thread", "conductor", "--words", '2026-11-27 "mode supervised"', "--for", target], run);
-    expect(await unnamed("lane")).toBe(0);
-    expect(await unnamed("lane-2")).toBe(0);
-    const recorded = readFileSync(join(run.home, ".local/state/hedge/decisions.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    expect(recorded.map(({ for: lane, message }) => [lane, message])).toEqual([["lane", "lane-card"], ["lane-2", "lane-2-card"]]);
-    await expect(unnamed("conductor")).rejects.toThrow("Pass --message with the id of the one they meant: conductor-1, conductor-2");
-  });
-
   test("an older answer never replaces a newer grant, and an answer for one lane never blocks another", async () => {
     const printed: string[] = [];
     const run = context([

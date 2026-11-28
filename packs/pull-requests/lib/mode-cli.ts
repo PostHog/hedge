@@ -68,7 +68,7 @@ async function set(parsed: Parsed, context: ModeContext) {
   if (!words || !thread) throw new Error("Pass --thread and --words: only the user's answer switches a mode. Run hedge mode --help");
   const target = parsed.options.get("--for") ?? thread;
   const ask = `ask them with your question tool: "${modeQuestion(target)}", with the options ${modeChoices.map((choice) => `"${choice}"`).join(", ")}, in thread ${thread}`;
-  const heard = await heardInThread(thread, words, parsed.options.get("--message"), context, (word) => word.source === "question" && sameThread(askedFor(word.answered) ?? "", target));
+  const heard = await heardInThread(thread, words, parsed.options.get("--message"), context);
   if (heard.source !== "question") throw new Error(`"${heard.text}" is a typed message. A mode switches only on the user's answer to your question tool; ${ask}`);
   const asked = askedFor(heard.answered);
   if (!asked || !sameThread(asked, target)) throw new Error(`The user chose "${heard.text}" on a question that does not start with "${modeQuestion(target)}"; ${ask}`);
