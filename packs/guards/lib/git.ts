@@ -84,12 +84,13 @@ export const readRepo: ReadRepo = (dir, selectors) => {
     if (!listed.has(prefix)) listed.set(prefix, git(["for-each-ref", "--format=%(refname)", prefix])!.split("\n").filter(Boolean));
     return listed.get(prefix)!;
   };
+  let branches: string[] | undefined;
   return {
     values: (key) => values.get(configKey(key)) ?? [],
     config: (key) => values.get(configKey(key))?.at(-1),
     branch,
     refs,
-    branches: () => refs("refs/heads/").map(branchName),
+    branches: () => (branches ??= refs("refs/heads/").map(branchName)),
     agents: agents && existsSync(agents) ? readFileSync(agents, "utf8") : undefined,
     stack: commonDir && branch ? stackSize(join(commonDir, "gh-stack"), branch) : undefined,
   };
@@ -460,7 +461,7 @@ function expandWildcard(spec: string, repo: Repo): Target[] {
   const [source, destination = source] = spec.split(":");
   const glob = source.startsWith("refs/") ? source : `refs/heads/${source}`;
   const pattern = globPattern(glob);
-  const prefix = glob.slice(0, glob.lastIndexOf("/", glob.indexOf("*")) + 1);
+  const prefix = glob.slice(0, glob.lastIndexOf("/", glob.search(/[*\uFFFD]/)) + 1);
   return repo.refs(prefix).flatMap((ref) => {
     const match = ref.match(pattern);
     return match ? [{ name: branchName(destination.replace("*", match[1])), upstream: false }] : [];

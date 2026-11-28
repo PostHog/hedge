@@ -948,7 +948,17 @@ describe("the Git guard", () => {
       const dir = await repoWithPrefetchedRefs("feature");
       const home = homeWith(withGuards(), { "guards.person": "Robin" });
       const allowed = await preToolUse(home, "claude", bash(command, dir), { guardAsProcess: true, env: gitThatTimesOutPastBudget() });
-      expect(allowed.refusal).toBeUndefined();
+      expect(allowed).toEqual({ code: 0, refusal: undefined });
+    });
+
+    test("still refuses a configured wildcard push onto main from a branch directory whose name is not UTF-8", async () => {
+      const dir = await repoWithPrefetchedRefs("feature");
+      const directory = "refs/heads/$(printf '\\377')dir";
+      const setup = Bun.spawn(["sh", "-c", `git update-ref "${directory}/main" HEAD && git config remote.origin.push "${directory}/*:refs/heads/*"`], { cwd: dir });
+      expect(await setup.exited).toBe(0);
+      const home = homeWith(withGuards(), { "guards.person": "Robin" });
+      const denied = await preToolUse(home, "claude", bash("git push", dir), { guardAsProcess: true, env: gitThatTimesOutPastBudget() });
+      expect(denied.refusal).toContain("pushes to `main` of acme/app");
     });
 
     test.each([
