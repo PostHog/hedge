@@ -41,7 +41,7 @@ test("on end, an ungraded PR still sends an escalated round to the user", async 
   await expect(pr.hedge("review-finish", "--round", "3", "--reviewer", "gpt-6.1-sol", "findings.md")).rejects.toThrow();
 });
 
-const oneWayDoor = () => graded("critical", "medium").replace("two-way door", "one-way door");
+const oneWayDoor = () => graded("critical", "medium").replace("**Rollback cost:** low ✅", "**Rollback cost:** high ⚠️\n- one-way door: the stored senders change shape");
 
 test("on end, an escalated round on a one-way door goes to the agent like any other round", async () => {
   const pr = await checkout();

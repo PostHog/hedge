@@ -278,6 +278,11 @@ export type Tier = "critical" | "non-critical" | "ungraded";
 
 export const riskCalloutOf = (body: string) => /<!--\s*merge-risk\s*-->([\s\S]*?)<!--\s*\/merge-risk\s*-->/.exec(body)?.[1];
 
+export function isOneWayDoor(callout: string) {
+  const declaration = callout.split("\n").find((line) => /Merge risk:/i.test(line)) ?? "";
+  return /\bone-way door\b/i.test(declaration) || /Rollback cost:\**\s*high\b/i.test(callout);
+}
+
 export function tierOf(body: string): Tier {
   const callout = riskCalloutOf(body);
   const line = callout && /^[\s>*-]*\**Tier\**:\**\s*\**\s*(non-critical|critical)\b/im.exec(callout);

@@ -58,6 +58,7 @@ describe("a source pinned by an older engine default", () => {
   const retired = [
     { name: "agent-skills", repo: "Silthus/agent-skills", ref: "997eb88e03cb322941f387ab577207335d77c414" },
     { name: "agent-skills", repo: "Silthus/agent-skills", ref: "6595e9ffecd03afdede25947d8d09361026cda92" },
+    { name: "agent-skills", repo: "Silthus/agent-skills", ref: "f699760221f6f7dc17495590283977aefda2ecbc" },
   ];
   const current = defaultSources.find((source) => source.name === "agent-skills")!;
 

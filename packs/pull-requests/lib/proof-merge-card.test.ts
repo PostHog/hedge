@@ -56,6 +56,14 @@ test("the merge card takes the door from the grade line, and a draft has no read
   expect((await pr.hedge("gate")).output).toMatch(/^merge card: example\/product#42: medium, two-way door · /m);
 });
 
+test("the merge card takes the door from the Rollback cost verdict of a merge-risk block", async () => {
+  const block = (grade: string, rollback: string, gap: string) => `<!-- merge-risk -->\n**Merge risk: ${grade}**\n\n**Impact:** small ✅\n\n**Rollback cost:** ${rollback}\n- ${gap}\n\n**Tier:** non-critical\n<!-- /merge-risk -->\n`;
+  const { pr } = await agentAcceptedGap(block("high", "high ⚠️", "The stored senders change shape"));
+  expect((await pr.hedge("gate")).output).toMatch(/^merge card: example\/product#42: high, one-way door · /m);
+  pr.pullRequestState({ body: `${block("medium", "low ✅", "No one-way door: the stored senders keep their shape")}${knownIssues}` });
+  expect((await pr.hedge("gate")).output).toMatch(/^merge card: example\/product#42: medium, two-way door · /m);
+});
+
 test("a failing gate prints no merge card line, and its receipt writes no merge card", async () => {
   const { pr } = await agentAcceptedGap();
   delete pr.env.HEDGE_HANDLERS;

@@ -1,4 +1,4 @@
-import { refText, riskCalloutOf, type DecisionState, type PrRef } from "./decision-ledger.ts";
+import { isOneWayDoor, refText, riskCalloutOf, type DecisionState, type PrRef } from "./decision-ledger.ts";
 import type { PullRequest, Run } from "./pr-ci.ts";
 import { acceptor, roundsCell } from "./proof-end-table.ts";
 import { knownIssues, summaryGaps, type ProofSummary } from "./proof.ts";
@@ -36,7 +36,7 @@ function gradeText(body: string) {
   if (callout === undefined) return "ungraded";
   const declaration = callout.split("\n").find((line) => /Merge risk:/i.test(line)) ?? "";
   const grade = /Merge risk:\**\s*(low|medium|high)\b/i.exec(declaration)?.[1]?.toLowerCase() ?? "no grade";
-  return `${grade}, ${/\bone-way door\b/i.test(declaration) ? "one-way door" : "two-way door"}`;
+  return `${grade}, ${isOneWayDoor(callout) ? "one-way door" : "two-way door"}`;
 }
 
 const reads = (summary: ProofSummary) => {
