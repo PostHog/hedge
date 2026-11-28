@@ -162,7 +162,7 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
   const today = now?.() ?? new Date();
   const weighedGap = await judgeGap(home, head, today, checked.decisions, checked.tier, decidesAll(env, head.repository));
   const known = {
-    risk: riskRubric === undefined ? undefined : { rubric: riskRubric, body: snapshot?.body ?? pullRequestDetails(head, run).body },
+    risk: "missing" in riskRubric ? undefined : { rubric: riskRubric.rubric, body: snapshot?.body ?? pullRequestDetails(head, run).body },
     shape: snapshot && snapshot.state !== "merged" && riskCalloutOf(snapshot.body) !== undefined ? snapshot.body : undefined,
     commit: head.commit, crossFamily: otherFamily(row, author), ci: checked.ci, owed: checked.owed!, ledger: checked.lines,
     evidence: checked.evidence, reviews: await reviewRecords(home, head), rubric: await readRubric(home), references: skillReferences(home),
@@ -170,7 +170,7 @@ async function judgeHead(head: ProofIdentity, checked: Checked, context: Judging
   };
   const outcome = await judgeDiff(head, known, row, context);
   const verdict = (lines: string[], gap?: JudgeSummary["gap"]): JudgeSummary => ({ state: outcome.state, model: outcome.model, ...gap ? { gap } : {}, lines });
-  if (riskRubric === undefined) outcome.lines.push("judge risk: not asked; ~/.agents/skills/merge-risk/SKILL.md is not installed");
+  if ("missing" in riskRubric) outcome.lines.push(`judge risk: not asked; ${riskRubric.missing} is not installed`);
   const reason = outcome.lines.find((line) => /^judge [a-z]+: fail\b/.test(line)) ?? outcome.lines[0];
   if (outcome.state === "pass") return { code: 0, lines: outcome.lines, covered: `pass by ${outcome.model}`, judge: verdict(outcome.lines) };
   const spentUnchecked = outcome.unchecked ?? [];

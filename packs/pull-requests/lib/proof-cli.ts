@@ -506,8 +506,8 @@ picks it. hedge hands it the diff from the merge base, CI, the owed kinds, the c
 findings and responses, and the coding standards in ~/.agents/guides/coding-standards.md. It answers four questions:
 does the evidence prove HEAD, do the owed kinds fit the diff, does the review hold, and how good is the code. A finding
 holds when it is fixed, rejected for a sound reason, or parked with a reach read for a problem the diff did not
-introduce. When the merge-risk skill is installed at ~/.agents/skills/merge-risk/SKILL.md, the judge also gets the PR
-body, that skill, and the merge-risk rules of pr-description when they are installed, and answers a fifth question: do
+introduce. When the merge-risk skill (~/.agents/skills/merge-risk/SKILL.md) and the merge-risk rules of pr-description
+are installed, the judge also gets the PR body and both files, and answers a fifth question: do
 the callout's grade, category verdicts, door and Tier follow from what the diff measurably changes. A body without a
 callout passes it. A failed question or a high quality finding fails the
 gate; medium and low findings are listed. The verdict is cached per set of inputs, and a later run asks an unavailable

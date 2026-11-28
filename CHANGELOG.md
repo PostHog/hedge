@@ -20,7 +20,8 @@
   together. Its risk question fails a grade, door or Tier more optimistic
   than its own, and names the category it derives differently. Its shape
   question checks the five categories, the Tier line, and at most two gap
-  bullets per category.
+  bullets per category. Without either file, the gate says which one is
+  missing and asks no risk question.
 - An open PR with a callout of the old shape fails the shape question at
   its next gate: grade it again with `merge-risk`.
 - A profile still pinned to the previous default of agent-skills follows

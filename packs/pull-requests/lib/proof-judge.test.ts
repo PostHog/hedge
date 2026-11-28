@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { cleanFixtures, lookup, checkout, type Checkout, verdict, fakeModel, reviewHead, reviewHeadFixed, finishRound, recordingModel, stalledOnQuota, acceptGap, graded, settings } from "./proof-testing.ts";
@@ -562,6 +562,8 @@ test("the gate stops a judge stuck on spent quota and reports it unavailable", a
 const installRiskSkill = (pr: Checkout) => {
   mkdirSync(join(pr.home, ".agents/skills/merge-risk"), { recursive: true });
   writeFileSync(join(pr.home, ".agents/skills/merge-risk/SKILL.md"), "# Merge risk\n\nGrade the blast radius of each changed row.\n");
+  mkdirSync(join(pr.home, ".agents/skills/pr-description/references"), { recursive: true });
+  writeFileSync(join(pr.home, ".agents/skills/pr-description/references/merge-risk-rules.md"), "# Merge-risk rules\n\nA one-way door takes Rollback cost high.\n");
 };
 
 const gateAfterResponse = async (pr: Checkout, response: string) => {
@@ -596,6 +598,18 @@ test("an agent that follows the judge's escalation steps in order gets the judge
   const gate = await pr.hedge("gate");
   expect(gate.output.split("\n").at(-1)).toContain("judge: fail accepted by the user");
   expect(gate.code).toBe(0);
+});
+
+test("with the merge-risk skill but without its rules, the judge does not ask the risk question and names the missing rules", async () => {
+  const pr = await checkout();
+  await pr.commit("feature.txt", "greet new members\n");
+  await reviewHead(pr);
+  await pr.hedge("require", "--none", "--reason", "Docs only");
+  const judge = fakeModel(pr, "JUDGE", verdict());
+  installRiskSkill(pr);
+  rmSync(join(pr.home, ".agents/skills/pr-description"), { recursive: true });
+  const gate = await pr.hedge("gate");
+  expect([gate.code, gate.output.includes("judge risk: not asked; ~/.agents/skills/pr-description/references/merge-risk-rules.md is not installed"), judge.prompts().at(-1)!.includes("Grade the blast radius")]).toEqual([0, true, false]);
 });
 
 test("with the merge-risk skill installed, the judge grades the callout against the diff, and a wrong grade fails the gate", async () => {
@@ -637,8 +651,6 @@ test("the judge grades with pr-description's merge-risk rules beside the merge-r
   await pr.hedge("require", "--none", "--reason", "Docs only");
   const judge = fakeModel(pr, "JUDGE", verdict());
   installRiskSkill(pr);
-  mkdirSync(join(pr.home, ".agents/skills/pr-description/references"), { recursive: true });
-  writeFileSync(join(pr.home, ".agents/skills/pr-description/references/merge-risk-rules.md"), "# Merge-risk rules\n\nA one-way door takes Rollback cost high.\n");
   pr.pullRequestState({ body: `Adds the greeting.\n\n${graded("non-critical")}` });
   await pr.hedge("gate");
   const prompt = judge.prompts().at(-1)!;

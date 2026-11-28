@@ -61,6 +61,8 @@ const reviewFixed = (pr: Checkout) => reviewHeadFixed(pr, "feature.txt:1", "gree
 function installRiskSkill(pr: Checkout) {
   mkdirSync(join(pr.home, ".agents/skills/merge-risk"), { recursive: true });
   writeFileSync(join(pr.home, ".agents/skills/merge-risk/SKILL.md"), "# Merge risk\n\nGrade the blast radius of each changed row.\n");
+  mkdirSync(join(pr.home, ".agents/skills/pr-description/references"), { recursive: true });
+  writeFileSync(join(pr.home, ".agents/skills/pr-description/references/merge-risk-rules.md"), "# Merge-risk rules\n\nA one-way door takes Rollback cost high.\n");
 }
 
 test("the body section shows each owed proof, the review and the judge in the testing section, and a refresh replaces only its block", async () => {
