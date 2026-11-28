@@ -218,9 +218,14 @@ export async function readRubric(home: string) {
   return standards;
 }
 
-export async function readRiskRubric(home: string) {
-  const skill = (await readFile(join(home, ".agents/skills/merge-risk/SKILL.md"), "utf8").catch(() => "")).trim();
-  return skill || undefined;
+const readTrimmed = async (path: string) => (await readFile(path, "utf8").catch(() => "")).trim();
+
+const riskRubricFiles = [".agents/skills/merge-risk/SKILL.md", ".agents/skills/pr-description/references/merge-risk-rules.md"];
+
+export async function readRiskRubric(home: string): Promise<{ rubric: string } | { missing: string }> {
+  const texts = await Promise.all(riskRubricFiles.map((file) => readTrimmed(join(home, file))));
+  const missing = riskRubricFiles.find((_, index) => !texts[index]);
+  return missing ? { missing: `~/${missing}` } : { rubric: texts.join("\n\n") };
 }
 
 export const skillReferences = (home: string) => ["tdd", "codebase-design"].map((skill) => join(home, ".agents/skills", skill, "SKILL.md"));

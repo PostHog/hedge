@@ -113,6 +113,11 @@ test("a one-way door is excluded and runs today's flow", async () => {
   expect((await firstLine(pr)).triage).toEqual({ setting: "on", arm: "treated", path: "excluded", why: ["one-way door"] });
 });
 
+test("a merge-risk block whose rollback cost is high is a one-way door, excluded like one", async () => {
+  const pr = await triaged("on", "## Merge risk\n\n<!-- merge-risk -->\n**Merge risk: medium**\n\n**Rollback cost:** high ⚠️\n- The migration drops a column\n\n**Tier:** non-critical\n<!-- /merge-risk -->\n");
+  expect((await firstLine(pr)).triage).toEqual({ setting: "on", arm: "treated", path: "excluded", why: ["one-way door"] });
+});
+
 test("a final read records the path at its own head", async () => {
   const pr = await triaged("on", graded("non-critical", "medium"));
   expect((await pr.hedge("review", "--single")).code).toBe(0);

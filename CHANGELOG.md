@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Merge risk grades with Warp's five categories
+
+- The pinned `merge-risk` skill is now a verbatim copy of the one in
+  warpdotdev/common-skills: Alignment, Impact, Verification, Rollback cost
+  and Error detection, weighted into low, medium or high.
+  `pr-description` adds its merge-risk rules, from blast-radius and the old
+  skill: the safety fact proved to a step, grade floors, the door by the
+  cost to undo, the Tier criteria, and the danger areas. It puts the output
+  between the merge-risk markers, with the Tier line and the Rollout
+  section.
+- A PR is a one-way door when its Rollback cost verdict is high or a bullet
+  starts with `one-way door:`. The merge card, the gate and
+  `hedge decision` read the door from either. A callout of the old shape
+  that says "one-way door" on its grade line still counts.
+- The proof judge grades with the merge-risk skill and the merge-risk rules
+  together. Its risk question fails a grade, door or Tier more optimistic
+  than its own, and names the category it derives differently. Its shape
+  question checks the five categories, the Tier line, and at most two gap
+  bullets per category. Without either file, the gate says which one is
+  missing and asks no risk question.
+- An open PR with a callout of the old shape fails the shape question at
+  its next gate: grade it again with `merge-risk`.
+- A profile still pinned to the previous default of agent-skills follows
+  the new pin.
+
 ### Three autonomy modes replace the autonomy setting
 
 - A thread now runs in one of three modes: `supervised`, `auto`, or `full`.

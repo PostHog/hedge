@@ -213,6 +213,8 @@ test("with the risk question asked, a test-only diff on a critical path tells th
     const pr = await checkout();
     mkdirSync(join(pr.home, ".agents/skills/merge-risk"), { recursive: true });
     writeFileSync(join(pr.home, ".agents/skills/merge-risk/SKILL.md"), "# Merge risk\n\nGrade the blast radius of each changed row.\n");
+    mkdirSync(join(pr.home, ".agents/skills/pr-description/references"), { recursive: true });
+    writeFileSync(join(pr.home, ".agents/skills/pr-description/references/merge-risk-rules.md"), "# Merge-risk rules\n\nA one-way door takes Rollback cost high.\n");
     writeFileSync(join(pr.home, "critical-paths.md"), "- billing/\n");
     pr.env.HEDGE_SETTINGS = JSON.stringify({ ...JSON.parse(pr.env.HEDGE_SETTINGS!), "pull-requests.criticalPathFiles": "example/product=critical-paths.md" });
     const judge = fakeModel(pr, "JUDGE", verdict({ risk: { verdict: "pass", reason: "Tests only: low, two-way", citations: [] } }));

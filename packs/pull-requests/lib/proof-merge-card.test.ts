@@ -56,6 +56,35 @@ test("the merge card takes the door from the grade line, and a draft has no read
   expect((await pr.hedge("gate")).output).toMatch(/^merge card: example\/product#42: medium, two-way door · /m);
 });
 
+test("the merge card takes the door from the Rollback cost verdict of a merge-risk block", async () => {
+  const block = (grade: string, rollback: string, gap: string) => `<!-- merge-risk -->\n**Merge risk: ${grade}**\n\n**Impact:** small ✅\n\n**Rollback cost:** ${rollback}\n- ${gap}\n\n**Tier:** non-critical\n<!-- /merge-risk -->\n`;
+  const { pr } = await agentAcceptedGap(block("high", "high ⚠️", "The stored senders change shape"));
+  expect((await pr.hedge("gate")).output).toMatch(/^merge card: example\/product#42: high, one-way door · /m);
+  pr.pullRequestState({ body: `${block("medium", "low ✅", "No one-way door: the stored senders keep their shape")}${knownIssues}` });
+  expect((await pr.hedge("gate")).output).toMatch(/^merge card: example\/product#42: medium, two-way door · /m);
+});
+
+test("the merge card reads a one-way door from the Rollback cost line or a one-way door bullet, in any bold or emoji order, and from nothing else", async () => {
+  const block = (lines: string) => `<!-- merge-risk -->\n**Merge risk: medium**\n\n${lines}\n\n**Tier:** non-critical\n<!-- /merge-risk -->\n${knownIssues}`;
+  const { pr } = await agentAcceptedGap(block("**Rollback cost:** low ✅"));
+  const doors: [string, string][] = [
+    ["**Rollback cost:** ⚠️ high", "one-way"],
+    ["**Rollback cost**: high ⚠️", "one-way"],
+    ["**Rollback cost:** **high**", "one-way"],
+    ["**Rollback cost:** **⚠️ high**", "one-way"],
+    ["- **Rollback cost:** high ⚠️", "one-way"],
+    ["**Rollback cost:** 🔴 `high`", "one-way"],
+    ["**Rollback cost:** low ✅\n- two-way until the SDK release: the field becomes public", "two-way"],
+    ["**Rollback cost:** medium 👀\n- one-way door: the welcome email is sent", "one-way"],
+    ["**Rollback cost:** medium 👀\n- At the SDK release, rollback cost: high", "two-way"],
+    ["**Rollback cost:** low ✅\n\n## Rollout\n\n- **Decided:** we judged Rollback cost: high for the old plan", "two-way"],
+  ];
+  for (const [lines, door] of doors) {
+    pr.pullRequestState({ body: block(lines) });
+    expect([lines, /^merge card: example\/product#42: medium, (\S+) door · /m.exec((await pr.hedge("gate")).output)?.[1]]).toEqual([lines, door]);
+  }
+});
+
 test("a failing gate prints no merge card line, and its receipt writes no merge card", async () => {
   const { pr } = await agentAcceptedGap();
   delete pr.env.HEDGE_HANDLERS;

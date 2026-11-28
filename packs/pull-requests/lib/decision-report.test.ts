@@ -284,7 +284,7 @@ test("the report keeps the judge's verdict through a body edit outside the merge
   pr.pullRequestState({ body: `${graded("non-critical")}\n## How did you test this code?\n\nThe receipt lists each proof.\n` });
   expect((await reportOf(pr)).stillYours).toEqual(["- Merge example/product#42: its proofs pass, and it waits on your merge word."]);
 
-  pr.pullRequestState({ body: graded("non-critical").replace("🔵 **Merge risk: low** · two-way door", "🔴 **Merge risk: high** · one-way door") });
+  pr.pullRequestState({ body: graded("non-critical").replace("**Merge risk: low**", "**Merge risk: high**") });
   expect(await reportOf(pr)).toEqual(notGated(head.slice(0, 7)));
 });
 
