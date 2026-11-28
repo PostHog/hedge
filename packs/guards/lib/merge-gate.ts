@@ -493,8 +493,8 @@ const overrideHint = (person: string) => `For an incident fix that cannot wait f
 const heldReason = (held: string[], person: string) => `Hedge blocked this merge: an agent accepted proof gaps of ${held.join("; ")} itself, so it merges only on ${person}'s word for that head, or under a standing order they chose on a question card in this T3 thread, whatever else lets it merge: own tooling or a standing merge grant. Only a thread that runs in mode full, which ${person} granted with \`hedge mode set full\`, merges it on its own decision. `
   + `Show it on a merge card: ask ${person} with the question tool, naming the PR, its full head sha, and each held decision as this message names it, such as \`d-1a2b3c4d for live-run/prod-shape\`, with the options "${mergeCardChoice}" and "Keep it open". When they choose "${mergeCardChoice}", record the answer with \`hedge decision record --mark 👤 --class merge --pr <owner/repo#n> --condition '<full 40-character head sha>: merge card'\`, then merge again. The answer lifts only the decisions its question named that way, only in the T3 thread that asked it, and a push leaves it behind; a gate pass at the new head that saw no such gap lifts the hold.`;
 
-const modeRows = (events: LedgerEvent[]) => JSON.stringify(events.filter((event) => event.type === "mode"));
-const modeChangedReason = "Hedge blocked this merge: the mode of a thread changed while the merge gate read it, so the gate pass and the standing order it checked may no longer hold. Merge again.";
+const decidedBy = (events: LedgerEvent[]) => JSON.stringify(events.filter((event) => event.type === "gate" || event.type === "mode"));
+const changedReason = "Hedge blocked this merge: the gate results or a thread's mode changed while the merge gate read the ledger, so the gate pass and the standing order it checked may no longer hold. Merge again.";
 
 const unreadReason = (repositories: string[]) => `Hedge blocked this merge: the decision ledger could not be read, so the merge gate cannot tell whether an agent accepted a proof gap in ${repositories.join(", ")} itself, and such a gap holds a merge until the person's word. Try again when the hub answers.`;
 
@@ -544,7 +544,7 @@ export async function mergeGateRisk(intent: MergeIntent, io: GateIO, person: str
   if (!missing.length && standing) {
     let fresh: LedgerEvent[];
     try { fresh = await io.ledger(); } catch { return unreadReason([...new Set([...intent.targets, ...intent.exempt ?? []].map((target) => target.repository))]); }
-    if (modeRows(fresh) !== modeRows(events ?? [])) return modeChangedReason;
+    if (decidedBy(fresh) !== decidedBy(events ?? [])) return changedReason;
     decisions = fold(fresh);
     if (order()) return undefined;
   }

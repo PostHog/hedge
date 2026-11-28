@@ -662,7 +662,7 @@ describe("a standing order of the person's", () => {
     expect(await mergeFrom(conductor, stacked, { now: () => time, github: lateGithub, command: both })).toContain("an agent accepted proof gaps of example/product#9");
   });
 
-  test("an order lifts the hold only while the fresh ledger read shows the mode rows the gate decided by", async () => {
+  test("an order lifts the hold only while the fresh ledger read shows the gate and mode rows the gate decided by", async () => {
     const onEnd = { ...pass, onEnd: true } as LedgerEvent;
     const supervised: LedgerEvent = { type: "mode", mode: "supervised", for: conductor, words: '2026-11-28 "mode supervised"', thread: conductor, message: "m-sup", machine: "hub", at: "2026-11-28T00:00:00Z" };
     const reads = (...ledgers: LedgerEvent[][]): GateIO => {
@@ -672,7 +672,9 @@ describe("a standing order of the person's", () => {
     const before = [gap, onEnd, order()];
     expect(await risk(one(9), reads(before, before))).toBeUndefined();
     const refusal = await risk(one(9), reads(before, [...before, supervised]));
-    expect(refusal).toContain("the mode of a thread changed while the merge gate read it");
+    expect(refusal).toContain("the gate results or a thread's mode changed while the merge gate read the ledger");
+    const failed = gatePass(9, head, false, "2026-11-28T00:30:00Z");
+    expect(await risk(one(9), reads(before, [...before, failed]))).toContain("the gate results or a thread's mode changed while the merge gate read the ledger");
   });
 
   test("a ledger entry counts as an order only with the person's choice on the exact standing-order question", async () => {
