@@ -336,8 +336,10 @@ async function startFinalRead(home: string, identity: ProofIdentity, base: strin
     const offPanel = !fromLatest && finished.find((review) => review.panel && !onHistory?.(review.commit));
     if (offPanel) throw new Error(`The first panel read ${offPanel.commit}, which is not on HEAD's history, so a final read from ${short(base)} would skip what no panel of this PR read. Ask the user how to review this PR again`);
     const unfinished = (await Promise.all(names.map(async (name) => !saved.includes(name) || await panelOutcome(join(reviews, name)) === "unfinished"))).some(Boolean);
-    const agentMayRead = spent < ceiling || (permit.autonomy?.() === "end" && pastBudget < agentExtraReads);
-    const retry = unfinished ? "" : ` To read it anyway, pass ${agentMayRead ? "--agent '<your reason>', or " : ""}the user's --override`;
+    const decidesAtEnd = permit.autonomy?.() === "end";
+    const agentMayRead = spent < ceiling || decidesAtEnd;
+    const arbiterDecides = spent >= ceiling && decidesAtEnd && pastBudget >= agentExtraReads ? ", which runs only when the review arbiter finds the loop converging" : "";
+    const retry = unfinished ? "" : ` To read it anyway, pass ${agentMayRead ? `--agent '<your reason>'${arbiterDecides}, or ` : ""}the user's --override`;
     if (emptyRange?.()) throw new Error(nothingToRead(from ?? base, carried));
     if (!decision && carried) throw new Error(`HEAD needs no final read: ${carried.quiet.length ? `final read carried from ${short(carried.from)}: ${quietReason(carried.kinds)}. hedge proof gate counts the carry.` : `hedge proof gate carries the review of ${short(carried.from)} across ${carried.merges.length} clean merge(s) of the base.`}${retry}`);
     if (unfinished) throw new Error("A review is unfinished. Finish it before a final read.");

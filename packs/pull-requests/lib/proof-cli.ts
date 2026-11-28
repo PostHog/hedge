@@ -62,8 +62,8 @@ here". Only their choice of "Run one more round" there counts, quoted with the d
 one (T3CODE_THREAD_ID). A typed message, a refusal, or a general rule, such as "ship everything autonomously", does
 not answer a round. The question names the PR, and an answer to the question of another PR does not count. The
 answer lands in the decision ledger as a 👤 review decision; one answer records one decision and starts one round.
---agent takes your own reason for a round that the arbiter escalates, or, in mode auto or full, for one of the 3 reads past the review
-budget. It lands in the ledger as a 🤖 review decision, refused on a PR whose merge-risk callout has no Tier line at HEAD.
+--agent takes your own reason for a round that the arbiter escalates, or, in mode auto or full, for a read past the review
+budget: 3 run on your reason alone, and each one after them runs only when the arbiter answers CONTINUE. It lands in the ledger as a 🤖 review decision, refused on a PR whose merge-risk callout has no Tier line at HEAD.
 In mode auto or full, an escalation tells you to decide the round with --agent, one-way doors and
 critical PRs included, unless the PR is ungraded. --standing is its old name. The round keeps the decision and the arbiter's verdict. List decisions with hedge decision list.
 A round starts only once its decision is in the ledger. A round that holds a decision stays reserved until the
